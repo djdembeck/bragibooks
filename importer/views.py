@@ -4,7 +4,7 @@ from django.shortcuts import render, redirect
 # from django.contrib import messages
 
 def importer(request):
-	return render(request, "import.html")
+	return render(request, "importer.html")
 
 def match(request):
 	return render(request, "match.html")
