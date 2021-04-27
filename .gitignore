@@ -1,0 +1,7 @@
+.vscode
+env/
+venv/
+__pycache__/
+.vscode/
+db.sqlite3
+secret_key.txt
