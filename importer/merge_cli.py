@@ -31,7 +31,6 @@ def audible_parser(asin):
 	if auth_file.exists():
 		auth = audible.Authenticator.from_file(auth_file)
 		client = audible.Client(auth)
-		# print("Already logged in")
 		ASIN = asin
 		aud_json = client.get(
 			f"catalog/products/{ASIN}",
@@ -54,7 +53,6 @@ def audible_parser(asin):
 		if 'subtitle' in aud_json['product']:
 			aud_title_start = aud_json['product']['title']
 			aud_title_end = aud_json['product']['subtitle']
-			# metadata_dict['title'] = f"{aud_title_start} - {aud_title_end}"
 			metadata_dict['title'] = aud_title_start
 			metadata_dict['subtitle'] = aud_title_end
 		else:
@@ -72,7 +70,6 @@ def audible_parser(asin):
 			for narrator in range(len(aud_authors_json)):
 				# from array of dicts, get author name
 				aud_authors_arr.append(aud_authors_json[narrator]['name'])
-			# aud_authors = ', '.join(aud_authors_arr)
 			metadata_dict['authors'] = aud_authors_arr
 		else:
 			# else author name will be in first element dict
@@ -86,7 +83,6 @@ def audible_parser(asin):
 			for narrator in range(len(aud_narrators_json)):
 				# from array of dicts, get narrator name
 				aud_narrators_arr.append(aud_narrators_json[narrator]['name'])
-			# aud_narrators = ', '.join(aud_narrators_arr)
 			metadata_dict['narrators'] = aud_narrators_arr
 		else:
 			# else narrator name will be in first element dict
