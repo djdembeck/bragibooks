@@ -2,11 +2,15 @@ from pathlib import Path
 import audible, collections, html2text, getpass, os, readline, shutil
 from datetime import datetime
 
-
 ### User editable variables
+# for non-default m4b-tool install path
 m4bpath = "m4b-tool"
 
+# output dir
 output = ""
+
+# Number of cpus to use for jobs
+cpus_to_use = ""
 ###
 
 dir_path = Path(__file__).resolve().parent
@@ -174,7 +178,8 @@ def m4b_data(input_data, metadata, output):
 	author = ', '.join(metadata['authors'])
 	narrator = ', '.join(metadata['narrators'])
 	series = metadata['series']
-	release_date = metadata['release_date']
+	summary = metadata['summary'].rstrip()
+	year = metadata['release_date'].year
 
 	book_output = f"{output}/{path_author}/{path_title}"
 	##
@@ -186,7 +191,10 @@ def m4b_data(input_data, metadata, output):
 	##
 
 	# Available CPU cores to use
-	num_cpus = os.cpu_count()
+	if not cpus_to_use:
+		num_cpus = os.cpu_count()
+	else:
+		num_cpus = cpus_to_use
 
 	# Make necessary directories
 	Path(book_output).mkdir(parents=True, exist_ok=True)
@@ -202,6 +210,8 @@ def m4b_data(input_data, metadata, output):
 			f'--album=\"{path_title}\"',
 			f'--artist=\"{narrator}\"',
 			f'--albumartist=\"{author}\"',
+			f'--year=\"{year}\"',
+			f'--description=\"{summary}\"',
 			'--force',
 			'--no-chapter-reindexing',
 			'--no-cleanup',
@@ -226,7 +236,9 @@ def m4b_data(input_data, metadata, output):
 			f'--name=\"{title}\"',
 			f'--album=\"{path_title}\"',
 			f'--artist=\"{narrator}\"',
-			f'--albumartist=\"{author}\"'
+			f'--albumartist=\"{author}\"',
+			f'--year=\"{year}\"',
+			f'--description=\"{summary}\"'
 		]
 
 		# make backup file
