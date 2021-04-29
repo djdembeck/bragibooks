@@ -64,7 +64,7 @@ def audible_parser(asin):
 
 		## Summary
 		aud_summary_json = aud_json['product']['merchandising_summary']
-		metadata_dict['summary'] = html2text.html2text(aud_summary_json)
+		metadata_dict['summary'] = html2text.html2text(aud_summary_json).replace("\n", " ")
 
 		## Authors
 		aud_authors_json = aud_json['product']['authors']
@@ -178,7 +178,7 @@ def m4b_data(input_data, metadata, output):
 	author = ', '.join(metadata['authors'])
 	narrator = ', '.join(metadata['narrators'])
 	series = metadata['series']
-	summary = metadata['summary'].rstrip()
+	summary = metadata['summary']
 	year = metadata['release_date'].year
 
 	book_output = f"{output}/{path_author}/{path_title}"
