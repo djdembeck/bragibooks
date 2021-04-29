@@ -242,6 +242,8 @@ def m4b_data(input_data, metadata, output):
 			f'--year=\"{year}\"',
 			f'--description=\"{summary}\"'
 		]
+		if series:
+			args.append(f'--series \"{series}\"')
 
 		# make backup file
 		shutil.copy(in_dir, f"{in_dir.parent}/{in_dir.stem}.new.m4b")
