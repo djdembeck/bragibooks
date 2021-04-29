@@ -107,19 +107,34 @@ def audible_parser(asin):
 
 def get_directory():
 	# enable using tab for filename completion
-	readline.set_completer_delims(' \t\n=')
+	readline.set_completer_delims('')
 	readline.parse_and_bind("tab: complete")
 
 	# get dir from user
 	input_take = input("Enter directory to use: ")
 
-	for dirpath, dirnames, files in os.walk(input_take):
-		EXTENSIONS=['mp3', 'm4a', 'm4b']
+	if Path(input_take).is_dir():
+		for dirpath, dirnames, files in os.walk(input_take):
+			EXTENSIONS=['mp3', 'm4a', 'm4b']
 
-		for EXT in EXTENSIONS:
-			if collections.Counter(p.suffix for p in Path(dirpath).resolve().glob(f'*.{EXT}')):
-				USE_EXT = EXT
-	return Path(dirpath).parent, USE_EXT
+			for EXT in EXTENSIONS:
+				if collections.Counter(p.suffix for p in Path(dirpath).resolve().glob(f'*.{EXT}')):
+					USE_EXT = EXT
+					list_of_files = os.listdir(Path(dirpath))
+					# Case for single file in a folder
+					if len(list_of_files) == 1:
+						dirpath = f"{dirpath}/" + list_of_files[0]
+						num_of_files = 1
+					else:
+						num_of_files = sum(x.endswith(f'.{USE_EXT}') for x in list_of_files)
+
+	elif Path(input_take).is_file():
+		dirpath = Path(input_take)
+		USE_EXT_PRE = dirpath.suffix
+		USE_EXT = Path(USE_EXT_PRE).stem.split('.')[1]
+		num_of_files = 1
+
+	return Path(dirpath), USE_EXT, num_of_files
 
 def m4b_data(input_data, metadata, output):
 	## Checks
@@ -167,35 +182,65 @@ def m4b_data(input_data, metadata, output):
 	## File variables
 	in_dir = input_data[0]
 	in_ext = input_data[1]
+	num_of_files = input_data[2]
 	##
 
 	# Available CPU cores to use
 	num_cpus = os.cpu_count()
 
-	## Array for argument use
-	args = [
-		' merge',
-		f"--output-file=\"{book_output}/{title}.m4b\"",
-		f'--name=\"{title}\"',
-		f'--album=\"{path_title}\"',
-		f'--artist=\"{narrator}\"',
-		f'--albumartist=\"{author}\"',
-		'--force',
-		'--no-chapter-reindexing',
-		'--no-cleanup',
-		f'--jobs={num_cpus}'
-		]
-	if series:
-		args.append(f'--series \"{series}\"')
-	##
-
 	# Make necessary directories
 	Path(book_output).mkdir(parents=True, exist_ok=True)
 
-	# m4b command with passed args
-	m4b_cmd = m4b_tool + ' '.join(args) + f' \"{in_dir}\"'
-	print(m4b_cmd)
-	return os.system(m4b_cmd)
+	## Array for argument use
+	# args for multiple input files in a folder
+	if Path(in_dir).is_dir() and num_of_files > 1:
+		print("Got multiple files in a dir")
+		args = [
+			' merge',
+			f"--output-file=\"{book_output}/{title}.m4b\"",
+			f'--name=\"{title}\"',
+			f'--album=\"{path_title}\"',
+			f'--artist=\"{narrator}\"',
+			f'--albumartist=\"{author}\"',
+			'--force',
+			'--no-chapter-reindexing',
+			'--no-cleanup',
+			f'--jobs={num_cpus}'
+		]
+		if series:
+			args.append(f'--series \"{series}\"')
+
+		# m4b command with passed args
+		m4b_cmd = m4b_tool + ' '.join(args) + f' \"{in_dir}\"'
+		os.system(m4b_cmd)
+
+	# args for single m4b input file
+	elif Path(in_dir).is_file() and in_ext == "m4b":
+		print("got single m4b input")
+		m4b_cmd = m4b_tool + ' meta ' + f'--export-chapters=\"\"' + f' \"{in_dir}\"'
+		os.system(m4b_cmd)
+		shutil.move(f"{in_dir.parent}/{in_dir.stem}.chapters.txt", f"{book_output}/{title}.chapters.txt")
+
+		args = [
+			' meta',
+			f'--name=\"{title}\"',
+			f'--album=\"{path_title}\"',
+			f'--artist=\"{narrator}\"',
+			f'--albumartist=\"{author}\"'
+		]
+
+		# make backup file
+		shutil.copy(in_dir, f"{in_dir.parent}/{in_dir.stem}.new.m4b")
+
+		# m4b command with passed args
+		m4b_cmd = m4b_tool + ' '.join(args) + f" \"{in_dir.parent}/{in_dir.stem}.new.m4b\""
+		os.system(m4b_cmd)
+
+		# Move completed file
+		shutil.move(f"{in_dir.parent}/{in_dir.stem}.new.m4b", f"{book_output}/{title}.m4b")
+
+	elif not in_ext:
+		print(f"No recognized filetypes found for {title}")
 
 def call():
 	input_data = get_directory()
