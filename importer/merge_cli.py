@@ -224,6 +224,8 @@ def m4b_data(input_data, metadata, output):
 		m4b_cmd = m4b_tool + ' '.join(args) + f' \"{in_dir}\"'
 		os.system(m4b_cmd)
 
+		m4b_fix_chapters(f"{book_output}/{title}.chapters.txt", f"{book_output}/{title}.m4b", m4b_tool)
+
 	# args for single m4b input file
 	elif Path(in_dir).is_file() and in_ext == "m4b":
 		print("got single m4b input")
@@ -251,8 +253,33 @@ def m4b_data(input_data, metadata, output):
 		# Move completed file
 		shutil.move(f"{in_dir.parent}/{in_dir.stem}.new.m4b", f"{book_output}/{title}.m4b")
 
+		m4b_fix_chapters(f"{book_output}/{title}.chapters.txt", f"{book_output}/{title}.m4b", m4b_tool)
+
 	elif not in_ext:
 		print(f"No recognized filetypes found for {title}")
+
+def m4b_fix_chapters(input, target, m4b_tool):
+	new_file_content = ""
+	with open(input) as f:
+		# Store and then skip past total length section
+		for line in f:
+			if "# total-length" in line.strip():
+				new_file_content += line.strip() +"\n"
+				break
+		# Iterate over rest of the file
+		counter = 0
+		for line in f:
+			stripped_line = line.strip()
+			counter += 1
+			new_line = (stripped_line[0:13]) + f'Chapter {"{0:0=2d}".format(counter)}'
+			new_file_content += new_line +"\n"
+
+	with open(input, 'w') as f:
+		f.write(new_file_content)
+	
+	# Apply fixed chapters to file
+	m4b_chap_cmd = m4b_tool + ' meta ' + f" \"{target}\" " + f"--import-chapters=\"{input}\""
+	os.system(m4b_chap_cmd)
 
 def call():
 	input_data = get_directory()
