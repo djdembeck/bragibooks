@@ -294,3 +294,7 @@ def call():
 	asin = input("Audiobook ASIN: ")
 	metadata = audible_parser(asin)
 	m4b_data(input_data, metadata, output)
+
+# Only run call if using CLI directly
+if __name__ == "__main__":
+	call()
