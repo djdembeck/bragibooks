@@ -42,9 +42,9 @@ def make_models(asin, input_data):
 	# Book DB entry
 	#TODO: fix long_desc
 	if 'subtitle' in metadata:
-		m.title = metadata['title']
-		m.subtitle = metadata['subtitle']
-		title = f'{m.title} - {m.subtitle}'
+		base_title = metadata['title']
+		base_subtitle = metadata['subtitle']
+		title = f'{base_title} - {base_subtitle}'
 	else:
 		title = metadata['title']
 
