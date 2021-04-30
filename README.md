@@ -20,6 +20,5 @@ Successor of [m4b-merge](https://github.com/djdembeck/m4b-merge)
   - After that, just run `python importer/manage_cli.py` and it will walk you through what you need to get going.
 
 ## Notes
-### About API auth method:
-- This project uses the [Audible for Python](https://github.com/mkb79/Audible) module by [mkb79](https://github.com/mkb79) for it's auth/api calls. For persistent authentication, Bragi uses the [Register an Audible device](https://audible.readthedocs.io/en/latest/auth/register.html) method of logging in, to avoid asking for log in constantly.
+- About API auth method: This project uses the [Audible for Python](https://github.com/mkb79/Audible) module by [mkb79](https://github.com/mkb79) for it's auth/api calls. For persistent authentication, Bragi uses the [Register an Audible device](https://audible.readthedocs.io/en/latest/auth/register.html) method of logging in, to avoid asking for log in constantly.
 - Not everything is finished porting from the old `m4b-merge` project, but what has been ported to Bragi is significantly more resilient.
