@@ -10,9 +10,10 @@ Successor of [m4b-merge](https://github.com/djdembeck/m4b-merge)
 
 - Django:
   - Set `rootdir` to a full-path input dir, in [views.py](importer/views.py)
+  - Create `secret_key.txt` and [fill it with a large password](https://docs.djangoproject.com/en/3.2/ref/settings/#std:setting-SECRET_KEY).
   - `python manage.py makemigrations`
   - `python manage.py migrate`
-  - `python manage.py runserver` 
+  - `python manage.py runserver`
 
 - CLI:
   - You can and _should_ run the core logic from terminal. I'm planning a docker to make this even easier to automate.
