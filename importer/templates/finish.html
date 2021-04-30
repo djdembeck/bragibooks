@@ -36,11 +36,12 @@
 				<div class="column">
 					<div class="box">
 						<div class="content">
-							<p>Title: {{ this_book.title }}</p>
-							<p>Author(s): {{ this_book.authors}} </p>
-							<p>Narrator(s): {{ this_book.narrators}} </p>
-							<p>Release Date: {{ this_book.release_date }}</p>
-							<p>Description: {{ this_book.short_desc }}</p>
+							<p><span class="has-text-weight-bold is-size-4">Title:</span> <span class="is-size-5"> {{ this_book.title }}{% if this_book.subtitle %} - {{ this_book.subtitle }}{% endif %}</span></p>
+							<p><span class="has-text-weight-medium is-size-6">Author(s):</span> {{ this_book.authors}} </p>
+							<p><span class="has-text-weight-medium is-size-6">Narrator(s):</span> {{ this_book.narrators}} </p>
+							{% if this_book.series %}<p><span class="has-text-weight-medium is-size-6">Series:</span> {{ this_book.series }}</p>{% endif %}
+							<p><span class="has-text-weight-medium is-size-6">Release Date:</span> {{ this_book.release_date }}</p>
+							<p><span class="has-text-weight-medium is-size-6">Description:</span> {{ this_book.short_desc }}</p>
 						</div>
 					</div>
 				</div>
