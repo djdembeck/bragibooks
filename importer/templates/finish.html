@@ -8,13 +8,20 @@
 	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.2/css/bulma.min.css">
 </head>
 <body>
-	<section class="section has-background-grey-dark">
-		<nav class="breadcrumb is-medium is-left" aria-label="breadcrumbs">
-			<ul>
-				<li><a href="/import">Import</a></li>
-				<li><a href="/import/match">Match</a></li>
-				<li class="is-active" aria-current="page"><a class="has-text-grey-lighter" href="/import/confirm">Confirm</a></li>
-			</ul>
+	<section class="hero is-small is-warning">
+		<nav class="level">
+			<div class="hero-body">
+				<p class="title">
+					Bragi Books
+				</p>
+			</div>
+			<nav class="breadcrumb is-medium is-right" aria-label="breadcrumbs">
+				<ul>
+					<li><a href="/import">Import</a></li>
+					<li><a href="/import/match">Match</a></li>
+					<li class="is-active" aria-current="page"><a class="has-text-weight-light" href="/import/confirm">Confirm</a></li>
+				</ul>
+			</nav>
 		</nav>
 	</section>
 	<section class="section has-background-warning-dark">
@@ -36,11 +43,12 @@
 				<div class="column">
 					<div class="box">
 						<div class="content">
-							<p>Title: {{ this_book.title }}</p>
-							<p>Author(s): {{ this_book.authors}} </p>
-							<p>Narrator(s): {{ this_book.narrators}} </p>
-							<p>Release Date: {{ this_book.release_date }}</p>
-							<p>Description: {{ this_book.short_desc }}</p>
+							<p><span class="has-text-weight-bold is-size-4">Title:</span> <span class="is-size-5"> {{ this_book.title }}{% if this_book.subtitle %} - {{ this_book.subtitle }}{% endif %}</span></p>
+							<p><span class="has-text-weight-medium is-size-6">Author(s):</span> {{ this_book.authors}} </p>
+							<p><span class="has-text-weight-medium is-size-6">Narrator(s):</span> {{ this_book.narrators}} </p>
+							{% if this_book.series %}<p><span class="has-text-weight-medium is-size-6">Series:</span> {{ this_book.series }}</p>{% endif %}
+							<p><span class="has-text-weight-medium is-size-6">Release Date:</span> {{ this_book.release_date }}</p>
+							<p><span class="has-text-weight-medium is-size-6">Description:</span> {{ this_book.short_desc }}</p>
 						</div>
 					</div>
 				</div>

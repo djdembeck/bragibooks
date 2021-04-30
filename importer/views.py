@@ -42,9 +42,9 @@ def make_models(asin, input_data):
 	# Book DB entry
 	#TODO: fix long_desc
 	if 'subtitle' in metadata:
-		m.title = metadata['title']
-		m.subtitle = metadata['subtitle']
-		title = f'{m.title} - {m.subtitle}'
+		base_title = metadata['title']
+		base_subtitle = metadata['subtitle']
+		title = f'{base_title} - {base_subtitle}'
 	else:
 		title = metadata['title']
 
@@ -76,21 +76,21 @@ def get_asin(request):
 
 	asin = request.POST['asin']
 	input_data = get_directory(f"{rootdir}/{request.session['input_dir']}")
-	# Check that asin actually returns data from audible
-	check = requests.get(f"https://www.audible.com/pd/{asin}")
-	if check.status_code == 200:
-		# Check for validation errors
-		errors = Book.objects.book_asin_validator(request.POST)
-		if len(errors) > 0:
-			for k, v in errors.items():
-				messages.error(request, v)
-			return redirect('/import/match')
-		else:
+	# Check for validation errors
+	errors = Book.objects.book_asin_validator(request.POST)
+	if len(errors) > 0:
+		for k, v in errors.items():
+			messages.error(request, v)
+		return redirect('/import/match')
+	else:
+		# Check that asin actually returns data from audible
+		check = requests.get(f"https://www.audible.com/pd/{asin}")
+		if check.status_code == 200:
 			make_models(asin, input_data)
 			return redirect(f'/import/{asin}/confirm')
-	else:
-		print(f'Got http error: {check.status_code}')
-		return redirect('/import/match')
+		else:
+			print(f'Got http error: {check.status_code}')
+			return redirect('/import/match')
 
 def finish(request, asin):
 	context = {

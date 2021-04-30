@@ -120,7 +120,6 @@ def get_directory(input_web=""):
 		# get dir from user
 		input_take = input("Enter directory to use: ")
 	else:
-		print("Got value from web")
 		input_take = input_web
 
 	if Path(input_take).is_dir():
@@ -171,9 +170,9 @@ def m4b_data(input_data, metadata, output):
 	## Metadata variables
 	# Only use subtitle in case of metadata, not file name
 	if 'subtitle' in metadata:
-		m.title = metadata['title']
-		m.subtitle = metadata['subtitle']
-		title = f'{m.title} - {m.subtitle}'
+		base_title = metadata['title']
+		base_subtitle = metadata['subtitle']
+		title = f'{base_title} - {base_subtitle}'
 	else:
 		title = metadata['title']
 	# Only use first author/narrator for file names; no subtitle for file name
@@ -183,7 +182,10 @@ def m4b_data(input_data, metadata, output):
 	# For embedded, use all authors/narrators
 	author = ', '.join(metadata['authors'])
 	narrator = ', '.join(metadata['narrators'])
-	series = metadata['series']
+	if 'series' in metadata:
+		series = metadata['series']
+	else:
+		series = None
 	summary = metadata['summary']
 	year = metadata['release_date'].year
 
