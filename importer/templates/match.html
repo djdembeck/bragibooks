@@ -36,12 +36,12 @@
 					<div class="card">
 						<div class="card-header">
 							<div class="card-header-title">
-								<p>{{request.session.input_dir}}</p>
+								<p class="title">{{request.session.input_dir}}</p>
 							</div>
 						</div>
-						<div class="card-content">
-							<form action="/import/get_asin" method="POST">
-								{% csrf_token %}
+						<form action="/import/get_asin" method="POST">
+							{% csrf_token %}
+							<div class="card-content">	
 								<div class="field is-horizontal">
 									<div class="field-body">
 										<div class="field">
@@ -50,14 +50,14 @@
 													<input class="input is-rounded" name="asin" type="text">
 												</div>
 												<div class="control">
-													<button class="button is-warning is-grouped">Check ASIN</button>
+													<button class="button is-link is-grouped">Check ASIN</button>
 												</div>
 											</div>
 										</div>
 									</div>
 								</div>
-							</form>
-						</div>
+							</div>
+						</form>
 					</div>
 				</div>
 			</div>

@@ -3,6 +3,7 @@ import importlib, json, os, requests
 from pathlib import Path
 # from login.models import User
 from .models import Book, Author, Narrator, Genre
+# core merge logic:
 from .merge_cli import *
 from django.contrib import messages
 
@@ -60,13 +61,26 @@ def make_models(asin, input_data):
 	# new_narrator = Narrator.objects.create()
 	# new_narrator.save()
 
+def api_auth(request):
+	return render(request, "authenticate.html")
+
+def get_auth(request):
+	audible_login(USERNAME=request.POST['aud_email'], PASSWORD=request.POST['aud_pass'])
+	return redirect('/import/match')
+
 def get_asin(request):
+	#check that user is signed into audible api
+	auth_file = Path(dir_path, ".aud_auth.txt")
+	if not auth_file.exists():
+		return redirect('/import/api_auth')
+
 	asin = request.POST['asin']
 	input_data = get_directory(f"{rootdir}/{request.session['input_dir']}")
+	# Check that asin actually returns data from audible
 	check = requests.get(f"https://www.audible.com/pd/{asin}")
 	if check.status_code == 200:
-		errors = Book.objects.asin_validator(request.POST)
-		print("great success")
+		# Check for validation errors
+		errors = Book.objects.book_asin_validator(request.POST)
 		if len(errors) > 0:
 			for k, v in errors.items():
 				messages.error(request, v)

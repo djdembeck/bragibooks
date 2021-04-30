@@ -11,7 +11,7 @@
 	<section class="section has-background-grey-dark">
 		<nav class="breadcrumb is-medium is-left" aria-label="breadcrumbs">
 			<ul>
-				<li class="is-active" aria-current="page"><a class="has-text-grey-lighter" href="/import">Import</a></li>
+				<li><a href="/import">Import</a></li>
 				<li><a href="/import/match">Match</a></li>
 				<li><a href="/import/confirm">Confirm</a></li>
 			</ul>
@@ -19,16 +19,12 @@
 	</section>
 	<section class="section has-background-warning-dark">
 		<div class="container">
-			{% if messages %}
 			<div class="notification is-danger">
 				<ul>
-					{% for message in messages %}
-					<li>{{message}}</li>
-					{% endfor %}
+					<li>You need to login to the Audible API (one-time)</li>
 				</ul>
 			</div>
 			<div class="block"></div> 
-			{% endif %}
 		</div>
 		<div class="container">
 			<div class="columns">
@@ -36,25 +32,25 @@
 					<div class="card">
 						<div class="card-header">
 							<div class="card-header-title">
-								<p class="title">Select input</p>
+								<p class="title">Login</p>
 							</div>
 						</div>
-						<form action="/import/dir_selection" method="POST">
+						<form action="/import/get_auth" method="POST">
 							{% csrf_token %}
 							<div class="card-content">
-								<div class="field is-horizontal">
-									<div class="field-body">
-										<div class="field">
-											<div class="select">
-												<select name="input_dir">
-													{% for list_item in this_dir %}
-													<option value="{{ list_item }}">{{ list_item }}</option>
-													{% endfor %}
-												</select>
-											</div>
+									<div class="field">
+										<label class="label">Email</label>
+										<div class="control">
+											<input class="input" type="email" name="aud_email" placeholder="johnsmith@example.com">
 										</div>
 									</div>
-								</div>
+									<div class="field">
+										<label class="label">Password</label>
+										<div class="control">
+											<input class="input" type="password" name="aud_pass">
+										</div>
+									</div>
+									<p class="subtitle">NOTE: If you have OTP enabled, you will need access to terminal</p>
 							</div>
 							<div class="card-footer">
 								<button class="button is-link">Next</button>

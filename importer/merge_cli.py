@@ -15,10 +15,12 @@ cpus_to_use = ""
 
 dir_path = Path(__file__).resolve().parent
 
-def audible_login():
+def audible_login(USERNAME="", PASSWORD=""):
 	print("You need to login")
-	USERNAME = input("Email: ")
-	PASSWORD = getpass.getpass()
+	# Check if we're coming from web or not
+	if not USERNAME:
+		USERNAME = input("Email: ")
+		PASSWORD = getpass.getpass()
 	auth = audible.Authenticator.from_login(
 		USERNAME,
 		PASSWORD,
