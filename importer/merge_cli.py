@@ -183,7 +183,10 @@ def m4b_data(input_data, metadata, output):
 	# For embedded, use all authors/narrators
 	author = ', '.join(metadata['authors'])
 	narrator = ', '.join(metadata['narrators'])
-	series = metadata['series']
+	if 'series' in metadata:
+		series = metadata['series']
+	else:
+		series = None
 	summary = metadata['summary']
 	year = metadata['release_date'].year
 
