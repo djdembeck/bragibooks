@@ -7,7 +7,7 @@ from .models import Book, Author, Narrator, Genre
 from .merge_cli import *
 from django.contrib import messages
 
-rootdir = ''
+rootdir = f"{str(Path.home())}/input"
 
 def importer(request):
 	folder_arr = []
