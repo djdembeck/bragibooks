@@ -1,6 +1,6 @@
 # Bragi Books
-### **Bragi: god of poetry in [Norse mythology](https://en.wikipedia.org/wiki/Bragi):**
-### An audiobook library cleanup & management app, written for web use with Django. Leveraging Audible's partial API to source metadata.
+**Bragi - (god of poetry in [Norse mythology](https://en.wikipedia.org/wiki/Bragi)):**
+An audiobook library cleanup & management app, written for web use with Django. Leveraging Audible's partial API to source metadata.
 Successor of [m4b-merge](https://github.com/djdembeck/m4b-merge)
 
 ## Requirements
