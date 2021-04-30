@@ -1,5 +1,5 @@
 from pathlib import Path
-import audible, collections, html2text, getpass, os, readline, shutil
+import audible, collections, getpass,html2text, os, readline, shutil
 from datetime import datetime
 
 ### User editable variables
@@ -15,10 +15,12 @@ cpus_to_use = ""
 
 dir_path = Path(__file__).resolve().parent
 
-def audible_login():
+def audible_login(USERNAME="", PASSWORD=""):
 	print("You need to login")
-	USERNAME = input("Email: ")
-	PASSWORD = getpass.getpass()
+	# Check if we're coming from web or not
+	if not USERNAME:
+		USERNAME = input("Email: ")
+		PASSWORD = getpass.getpass()
 	auth = audible.Authenticator.from_login(
 		USERNAME,
 		PASSWORD,
@@ -109,13 +111,17 @@ def audible_parser(asin):
 		# If no auth file exists, call login function
 		audible_login()
 
-def get_directory():
-	# enable using tab for filename completion
-	readline.set_completer_delims('')
-	readline.parse_and_bind("tab: complete")
+def get_directory(input_web=""):
+	if not input_web:
+		# enable using tab for filename completion
+		readline.set_completer_delims('')
+		readline.parse_and_bind("tab: complete")
 
-	# get dir from user
-	input_take = input("Enter directory to use: ")
+		# get dir from user
+		input_take = input("Enter directory to use: ")
+	else:
+		print("Got value from web")
+		input_take = input_web
 
 	if Path(input_take).is_dir():
 		for dirpath, dirnames, files in os.walk(input_take):
@@ -288,5 +294,3 @@ def call():
 	asin = input("Audiobook ASIN: ")
 	metadata = audible_parser(asin)
 	m4b_data(input_data, metadata, output)
-
-call()
