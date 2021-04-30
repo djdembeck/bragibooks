@@ -120,7 +120,6 @@ def get_directory(input_web=""):
 		# get dir from user
 		input_take = input("Enter directory to use: ")
 	else:
-		print("Got value from web")
 		input_take = input_web
 
 	if Path(input_take).is_dir():

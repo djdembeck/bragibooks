@@ -7,6 +7,9 @@ class BookManager(models.Manager):
 		if Book.objects.filter(asin=post_data['asin']):
 			errors["dupe_asin"] = "A book with that ASIN already exists"
 
+		if len(post_data['asin']) != 10:
+			errors['invalid_asin'] = "Invalid ASIN format"
+
 		return errors
 
 class AuthorManager(models.Manager):
