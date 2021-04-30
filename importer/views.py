@@ -12,10 +12,9 @@ rootdir = f"{str(Path.home())}/input"
 def importer(request):
 	folder_arr = []
 	for path in Path(rootdir).iterdir():
-		if path.is_dir():
-			base = os.path.basename(path)
-			full = path
-			folder_arr.append(base)
+		base = os.path.basename(path)
+		full = path
+		folder_arr.append(base)
 
 	context = {
 		"this_dir": folder_arr,
