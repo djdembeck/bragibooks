@@ -71,13 +71,19 @@ def audible_parser(asin):
 				aud_json['product']['title']
 				)
 
-		## Summary
-		aud_summary_json = (
+		## Short summary
+		aud_short_summary_json = (
 			aud_json['product']['merchandising_summary']
 			)
-		metadata_dict['summary'] = (
-			html2text.html2text(aud_summary_json).replace("\n", " ")
+		metadata_dict['short_summary'] = (
+			html2text.html2text(aud_short_summary_json).replace("\n", " ")
 			)
+
+		## Long summary
+		aud_long_summary_json = (
+			aud_json['product']['publisher_summary']
+			)
+		metadata_dict['long_summary'] = aud_long_summary_json
 
 		## Authors
 		aud_authors_json = (
@@ -132,7 +138,23 @@ def audible_parser(asin):
 					aud_json['product']['release_date'], '%Y-%m-%d'
 					).date()
 				)
-		
+
+		## Publisher
+		if 'publisher_name' in aud_json['product']:
+			metadata_dict['publisher_name'] = aud_json['product']['publisher_name']
+
+		## Language
+		if 'language' in aud_json['product']:
+			metadata_dict['language'] = aud_json['product']['language']
+
+		## Runtime in minutes
+		if 'runtime_length_min' in aud_json['product']:
+			metadata_dict['runtime_length_min'] = aud_json['product']['runtime_length_min']
+
+		## Format type (abridged or unabridged)
+		if 'format_type' in aud_json['product']:
+			metadata_dict['format_type'] = aud_json['product']['format_type']
+
 		# return all data
 		return metadata_dict
 	else:
@@ -141,38 +163,50 @@ def audible_parser(asin):
 		audible_login()
 
 def get_directory(input_take):
+	# Check if input is a dir
 	if Path(input_take).is_dir():
-		for dirpath, dirnames, files in os.walk(input_take):
-			EXTENSIONS=['mp3', 'm4a', 'm4b']
+		# Check if input has multiple subdirs
+		num_of_subdirs = len(next(os.walk(input_take))[1])
+		if num_of_subdirs >= 1:
+			logging.info(
+				f"Found multiple ({num_of_subdirs}) subdirs, "
+					f"using those as input (multi-disc)"
+				)
+			dirpath = inputs
+			USE_EXT = None
+			num_of_files = num_of_subdirs
+		else:
+			for dirpath, dirnames, files in os.walk(input_take):
+				EXTENSIONS=['mp3', 'm4a', 'm4b']
 
-			for EXT in EXTENSIONS:
-				if collections.Counter(
-					p.suffix for p in Path(dirpath)\
-						.resolve().glob(f'*.{EXT}')
-					):
-					USE_EXT = EXT
-					list_of_files = os.listdir(Path(dirpath))
-					# Case for single file in a folder
-					if sum(
-						x.endswith(f'.{USE_EXT}') 
-						for x in list_of_files
-						) == 1:
-						for m4b_file in Path(dirpath).glob(f'*.{USE_EXT}'):
-							dirpath = m4b_file
-						num_of_files = 1
-					else:
-						num_of_files = sum(
+				for EXT in EXTENSIONS:
+					if collections.Counter(
+						p.suffix for p in Path(dirpath)\
+							.resolve().glob(f'*.{EXT}')
+						):
+						USE_EXT = EXT
+						list_of_files = os.listdir(Path(dirpath))
+						# Case for single file in a folder
+						if sum(
 							x.endswith(f'.{USE_EXT}') 
 							for x in list_of_files
-							)
-
+							) == 1:
+							for m4b_file in Path(dirpath).glob(f'*.{USE_EXT}'):
+								dirpath = m4b_file
+							num_of_files = 1
+						else:
+							num_of_files = sum(
+								x.endswith(f'.{USE_EXT}') 
+								for x in list_of_files
+								)
+	# Check if input is a file
 	elif Path(input_take).is_file():
 		dirpath = Path(input_take)
 		USE_EXT_PRE = dirpath.suffix
 		USE_EXT = Path(USE_EXT_PRE).stem.split('.')[1]
 		num_of_files = 1
 
-	return Path(dirpath), USE_EXT, num_of_files
+	return dirpath, USE_EXT, num_of_files
 
 def m4b_data(input_data, metadata, output):
 	## Checks
@@ -205,7 +239,7 @@ def m4b_data(input_data, metadata, output):
 	if 'subtitle' in metadata:
 		base_title = metadata['title']
 		base_subtitle = metadata['subtitle']
-		title = f'{base_title} - {base_subtitle}'
+		title = f"{base_title} - {base_subtitle}"
 	else:
 		title = metadata['title']
 	# Only use first author/narrator for file names;
@@ -220,7 +254,7 @@ def m4b_data(input_data, metadata, output):
 		series = metadata['series']
 	else:
 		series = None
-	summary = metadata['summary']
+	summary = metadata['short_summary']
 	year = metadata['release_date'].year
 
 	book_output = (
@@ -248,17 +282,17 @@ def m4b_data(input_data, metadata, output):
 
 	## Array for argument use
 	# args for multiple input files in a folder
-	if Path(in_dir).is_dir() and num_of_files > 1:
+	if Path(in_dir).is_dir() and num_of_files > 1 or in_ext == None:
 		logging.info("Got multiple files in a dir")
 		args = [
 			' merge',
 			f"--output-file=\"{book_output}/{title}.m4b\"",
-			f'--name=\"{title}\"',
-			f'--album=\"{path_title}\"',
-			f'--artist=\"{narrator}\"',
-			f'--albumartist=\"{author}\"',
-			f'--year=\"{year}\"',
-			f'--description=\"{summary}\"',
+			f"--name=\"{title}\"",
+			f"--album=\"{path_title}\"",
+			f"--artist=\"{narrator}\"",
+			f"--albumartist=\"{author}\"",
+			f"--year=\"{year}\"",
+			f"--description=\"{summary}\"",
 			'--force',
 			'--no-chapter-reindexing',
 			'--no-cleanup',
@@ -271,7 +305,7 @@ def m4b_data(input_data, metadata, output):
 		m4b_cmd = (
 			m4b_tool + 
 		' '.join(args) + 
-		f' \"{in_dir}\"'
+		f" \"{in_dir}\""
 		)
 		os.system(m4b_cmd)
 
@@ -280,7 +314,7 @@ def m4b_data(input_data, metadata, output):
 			f"{book_output}/{title}.m4b",
 			m4b_tool
 			)
-
+		
 	# args for single m4b input file
 	elif Path(in_dir).is_file() and in_ext == "m4b":
 		logging.info("got single m4b input")
@@ -288,7 +322,7 @@ def m4b_data(input_data, metadata, output):
 			m4b_tool + 
 		' meta ' + 
 		f'--export-chapters=\"\"' + 
-		f' \"{in_dir}\"'
+		f" \"{in_dir}\""
 		)
 		os.system(m4b_cmd)
 		shutil.move(
@@ -298,15 +332,15 @@ def m4b_data(input_data, metadata, output):
 
 		args = [
 			' meta',
-			f'--name=\"{title}\"',
-			f'--album=\"{path_title}\"',
-			f'--artist=\"{narrator}\"',
-			f'--albumartist=\"{author}\"',
-			f'--year=\"{year}\"',
-			f'--description=\"{summary}\"'
+			f"--name=\"{title}\"",
+			f"--album=\"{path_title}\"",
+			f"--artist=\"{narrator}\"",
+			f"--albumartist=\"{author}\"",
+			f"--year=\"{year}\"",
+			f"--description=\"{summary}\""
 		]
 		if series:
-			args.append(f'--series \"{series}\"')
+			args.append(f"--series \"{series}\"")
 
 		# make backup file
 		shutil.copy(

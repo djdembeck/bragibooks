@@ -6,6 +6,8 @@ from .models import Book, Author, Narrator, Genre
 # core merge logic:
 from .merge_cli import *
 from django.contrib import messages
+# To display book length
+from datetime import timedelta
 
 rootdir = f"{str(Path.home())}/input"
 
@@ -24,7 +26,13 @@ def importer(request):
 def dir_selection(request):
 	request.session['input_dir'] = request.POST['input_dir']
 
-	return redirect('/import/match')
+	check_book_path = Book.objects.filter(src_path__icontains=f"{rootdir}/{request.session['input_dir']}")
+	if check_book_path:
+		confirmed_book = Book.objects.get(src_path__icontains=f"{rootdir}/{request.session['input_dir']}")
+		asin = confirmed_book.asin
+		return redirect(f'/import/{asin}/confirm')
+	else:
+		return redirect('/import/match')
 
 def match(request):
 	context = {
@@ -38,31 +46,34 @@ def make_models(asin, input_data):
 	metadata = audible_parser(asin)
 	m4b_data(input_data, metadata, output)
 
-	# Book DB entry
-	#TODO: fix long_desc
+# Book DB entry
 	if 'subtitle' in metadata:
 		base_title = metadata['title']
 		base_subtitle = metadata['subtitle']
-		title = f'{base_title} - {base_subtitle}'
+		title = f"{base_title} - {base_subtitle}"
 	else:
 		title = metadata['title']
 
 	new_book = Book.objects.create(
 		title=metadata['title'],
 		asin=asin,
-		short_desc=metadata['summary'],
-		long_desc="",
+		short_desc=metadata['short_summary'],
+		long_desc=metadata['long_summary'],
 		release_date=metadata['release_date'],
+		publisher=metadata['publisher_name'],
+		lang=metadata['language'],
+		runtime_length_minutes=metadata['runtime_length_min'],
+		format_type=metadata['format_type'],
 		converted=True,
 		src_path=input_data[0],
-		dest_path=f"""
-		\"
-		{output}/
-		{metadata['authors'][0]}/
-		{metadata['title']}/
-		{title}.m4b
-		\"
-		"""
+		dest_path=(
+		f"\""
+		f"{output}/"
+		f"{metadata['authors'][0]}/"
+		f"{metadata['title']}/"
+		f"{title}.m4b"
+		f"\""
+		)
 		)
 
 	# Only add in series if it exists
@@ -88,7 +99,7 @@ def get_auth(request):
 	audible_login(
 		USERNAME=request.POST['aud_email'],
 		PASSWORD=request.POST['aud_pass'])
-	return redirect('/import/match)
+	return redirect('/import/match')
 
 def get_asin(request):
 	#check that user is signed into audible api
@@ -117,8 +128,15 @@ def get_asin(request):
 			return redirect('/import/match')
 
 def finish(request, asin):
+	this_book = Book.objects.get(asin=asin)
+	d = timedelta(minutes=this_book.runtime_length_minutes)
+	book_length_calc = (
+		f'{d.seconds//3600} hrs and {(d.seconds//60)%60} minutes'
+	)
+
 	context = {
-		"this_book": Book.objects.get(asin=asin)
+		"this_book": this_book,
+		"book_length": book_length_calc
 	}
 	
 	return render(request, "finish.html", context)

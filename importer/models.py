@@ -38,10 +38,10 @@ class Book(models.Model):
 	release_date = models.DateField()
 	series = models.CharField(max_length=255, blank=True, default='')
 	# genre = models.TextField()
-	# publisher
-	# lang
-	# length_minutes = 
-	# format_type = 
+	publisher = models.CharField(max_length=255)
+	lang = models.CharField(max_length=25)
+	runtime_length_minutes = models.IntegerField()
+	format_type = models.CharField(max_length=25)
 	converted = models.BooleanField()
 	src_path = models.FilePathField()
 	dest_path = models.FilePathField()
@@ -54,8 +54,8 @@ class Author(models.Model):
 	last_name = models.CharField(max_length=45)
 	asin = models.CharField(max_length=10)
 	books = models.ManyToManyField(Book, related_name="authors")
-	short_desc = models.TextField()
-	long_desc = models.TextField()
+	short_desc = models.TextField(blank=True, default='')
+	long_desc = models.TextField(blank=True, default='')
 	created_at = models.DateTimeField(auto_now_add=True)
 	updated_at = models.DateTimeField(auto_now=True)
 	objects = AuthorManager()
@@ -65,8 +65,8 @@ class Narrator(models.Model):
 	last_name = models.CharField(max_length=45)
 	asin = models.CharField(max_length=10)
 	books = models.ManyToManyField(Book, related_name="narrators")
-	short_desc = models.TextField()
-	long_desc = models.TextField()
+	short_desc = models.TextField(blank=True, default='')
+	long_desc = models.TextField(blank=True, default='')
 	created_at = models.DateTimeField(auto_now_add=True)
 	updated_at = models.DateTimeField(auto_now=True)
 	objects = NarratorManager()
