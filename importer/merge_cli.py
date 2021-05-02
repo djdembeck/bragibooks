@@ -241,7 +241,10 @@ def m4b_data(input_data, metadata, output):
 		num_cpus = cpus_to_use
 
 	# Make necessary directories
-	Path(book_output).mkdir(parents=True, exist_ok=True)
+	Path(book_output).mkdir(
+		parents=True,
+		exist_ok=True
+		)
 
 	## Array for argument use
 	# args for multiple input files in a folder
@@ -273,8 +276,9 @@ def m4b_data(input_data, metadata, output):
 		os.system(m4b_cmd)
 
 		m4b_fix_chapters(
-			f"{book_output}/{title}.chapters.txt", 
-			f"{book_output}/{title}.m4b", m4b_tool
+			f"{book_output}/{title}.chapters.txt",
+			f"{book_output}/{title}.m4b",
+			m4b_tool
 			)
 
 	# args for single m4b input file
@@ -288,7 +292,7 @@ def m4b_data(input_data, metadata, output):
 		)
 		os.system(m4b_cmd)
 		shutil.move(
-			f"{in_dir.parent}/{in_dir.stem}.chapters.txt", 
+			f"{in_dir.parent}/{in_dir.stem}.chapters.txt",
 			f"{book_output}/{title}.chapters.txt"
 			)
 
@@ -306,7 +310,7 @@ def m4b_data(input_data, metadata, output):
 
 		# make backup file
 		shutil.copy(
-			in_dir, 
+			in_dir,
 			f"{in_dir.parent}/{in_dir.stem}.new.m4b"
 			)
 
@@ -319,13 +323,14 @@ def m4b_data(input_data, metadata, output):
 
 		# Move completed file
 		shutil.move(
-			f"{in_dir.parent}/{in_dir.stem}.new.m4b", 
+			f"{in_dir.parent}/{in_dir.stem}.new.m4b",
 			f"{book_output}/{title}.m4b"
 			)
 
 		m4b_fix_chapters(
-			f"{book_output}/{title}.chapters.txt", 
-			f"{book_output}/{title}.m4b", m4b_tool
+			f"{book_output}/{title}.chapters.txt",
+			f"{book_output}/{title}.m4b",
+			m4b_tool
 			)
 
 	elif not in_ext:

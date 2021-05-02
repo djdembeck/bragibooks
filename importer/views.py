@@ -48,12 +48,13 @@ def make_models(asin, input_data):
 		title = metadata['title']
 
 	new_book = Book.objects.create(
-		title=metadata['title'], 
-		asin=asin, short_desc=metadata['summary'], 
-		long_desc="", 
-		release_date=metadata['release_date'], 
-		converted=True, 
-		src_path=input_data[0], 
+		title=metadata['title'],
+		asin=asin,
+		short_desc=metadata['summary'],
+		long_desc="",
+		release_date=metadata['release_date'],
+		converted=True,
+		src_path=input_data[0],
 		dest_path=f"""
 		\"
 		{output}/
@@ -85,7 +86,7 @@ def api_auth(request):
 
 def get_auth(request):
 	audible_login(
-		USERNAME=request.POST['aud_email'], 
+		USERNAME=request.POST['aud_email'],
 		PASSWORD=request.POST['aud_pass'])
 	return redirect('/import/match)
 
