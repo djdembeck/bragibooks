@@ -87,13 +87,14 @@ def make_models(asin, input_data):
 	if len(metadata['authors']) > 1:
 		for author in metadata['authors']:
 			author_name_split = author['name'].split()
+			last_name_index = len(author_name_split) - 1
 			if not Author.objects.filter(
 				asin=author['asin']
 			):
 				new_author = Author.objects.create(
 					asin=author['asin'],
 					first_name=author_name_split[0],
-					last_name=author_name_split[1]
+					last_name=author_name_split[last_name_index]
 				)
 				new_author.books.add(new_book)
 				new_author.save()
@@ -105,19 +106,21 @@ def make_models(asin, input_data):
 				existing_author.save()
 	else:
 		author_name_split = metadata['authors'][0]['name'].split()
+		last_name_index = len(author_name_split) - 1
+		print(author_name_split[last_name_index])
 		if not Author.objects.filter(
 			asin=metadata['authors'][0]['asin']
 		):
 			new_author = Author.objects.create(
 				asin=metadata['authors'][0]['asin'],
 				first_name=author_name_split[0],
-				last_name=author_name_split[1]
+				last_name=author_name_split[last_name_index]
 			)
 			new_author.books.add(new_book)
 			new_author.save()
 		else:
 			existing_author = Author.objects.get(
-				asin=author['asin']
+				asin=metadata['authors'][0]['asin']
 			)
 			existing_author.books.add(new_book)
 			existing_author.save()
@@ -127,39 +130,41 @@ def make_models(asin, input_data):
 	if len(metadata['narrators']) > 1:
 		for narrator in metadata['narrators']:
 			narr_name_split = narrator.split()
+			last_name_index = len(narr_name_split) - 1
 			if not Narrator.objects.filter(
 				first_name=narr_name_split[0],
-				last_name=narr_name_split[1]
+				last_name=narr_name_split[last_name_index]
 			):
 				new_narrator = Narrator.objects.create(
 					first_name=narr_name_split[0],
-					last_name=narr_name_split[1]
+					last_name=narr_name_split[last_name_index]
 				)
 				new_narrator.books.add(new_book)
 				new_narrator.save()
 			else:
 				existing_narrator = Narrator.objects.get(
 					first_name=narr_name_split[0],
-					last_name=narr_name_split[1]
+					last_name=narr_name_split[last_name_index]
 				)
 				existing_narrator.books.add(new_book)
 				existing_narrator.save()
 	else:
 		narr_name_split = metadata['narrators'][0].split()
+		last_name_index = len(narr_name_split) - 1
 		if not Narrator.objects.filter(
 			first_name=narr_name_split[0],
-			last_name=narr_name_split[1]
+			last_name=narr_name_split[last_name_index]
 		):
 			new_narrator = Narrator.objects.create(
 				first_name=narr_name_split[0],
-				last_name=narr_name_split[1]
+				last_name=narr_name_split[last_name_index]
 			)
 			new_narrator.books.add(new_book)
 			new_narrator.save()
 		else:
 			existing_narrator = Narrator.objects.get(
 				first_name=narr_name_split[0],
-				last_name=narr_name_split[1]
+				last_name=narr_name_split[last_name_index]
 			)
 			existing_narrator.books.add(new_book)
 			existing_narrator.save()
