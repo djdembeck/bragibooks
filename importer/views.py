@@ -47,7 +47,22 @@ def make_models(asin, input_data):
 	else:
 		title = metadata['title']
 
-	new_book = Book.objects.create(title=metadata['title'], asin=asin, short_desc=metadata['summary'], long_desc="", release_date=metadata['release_date'], converted=True, src_path=input_data[0], dest_path=f"\"{output}/{metadata['authors'][0]}/{metadata['title']}/{title}.m4b\"")
+	new_book = Book.objects.create(
+		title=metadata['title'], 
+		asin=asin, short_desc=metadata['summary'], 
+		long_desc="", 
+		release_date=metadata['release_date'], 
+		converted=True, 
+		src_path=input_data[0], 
+		dest_path=f"""
+		\"
+		{output}/
+		{metadata['authors'][0]}/
+		{metadata['title']}/
+		{title}.m4b
+		\"
+		"""
+		)
 
 	# Only add in series if it exists
 	if 'series' in metadata:
@@ -69,8 +84,10 @@ def api_auth(request):
 	return render(request, "authenticate.html")
 
 def get_auth(request):
-	audible_login(USERNAME=request.POST['aud_email'], PASSWORD=request.POST['aud_pass'])
-	return redirect('/import/match')
+	audible_login(
+		USERNAME=request.POST['aud_email'], 
+		PASSWORD=request.POST['aud_pass'])
+	return redirect('/import/match)
 
 def get_asin(request):
 	#check that user is signed into audible api
@@ -79,7 +96,9 @@ def get_asin(request):
 		return redirect('/import/api_auth')
 
 	asin = request.POST['asin']
-	input_data = get_directory(f"{rootdir}/{request.session['input_dir']}")
+	input_data = get_directory(
+		f"{rootdir}/{request.session['input_dir']}"
+		)
 	# Check for validation errors
 	errors = Book.objects.book_asin_validator(request.POST)
 	if len(errors) > 0:
