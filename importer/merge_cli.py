@@ -131,8 +131,9 @@ def get_directory(input_web=""):
 					USE_EXT = EXT
 					list_of_files = os.listdir(Path(dirpath))
 					# Case for single file in a folder
-					if len(list_of_files) == 1:
-						dirpath = f"{dirpath}/" + list_of_files[0]
+					if sum(x.endswith(f'.{USE_EXT}') for x in list_of_files) == 1:
+						for m4b_file in Path(dirpath).glob(f'*.{USE_EXT}'):
+							dirpath = m4b_file
 						num_of_files = 1
 					else:
 						num_of_files = sum(x.endswith(f'.{USE_EXT}') for x in list_of_files)

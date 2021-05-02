@@ -36,7 +36,7 @@ class Book(models.Model):
 	short_desc = models.TextField()
 	long_desc = models.TextField()
 	release_date = models.DateField()
-	series = models.CharField(max_length=255)
+	series = models.CharField(max_length=255, blank=True, default='')
 	# genre = models.TextField()
 	# publisher
 	# lang

@@ -7,15 +7,14 @@ from .models import Book, Author, Narrator, Genre
 from .merge_cli import *
 from django.contrib import messages
 
-rootdir = ''
+rootdir = f"{str(Path.home())}/input"
 
 def importer(request):
 	folder_arr = []
 	for path in Path(rootdir).iterdir():
-		if path.is_dir():
-			base = os.path.basename(path)
-			full = path
-			folder_arr.append(base)
+		base = os.path.basename(path)
+		full = path
+		folder_arr.append(base)
 
 	context = {
 		"this_dir": folder_arr,
@@ -48,7 +47,12 @@ def make_models(asin, input_data):
 	else:
 		title = metadata['title']
 
-	new_book = Book.objects.create(title=metadata['title'], asin=asin, short_desc=metadata['summary'], long_desc="", release_date=metadata['release_date'], series=metadata['series'], converted=True, src_path=input_data[0], dest_path=f"\"{output}/{metadata['authors'][0]}/{metadata['title']}/{title}.m4b\"")
+	new_book = Book.objects.create(title=metadata['title'], asin=asin, short_desc=metadata['summary'], long_desc="", release_date=metadata['release_date'], converted=True, src_path=input_data[0], dest_path=f"\"{output}/{metadata['authors'][0]}/{metadata['title']}/{title}.m4b\"")
+
+	# Only add in series if it exists
+	if 'series' in metadata:
+		new_book.series = metadata['series']
+
 	new_book.save()
 
 	# # Author DB entry
