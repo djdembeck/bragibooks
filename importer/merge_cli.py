@@ -92,17 +92,23 @@ def audible_parser(asin):
 		# check if list contains more than 1 author
 		if len(aud_authors_json) > 1:
 			aud_authors_arr = []
-			for narrator in range(len(aud_authors_json)):
+			for author in range(len(aud_authors_json)):
 				# from array of dicts, get author name
 				aud_authors_arr.append(
-					aud_authors_json[narrator]['name']
+				{
+				'asin': aud_authors_json[author]['asin'],
+				'name': aud_authors_json[author]['name']
+				}
 					)
 			metadata_dict['authors'] = aud_authors_arr
 		else:
 			# else author name will be in first element dict
-			metadata_dict['authors'] = (
-				[aud_authors_json[0]['name']]
-				)
+			metadata_dict['authors'] = [
+				{
+				'asin': aud_authors_json[0]['asin'],
+				'name': aud_authors_json[0]['name']
+				}
+				]
 		
 		## Narrators
 		aud_narrators_json = (
@@ -245,10 +251,13 @@ def m4b_data(input_data, metadata, output):
 	# Only use first author/narrator for file names;
 	# no subtitle for file name
 	path_title = metadata['title']
-	path_author = metadata['authors'][0]
+	path_author = metadata['authors'][0]['name']
 	path_narrator = metadata['narrators'][0]
 	# For embedded, use all authors/narrators
-	author = ', '.join(metadata['authors'])
+	for authors in metadata['authors']:
+		author_name_arr = []
+		author_name_arr.append(authors['name'])
+	author = ', '.join(author_name_arr)
 	narrator = ', '.join(metadata['narrators'])
 	if 'series' in metadata:
 		series = metadata['series']

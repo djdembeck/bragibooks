@@ -12,24 +12,6 @@ class BookManager(models.Manager):
 
 		return errors
 
-class AuthorManager(models.Manager):
-	def author_asin_validator(self, post_data):
-		errors = {}
-
-		if Author.objects.filter(asin=post_data['asin']):
-			errors["dupe_asin"] = "A book with that ASIN already exists"
-
-		return errors
-
-class NarratorManager(models.Manager):
-	def narrator_asin_validator(self, post_data):
-		errors = {}
-
-		if Narrator.objects.filter(asin=post_data['asin']):
-			errors["dupe_asin"] = "A book with that ASIN already exists"
-
-		return errors
-
 class Book(models.Model):
 	title = models.CharField(max_length=255)
 	asin = models.CharField(max_length=10)
@@ -58,7 +40,6 @@ class Author(models.Model):
 	long_desc = models.TextField(blank=True, default='')
 	created_at = models.DateTimeField(auto_now_add=True)
 	updated_at = models.DateTimeField(auto_now=True)
-	objects = AuthorManager()
 
 class Narrator(models.Model):
 	first_name = models.CharField(max_length=45)
@@ -68,7 +49,6 @@ class Narrator(models.Model):
 	long_desc = models.TextField(blank=True, default='')
 	created_at = models.DateTimeField(auto_now_add=True)
 	updated_at = models.DateTimeField(auto_now=True)
-	objects = NarratorManager()
 
 class Genre(models.Model):
 	name = models.CharField(max_length=255)

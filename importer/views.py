@@ -46,7 +46,7 @@ def make_models(asin, input_data):
 	metadata = audible_parser(asin)
 	m4b_data(input_data, metadata, output)
 
-# Book DB entry
+	## Book DB entry
 	if 'subtitle' in metadata:
 		base_title = metadata['title']
 		base_subtitle = metadata['subtitle']
@@ -82,16 +82,88 @@ def make_models(asin, input_data):
 
 	new_book.save()
 
-	# # Author DB entry
-	# # Need check if author exists
-	# new_author = Author.objects.create(short_desc="", long_desc="")
-	# new_author.save()
+	## Author DB entry
+	# Create new entry for each author if there's more than one
+	if len(metadata['authors']) > 1:
+		for author in metadata['authors']:
+			author_name_split = author['name'].split()
+			if not Author.objects.filter(
+				asin=author['asin']
+			):
+				new_author = Author.objects.create(
+					asin=author['asin'],
+					first_name=author_name_split[0],
+					last_name=author_name_split[1]
+				)
+				new_author.books.add(new_book)
+				new_author.save()
+			else:
+				existing_author = Author.objects.get(
+					asin=author['asin']
+				)
+				existing_author.books.add(new_book)
+				existing_author.save()
+	else:
+		author_name_split = metadata['authors'][0]['name'].split()
+		if not Author.objects.filter(
+			asin=metadata['authors'][0]['asin']
+		):
+			new_author = Author.objects.create(
+				asin=metadata['authors'][0]['asin'],
+				first_name=author_name_split[0],
+				last_name=author_name_split[1]
+			)
+			new_author.books.add(new_book)
+			new_author.save()
+		else:
+			existing_author = Author.objects.get(
+				asin=author['asin']
+			)
+			existing_author.books.add(new_book)
+			existing_author.save()
 
-	# # Need check if narrator exists
-	# # Narrator DB entry
-	# new_narrator = Narrator.objects.create()
-	# new_narrator.save()
-
+	## Narrator DB entry
+	# Create new entry for each narrator if there's more than one
+	if len(metadata['narrators']) > 1:
+		for narrator in metadata['narrators']:
+			narr_name_split = narrator.split()
+			if not Narrator.objects.filter(
+				first_name=narr_name_split[0],
+				last_name=narr_name_split[1]
+			):
+				new_narrator = Narrator.objects.create(
+					first_name=narr_name_split[0],
+					last_name=narr_name_split[1]
+				)
+				new_narrator.books.add(new_book)
+				new_narrator.save()
+			else:
+				existing_narrator = Narrator.objects.get(
+					first_name=narr_name_split[0],
+					last_name=narr_name_split[1]
+				)
+				existing_narrator.books.add(new_book)
+				existing_narrator.save()
+	else:
+		narr_name_split = metadata['narrators'][0].split()
+		if not Narrator.objects.filter(
+			first_name=narr_name_split[0],
+			last_name=narr_name_split[1]
+		):
+			new_narrator = Narrator.objects.create(
+				first_name=narr_name_split[0],
+				last_name=narr_name_split[1]
+			)
+			new_narrator.books.add(new_book)
+			new_narrator.save()
+		else:
+			existing_narrator = Narrator.objects.get(
+				first_name=narr_name_split[0],
+				last_name=narr_name_split[1]
+			)
+			existing_narrator.books.add(new_book)
+			existing_narrator.save()
+		
 def api_auth(request):
 	return render(request, "authenticate.html")
 
