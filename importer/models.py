@@ -63,7 +63,6 @@ class Author(models.Model):
 class Narrator(models.Model):
 	first_name = models.CharField(max_length=45)
 	last_name = models.CharField(max_length=45)
-	asin = models.CharField(max_length=10)
 	books = models.ManyToManyField(Book, related_name="narrators")
 	short_desc = models.TextField(blank=True, default='')
 	long_desc = models.TextField(blank=True, default='')
