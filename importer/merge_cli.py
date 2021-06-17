@@ -270,8 +270,8 @@ def m4b_data(input_data, metadata, output):
 	path_author = metadata['authors'][0]['name']
 	path_narrator = metadata['narrators'][0]
 	# For embedded, use all authors/narrators
+	author_name_arr = []
 	for authors in metadata['authors']:
-		author_name_arr = []
 		author_name_arr.append(authors['name'])
 	author = ', '.join(author_name_arr)
 	narrator = ', '.join(metadata['narrators'])
