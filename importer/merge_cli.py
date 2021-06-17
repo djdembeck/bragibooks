@@ -2,6 +2,7 @@ from pathlib import Path
 import argparse, audible, collections, getpass, \
 	html2text, logging, os, readline, shutil
 from datetime import datetime
+from pathvalidate import sanitize_filename
 
 ### User editable variables
 # for non-default m4b-tool install path
@@ -283,8 +284,9 @@ def m4b_data(input_data, metadata, output):
 	year = metadata['release_date'].year
 
 	book_output = (
-		f"{output}/{path_author}/{path_title}"
+		f"{output}/{sanitize_filename(path_author)}/{sanitize_filename(path_title)}"
 		)
+	file_title = sanitize_filename(title)
 	##
 
 	## File variables
@@ -311,7 +313,7 @@ def m4b_data(input_data, metadata, output):
 		logging.info("Got multiple files in a dir")
 		args = [
 			' merge',
-			f"--output-file=\"{book_output}/{title}.m4b\"",
+			f"--output-file=\"{book_output}/{file_title}.m4b\"",
 			f"--name=\"{title}\"",
 			f"--album=\"{path_title}\"",
 			f"--artist=\"{narrator}\"",
@@ -335,8 +337,8 @@ def m4b_data(input_data, metadata, output):
 		os.system(m4b_cmd)
 
 		m4b_fix_chapters(
-			f"{book_output}/{title}.chapters.txt",
-			f"{book_output}/{title}.m4b",
+			f"{book_output}/{file_title}.chapters.txt",
+			f"{book_output}/{file_title}.m4b",
 			m4b_tool
 			)
 		
@@ -352,7 +354,7 @@ def m4b_data(input_data, metadata, output):
 		os.system(m4b_cmd)
 		shutil.move(
 			f"{in_dir.parent}/{in_dir.stem}.chapters.txt",
-			f"{book_output}/{title}.chapters.txt"
+			f"{book_output}/{file_title}.chapters.txt"
 			)
 
 		args = [
@@ -383,12 +385,12 @@ def m4b_data(input_data, metadata, output):
 		# Move completed file
 		shutil.move(
 			f"{in_dir.parent}/{in_dir.stem}.new.m4b",
-			f"{book_output}/{title}.m4b"
+			f"{book_output}/{file_title}.m4b"
 			)
 
 		m4b_fix_chapters(
-			f"{book_output}/{title}.chapters.txt",
-			f"{book_output}/{title}.m4b",
+			f"{book_output}/{file_title}.chapters.txt",
+			f"{book_output}/{file_title}.m4b",
 			m4b_tool
 			)
 
