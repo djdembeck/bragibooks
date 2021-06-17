@@ -93,21 +93,37 @@ def audible_parser(asin):
 		if len(aud_authors_json) > 1:
 			aud_authors_arr = []
 			for author in range(len(aud_authors_json)):
-				# from array of dicts, get author name
-				aud_authors_arr.append(
-				{
-				'asin': aud_authors_json[author]['asin'],
-				'name': aud_authors_json[author]['name']
-				}
-					)
+				# Use ASIN for author only if available
+				if aud_authors_json[author].get('asin'):
+					# from array of dicts, get author name
+					aud_authors_arr.append(
+					{
+					'asin': aud_authors_json[author]['asin'],
+					'name': aud_authors_json[author]['name']
+					}
+						)
+				else:
+					aud_authors_arr.append(
+					{
+					'name': aud_authors_json[author]['name']
+					}
+						)
 			metadata_dict['authors'] = aud_authors_arr
 		else:
 			# else author name will be in first element dict
-			metadata_dict['authors'] = [
-				{
-				'asin': aud_authors_json[0]['asin'],
-				'name': aud_authors_json[0]['name']
-				}
+			# Use ASIN for author only if available
+			if aud_authors_json[0].get('asin'):
+				metadata_dict['authors'] = [
+					{
+					'asin': aud_authors_json[0]['asin'],
+					'name': aud_authors_json[0]['name']
+					}
+				]
+			else:
+				metadata_dict['authors'] = [
+					{
+					'name': aud_authors_json[0]['name']
+					}
 				]
 		
 		## Narrators
