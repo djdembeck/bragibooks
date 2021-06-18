@@ -1,8 +1,16 @@
 #!/usr/bin/env python
 """Django's command-line utility for administrative tasks."""
 import os
-import sys
+import subprocess, sys
 
+# Init django secret and DB
+from django.core.management.utils import get_random_secret_key
+if not os.path.exists("secret_key.txt"):
+	f = open("secret_key.txt", "w")
+	f.write(get_random_secret_key())
+	f.close()
+	subprocess.run(["python", "manage.py", "makemigrations"])
+	subprocess.run(["python", "manage.py", "migrate"])
 
 def main():
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'bragibooks_proj.settings')
