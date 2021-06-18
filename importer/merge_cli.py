@@ -1,8 +1,9 @@
 from pathlib import Path
 import argparse, audible, collections, getpass, \
-	html2text, logging, os, readline, shutil
+	html2text, logging, math, os, shutil
 from datetime import datetime
 from pathvalidate import sanitize_filename
+from pydub.utils import mediainfo
 
 ### User editable variables
 # for non-default m4b-tool install path
@@ -311,6 +312,26 @@ def m4b_data(input_data, metadata, output):
 	# args for multiple input files in a folder
 	if Path(in_dir).is_dir() and num_of_files > 1 or in_ext == None:
 		logging.info("Got multiple files in a dir")
+
+		# Find first file with our extension, to check rates against
+		first_file_index = 0
+		while True:
+			if Path(sorted(os.listdir(in_dir))[first_file_index]).suffix == f".{in_ext}":
+				break
+			first_file_index += 1
+		first_file = sorted(os.listdir(in_dir))[first_file_index]
+
+		## Mediainfo data
+		# Divide bitrate by 1k, round up, and return back to 1k divisible for round number.
+		target_bitrate = math.ceil(
+			int(mediainfo(f"{in_dir}/{first_file}")['bit_rate']) / 1000
+		) * 1000
+
+		target_samplerate =	int(mediainfo(f"{in_dir}/{first_file}")['sample_rate'])
+
+		logging.info(f"Source bitrate: {target_bitrate}")
+		logging.info(f"Source samplerate: {target_samplerate}")
+		##
 		args = [
 			' merge',
 			f"--output-file=\"{book_output}/{file_title}.m4b\"",
@@ -320,6 +341,8 @@ def m4b_data(input_data, metadata, output):
 			f"--albumartist=\"{author}\"",
 			f"--year=\"{year}\"",
 			f"--description=\"{summary}\"",
+			f"--audio-bitrate=\"{target_bitrate}\"",
+			f"--audio-samplerate=\"{target_samplerate}\"",
 			'--force',
 			'--no-chapter-reindexing',
 			'--no-cleanup',
@@ -344,6 +367,15 @@ def m4b_data(input_data, metadata, output):
 		
 	# args for single m4b input file
 	elif Path(in_dir).is_file() and in_ext == "m4b":
+		## Mediainfo data
+		# Divide bitrate by 1k, round up, and return back to 1k divisible for round number.
+		target_bitrate = math.ceil(
+			int(mediainfo(in_dir)['bit_rate']) / 1000
+		) * 1000
+
+		target_samplerate =	int(mediainfo(in_dir)['sample_rate'])
+		##
+
 		logging.info("got single m4b input")
 		m4b_cmd = (
 			m4b_tool + 
