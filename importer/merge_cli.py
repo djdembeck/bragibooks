@@ -35,156 +35,150 @@ def audible_login(USERNAME="", PASSWORD=""):
 
 def audible_parser(asin):
 	auth_file = Path(dir_path, ".aud_auth.txt")
-	# Only proceed auth exists
-	#TODO: add functional logged in state checking
-	if auth_file.exists():
-		auth = audible.Authenticator.from_file(auth_file)
-		client = audible.Client(auth)
-		ASIN = asin
-		aud_json = client.get(
-			f"catalog/products/{ASIN}",
-			params={
-				"response_groups": f'''
-				contributors,
-				product_desc,
-				product_extended_attrs,
-				product_attrs''',
-				"asins": ASIN
-			}
+
+	auth = audible.Authenticator.from_file(auth_file)
+	client = audible.Client(auth)
+	ASIN = asin
+	aud_json = client.get(
+		f"catalog/products/{ASIN}",
+		params={
+			"response_groups": f'''
+			contributors,
+			product_desc,
+			product_extended_attrs,
+			product_attrs''',
+			"asins": ASIN
+		}
+	)
+
+	### JSON RESPONSE
+	# We have:
+	# Summary, Title, Author, Narrator, Series
+	# Want: series number
+
+	# metadata dictionary
+	metadata_dict = {}
+
+	## Title
+	# Use subtitle if it exists
+	if 'subtitle' in aud_json['product']:
+		aud_title_start = aud_json['product']['title']
+		aud_title_end = aud_json['product']['subtitle']
+		metadata_dict['title'] = aud_title_start
+		metadata_dict['subtitle'] = aud_title_end
+	else:
+		metadata_dict['title'] = (
+			aud_json['product']['title']
+			)
+
+	## Short summary
+	aud_short_summary_json = (
+		aud_json['product']['merchandising_summary']
+		)
+	metadata_dict['short_summary'] = (
+		html2text.html2text(aud_short_summary_json).replace("\n", " ")
 		)
 
-		### JSON RESPONSE
-		# We have:
-		# Summary, Title, Author, Narrator, Series
-		# Want: series number
+	## Long summary
+	aud_long_summary_json = (
+		aud_json['product']['publisher_summary']
+		)
+	metadata_dict['long_summary'] = aud_long_summary_json
 
-		# metadata dictionary
-		metadata_dict = {}
-
-		## Title
-		# Use subtitle if it exists
-		if 'subtitle' in aud_json['product']:
-			aud_title_start = aud_json['product']['title']
-			aud_title_end = aud_json['product']['subtitle']
-			metadata_dict['title'] = aud_title_start
-			metadata_dict['subtitle'] = aud_title_end
-		else:
-			metadata_dict['title'] = (
-				aud_json['product']['title']
-				)
-
-		## Short summary
-		aud_short_summary_json = (
-			aud_json['product']['merchandising_summary']
-			)
-		metadata_dict['short_summary'] = (
-			html2text.html2text(aud_short_summary_json).replace("\n", " ")
-			)
-
-		## Long summary
-		aud_long_summary_json = (
-			aud_json['product']['publisher_summary']
-			)
-		metadata_dict['long_summary'] = aud_long_summary_json
-
-		## Authors
-		aud_authors_json = (
-			aud_json['product']['authors']
-			)
-		# check if list contains more than 1 author
-		if len(aud_authors_json) > 1:
-			aud_authors_arr = []
-			for author in range(len(aud_authors_json)):
-				# Use ASIN for author only if available
-				if aud_authors_json[author].get('asin'):
-					# from array of dicts, get author name
-					aud_authors_arr.append(
-					{
-					'asin': aud_authors_json[author]['asin'],
-					'name': aud_authors_json[author]['name']
-					}
-						)
-				else:
-					aud_authors_arr.append(
-					{
-					'name': aud_authors_json[author]['name']
-					}
-						)
-			metadata_dict['authors'] = aud_authors_arr
-		else:
-			# else author name will be in first element dict
+	## Authors
+	aud_authors_json = (
+		aud_json['product']['authors']
+		)
+	# check if list contains more than 1 author
+	if len(aud_authors_json) > 1:
+		aud_authors_arr = []
+		for author in range(len(aud_authors_json)):
 			# Use ASIN for author only if available
-			if aud_authors_json[0].get('asin'):
-				metadata_dict['authors'] = [
-					{
-					'asin': aud_authors_json[0]['asin'],
-					'name': aud_authors_json[0]['name']
-					}
-				]
-			else:
-				metadata_dict['authors'] = [
-					{
-					'name': aud_authors_json[0]['name']
-					}
-				]
-		
-		## Narrators
-		aud_narrators_json = (
-			aud_json['product']['narrators']
-			)
-		# check if list contains more than 1 narrator
-		if len(aud_narrators_json) > 1:
-			aud_narrators_arr = []
-			for narrator in range(len(aud_narrators_json)):
-				# from array of dicts, get narrator name
-				aud_narrators_arr.append(
-					aud_narrators_json[narrator]['name']
+			if aud_authors_json[author].get('asin'):
+				# from array of dicts, get author name
+				aud_authors_arr.append(
+				{
+				'asin': aud_authors_json[author]['asin'],
+				'name': aud_authors_json[author]['name']
+				}
 					)
-			metadata_dict['narrators'] = aud_narrators_arr
-		else:
-			# else narrator name will be in first element dict
-			metadata_dict['narrators'] = (
-				[aud_narrators_json[0]['name']]
-				)
-
-		## Series
-		# Check if book has publication name (series)
-		if 'publication_name' in aud_json['product']:
-			metadata_dict['series'] = (
-				aud_json['product']['publication_name']
-				)
-
-		## Release date
-		if 'release_date' in aud_json['product']:
-			# Convert date string into datetime object
-			metadata_dict['release_date'] = (
-				datetime.strptime(
-					aud_json['product']['release_date'], '%Y-%m-%d'
-					).date()
-				)
-
-		## Publisher
-		if 'publisher_name' in aud_json['product']:
-			metadata_dict['publisher_name'] = aud_json['product']['publisher_name']
-
-		## Language
-		if 'language' in aud_json['product']:
-			metadata_dict['language'] = aud_json['product']['language']
-
-		## Runtime in minutes
-		if 'runtime_length_min' in aud_json['product']:
-			metadata_dict['runtime_length_min'] = aud_json['product']['runtime_length_min']
-
-		## Format type (abridged or unabridged)
-		if 'format_type' in aud_json['product']:
-			metadata_dict['format_type'] = aud_json['product']['format_type']
-
-		# return all data
-		return metadata_dict
+			else:
+				aud_authors_arr.append(
+				{
+				'name': aud_authors_json[author]['name']
+				}
+					)
+		metadata_dict['authors'] = aud_authors_arr
 	else:
-		logging.error("no auth")
-		# If no auth file exists, call login function
-		audible_login()
+		# else author name will be in first element dict
+		# Use ASIN for author only if available
+		if aud_authors_json[0].get('asin'):
+			metadata_dict['authors'] = [
+				{
+				'asin': aud_authors_json[0]['asin'],
+				'name': aud_authors_json[0]['name']
+				}
+			]
+		else:
+			metadata_dict['authors'] = [
+				{
+				'name': aud_authors_json[0]['name']
+				}
+			]
+	
+	## Narrators
+	aud_narrators_json = (
+		aud_json['product']['narrators']
+		)
+	# check if list contains more than 1 narrator
+	if len(aud_narrators_json) > 1:
+		aud_narrators_arr = []
+		for narrator in range(len(aud_narrators_json)):
+			# from array of dicts, get narrator name
+			aud_narrators_arr.append(
+				aud_narrators_json[narrator]['name']
+				)
+		metadata_dict['narrators'] = aud_narrators_arr
+	else:
+		# else narrator name will be in first element dict
+		metadata_dict['narrators'] = (
+			[aud_narrators_json[0]['name']]
+			)
+
+	## Series
+	# Check if book has publication name (series)
+	if 'publication_name' in aud_json['product']:
+		metadata_dict['series'] = (
+			aud_json['product']['publication_name']
+			)
+
+	## Release date
+	if 'release_date' in aud_json['product']:
+		# Convert date string into datetime object
+		metadata_dict['release_date'] = (
+			datetime.strptime(
+				aud_json['product']['release_date'], '%Y-%m-%d'
+				).date()
+			)
+
+	## Publisher
+	if 'publisher_name' in aud_json['product']:
+		metadata_dict['publisher_name'] = aud_json['product']['publisher_name']
+
+	## Language
+	if 'language' in aud_json['product']:
+		metadata_dict['language'] = aud_json['product']['language']
+
+	## Runtime in minutes
+	if 'runtime_length_min' in aud_json['product']:
+		metadata_dict['runtime_length_min'] = aud_json['product']['runtime_length_min']
+
+	## Format type (abridged or unabridged)
+	if 'format_type' in aud_json['product']:
+		metadata_dict['format_type'] = aud_json['product']['format_type']
+
+	# return all data
+	return metadata_dict
 
 def get_directory(input_take):
 	# Check if input is a dir
@@ -461,6 +455,13 @@ def m4b_fix_chapters(input, target, m4b_tool):
 	os.system(m4b_chap_cmd)
 
 def call(inputs):
+	auth_file = Path(dir_path, ".aud_auth.txt")
+	# Only proceed if auth exists
+	if not auth_file.exists():
+		logging.error("Not logged in to Audible")
+		# If no auth file exists, call login function
+		audible_login()
+
 	print(f"Working on: {inputs}")
 	input_data = get_directory(inputs)
 	asin = input("Audiobook ASIN: ")
