@@ -15,6 +15,12 @@ Successor of [m4b-merge](https://github.com/djdembeck/m4b-merge)
   - `python manage.py migrate`
   - `python manage.py runserver`
 
+- Docker:
+  - To run the container, you need to pass the input folder and port you would like to use:
+    - Edit the `/home/user` portion: `-v /home/user/input:/root/input`
+    - `-p 8000:8000/tcp`
+  - Which all together should look like: ```docker run --rm -d -v /home/user/input:/root/input -p 8000:8000/tcp bragibooks:latest```
+
 - CLI:
   - You can and _should_ run the core logic from terminal. I'm planning a docker to make this even easier to automate.
   - Check the user editable variables in [merge_cli.py](importer/merge_cli.py), and see if there's anything you need to change.

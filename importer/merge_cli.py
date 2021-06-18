@@ -1,7 +1,9 @@
 from pathlib import Path
 import argparse, audible, collections, getpass, \
-	html2text, logging, os, readline, shutil
+	html2text, logging, math, os, shutil
 from datetime import datetime
+from pathvalidate import sanitize_filename
+from pydub.utils import mediainfo
 
 ### User editable variables
 # for non-default m4b-tool install path
@@ -93,21 +95,37 @@ def audible_parser(asin):
 		if len(aud_authors_json) > 1:
 			aud_authors_arr = []
 			for author in range(len(aud_authors_json)):
-				# from array of dicts, get author name
-				aud_authors_arr.append(
-				{
-				'asin': aud_authors_json[author]['asin'],
-				'name': aud_authors_json[author]['name']
-				}
-					)
+				# Use ASIN for author only if available
+				if aud_authors_json[author].get('asin'):
+					# from array of dicts, get author name
+					aud_authors_arr.append(
+					{
+					'asin': aud_authors_json[author]['asin'],
+					'name': aud_authors_json[author]['name']
+					}
+						)
+				else:
+					aud_authors_arr.append(
+					{
+					'name': aud_authors_json[author]['name']
+					}
+						)
 			metadata_dict['authors'] = aud_authors_arr
 		else:
 			# else author name will be in first element dict
-			metadata_dict['authors'] = [
-				{
-				'asin': aud_authors_json[0]['asin'],
-				'name': aud_authors_json[0]['name']
-				}
+			# Use ASIN for author only if available
+			if aud_authors_json[0].get('asin'):
+				metadata_dict['authors'] = [
+					{
+					'asin': aud_authors_json[0]['asin'],
+					'name': aud_authors_json[0]['name']
+					}
+				]
+			else:
+				metadata_dict['authors'] = [
+					{
+					'name': aud_authors_json[0]['name']
+					}
 				]
 		
 		## Narrators
@@ -254,8 +272,8 @@ def m4b_data(input_data, metadata, output):
 	path_author = metadata['authors'][0]['name']
 	path_narrator = metadata['narrators'][0]
 	# For embedded, use all authors/narrators
+	author_name_arr = []
 	for authors in metadata['authors']:
-		author_name_arr = []
 		author_name_arr.append(authors['name'])
 	author = ', '.join(author_name_arr)
 	narrator = ', '.join(metadata['narrators'])
@@ -267,8 +285,9 @@ def m4b_data(input_data, metadata, output):
 	year = metadata['release_date'].year
 
 	book_output = (
-		f"{output}/{path_author}/{path_title}"
+		f"{output}/{sanitize_filename(path_author)}/{sanitize_filename(path_title)}"
 		)
+	file_title = sanitize_filename(title)
 	##
 
 	## File variables
@@ -293,15 +312,37 @@ def m4b_data(input_data, metadata, output):
 	# args for multiple input files in a folder
 	if Path(in_dir).is_dir() and num_of_files > 1 or in_ext == None:
 		logging.info("Got multiple files in a dir")
+
+		# Find first file with our extension, to check rates against
+		first_file_index = 0
+		while True:
+			if Path(sorted(os.listdir(in_dir))[first_file_index]).suffix == f".{in_ext}":
+				break
+			first_file_index += 1
+		first_file = sorted(os.listdir(in_dir))[first_file_index]
+
+		## Mediainfo data
+		# Divide bitrate by 1k, round up, and return back to 1k divisible for round number.
+		target_bitrate = math.ceil(
+			int(mediainfo(f"{in_dir}/{first_file}")['bit_rate']) / 1000
+		) * 1000
+
+		target_samplerate =	int(mediainfo(f"{in_dir}/{first_file}")['sample_rate'])
+
+		logging.info(f"Source bitrate: {target_bitrate}")
+		logging.info(f"Source samplerate: {target_samplerate}")
+		##
 		args = [
 			' merge',
-			f"--output-file=\"{book_output}/{title}.m4b\"",
+			f"--output-file=\"{book_output}/{file_title}.m4b\"",
 			f"--name=\"{title}\"",
 			f"--album=\"{path_title}\"",
 			f"--artist=\"{narrator}\"",
 			f"--albumartist=\"{author}\"",
 			f"--year=\"{year}\"",
 			f"--description=\"{summary}\"",
+			f"--audio-bitrate=\"{target_bitrate}\"",
+			f"--audio-samplerate=\"{target_samplerate}\"",
 			'--force',
 			'--no-chapter-reindexing',
 			'--no-cleanup',
@@ -319,13 +360,22 @@ def m4b_data(input_data, metadata, output):
 		os.system(m4b_cmd)
 
 		m4b_fix_chapters(
-			f"{book_output}/{title}.chapters.txt",
-			f"{book_output}/{title}.m4b",
+			f"{book_output}/{file_title}.chapters.txt",
+			f"{book_output}/{file_title}.m4b",
 			m4b_tool
 			)
 		
 	# args for single m4b input file
 	elif Path(in_dir).is_file() and in_ext == "m4b":
+		## Mediainfo data
+		# Divide bitrate by 1k, round up, and return back to 1k divisible for round number.
+		target_bitrate = math.ceil(
+			int(mediainfo(in_dir)['bit_rate']) / 1000
+		) * 1000
+
+		target_samplerate =	int(mediainfo(in_dir)['sample_rate'])
+		##
+
 		logging.info("got single m4b input")
 		m4b_cmd = (
 			m4b_tool + 
@@ -336,7 +386,7 @@ def m4b_data(input_data, metadata, output):
 		os.system(m4b_cmd)
 		shutil.move(
 			f"{in_dir.parent}/{in_dir.stem}.chapters.txt",
-			f"{book_output}/{title}.chapters.txt"
+			f"{book_output}/{file_title}.chapters.txt"
 			)
 
 		args = [
@@ -367,12 +417,12 @@ def m4b_data(input_data, metadata, output):
 		# Move completed file
 		shutil.move(
 			f"{in_dir.parent}/{in_dir.stem}.new.m4b",
-			f"{book_output}/{title}.m4b"
+			f"{book_output}/{file_title}.m4b"
 			)
 
 		m4b_fix_chapters(
-			f"{book_output}/{title}.chapters.txt",
-			f"{book_output}/{title}.m4b",
+			f"{book_output}/{file_title}.chapters.txt",
+			f"{book_output}/{file_title}.m4b",
 			m4b_tool
 			)
 
