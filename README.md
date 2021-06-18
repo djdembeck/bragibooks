@@ -17,9 +17,15 @@ Successor of [m4b-merge](https://github.com/djdembeck/m4b-merge)
 
 - Docker:
   - To run the container, you need to pass the input folder and port you would like to use:
-    - Edit the `/home/user` portion: `-v /home/user/input:/root/input`
-    - `-p 8000:8000/tcp`
-  - Which all together should look like: ```docker run --rm -d -v /home/user/input:/root/input -p 8000:8000/tcp bragibooks:latest```
+
+	| Parameter | Function |
+	| :----: | --- |
+	| `-v /home/user/input:/root/input` | Input folder |
+	| `-v /home/user/output:/root/output` | Output folder |
+	| `-v /appdata/bragibooks/config:/config` | Persistent config storage |
+	| `-p 8000:8000/tcp` | Port for your browser to use |
+    
+  - Which all together should look like: ```docker run --rm -d -v /home/user/input:/root/input -v /home/user/output:/root/output -v /appdata/bragibooks/config:/config -p 8000:8000/tcp bragibooks:latest```
 
 - CLI:
   - You can and _should_ run the core logic from terminal. I'm planning a docker to make this even easier to automate.
