@@ -2,6 +2,15 @@
 **Bragi - (god of poetry in [Norse mythology](https://en.wikipedia.org/wiki/Bragi)):**
 An audiobook library cleanup & management app, written for both web use (Django) and CLI (Python). Leveraging Audible's unofficial API to source metadata. Successor of [m4b-merge](https://github.com/djdembeck/m4b-merge)
 
+## Screens
+
+Folder/file selection             |  ASIN input
+:-------------------------:|:-------------------------:
+![screenshot-10 0 0 254_8000-2021 06 19-17_04_43](https://user-images.githubusercontent.com/71412966/122656488-ab6ae480-d120-11eb-9893-692fd1428240.png)  |  ![screenshot-10 0 0 254_8000-2021 06 19-17_05_13](https://user-images.githubusercontent.com/71412966/122656487-ab6ae480-d120-11eb-97ed-3e21c598616d.png)
+
+### Book page after file conversion
+![screenshot-10 0 0 254_8000-2021 06 19-17_09_10](https://user-images.githubusercontent.com/71412966/122656539-1ddbc480-d121-11eb-9066-a7ca6d13c560.png)
+
 ## Requirements
 - [m4b-tool](https://github.com/sandreas/m4b-tool) by [sandreas](https://github.com/sandreas)
     - [m4b-tool's list of dependencies](https://github.com/sandreas/m4b-tool#ubuntu)
