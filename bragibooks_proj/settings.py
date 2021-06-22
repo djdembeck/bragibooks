@@ -17,7 +17,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # config section for docker
 if os.path.isdir("/config"):
-	CONFIG_DIR = os.path("/config")
+	CONFIG_DIR = os.path.abspath("/config")
 else:
 	CONFIG_DIR = BASE_DIR
 
