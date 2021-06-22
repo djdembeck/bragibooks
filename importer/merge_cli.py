@@ -16,7 +16,11 @@ output = ""
 cpus_to_use = ""
 ###
 
-dir_path = Path(__file__).resolve().parent
+# config section for docker
+if Path('/config').is_dir():
+	dir_path = Path('/config')
+else:
+	dir_path = Path(__file__).resolve().parent
 
 def audible_login(USERNAME="", PASSWORD=""):
 	print("You need to login")
