@@ -10,6 +10,7 @@ from pydub.utils import mediainfo
 m4bpath = "m4b-tool"
 
 # output dir
+# leaving blank uses /output for docker or $USER/output for anything else
 output = ""
 
 # Number of cpus to use for jobs
@@ -250,11 +251,16 @@ def m4b_data(input_data, metadata, output):
 			'Error: Could not successfully run m4b-tool, exiting.'
 			)
 
+	# Setup output folder defaults
 	if not output:
-		logging.info("Defaulting output to home directory")
-		default_output = Path.home()
-		output = Path(f"{default_output}/output")
-	#
+		# If using docker, default to /input folder, else $USER/input
+		if Path('/output').is_dir():
+			logging.info("Defaulting output to docker directory")
+			output = Path('/output')
+		else:
+			logging.info("Defaulting output to home directory")
+			default_output = Path.home()
+			output = Path(f"{default_output}/output")
 
 	## Metadata variables
 	# Only use subtitle in case of metadata, not file name

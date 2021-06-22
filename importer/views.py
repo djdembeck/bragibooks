@@ -9,7 +9,11 @@ from django.contrib import messages
 # To display book length
 from datetime import timedelta
 
-rootdir = f"{str(Path.home())}/input"
+# If using docker, default to /input folder, else $USER/input
+if Path('/input').is_dir():
+	rootdir = Path('/input')
+else:
+	rootdir = f"{str(Path.home())}/input"
 
 def importer(request):
 	folder_arr = []
