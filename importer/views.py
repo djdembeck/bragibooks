@@ -13,9 +13,8 @@ rootdir = f"{str(Path.home())}/input"
 
 def importer(request):
 	folder_arr = []
-	for path in Path(rootdir).iterdir():
+	for path in sorted(Path(rootdir).iterdir(), key=os.path.getmtime, reverse=True):
 		base = os.path.basename(path)
-		full = path
 		folder_arr.append(base)
 
 	context = {
