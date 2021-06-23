@@ -3,10 +3,16 @@
 import os
 import subprocess, sys
 
+# config section for docker
+if os.path.isdir("/config"):
+	CONFIG_DIR = os.path.abspath("/config")
+else:
+	CONFIG_DIR = './'
+
 # Init django secret and DB
 from django.core.management.utils import get_random_secret_key
-if not os.path.exists("secret_key.txt"):
-	f = open("secret_key.txt", "w")
+if not os.path.exists(f"{CONFIG_DIR}/secret_key.txt"):
+	f = open(f"{CONFIG_DIR}/secret_key.txt", "w")
 	f.write(get_random_secret_key())
 	f.close()
 	subprocess.run(["python", "manage.py", "makemigrations"])

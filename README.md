@@ -29,14 +29,14 @@ To run Bragi Books as a container, you need to pass some paramaters in the run c
 
 	| Parameter | Function |
 	| :----: | --- |
-	| `-v /home/user/input:/root/input` | Input folder |
-	| `-v /home/user/output:/root/output` | Output folder |
+	| `-v /path/to/input:/input` | Input folder |
+	| `-v /path/to/output:/output` | Output folder |
 	| `-v /appdata/bragibooks/config:/config` | Persistent config storage |
 	| `-p 8000:8000/tcp` | Port for your browser to use |
     
 Which all together should look like: 
 
-	docker run --rm -d -v /home/user/input:/root/input -v /home/user/output:/root/output -v /appdata/bragibooks/config:/config -p 8000:8000/tcp bragibooks:latest
+	docker run --rm -d -v /path/to//input:/input -v /path/to//output:/output -v /appdata/bragibooks/config:/config -p 8000:8000/tcp bragibooks:latest
 
 ### CLI:
 You can run the core logic from the terminal without any running server or database
