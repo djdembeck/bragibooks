@@ -21,7 +21,11 @@ cpus_to_use = ""
 if Path('/config').is_dir():
 	dir_path = Path('/config')
 else:
-	dir_path = Path(__file__).resolve().parent
+	dir_path = Path(f"{Path(__file__).resolve().parent}/config")
+	Path(dir_path).mkdir(
+	parents=True,
+	exist_ok=True
+	)
 
 def audible_login(USERNAME="", PASSWORD=""):
 	print("You need to login")
