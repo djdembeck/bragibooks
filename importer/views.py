@@ -1,5 +1,5 @@
 from django.shortcuts import render, redirect
-import importlib, json, os, requests
+import importlib, json, logging, os, requests
 from pathlib import Path
 # from login.models import User
 from .models import Book, Author, Narrator, Genre
@@ -8,6 +8,35 @@ from .merge_cli import *
 from django.contrib import messages
 # To display book length
 from datetime import timedelta
+
+# Get an instance of a logger
+logger = logging.getLogger(__name__)
+
+import os
+
+# Set environment variable DJANGO_LOG_LEVEL to desired level
+# https://docs.djangoproject.com/en/2.2/topics/logging/
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'WARNING',
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console'],
+            'level': os.getenv('DJANGO_LOG_LEVEL', 'INFO'),
+            'propagate': False,
+        },
+    },
+}
 
 # If using docker, default to /input folder, else $USER/input
 if Path('/input').is_dir():
@@ -27,20 +56,10 @@ def importer(request):
 	return render(request, "importer.html", context)
 
 def dir_selection(request):
-	print(request.POST.getlist('input_dir'))
 	request.session['input_dir'] = request.POST.getlist('input_dir')
-	# request.session['input_dir'] = request.POST['input_dir']
-
-	# check_book_path = Book.objects.filter(src_path__icontains=f"{rootdir}/{request.session['input_dir']}")
-	# if check_book_path:
-	# 	confirmed_book = Book.objects.get(src_path__icontains=f"{rootdir}/{request.session['input_dir']}")
-	# 	asin = confirmed_book.asin
-	# 	return redirect(f'/import/{asin}/confirm')
-	# else:
 	return redirect('/import/match')
 
 def match(request):
-	input_len = len(request.session['input_dir'])
 	context_item = request.session['input_dir']
 
 	context = {
@@ -50,7 +69,6 @@ def match(request):
 	return render(request, "match.html", context)
 
 def make_models(asin, input_data):
-	
 	metadata = audible_parser(asin)
 	m4b_data(input_data, metadata, output)
 
@@ -96,39 +114,68 @@ def make_models(asin, input_data):
 		for author in metadata['authors']:
 			author_name_split = author['name'].split()
 			last_name_index = len(author_name_split) - 1
+
+			# Check if author asin exists
+			if 'asin' in author:
+				author_asin = author['asin']
+				_filter_vals = {'asin': author_asin}
+			# If author doesn't exist, search by name and set asin to none
+			else:
+				author_asin = None
+				_filter_vals = {'first_name': author_name_split[0], 'last_name': author_name_split[last_name_index]}
+				logger.warning(f"No author ASIN for: {author['name']}")
+
+			# Check if author is in database
 			if not Author.objects.filter(
-				asin=author['asin']
+				**_filter_vals
 			):
 				new_author = Author.objects.create(
-					asin=author['asin'],
+					asin=author_asin,
 					first_name=author_name_split[0],
 					last_name=author_name_split[last_name_index]
 				)
 				new_author.books.add(new_book)
 				new_author.save()
 			else:
+				author_id = Author.objects.filter(
+					**_filter_vals
+				)
 				existing_author = Author.objects.get(
-					asin=author['asin']
+					id = author_id[0].id
 				)
 				existing_author.books.add(new_book)
 				existing_author.save()
 	else:
 		author_name_split = metadata['authors'][0]['name'].split()
 		last_name_index = len(author_name_split) - 1
-		print(author_name_split[last_name_index])
+
+		# Check if author asin exists
+		if 'asin' in metadata['authors'][0]:
+			author_asin = metadata['authors'][0]['asin']
+			_filter_vals = {'asin': author_asin}
+		# If author doesn't exist, search by name and set asin to none
+		else:
+			author_asin = None
+			_filter_vals = {'first_name': author_name_split[0], 'last_name': author_name_split[last_name_index]}
+			logger.warning(f"No author ASIN for: {metadata['authors'][0]['name']}")
+
+		# Check if author is in database
 		if not Author.objects.filter(
-			asin=metadata['authors'][0]['asin']
+			**_filter_vals
 		):
 			new_author = Author.objects.create(
-				asin=metadata['authors'][0]['asin'],
+				asin=author_asin,
 				first_name=author_name_split[0],
 				last_name=author_name_split[last_name_index]
 			)
 			new_author.books.add(new_book)
 			new_author.save()
 		else:
+			author_id = Author.objects.filter(
+				**_filter_vals
+			)
 			existing_author = Author.objects.get(
-				asin=metadata['authors'][0]['asin']
+				id = author_id[0].id
 			)
 			existing_author.books.add(new_book)
 			existing_author.save()
@@ -192,13 +239,12 @@ def get_asin(request):
 	if not auth_file.exists():
 		return redirect('/import/api_auth')
 
+	asin_arr = []
 	dict1 = request.POST
 	for key, value in dict1.items():
 		if key != "csrfmiddlewaretoken":
-			print(key)
 			asin = value
 			asin_key = int(key[5:7])
-			print(asin_key)
 			input_data = get_directory(
 				f"{rootdir}/{request.session['input_dir'][asin_key]}"
 				)
@@ -212,22 +258,40 @@ def get_asin(request):
 				# Check that asin actually returns data from audible
 				check = requests.get(f"https://www.audible.com/pd/{asin}")
 				if check.status_code == 200:
-					make_models(asin, input_data)
-					return redirect(f'/import/{asin}/confirm')
+					asin_arr.append(asin)
+					logger.info(f"Validated ASIN: {asin}")
+					# make_models(asin, input_data)
 				else:
-					print(f'Got http error: {check.status_code}')
+					logger.error(f'Got http error: {check.status_code}')
 					return redirect('/import/match')
 
-def finish(request, asin):
-	this_book = Book.objects.get(asin=asin)
-	d = timedelta(minutes=this_book.runtime_length_minutes)
-	book_length_calc = (
-		f'{d.seconds//3600} hrs and {(d.seconds//60)%60} minutes'
-	)
+	for i in range(len(asin_arr)):
+		input_data = get_directory(
+				f"{rootdir}/{request.session['input_dir'][i]}"
+				)
+		logger.info(f"Making models and merging files for: {input_data}")
+		make_models(asin_arr[i], input_data)
+
+	request.session['asins'] = asin_arr
+	return redirect('/import/confirm')
+
+def finish(request):
+	asins = request.session['asins']
+	this_book = Book.objects.filter(asin__in=asins)
+
+	length_arr = []
+	for book in this_book:
+		d = timedelta(minutes=book.runtime_length_minutes)
+		book_length_calc = (
+			f'{d.seconds//3600} hrs and {(d.seconds//60)%60} minutes'
+		)
+		length_arr.append(book_length_calc)
+
+	print(length_arr)
 
 	context = {
-		"this_book": this_book,
-		"book_length": book_length_calc
+		"finished_books": this_book,
+		"book_lengths": length_arr
 	}
 	
 	return render(request, "finish.html", context)
