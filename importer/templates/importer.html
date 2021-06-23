@@ -52,8 +52,8 @@
 								<div class="field is-horizontal">
 									<div class="field-body">
 										<div class="field">
-											<div class="select">
-												<select name="input_dir">
+											<div class="select is-multiple">
+												<select multiple size="15" name="input_dir">
 													{% for list_item in this_dir %}
 													<option value="{{ list_item }}"><p>{{ list_item }}</p></option>
 													{% endfor %}

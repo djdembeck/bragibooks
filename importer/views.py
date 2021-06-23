@@ -27,19 +27,24 @@ def importer(request):
 	return render(request, "importer.html", context)
 
 def dir_selection(request):
-	request.session['input_dir'] = request.POST['input_dir']
+	print(request.POST.getlist('input_dir'))
+	request.session['input_dir'] = request.POST.getlist('input_dir')
+	# request.session['input_dir'] = request.POST['input_dir']
 
-	check_book_path = Book.objects.filter(src_path__icontains=f"{rootdir}/{request.session['input_dir']}")
-	if check_book_path:
-		confirmed_book = Book.objects.get(src_path__icontains=f"{rootdir}/{request.session['input_dir']}")
-		asin = confirmed_book.asin
-		return redirect(f'/import/{asin}/confirm')
-	else:
-		return redirect('/import/match')
+	# check_book_path = Book.objects.filter(src_path__icontains=f"{rootdir}/{request.session['input_dir']}")
+	# if check_book_path:
+	# 	confirmed_book = Book.objects.get(src_path__icontains=f"{rootdir}/{request.session['input_dir']}")
+	# 	asin = confirmed_book.asin
+	# 	return redirect(f'/import/{asin}/confirm')
+	# else:
+	return redirect('/import/match')
 
 def match(request):
+	input_len = len(request.session['input_dir'])
+	context_item = request.session['input_dir']
+
 	context = {
-		"this_input": request.session['input_dir']
+		"this_input": context_item
 	}
 	
 	return render(request, "match.html", context)
@@ -187,25 +192,31 @@ def get_asin(request):
 	if not auth_file.exists():
 		return redirect('/import/api_auth')
 
-	asin = request.POST['asin']
-	input_data = get_directory(
-		f"{rootdir}/{request.session['input_dir']}"
-		)
-	# Check for validation errors
-	errors = Book.objects.book_asin_validator(request.POST)
-	if len(errors) > 0:
-		for k, v in errors.items():
-			messages.error(request, v)
-		return redirect('/import/match')
-	else:
-		# Check that asin actually returns data from audible
-		check = requests.get(f"https://www.audible.com/pd/{asin}")
-		if check.status_code == 200:
-			make_models(asin, input_data)
-			return redirect(f'/import/{asin}/confirm')
-		else:
-			print(f'Got http error: {check.status_code}')
-			return redirect('/import/match')
+	dict1 = request.POST
+	for key, value in dict1.items():
+		if key != "csrfmiddlewaretoken":
+			print(key)
+			asin = value
+			asin_key = int(key[5:7])
+			print(asin_key)
+			input_data = get_directory(
+				f"{rootdir}/{request.session['input_dir'][asin_key]}"
+				)
+			# Check for validation errors
+			errors = Book.objects.book_asin_validator(asin)
+			if len(errors) > 0:
+				for k, v in errors.items():
+					messages.error(request, v)
+				return redirect('/import/match')
+			else:
+				# Check that asin actually returns data from audible
+				check = requests.get(f"https://www.audible.com/pd/{asin}")
+				if check.status_code == 200:
+					make_models(asin, input_data)
+					return redirect(f'/import/{asin}/confirm')
+				else:
+					print(f'Got http error: {check.status_code}')
+					return redirect('/import/match')
 
 def finish(request, asin):
 	this_book = Book.objects.get(asin=asin)

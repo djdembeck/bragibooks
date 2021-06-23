@@ -43,23 +43,29 @@
 					<div class="card">
 						<div class="card-header">
 							<div class="card-header-title">
-								<p class="title">{{request.session.input_dir}}</p>
+								<p class="title">Submit ASINs</p>
 							</div>
 						</div>
 						<form action="/import/get_asin" method="POST">
 							{% csrf_token %}
-							<div class="card-content">	
+							<div class="card-content">
+								{% for input in this_input %}
 								<div class="field is-horizontal">
 									<div class="field-body">
 										<div class="field">
-											<div class="field has-addons has-addons-centered">
-												<div class="control has-icons-right">
-													<input class="input is-rounded" name="asin" type="text">
-												</div>
+											<div class="field">
 												<div class="control">
-													<button class="button is-link is-grouped">Check ASIN</button>
+													<input class="input" name="asin-{{ forloop.counter|add:"-1" }}" type="text" placeholder="{{ input }}">
 												</div>
 											</div>
+										</div>
+									</div>
+								</div>
+								{% endfor %}
+								<div class="card-footer">
+									<div class="card-footer-item">
+										<div class="control">
+											<button class="button is-link">Submit ASINs</button>
 										</div>
 									</div>
 								</div>

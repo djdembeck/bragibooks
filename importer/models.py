@@ -1,14 +1,17 @@
 from django.db import models
 
 class BookManager(models.Manager):
-	def book_asin_validator(self, post_data):
+	def book_asin_validator(self, asin):
 		errors = {}
 
-		if Book.objects.filter(asin=post_data['asin']):
-			errors["dupe_asin"] = "A book with that ASIN already exists"
+		if Book.objects.filter(asin=asin):
+			errors["dupe_asin"] = f"A book with the ASIN {asin} already exists"
 
-		if len(post_data['asin']) != 10:
-			errors['invalid_asin'] = "Invalid ASIN format"
+		if len(asin) != 10 and len(asin) != 0:
+			errors['invalid_asin'] = f"Invalid ASIN format for {asin}"
+
+		if len(asin) == 0:
+			errors['blank_asin'] = f"Must fill in all ASIN fields"
 
 		return errors
 
