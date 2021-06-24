@@ -244,6 +244,13 @@ def get_auth(request):
 	return redirect('/import/match')
 
 def get_asin(request):
+	if 'asins' not in request.session or 'input_dir' not in request.session:
+		logger.warning(
+			"No session data found, "
+			"returning to import page"
+		)
+		return redirect('/import')
+
 	#check that user is signed into audible api
 	auth_file = Path(dir_path, ".aud_auth.txt")
 	if not auth_file.exists():
