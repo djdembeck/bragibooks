@@ -181,7 +181,9 @@ RUN	apt-get update && \
 	fdkaac \
 	php-cli \
 	php-common \
+	php-intl \
 	php-mbstring \
+	php-xml \
 	wget && \
 	rm -rf /var/lib/apt/lists/*
 
