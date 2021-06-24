@@ -17,27 +17,6 @@ import os
 # Set environment variable DJANGO_LOG_LEVEL to desired level
 # https://docs.djangoproject.com/en/2.2/topics/logging/
 
-LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
-        },
-    },
-    'root': {
-        'handlers': ['console'],
-        'level': 'WARNING',
-    },
-    'loggers': {
-        'django': {
-            'handlers': ['console'],
-            'level': os.getenv('DJANGO_LOG_LEVEL', 'INFO'),
-            'propagate': False,
-        },
-    },
-}
-
 # If using docker, default to /input folder, else $USER/input
 if Path('/input').is_dir():
 	rootdir = Path('/input')

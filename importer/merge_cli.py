@@ -504,11 +504,10 @@ if __name__ == "__main__":
 	if args.log_level:
 		numeric_level = getattr(logging, args.log_level.upper(), None)
 		if not isinstance(numeric_level, int):
-			raise ValueError('Invalid log level: %s' % log_level)
+			raise ValueError('Invalid log level: %s' % args.log_level)
 		logging.basicConfig(level=numeric_level)
 	else:
-		logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO"))
-	
+		logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 	# Run through inputs
 	for inputs in args.inputs:
 		call(inputs)
