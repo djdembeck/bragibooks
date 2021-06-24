@@ -14,9 +14,6 @@ logger = logging.getLogger(__name__)
 
 import os
 
-# Set environment variable DJANGO_LOG_LEVEL to desired level
-# https://docs.djangoproject.com/en/2.2/topics/logging/
-
 # If using docker, default to /input folder, else $USER/input
 if Path('/input').is_dir():
 	rootdir = Path('/input')
@@ -25,7 +22,11 @@ else:
 
 def importer(request):
 	folder_arr = []
-	for path in sorted(Path(rootdir).iterdir(), key=os.path.getmtime, reverse=True):
+	for path in sorted(
+		Path(rootdir).iterdir(),
+		key=os.path.getmtime,
+		reverse=True
+	):
 		base = os.path.basename(path)
 		folder_arr.append(base)
 
@@ -41,6 +42,10 @@ def dir_selection(request):
 def match(request):
 	# Redirect if this is a new session
 	if 'input_dir' not in request.session:
+		logger.warning(
+			"No session data found, \
+			returning to import page"
+		)
 		return redirect('/import')
 
 	context_item = request.session['input_dir']
@@ -95,7 +100,8 @@ def make_models(asin, input_data):
 	# Create new entry for each author if there's more than one
 	if len(metadata['authors']) > 1:
 		for author in metadata['authors']:
-			author_name_split = author['name'].split()
+			author_name_full = author['name']
+			author_name_split = author_name_full.split()
 			last_name_index = len(author_name_split) - 1
 
 			# Check if author asin exists
@@ -105,8 +111,14 @@ def make_models(asin, input_data):
 			# If author doesn't exist, search by name and set asin to none
 			else:
 				author_asin = None
-				_filter_vals = {'first_name': author_name_split[0], 'last_name': author_name_split[last_name_index]}
-				logger.warning(f"No author ASIN for: {author['name']}")
+				_filter_vals = {
+					'first_name': author_name_split[0],
+					'last_name': author_name_split[last_name_index]
+				}
+				logger.warning(
+					f"No author ASIN for: \
+					{author_name_full}"
+				)
 
 			# Check if author is in database
 			if not Author.objects.filter(
@@ -120,6 +132,10 @@ def make_models(asin, input_data):
 				new_author.books.add(new_book)
 				new_author.save()
 			else:
+				logger.info(
+					f"Using existing db entry for author: \
+					{author_name_full}"
+				)
 				author_id = Author.objects.filter(
 					**_filter_vals
 				)
@@ -129,7 +145,8 @@ def make_models(asin, input_data):
 				existing_author.books.add(new_book)
 				existing_author.save()
 	else:
-		author_name_split = metadata['authors'][0]['name'].split()
+		author_name_full = metadata['authors'][0]['name']
+		author_name_split = author_name_full.split()
 		last_name_index = len(author_name_split) - 1
 
 		# Check if author asin exists
@@ -139,8 +156,14 @@ def make_models(asin, input_data):
 		# If author doesn't exist, search by name and set asin to none
 		else:
 			author_asin = None
-			_filter_vals = {'first_name': author_name_split[0], 'last_name': author_name_split[last_name_index]}
-			logger.warning(f"No author ASIN for: {metadata['authors'][0]['name']}")
+			_filter_vals = {
+				'first_name': author_name_split[0],
+				'last_name': author_name_split[last_name_index]
+			}
+			logger.warning(
+				f"No author ASIN for: \
+				{author_name_full}"
+			)
 
 		# Check if author is in database
 		if not Author.objects.filter(
@@ -154,6 +177,10 @@ def make_models(asin, input_data):
 			new_author.books.add(new_book)
 			new_author.save()
 		else:
+			logger.info(
+				f"Using existing db entry for author: \
+				{author_name_full}"
+			)
 			author_id = Author.objects.filter(
 				**_filter_vals
 			)
@@ -243,16 +270,21 @@ def get_asin(request):
 				if check.status_code == 200:
 					asin_arr.append(asin)
 					logger.info(f"Validated ASIN: {asin}")
-					# make_models(asin, input_data)
 				else:
-					logger.error(f'Got http error: {check.status_code}')
+					logger.error(
+						f'Got http error during ASIN check: \
+						{check.status_code}'
+					)
 					return redirect('/import/match')
 
 	for i in range(len(asin_arr)):
 		input_data = get_directory(
 				f"{rootdir}/{request.session['input_dir'][i]}"
 				)
-		logger.info(f"Making models and merging files for: {input_data}")
+		logger.info(
+			f"Making models and merging files for: \
+			{input_data}"
+		)
 		make_models(asin_arr[i], input_data)
 
 	request.session['asins'] = asin_arr
@@ -261,6 +293,10 @@ def get_asin(request):
 def finish(request):
 	# Redirect if this is a new session
 	if 'asins' not in request.session:
+		logger.warning(
+			"No session data found, \
+			returning to import page"
+		)
 		return redirect('/import')
 
 	asins = request.session['asins']

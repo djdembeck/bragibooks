@@ -123,6 +123,8 @@ USE_TZ = True
 
 STATIC_URL = '/static/'
 
+# Set environment variable DJANGO_LOG_LEVEL to desired level
+# https://docs.djangoproject.com/en/2.2/topics/logging/
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
