@@ -52,12 +52,14 @@
 								<div class="field is-horizontal">
 									<div class="field-body">
 										<div class="field">
-											<div class="select is-multiple">
-												<select multiple size="15" name="input_dir">
-													{% for list_item in this_dir %}
-													<option value="{{ list_item }}"><p>{{ list_item }}</p></option>
-													{% endfor %}
-												</select>
+											<div class="control">
+												<div class="select is-multiple is-fullwidth">
+													<select multiple size="15" name="input_dir">
+														{% for list_item in this_dir %}
+														<option value="{{ list_item }}"><p>{{ list_item }}</p></option>
+														{% endfor %}
+													</select>
+												</div>
 											</div>
 										</div>
 									</div>
@@ -65,7 +67,9 @@
 							</div>
 							<footer class="card-footer">
 								<div class="card-footer-item">
-									<button class="button is-link">Next</button>
+									<div class="control">
+										<button class="button is-link is-fullwidth">Next</button>
+									</div>
 								</div>
 							</footer>
 						</form>
