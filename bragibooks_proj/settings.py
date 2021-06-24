@@ -19,13 +19,15 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if os.path.isdir("/config"):
 	CONFIG_DIR = os.path.abspath("/config")
 else:
-	CONFIG_DIR = BASE_DIR
+	CONFIG_DIR = os.path.join(BASE_DIR, 'config')
+
+SECRET_PATH = os.path.join(CONFIG_DIR, 'secret_key.txt')
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/2.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-with open(f"{CONFIG_DIR}/secret_key.txt") as f:
+with open(SECRET_PATH) as f:
 	SECRET_KEY = f.read().strip()
 
 # SECURITY WARNING: don't run with debug turned on in production!

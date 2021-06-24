@@ -38,25 +38,26 @@
 			{% endif %}
 		</div>
 		<div class="container">
-			<div class="columns">
-				{% if this_book.asin %}
-				<div class="column is-one-quarter">
-					<div class="box">
-						<div class="content">
-							<ul style="list-style: none; margin-left: 0; margin-top: 0;">
-								<li><span class="has-text-weight-bold is-size-4">Title:</span> <span class="is-size-5"> {{ this_book.title }}{% if this_book.subtitle %} - {{ this_book.subtitle }}{% endif %}</span></li>
-								<li><span class="has-text-weight-semibold is-size-6">Author(s):</span> {% for author in this_book.authors.all %}{% if not forloop.first %}{% if forloop.last %} and {% else %}, {% endif %}{% endif %}{{ author.first_name }} {{ author.last_name }}{% endfor %}</li>
-								<li><span class="has-text-weight-semibold is-size-6">Narrator(s):</span> {% for narrator in this_book.narrators.all %}{% if not forloop.first %}{% if forloop.last %} and {% else %}, {% endif %}{% endif %}{{ narrator.first_name }} {{ narrator.last_name }}{% endfor %} </li>
-								{% if this_book.series %}<li><span class="has-text-weight-semibold is-size-6">Series:</span> {{ this_book.series }}</li>{% endif %}
-								<li><span class="has-text-weight-semibold is-size-6">Length:</span> {{ book_length }} </li>
-								<li><span class="has-text-weight-semibold is-size-6">Type:</span> <span style="text-transform:capitalize">{{ this_book.format_type }}</span></li>
-								<li><span class="has-text-weight-semibold is-size-6">Release Date:</span> {{ this_book.release_date }}</li>
-								<li><span class="has-text-weight-semibold is-size-6">Language:</span> <span style="text-transform:capitalize">{{ this_book.lang }}</span></li>
-								<li><span class="has-text-weight-semibold is-size-6">Publisher:</span> <span style="text-transform:capitalize">{{ this_book.publisher }}</span></li>
-							</ul>
+			{% for this_book, book_length in finished_books %}
+				<div class="columns">
+					{% if this_book.asin %}
+					<div class="column is-one-quarter">
+						<div class="box">
+							<div class="content">
+								<ul style="list-style: none; margin-left: 0; margin-top: 0;">
+									<li><span class="has-text-weight-bold is-size-4">Title:</span> <span class="is-size-5"> {{ this_book.title }}{% if this_book.subtitle %} - {{ this_book.subtitle }}{% endif %}</span></li>
+									<li><span class="has-text-weight-semibold is-size-6">Author(s):</span> {% for author in this_book.authors.all %}{% if not forloop.first %}{% if forloop.last %} and {% else %}, {% endif %}{% endif %}{{ author.first_name }} {{ author.last_name }}{% endfor %}</li>
+									<li><span class="has-text-weight-semibold is-size-6">Narrator(s):</span> {% for narrator in this_book.narrators.all %}{% if not forloop.first %}{% if forloop.last %} and {% else %}, {% endif %}{% endif %}{{ narrator.first_name }} {{ narrator.last_name }}{% endfor %} </li>
+									{% if this_book.series %}<li><span class="has-text-weight-semibold is-size-6">Series:</span> {{ this_book.series }}</li>{% endif %}
+									<li><span class="has-text-weight-semibold is-size-6">Length:</span> {{ book_length }} </li>
+									<li><span class="has-text-weight-semibold is-size-6">Type:</span> <span style="text-transform:capitalize">{{ this_book.format_type }}</span></li>
+									<li><span class="has-text-weight-semibold is-size-6">Release Date:</span> {{ this_book.release_date }}</li>
+									<li><span class="has-text-weight-semibold is-size-6">Language:</span> <span style="text-transform:capitalize">{{ this_book.lang }}</span></li>
+									<li><span class="has-text-weight-semibold is-size-6">Publisher:</span> <span style="text-transform:capitalize">{{ this_book.publisher }}</span></li>
+								</ul>
+							</div>
 						</div>
 					</div>
-				</div>
 					<div class="box">
 						<div class="content">
 							<span class="has-text-weight-semibold is-size-3">Description:</span>
@@ -65,8 +66,10 @@
 							</p>
 						</div>
 					</div>
-				{% endif %}
-			</div>
+					<div class="block"></div>
+					{% endif %}
+				</div>
+			{% endfor %}
 		</div>
 	</section>
 </body>
