@@ -244,7 +244,7 @@ def get_auth(request):
 	return redirect('/import/match')
 
 def get_asin(request):
-	if 'asins' not in request.session or 'input_dir' not in request.session:
+	if 'input_dir' not in request.session:
 		logger.warning(
 			"No session data found, "
 			"returning to import page"
