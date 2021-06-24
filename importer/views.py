@@ -43,8 +43,8 @@ def match(request):
 	# Redirect if this is a new session
 	if 'input_dir' not in request.session:
 		logger.warning(
-			"No session data found, \
-			returning to import page"
+			"No session data found, "
+			"returning to import page"
 		)
 		return redirect('/import')
 
@@ -116,8 +116,8 @@ def make_models(asin, input_data):
 					'last_name': author_name_split[last_name_index]
 				}
 				logger.warning(
-					f"No author ASIN for: \
-					{author_name_full}"
+					f"No author ASIN for: "
+					f"{author_name_full}"
 				)
 
 			# Check if author is in database
@@ -133,8 +133,8 @@ def make_models(asin, input_data):
 				new_author.save()
 			else:
 				logger.info(
-					f"Using existing db entry for author: \
-					{author_name_full}"
+					f"Using existing db entry for author: "
+					f"{author_name_full}"
 				)
 				author_id = Author.objects.filter(
 					**_filter_vals
@@ -161,8 +161,8 @@ def make_models(asin, input_data):
 				'last_name': author_name_split[last_name_index]
 			}
 			logger.warning(
-				f"No author ASIN for: \
-				{author_name_full}"
+				f"No author ASIN for: "
+				f"{author_name_full}"
 			)
 
 		# Check if author is in database
@@ -178,8 +178,8 @@ def make_models(asin, input_data):
 			new_author.save()
 		else:
 			logger.info(
-				f"Using existing db entry for author: \
-				{author_name_full}"
+				f"Using existing db entry for author: "
+				f"{author_name_full}"
 			)
 			author_id = Author.objects.filter(
 				**_filter_vals
@@ -272,8 +272,8 @@ def get_asin(request):
 					logger.info(f"Validated ASIN: {asin}")
 				else:
 					logger.error(
-						f'Got http error during ASIN check: \
-						{check.status_code}'
+						f"Got http error during ASIN check: "
+						f"{check.status_code}"
 					)
 					return redirect('/import/match')
 
@@ -282,8 +282,8 @@ def get_asin(request):
 				f"{rootdir}/{request.session['input_dir'][i]}"
 				)
 		logger.info(
-			f"Making models and merging files for: \
-			{input_data}"
+			f"Making models and merging files for: "
+			f"{request.session['input_dir'][i]}"
 		)
 		make_models(asin_arr[i], input_data)
 
@@ -294,8 +294,8 @@ def finish(request):
 	# Redirect if this is a new session
 	if 'asins' not in request.session:
 		logger.warning(
-			"No session data found, \
-			returning to import page"
+			"No session data found, "
+			"returning to import page"
 		)
 		return redirect('/import')
 

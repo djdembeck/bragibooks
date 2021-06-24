@@ -208,7 +208,7 @@ def get_directory(input_take):
 
 				for EXT in EXTENSIONS:
 					if collections.Counter(
-						p.suffix for p in Path(dirpath)\
+						p.suffix for p in Path(dirpath)
 							.resolve().glob(f'*.{EXT}')
 						):
 						USE_EXT = EXT
@@ -259,10 +259,10 @@ def m4b_data(input_data, metadata, output):
 	if not output:
 		# If using docker, default to /input folder, else $USER/input
 		if Path('/output').is_dir():
-			logging.info("Defaulting output to docker directory")
+			logging.debug("Output is set to docker directory")
 			output = Path('/output')
 		else:
-			logging.info("Defaulting output to home directory")
+			logging.debug("Output is set to home directory")
 			default_output = Path.home()
 			output = Path(f"{default_output}/output")
 
@@ -293,8 +293,8 @@ def m4b_data(input_data, metadata, output):
 	year = metadata['release_date'].year
 
 	book_output = (
-		f"{output}/{sanitize_filename(path_author)}/\
-		{sanitize_filename(path_title)}"
+		f"{output}/{sanitize_filename(path_author)}/"
+		f"{sanitize_filename(path_title)}"
 	)
 	file_title = sanitize_filename(title)
 	##
@@ -320,7 +320,7 @@ def m4b_data(input_data, metadata, output):
 	## Array for argument use
 	# args for multiple input files in a folder
 	if Path(in_dir).is_dir() and num_of_files > 1 or in_ext == None:
-		logging.info("Got multiple files in a dir")
+		logging.info("Processing multiple files in a dir...")
 
 		# Find first file with our extension, to check rates against
 		first_file_index = 0
@@ -340,7 +340,7 @@ def m4b_data(input_data, metadata, output):
 			int(mediainfo(f"{in_dir}/{first_file}")['bit_rate']) / 1000
 		) * 1000
 
-		target_samplerate =	int(
+		target_samplerate = int(
 			mediainfo(
 				f"{in_dir}/{first_file}"
 			)['sample_rate']
@@ -394,7 +394,7 @@ def m4b_data(input_data, metadata, output):
 		target_samplerate =	int(mediainfo(in_dir)['sample_rate'])
 		##
 
-		logging.info("got single m4b input")
+		logging.info("Processing single M4B input...")
 		m4b_cmd = (
 			m4b_tool + 
 		' meta ' + 
