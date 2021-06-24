@@ -287,11 +287,8 @@ def finish(request):
 		)
 		length_arr.append(book_length_calc)
 
-	print(length_arr)
-
 	context = {
-		"finished_books": this_book,
-		"book_lengths": length_arr
+		"finished_books": zip(this_book, length_arr),
 	}
 	
 	return render(request, "finish.html", context)

@@ -38,7 +38,7 @@
 			{% endif %}
 		</div>
 		<div class="container">
-			{% for this_book in finished_books %}
+			{% for this_book, book_length in finished_books %}
 				<div class="columns">
 					{% if this_book.asin %}
 					<div class="column is-one-quarter">
@@ -49,7 +49,7 @@
 									<li><span class="has-text-weight-semibold is-size-6">Author(s):</span> {% for author in this_book.authors.all %}{% if not forloop.first %}{% if forloop.last %} and {% else %}, {% endif %}{% endif %}{{ author.first_name }} {{ author.last_name }}{% endfor %}</li>
 									<li><span class="has-text-weight-semibold is-size-6">Narrator(s):</span> {% for narrator in this_book.narrators.all %}{% if not forloop.first %}{% if forloop.last %} and {% else %}, {% endif %}{% endif %}{{ narrator.first_name }} {{ narrator.last_name }}{% endfor %} </li>
 									{% if this_book.series %}<li><span class="has-text-weight-semibold is-size-6">Series:</span> {{ this_book.series }}</li>{% endif %}
-									<li><span class="has-text-weight-semibold is-size-6">Length:</span> {{ book_lengths.0 }} </li>
+									<li><span class="has-text-weight-semibold is-size-6">Length:</span> {{ book_length }} </li>
 									<li><span class="has-text-weight-semibold is-size-6">Type:</span> <span style="text-transform:capitalize">{{ this_book.format_type }}</span></li>
 									<li><span class="has-text-weight-semibold is-size-6">Release Date:</span> {{ this_book.release_date }}</li>
 									<li><span class="has-text-weight-semibold is-size-6">Language:</span> <span style="text-transform:capitalize">{{ this_book.lang }}</span></li>
