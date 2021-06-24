@@ -60,6 +60,10 @@ def dir_selection(request):
 	return redirect('/import/match')
 
 def match(request):
+	# Redirect if this is a new session
+	if 'input_dir' not in request.session:
+		return redirect('/import')
+
 	context_item = request.session['input_dir']
 
 	context = {
@@ -276,6 +280,10 @@ def get_asin(request):
 	return redirect('/import/confirm')
 
 def finish(request):
+	# Redirect if this is a new session
+	if 'asins' not in request.session:
+		return redirect('/import')
+
 	asins = request.session['asins']
 	this_book = Book.objects.filter(asin__in=asins)
 
