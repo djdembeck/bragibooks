@@ -9,7 +9,7 @@ from pydub.utils import mediainfo
 # for non-default m4b-tool install path
 m4bpath = "m4b-tool"
 
-# output dir
+# output directory for cleaned metadata/folder structure
 # leaving blank uses /output for docker or $USER/output for anything else
 output = ""
 
@@ -257,7 +257,7 @@ def m4b_data(input_data, metadata, output):
 
 	# Setup output folder defaults
 	if not output:
-		# If using docker, default to /input folder, else $USER/input
+		# If using docker, default to /output folder, else $USER/output
 		if Path('/output').is_dir():
 			logging.debug("Output is set to docker directory")
 			output = Path('/output')
@@ -265,6 +265,20 @@ def m4b_data(input_data, metadata, output):
 			logging.debug("Output is set to home directory")
 			default_output = Path.home()
 			output = Path(f"{default_output}/output")
+
+	# If using docker, default to /input/done folder, else $USER/input/done
+	if Path('/input').is_dir():
+		logging.debug("Input/Junk is set to docker directory")
+		junk_dir = Path('/input/done')
+	else:
+		logging.debug("Input/Junk is set to home directory")
+		default_input = Path.home()
+		junk_dir = Path(f"{default_input}/input/done")
+	
+	Path(junk_dir).mkdir(
+		parents=True,
+		exist_ok=True
+	)
 
 	## Metadata variables
 	# Only use subtitle in case of metadata, not file name
@@ -339,14 +353,8 @@ def m4b_data(input_data, metadata, output):
 	]
 
 	# args for multiple input files in a folder
-	if (Path(in_dir).is_dir() and num_of_files > 1) or in_ext == None:
+	if (in_dir.is_dir() and num_of_files > 1) or in_ext == None:
 		logging.info("Processing multiple files in a dir...")
-
-		# Dir for completed folders to move to
-		Path(Path(in_dir).parent, 'done').mkdir(
-			parents=True,
-			exist_ok=True
-		)
 
 		# Find first file with our extension, to check rates against
 		first_file_index = 0
@@ -403,7 +411,7 @@ def m4b_data(input_data, metadata, output):
 		# Move obsolete input to processed folder
 		shutil.move(
 			f"{in_dir}",
-			f"{Path(in_dir).parent}/done"
+			f"{junk_dir}"
 		)
 
 		m4b_fix_chapters(
@@ -413,12 +421,9 @@ def m4b_data(input_data, metadata, output):
 			)
 		
 	# args for single m4b input file
-	elif (Path(in_dir).is_file()) and (in_ext == "m4b" or in_ext == "m4a"):
-		# Dir for completed folders to move to
-		Path(Path(in_dir).parent, 'done').mkdir(
-			parents=True,
-			exist_ok=True
-		)
+	elif (in_dir.is_file()) and (in_ext == "m4b" or in_ext == "m4a"):
+		logging.info(f"Processing single {in_ext} input...")
+
 		## Mediainfo data
 		# Divide bitrate by 1k, round up,
 		# and return back to 1k divisible for round number.
@@ -428,8 +433,6 @@ def m4b_data(input_data, metadata, output):
 
 		target_samplerate =	int(mediainfo(in_dir)['sample_rate'])
 		##
-
-		logging.info(f"Processing single {in_ext} input...")
 
 		m4b_cmd = (
 			m4b_tool + 
@@ -441,7 +444,7 @@ def m4b_data(input_data, metadata, output):
 		os.system(m4b_cmd)
 		
 		shutil.move(
-			f"{Path(in_dir).parent}/{in_dir.stem}.chapters.txt",
+			f"{in_dir.parent}/{in_dir.stem}.chapters.txt",
 			f"{book_output}/{file_title}.chapters.txt"
 			)
 
@@ -457,26 +460,35 @@ def m4b_data(input_data, metadata, output):
 		# make backup file
 		shutil.copy(
 			in_dir,
-			f"{Path(in_dir).parent}/{in_dir.stem}.new.m4b"
+			f"{in_dir.parent}/{in_dir.stem}.new.m4b"
 			)
 
 		# m4b command with passed args
 		m4b_cmd = (
 			m4b_tool + 
 			' '.join(args) + 
-			f" \"{Path(in_dir).parent}/{in_dir.stem}.new.m4b\"")
+			f" \"{in_dir.parent}/{in_dir.stem}.new.m4b\"")
 		os.system(m4b_cmd)
 
 		# Move completed file
 		shutil.move(
-			f"{Path(in_dir).parent}/{in_dir.stem}.new.m4b",
+			f"{in_dir.parent}/{in_dir.stem}.new.m4b",
 			f"{book_output}/{file_title}.m4b"
 		)
 
 		# Move obsolete input to processed folder
+		if Path(in_dir.parent, 'done') == junk_dir:
+			logging.debug("Junk dir is direct parent")
+			move_dir = in_dir
+		elif Path(in_dir.parents[1], 'done') == junk_dir:
+			logging.debug("Junk dir is double parent")
+			move_dir = in_dir.parent
+		else:
+			logging.warning("Couldn't find junk dir relative to input")
+
 		shutil.move(
-			f"{in_dir}",
-			f"{Path(in_dir).parent}/done"
+			f"{move_dir}",
+			f"{junk_dir}"
 		)
 
 		m4b_fix_chapters(
@@ -485,14 +497,8 @@ def m4b_data(input_data, metadata, output):
 			m4b_tool
 			)
 
-	elif Path(in_dir).is_file() and in_ext == "mp3":
+	elif in_dir.is_file() and in_ext == "mp3":
 		logging.info(f"Processing single {in_ext} input...")
-
-		# Dir for completed folders to move to
-		Path(Path(in_dir).parent, 'done').mkdir(
-			parents=True,
-			exist_ok=True
-		)
 
 		## Mediainfo data
 		# Divide bitrate by 1k, round up,
@@ -532,9 +538,18 @@ def m4b_data(input_data, metadata, output):
 		os.system(m4b_cmd)
 
 		# Move obsolete input to processed folder
+		if Path(in_dir.parent, 'done') == junk_dir:
+			logging.debug("Junk dir is direct parent")
+			move_dir = in_dir
+		elif Path(in_dir.parents[1], 'done') == junk_dir:
+			logging.debug("Junk dir is double parent")
+			move_dir = in_dir.parent
+		else:
+			logging.warning("Couldn't find junk dir relative to input")
+
 		shutil.move(
-			f"{in_dir}",
-			f"{Path(in_dir).parent}/done"
+			f"{move_dir}",
+			f"{junk_dir}"
 		)
 
 		logging.warning(f"Not processing chapters for  {title}, since it's an mp3")
