@@ -486,10 +486,11 @@ def m4b_data(input_data, metadata, output):
 		else:
 			logging.warning("Couldn't find junk dir relative to input")
 
-		shutil.move(
-			f"{move_dir}",
-			f"{junk_dir}"
-		)
+		if move_dir:
+			shutil.move(
+				f"{move_dir}",
+				f"{junk_dir}"
+			)
 
 		m4b_fix_chapters(
 			f"{book_output}/{file_title}.chapters.txt",
@@ -547,10 +548,11 @@ def m4b_data(input_data, metadata, output):
 		else:
 			logging.warning("Couldn't find junk dir relative to input")
 
-		shutil.move(
-			f"{move_dir}",
-			f"{junk_dir}"
-		)
+		if move_dir:
+			shutil.move(
+				f"{move_dir}",
+				f"{junk_dir}"
+			)
 
 		logging.warning(f"Not processing chapters for  {title}, since it's an mp3")
 
