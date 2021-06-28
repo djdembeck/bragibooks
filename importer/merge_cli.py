@@ -319,6 +319,25 @@ def m4b_data(input_data, metadata, output):
 	)
 
 	## Array for argument use
+	# main metadata args
+	metadata_args = [
+		f"--name=\"{title}\"",
+		f"--album=\"{path_title}\"",
+		f"--artist=\"{narrator}\"",
+		f"--albumartist=\"{author}\"",
+		f"--year=\"{year}\"",
+		f"--description=\"{summary}\""
+	]
+
+	# args for merge  process
+	processing_args = [
+		'--force',
+		'--no-chapter-reindexing',
+		'--no-cleanup',
+		f'--jobs={num_cpus}',
+		'-v'
+	]
+
 	# args for multiple input files in a folder
 	if (Path(in_dir).is_dir() and num_of_files > 1) or in_ext == None:
 		logging.info("Processing multiple files in a dir...")
@@ -359,24 +378,18 @@ def m4b_data(input_data, metadata, output):
 		args = [
 			' merge',
 			f"--output-file=\"{book_output}/{file_title}.m4b\"",
-			f"--name=\"{title}\"",
-			f"--album=\"{path_title}\"",
-			f"--artist=\"{narrator}\"",
-			f"--albumartist=\"{author}\"",
-			f"--year=\"{year}\"",
-			f"--description=\"{summary}\"",
 			f"--audio-bitrate=\"{target_bitrate}\"",
-			f"--audio-samplerate=\"{target_samplerate}\"",
-			'--force',
-			'--no-chapter-reindexing',
-			'--no-cleanup',
-			f'--jobs={num_cpus}',
-			'-v'
+			f"--audio-samplerate=\"{target_samplerate}\""
 		]
+		# Add in main metadata and merge args
+		args.extend(metadata_args)
+		args.extend(processing_args)
+
 		if series:
 			args.append(f'--series \"{series}\"')
 
 		if in_ext == "m4b":
+			logging.info("Multiple m4b files, not converting")
 			args.append(f'--no-conversion')
 
 		# m4b command with passed args
@@ -433,14 +446,11 @@ def m4b_data(input_data, metadata, output):
 			)
 
 		args = [
-			' meta',
-			f"--name=\"{title}\"",
-			f"--album=\"{path_title}\"",
-			f"--artist=\"{narrator}\"",
-			f"--albumartist=\"{author}\"",
-			f"--year=\"{year}\"",
-			f"--description=\"{summary}\""
+			' meta'
 		]
+		# Add in main metadata args
+		args.extend(metadata_args)
+
 		if series:
 			args.append(f"--series \"{series}\"")
 
@@ -503,20 +513,13 @@ def m4b_data(input_data, metadata, output):
 		args = [
 			' merge',
 			f"--output-file=\"{book_output}/{file_title}.m4b\"",
-			f"--name=\"{title}\"",
-			f"--album=\"{path_title}\"",
-			f"--artist=\"{narrator}\"",
-			f"--albumartist=\"{author}\"",
-			f"--year=\"{year}\"",
-			f"--description=\"{summary}\"",
 			f"--audio-bitrate=\"{target_bitrate}\"",
-			f"--audio-samplerate=\"{target_samplerate}\"",
-			'--force',
-			'--no-chapter-reindexing',
-			'--no-cleanup',
-			f'--jobs={num_cpus}',
-			'-v'
+			f"--audio-samplerate=\"{target_samplerate}\""
 		]
+		# Add in main metadata and merge args
+		args.extend(metadata_args)
+		args.extend(processing_args)
+
 		if series:
 			args.append(f'--series \"{series}\"')
 
