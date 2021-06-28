@@ -311,7 +311,8 @@ def m4b_data(input_data, metadata, output):
 	else:
 		num_cpus = cpus_to_use
 
-	# Make necessary directories
+	## Make necessary directories
+	# Final output folder
 	Path(book_output).mkdir(
 		parents=True,
 		exist_ok=True
@@ -319,8 +320,14 @@ def m4b_data(input_data, metadata, output):
 
 	## Array for argument use
 	# args for multiple input files in a folder
-	if Path(in_dir).is_dir() and num_of_files > 1 or in_ext == None:
+	if (Path(in_dir).is_dir() and num_of_files > 1) or in_ext == None:
 		logging.info("Processing multiple files in a dir...")
+
+		# Dir for completed folders to move to
+		Path(Path(in_dir).parent, 'done').mkdir(
+			parents=True,
+			exist_ok=True
+		)
 
 		# Find first file with our extension, to check rates against
 		first_file_index = 0
@@ -363,10 +370,14 @@ def m4b_data(input_data, metadata, output):
 			'--force',
 			'--no-chapter-reindexing',
 			'--no-cleanup',
-			f'--jobs={num_cpus}'
+			f'--jobs={num_cpus}',
+			'-v'
 		]
 		if series:
 			args.append(f'--series \"{series}\"')
+
+		if in_ext == "m4b":
+			args.append(f'--no-conversion')
 
 		# m4b command with passed args
 		m4b_cmd = (
@@ -376,6 +387,12 @@ def m4b_data(input_data, metadata, output):
 		)
 		os.system(m4b_cmd)
 
+		# Move obsolete input to processed folder
+		shutil.move(
+			f"{in_dir}",
+			f"{Path(in_dir).parent}/done"
+		)
+
 		m4b_fix_chapters(
 			f"{book_output}/{file_title}.chapters.txt",
 			f"{book_output}/{file_title}.m4b",
@@ -384,6 +401,11 @@ def m4b_data(input_data, metadata, output):
 		
 	# args for single m4b input file
 	elif Path(in_dir).is_file() and in_ext == "m4b":
+		# Dir for completed folders to move to
+		Path(Path(in_dir).parent, 'done').mkdir(
+			parents=True,
+			exist_ok=True
+		)
 		## Mediainfo data
 		# Divide bitrate by 1k, round up,
 		# and return back to 1k divisible for round number.
@@ -394,16 +416,19 @@ def m4b_data(input_data, metadata, output):
 		target_samplerate =	int(mediainfo(in_dir)['sample_rate'])
 		##
 
-		logging.info("Processing single M4B input...")
+		logging.info(f"Processing single {in_ext} input...")
+
 		m4b_cmd = (
 			m4b_tool + 
 		' meta ' + 
 		f'--export-chapters=\"\"' + 
 		f" \"{in_dir}\""
 		)
+
 		os.system(m4b_cmd)
+		
 		shutil.move(
-			f"{in_dir.parent}/{in_dir.stem}.chapters.txt",
+			f"{Path(in_dir).parent}/{in_dir.stem}.chapters.txt",
 			f"{book_output}/{file_title}.chapters.txt"
 			)
 
@@ -422,27 +447,94 @@ def m4b_data(input_data, metadata, output):
 		# make backup file
 		shutil.copy(
 			in_dir,
-			f"{in_dir.parent}/{in_dir.stem}.new.m4b"
+			f"{Path(in_dir).parent}/{in_dir.stem}.new.m4b"
 			)
 
 		# m4b command with passed args
 		m4b_cmd = (
 			m4b_tool + 
 			' '.join(args) + 
-			f" \"{in_dir.parent}/{in_dir.stem}.new.m4b\"")
+			f" \"{Path(in_dir).parent}/{in_dir.stem}.new.m4b\"")
 		os.system(m4b_cmd)
 
 		# Move completed file
 		shutil.move(
-			f"{in_dir.parent}/{in_dir.stem}.new.m4b",
+			f"{Path(in_dir).parent}/{in_dir.stem}.new.m4b",
 			f"{book_output}/{file_title}.m4b"
-			)
+		)
+
+		# Move obsolete input to processed folder
+		shutil.move(
+			f"{in_dir}",
+			f"{Path(in_dir).parent}/done"
+		)
 
 		m4b_fix_chapters(
 			f"{book_output}/{file_title}.chapters.txt",
 			f"{book_output}/{file_title}.m4b",
 			m4b_tool
 			)
+
+	elif Path(in_dir).is_file() and in_ext == "mp3":
+		logging.info(f"Processing single {in_ext} input...")
+
+		# Dir for completed folders to move to
+		Path(Path(in_dir).parent, 'done').mkdir(
+			parents=True,
+			exist_ok=True
+		)
+
+		## Mediainfo data
+		# Divide bitrate by 1k, round up,
+		# and return back to 1k divisible for round number.
+		target_bitrate = math.ceil(
+			int(mediainfo(f"{in_dir}")['bit_rate']) / 1000
+		) * 1000
+
+		target_samplerate = int(
+			mediainfo(
+				f"{in_dir}"
+			)['sample_rate']
+		)
+
+		logging.info(f"Source bitrate: {target_bitrate}")
+		logging.info(f"Source samplerate: {target_samplerate}")
+		##
+		args = [
+			' merge',
+			f"--output-file=\"{book_output}/{file_title}.m4b\"",
+			f"--name=\"{title}\"",
+			f"--album=\"{path_title}\"",
+			f"--artist=\"{narrator}\"",
+			f"--albumartist=\"{author}\"",
+			f"--year=\"{year}\"",
+			f"--description=\"{summary}\"",
+			f"--audio-bitrate=\"{target_bitrate}\"",
+			f"--audio-samplerate=\"{target_samplerate}\"",
+			'--force',
+			'--no-chapter-reindexing',
+			'--no-cleanup',
+			f'--jobs={num_cpus}',
+			'-v'
+		]
+		if series:
+			args.append(f'--series \"{series}\"')
+
+		# m4b command with passed args
+		m4b_cmd = (
+			m4b_tool + 
+		' '.join(args) + 
+		f" \"{in_dir}\""
+		)
+		os.system(m4b_cmd)
+
+		# Move obsolete input to processed folder
+		shutil.move(
+			f"{in_dir}",
+			f"{Path(in_dir).parent}/done"
+		)
+
+		logging.warning(f"Not processing chapters for  {title}, since it's an mp3")
 
 	elif not in_ext:
 		logging.error(f"No recognized filetypes found for {title}")
