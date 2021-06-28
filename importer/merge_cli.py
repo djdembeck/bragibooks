@@ -348,9 +348,15 @@ def m4b_data(input_data, metadata, output):
 		'--force',
 		'--no-chapter-reindexing',
 		'--no-cleanup',
-		f'--jobs={num_cpus}',
-		'-vv'
+		f'--jobs={num_cpus}'
 	]
+
+	# Set logging level of m4b-tool depending upon log_level
+	level = logging.root.level
+	if level == logging.INFO:
+		processing_args.append('-v')
+	elif level == logging.DEBUG:
+		processing_args.append('-vvv')
 
 	# args for multiple input files in a folder
 	if (in_dir.is_dir() and num_of_files > 1) or in_ext == None:
