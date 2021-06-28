@@ -32,14 +32,14 @@ To run Bragi Books as a container, you need to pass some paramaters in the run c
     
 Which all together should look like: 
 
-	docker run --rm -d -v /path/to//input:/input -v /path/to//output:/output -v /appdata/bragibooks/config:/config -p 8000:8000/tcp -e LOG_LEVEL=WARNING bragibooks:latest
+	docker run --rm -d -v /path/to/input:/input -v /path/to/output:/output -v /appdata/bragibooks/config:/config -p 8000:8000/tcp -e LOG_LEVEL=WARNING ghcr.io/djdembeck/bragibooks:latest
 	
 ---
 
-### Webserver (Django):
-  - `python manage.py makemigrations`
+### Webserver (Gunicorn + Django):
+From within the `bragibooks` folder you cloned:
   - `python manage.py migrate`
-  - `python manage.py runserver`
+  - `gunicorn bragibooks_proj.wsgi`
 
 ---
 
