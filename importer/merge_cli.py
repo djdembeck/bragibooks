@@ -228,12 +228,12 @@ def get_directory(input_take):
 								)
 	# Check if input is a file
 	elif Path(input_take).is_file():
-		dirpath = Path(input_take)
+		dirpath = input_take
 		USE_EXT_PRE = dirpath.suffix
 		USE_EXT = Path(USE_EXT_PRE).stem.split('.')[1]
 		num_of_files = 1
 
-	return dirpath, USE_EXT, num_of_files
+	return Path(dirpath), USE_EXT, num_of_files
 
 def m4b_data(input_data, metadata, output):
 	## Checks
@@ -598,7 +598,7 @@ def call(inputs):
 		# If no auth file exists, call login function
 		audible_login()
 
-	print(f"Working on: {inputs}")
+	logging.info(f"Working on: {inputs}")
 	input_data = get_directory(inputs)
 	asin = input("Audiobook ASIN: ")
 	metadata = audible_parser(asin)
