@@ -335,7 +335,7 @@ def m4b_data(input_data, metadata, output):
 		'--no-chapter-reindexing',
 		'--no-cleanup',
 		f'--jobs={num_cpus}',
-		'-v'
+		'-vv'
 	]
 
 	# args for multiple input files in a folder
@@ -388,8 +388,8 @@ def m4b_data(input_data, metadata, output):
 		if series:
 			args.append(f'--series \"{series}\"')
 
-		if in_ext == "m4b":
-			logging.info("Multiple m4b files, not converting")
+		if in_ext == "m4b" or in_ext == "m4a":
+			logging.info(f"Multiple {in_ext} files, not converting")
 			args.append(f'--no-conversion')
 
 		# m4b command with passed args
@@ -413,7 +413,7 @@ def m4b_data(input_data, metadata, output):
 			)
 		
 	# args for single m4b input file
-	elif Path(in_dir).is_file() and in_ext == "m4b":
+	elif (Path(in_dir).is_file()) and (in_ext == "m4b" or in_ext == "m4a"):
 		# Dir for completed folders to move to
 		Path(Path(in_dir).parent, 'done').mkdir(
 			parents=True,
