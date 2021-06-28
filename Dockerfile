@@ -233,4 +233,4 @@ COPY --from=ffbuild /opt/ffmpeg/bin/ffprobe /usr/bin
 # USER 99:100
 
 # start server
-CMD python manage.py migrate && gunicorn bragibooks_proj.wsgi --bind 0.0.0.0:8000
+CMD python manage.py migrate && gunicorn bragibooks_proj.wsgi --bind 0.0.0.0:8000 --timeout 1200
