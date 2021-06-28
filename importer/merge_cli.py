@@ -615,4 +615,7 @@ if __name__ == "__main__":
 		logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 	# Run through inputs
 	for inputs in args.inputs:
-		call(inputs)
+		if inputs.exists():
+			call(inputs)
+		else:
+			logging.error(f"Input \"{inputs}\" does not exist")
