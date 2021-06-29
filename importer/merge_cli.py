@@ -205,6 +205,7 @@ def find_extension(dirpath):
 				for x in list_of_files
 				) == 1:
 				for m4b_file in Path(dirpath).glob(f'*.{USE_EXT}'):
+					logging.debug(f"Adjusted input for {dirpath} to use single m4b file")
 					dirpath = m4b_file
 				num_of_files = 1
 			else:
@@ -212,7 +213,7 @@ def find_extension(dirpath):
 					x.endswith(f'.{USE_EXT}') 
 					for x in list_of_files
 					)
-			return USE_EXT, num_of_files
+			return dirpath, USE_EXT, num_of_files
 
 def get_directory(input_take):
 	# Check if input is a dir
@@ -230,8 +231,9 @@ def get_directory(input_take):
 		else:
 			for dirpath, dirnames, files in os.walk(input_take):
 				find_ext = find_extension(dirpath)
-				USE_EXT = find_ext[0]
-				num_of_files = find_ext[1]
+				dirpath = find_ext[0]
+				USE_EXT = find_ext[1]
+				num_of_files = find_ext[2]
 
 	# Check if input is a file
 	elif Path(input_take).is_file():
@@ -240,6 +242,9 @@ def get_directory(input_take):
 		USE_EXT = Path(USE_EXT_PRE).stem.split('.')[1]
 		num_of_files = 1
 
+	logging.debug(f"Final input path is: {dirpath}")
+	logging.debug(f"Extension is: {USE_EXT}")
+	logging.debug(f"Number of files: {num_of_files}")
 	return Path(dirpath), USE_EXT, num_of_files
 
 def m4b_data(input_data, metadata, output):
@@ -580,6 +585,9 @@ def m4b_data(input_data, metadata, output):
 
 	elif not in_ext:
 		logging.error(f"No recognized filetypes found for {title}")
+
+	else:
+		logging.error(f"Couldn't determine input type/extension for {title}")
 
 def m4b_fix_chapters(input, target, m4b_tool):
 	new_file_content = ""
