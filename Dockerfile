@@ -182,4 +182,5 @@ CMD python manage.py migrate && \
 	--worker-tmp-dir /dev/shm \
 	--workers=2 \
 	--threads=4 \
-	--worker-class=gthread
+	--worker-class=gthread \
+	--reload
