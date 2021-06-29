@@ -85,7 +85,7 @@ def audible_parser(asin):
 		aud_json['product']['merchandising_summary']
 		)
 	metadata_dict['short_summary'] = (
-		html2text.html2text(aud_short_summary_json).replace("\n", " ")
+		html2text.html2text(aud_short_summary_json).replace("\n", " ").replace("\"", "'")
 		)
 
 	## Long summary
@@ -400,7 +400,7 @@ def m4b_data(input_data, metadata, output):
 		args.extend(processing_args)
 
 		if series:
-			args.append(f'--series \"{series}\"')
+			args.append(f"--series=\"{series}\"")
 
 		if in_ext == "m4b" or in_ext == "m4a":
 			logging.info(f"Multiple {in_ext} files, not converting")
@@ -461,7 +461,7 @@ def m4b_data(input_data, metadata, output):
 		args.extend(metadata_args)
 
 		if series:
-			args.append(f"--series \"{series}\"")
+			args.append(f"--series=\"{series}\"")
 
 		# make backup file
 		shutil.copy(
@@ -534,7 +534,7 @@ def m4b_data(input_data, metadata, output):
 		args.extend(processing_args)
 
 		if series:
-			args.append(f'--series \"{series}\"')
+			args.append(f"--series=\"{series}\"")
 
 		# m4b command with passed args
 		m4b_cmd = (
