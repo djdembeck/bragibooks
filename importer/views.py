@@ -16,7 +16,7 @@ import os
 
 # If using docker, default to /input folder, else $USER/input
 if Path('/input').is_dir():
-	rootdir = Path('/input')
+	rootdir = "/input"
 else:
 	rootdir = f"{str(Path.home())}/input"
 
@@ -261,10 +261,6 @@ def get_asin(request):
 	for key, value in dict1.items():
 		if key != "csrfmiddlewaretoken":
 			asin = value
-			asin_key = int(key[5:7])
-			input_data = get_directory(
-				f"{rootdir}/{request.session['input_dir'][asin_key]}"
-				)
 			# Check for validation errors
 			errors = Book.objects.book_asin_validator(asin)
 			if len(errors) > 0:
@@ -286,8 +282,8 @@ def get_asin(request):
 
 	for i in range(len(asin_arr)):
 		input_data = get_directory(
-				f"{rootdir}/{request.session['input_dir'][i]}"
-				)
+			Path(rootdir, request.session['input_dir'][i])
+		)
 		logger.info(
 			f"Making models and merging files for: "
 			f"{request.session['input_dir'][i]}"
