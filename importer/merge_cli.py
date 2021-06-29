@@ -189,6 +189,31 @@ def audible_parser(asin):
 	# return all data
 	return metadata_dict
 
+def find_extension(dirpath):
+	EXTENSIONS=['mp3', 'm4a', 'm4b']
+
+	for EXT in EXTENSIONS:
+		if collections.Counter(
+			p.suffix for p in Path(dirpath)
+				.resolve().glob(f'*.{EXT}')
+			):
+			USE_EXT = EXT
+			list_of_files = os.listdir(Path(dirpath))
+			# Case for single file in a folder
+			if sum(
+				x.endswith(f'.{USE_EXT}') 
+				for x in list_of_files
+				) == 1:
+				for m4b_file in Path(dirpath).glob(f'*.{USE_EXT}'):
+					dirpath = m4b_file
+				num_of_files = 1
+			else:
+				num_of_files = sum(
+					x.endswith(f'.{USE_EXT}') 
+					for x in list_of_files
+					)
+			return USE_EXT, num_of_files
+
 def get_directory(input_take):
 	# Check if input is a dir
 	if Path(input_take).is_dir():
@@ -199,33 +224,15 @@ def get_directory(input_take):
 				f"Found multiple ({num_of_subdirs}) subdirs, "
 					f"using those as input (multi-disc)"
 				)
-			dirpath = inputs
+			dirpath = input_take
 			USE_EXT = None
 			num_of_files = num_of_subdirs
 		else:
 			for dirpath, dirnames, files in os.walk(input_take):
-				EXTENSIONS=['mp3', 'm4a', 'm4b']
+				find_ext = find_extension(dirpath)
+				USE_EXT = find_ext[0]
+				num_of_files = find_ext[1]
 
-				for EXT in EXTENSIONS:
-					if collections.Counter(
-						p.suffix for p in Path(dirpath)
-							.resolve().glob(f'*.{EXT}')
-						):
-						USE_EXT = EXT
-						list_of_files = os.listdir(Path(dirpath))
-						# Case for single file in a folder
-						if sum(
-							x.endswith(f'.{USE_EXT}') 
-							for x in list_of_files
-							) == 1:
-							for m4b_file in Path(dirpath).glob(f'*.{USE_EXT}'):
-								dirpath = m4b_file
-							num_of_files = 1
-						else:
-							num_of_files = sum(
-								x.endswith(f'.{USE_EXT}') 
-								for x in list_of_files
-								)
 	# Check if input is a file
 	elif Path(input_take).is_file():
 		dirpath = input_take
@@ -362,27 +369,35 @@ def m4b_data(input_data, metadata, output):
 	if (in_dir.is_dir() and num_of_files > 1) or in_ext == None:
 		logging.info("Processing multiple files in a dir...")
 
+		# If multi-disc, find the extension
+		if not in_ext:
+			dir_select = sorted(Path(in_dir).glob('**/*'))[0]
+			find_ext = find_extension(dir_select)
+			in_ext = find_ext[0]
+		else:
+			dir_select = in_dir
+
 		# Find first file with our extension, to check rates against
 		first_file_index = 0
 		while True:
 			if Path(
 				sorted(
-					os.listdir(in_dir))[first_file_index]
+					Path(dir_select).glob('**/*'))[first_file_index]
 				).suffix == f".{in_ext}":
 				break
 			first_file_index += 1
-		first_file = sorted(os.listdir(in_dir))[first_file_index]
+		first_file = sorted(Path(dir_select).glob('**/*'))[first_file_index]
 
 		## Mediainfo data
 		# Divide bitrate by 1k, round up,
 		# and return back to 1k divisible for round number.
 		target_bitrate = math.ceil(
-			int(mediainfo(f"{in_dir}/{first_file}")['bit_rate']) / 1000
+			int(mediainfo(first_file)['bit_rate']) / 1000
 		) * 1000
 
 		target_samplerate = int(
 			mediainfo(
-				f"{in_dir}/{first_file}"
+				first_file
 			)['sample_rate']
 		)
 
