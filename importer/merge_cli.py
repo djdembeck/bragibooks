@@ -355,6 +355,7 @@ def m4b_data(input_data, metadata, output):
 		'--force',
 		'--no-chapter-reindexing',
 		'--no-cleanup',
+		'--skip-cover',
 		f'--jobs={num_cpus}'
 	]
 
