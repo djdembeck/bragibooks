@@ -355,7 +355,6 @@ def m4b_data(input_data, metadata, output):
 		'--force',
 		'--no-chapter-reindexing',
 		'--no-cleanup',
-		'--skip-cover',
 		f'--jobs={num_cpus}'
 	]
 
@@ -543,7 +542,8 @@ def m4b_data(input_data, metadata, output):
 			' merge',
 			f"--output-file=\"{book_output}/{file_title}.m4b\"",
 			f"--audio-bitrate=\"{target_bitrate}\"",
-			f"--audio-samplerate=\"{target_samplerate}\""
+			f"--audio-samplerate=\"{target_samplerate}\"",
+			'--skip-cover'
 		]
 		# Add in main metadata and merge args
 		args.extend(metadata_args)
