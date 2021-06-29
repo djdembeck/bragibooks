@@ -432,6 +432,7 @@ def m4b_data(input_data, metadata, output):
 		' '.join(args) + 
 		f" \"{in_dir}\""
 		)
+		logging.debug(f"M4B command: {m4b_cmd}")
 		os.system(m4b_cmd)
 
 		# Move obsolete input to processed folder
@@ -466,7 +467,7 @@ def m4b_data(input_data, metadata, output):
 		f'--export-chapters=\"\"' + 
 		f" \"{in_dir}\""
 		)
-
+		logging.debug(f"M4B command: {m4b_cmd}")
 		os.system(m4b_cmd)
 		
 		shutil.move(
@@ -494,6 +495,7 @@ def m4b_data(input_data, metadata, output):
 			m4b_tool + 
 			' '.join(args) + 
 			f" \"{in_dir.parent}/{in_dir.stem}.new.m4b\"")
+		logging.debug(f"M4B command: {m4b_cmd}")
 		os.system(m4b_cmd)
 
 		# Move completed file
@@ -563,6 +565,7 @@ def m4b_data(input_data, metadata, output):
 		' '.join(args) + 
 		f" \"{in_dir}\""
 		)
+		logging.debug(f"M4B command: {m4b_cmd}")
 		os.system(m4b_cmd)
 
 		# Move obsolete input to processed folder
