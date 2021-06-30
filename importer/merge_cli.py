@@ -387,15 +387,12 @@ def m4b_data(input_data, metadata, output):
 
 		dir_select_glob = Path(dir_select).glob('**/*')
 
-
-		first_file_index = 0
 		# Find first file with our extension, to check rates against
-		while True:
-			files_sorted = Path(sorted(dir_select_glob)[first_file_index])
-			if files_sorted.suffix == f".{in_ext}":
+		for file in sorted(dir_select_glob):
+			if file.suffix == f".{in_ext}":
+				first_file = file
 				break
-			first_file_index += 1
-		first_file = files_sorted
+
 		logging.debug(f"Got file to run mediainfo on: {first_file}")
 
 		## Mediainfo data
