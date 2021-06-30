@@ -374,24 +374,29 @@ def m4b_data(input_data, metadata, output):
 	if (in_dir.is_dir() and num_of_files > 1) or in_ext == None:
 		logging.info("Processing multiple files in a dir...")
 
+		in_dir_glob = Path(in_dir).glob('**/*')
+
 		# If multi-disc, find the extension
 		if not in_ext:
-			dir_select = sorted(Path(in_dir).glob('**/*'))[0]
-			find_ext = find_extension(dir_select)
-			in_ext = find_ext[0]
+			dir_select = sorted(in_dir_glob)[0]
+			print(dir_select)
+			in_ext = find_extension(dir_select)[1]
+			logging.debug(f"Guessed multi-disc extension to be: {in_ext}")
 		else:
 			dir_select = in_dir
 
-		# Find first file with our extension, to check rates against
+		dir_select_glob = Path(dir_select).glob('**/*')
+
+
 		first_file_index = 0
+		# Find first file with our extension, to check rates against
 		while True:
-			if Path(
-				sorted(
-					Path(dir_select).glob('**/*'))[first_file_index]
-				).suffix == f".{in_ext}":
+			files_sorted = Path(sorted(dir_select_glob)[first_file_index])
+			if files_sorted.suffix == f".{in_ext}":
 				break
 			first_file_index += 1
-		first_file = sorted(Path(dir_select).glob('**/*'))[first_file_index]
+		first_file = files_sorted
+		logging.debug(f"Got file to run mediainfo on: {first_file}")
 
 		## Mediainfo data
 		# Divide bitrate by 1k, round up,
