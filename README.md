@@ -32,22 +32,36 @@ To run Bragi Books as a container, you need to pass some paramaters in the run c
     
 Which all together should look like: 
 
-	docker run --rm -d -v /path/to//input:/input -v /path/to//output:/output -v /appdata/bragibooks/config:/config -p 8000:8000/tcp -e LOG_LEVEL=WARNING bragibooks:latest
+	docker run --rm -d -v /path/to/input:/input -v /path/to/output:/output -v /appdata/bragibooks/config:/config -p 8000:8000/tcp -e LOG_LEVEL=WARNING ghcr.io/djdembeck/bragibooks:latest
 	
 ---
 
-### Webserver (Django):
-  - `python manage.py makemigrations`
+### Webserver (Gunicorn + Django):
+From within the `bragibooks` folder you cloned:
   - `python manage.py migrate`
-  - `python manage.py runserver`
+  - `gunicorn bragibooks_proj.wsgi`
 
 ---
 
 ### CLI:
 You can run the core logic from the terminal without any running server or database
 
+
+```
+usage: merge_cli.py [-h] -i INPUTS [INPUTS ...] [--log_level LOG_LEVEL]
+
+Bragi Books merge cli
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -i INPUTS [INPUTS ...], --inputs INPUTS [INPUTS ...]
+                        Input paths to process
+  --log_level LOG_LEVEL
+                        Set logging level
+```
   - Check the user editable variables in [merge_cli.py](importer/merge_cli.py), and see if there's anything you need to change.
-  - After that, just run `python importer/manage_cli.py` and it will walk you through what you need to get going.
+
+  - On first run, you will be prompted to signin to Audible. This is a one-time process that will be saved to the `config` folder.
 
 ---
 

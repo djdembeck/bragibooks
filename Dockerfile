@@ -38,15 +38,10 @@ ARG PREFIX=/opt/ffmpeg
 ARG MAKEFLAGS="-j$(nproc)"
 
 ENV FFMPEG_VERSION=snapshot \
-	FREETYPE_VERSION=2.10.1 \
 	LAME_VERSION=3.100 \
 	OPUS_VERSION=1.3.1 \
-	X264_VERSION=x264-master \
-	X265_VERSION=3.4 \
-	ZIMG_VERSION=2.9.3 \
 	SRC=/usr/local
 
-ARG FREETYPE_SHA256SUM="3a60d391fd579440561bf0e7f31af2222bc610ad6ce4d9d7bd2165bca8669110 freetype-${FREETYPE_VERSION}.tar.gz"
 ARG OPUS_SHA256SUM="65b58e1e25b2a114157014736a3d9dfeaad8d41be1c8179866f144a2fb44ff9d opus-${OPUS_VERSION}.tar.gz"
 
 ### fdk-aac https://github.com/mstorsjo/fdk-aac
@@ -59,31 +54,6 @@ RUN \
 		rm fdk-aac-master.zip && \
 		autoreconf -fiv && \
 		./configure --prefix="${PREFIX}" --disable-shared --datadir="${DIR}" && \
-		make && \
-		make install
-
-## x264 http://www.videolan.org/developers/x264.html
-RUN \
-		DIR=/tmp/x264 && \
-		mkdir -p ${DIR} && \
-		cd ${DIR} && \
-		curl -sL https://code.videolan.org/videolan/x264/-/archive/master/${X264_VERSION}.tar.bz2 | \
-		tar -jx --strip-components=1 && \
-		./configure --prefix="${PREFIX}" --enable-static --enable-pic --disable-cli && \
-		make && \
-		make install
-
-### x265 http://x265.org/
-RUN \
-		DIR=/tmp/x265 && \
-		mkdir -p ${DIR} && \
-		cd ${DIR} && \
-		curl -sL http://anduin.linuxfromscratch.org/BLFS/x265/x265_${X265_VERSION}.tar.gz  | \
-		tar -zx && \
-		cd x265_${X265_VERSION}/build/linux && \
-		find . -mindepth 1 ! -name 'make-Makefiles.bash' -and ! -name 'multilib.sh' -exec rm -r {} + && \
-		cmake -G "Unix Makefiles" -DCMAKE_INSTALL_PREFIX="$PREFIX" -DENABLE_SHARED:BOOL=OFF -DSTATIC_LINK_CRT:BOOL=ON -DENABLE_CLI:BOOL=OFF ../../source && \
-		sed -i 's/-lgcc_s/-lgcc_eh/g' x265.pc && \
 		make && \
 		make install
 
@@ -111,30 +81,6 @@ RUN \
 		make && \
 		make install
 
-## freetype https://www.freetype.org/
-RUN  \
-		DIR=/tmp/freetype && \
-		mkdir -p ${DIR} && \
-		cd ${DIR} && \
-		curl -sLO https://download.savannah.gnu.org/releases/freetype/freetype-${FREETYPE_VERSION}.tar.gz && \
-		echo ${FREETYPE_SHA256SUM} | sha256sum --check && \
-		tar -zx --strip-components=1 -f freetype-${FREETYPE_VERSION}.tar.gz && \
-		./configure --prefix="${PREFIX}" --enable-static --disable-shared && \
-		make && \
-		make install
-
-## Zimg
-RUN  \
-		DIR=/tmp/zimg && \
-		mkdir -p ${DIR} && \
-		cd ${DIR} && \
-		curl -sLO https://github.com/sekrit-twc/zimg/archive/release-${ZIMG_VERSION}.tar.gz &&\
-		tar -zx --strip-components=1 -f release-${ZIMG_VERSION}.tar.gz && \
-		./autogen.sh && \
-		./configure --enable-static -prefix="${PREFIX}" --disable-shared && \
-		make && \
-		make install
-
 ## ffmpeg https://ffmpeg.org/
 RUN  \
 		DIR=/tmp/ffmpeg && mkdir -p ${DIR} && cd ${DIR} && \
@@ -148,12 +94,8 @@ RUN \
 		--enable-gpl \
 		--enable-version3 \
 		--enable-libfdk-aac \
-		--enable-libfreetype \
 		--enable-libmp3lame \
 		--enable-libopus \
-		--enable-libx264 \
-		--enable-libx265 \
-		--enable-libzimg \
 		--enable-nonfree \
 		--enable-openssl \
 		--pkg-config-flags="--static" \
@@ -233,4 +175,12 @@ COPY --from=ffbuild /opt/ffmpeg/bin/ffprobe /usr/bin
 # USER 99:100
 
 # start server
-CMD python manage.py runserver 0.0.0.0:8000
+CMD python manage.py migrate && \
+	gunicorn bragibooks_proj.wsgi \
+	--bind 0.0.0.0:8000 \
+	--timeout 1200 \
+	--worker-tmp-dir /dev/shm \
+	--workers=2 \
+	--threads=4 \
+	--worker-class=gthread \
+	--reload

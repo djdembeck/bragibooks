@@ -9,7 +9,7 @@ from pydub.utils import mediainfo
 # for non-default m4b-tool install path
 m4bpath = "m4b-tool"
 
-# output dir
+# output directory for cleaned metadata/folder structure
 # leaving blank uses /output for docker or $USER/output for anything else
 output = ""
 
@@ -85,7 +85,7 @@ def audible_parser(asin):
 		aud_json['product']['merchandising_summary']
 		)
 	metadata_dict['short_summary'] = (
-		html2text.html2text(aud_short_summary_json).replace("\n", " ")
+		html2text.html2text(aud_short_summary_json).replace("\n", " ").replace("\"", "'")
 		)
 
 	## Long summary
@@ -189,6 +189,32 @@ def audible_parser(asin):
 	# return all data
 	return metadata_dict
 
+def find_extension(dirpath):
+	EXTENSIONS=['mp3', 'm4a', 'm4b']
+
+	for EXT in EXTENSIONS:
+		if collections.Counter(
+			p.suffix for p in Path(dirpath)
+				.resolve().glob(f'*.{EXT}')
+			):
+			USE_EXT = EXT
+			list_of_files = os.listdir(Path(dirpath))
+			# Case for single file in a folder
+			if sum(
+				x.endswith(f'.{USE_EXT}') 
+				for x in list_of_files
+				) == 1:
+				for m4b_file in Path(dirpath).glob(f'*.{USE_EXT}'):
+					logging.debug(f"Adjusted input for {dirpath} to use single m4b file")
+					dirpath = m4b_file
+				num_of_files = 1
+			else:
+				num_of_files = sum(
+					x.endswith(f'.{USE_EXT}') 
+					for x in list_of_files
+					)
+			return dirpath, USE_EXT, num_of_files
+
 def get_directory(input_take):
 	# Check if input is a dir
 	if Path(input_take).is_dir():
@@ -199,41 +225,27 @@ def get_directory(input_take):
 				f"Found multiple ({num_of_subdirs}) subdirs, "
 					f"using those as input (multi-disc)"
 				)
-			dirpath = inputs
+			dirpath = input_take
 			USE_EXT = None
 			num_of_files = num_of_subdirs
 		else:
 			for dirpath, dirnames, files in os.walk(input_take):
-				EXTENSIONS=['mp3', 'm4a', 'm4b']
+				find_ext = find_extension(dirpath)
+				dirpath = find_ext[0]
+				USE_EXT = find_ext[1]
+				num_of_files = find_ext[2]
 
-				for EXT in EXTENSIONS:
-					if collections.Counter(
-						p.suffix for p in Path(dirpath)
-							.resolve().glob(f'*.{EXT}')
-						):
-						USE_EXT = EXT
-						list_of_files = os.listdir(Path(dirpath))
-						# Case for single file in a folder
-						if sum(
-							x.endswith(f'.{USE_EXT}') 
-							for x in list_of_files
-							) == 1:
-							for m4b_file in Path(dirpath).glob(f'*.{USE_EXT}'):
-								dirpath = m4b_file
-							num_of_files = 1
-						else:
-							num_of_files = sum(
-								x.endswith(f'.{USE_EXT}') 
-								for x in list_of_files
-								)
 	# Check if input is a file
 	elif Path(input_take).is_file():
-		dirpath = Path(input_take)
+		dirpath = input_take
 		USE_EXT_PRE = dirpath.suffix
 		USE_EXT = Path(USE_EXT_PRE).stem.split('.')[1]
 		num_of_files = 1
 
-	return dirpath, USE_EXT, num_of_files
+	logging.debug(f"Final input path is: {dirpath}")
+	logging.debug(f"Extension is: {USE_EXT}")
+	logging.debug(f"Number of files: {num_of_files}")
+	return Path(dirpath), USE_EXT, num_of_files
 
 def m4b_data(input_data, metadata, output):
 	## Checks
@@ -257,7 +269,7 @@ def m4b_data(input_data, metadata, output):
 
 	# Setup output folder defaults
 	if not output:
-		# If using docker, default to /input folder, else $USER/input
+		# If using docker, default to /output folder, else $USER/output
 		if Path('/output').is_dir():
 			logging.debug("Output is set to docker directory")
 			output = Path('/output')
@@ -265,6 +277,20 @@ def m4b_data(input_data, metadata, output):
 			logging.debug("Output is set to home directory")
 			default_output = Path.home()
 			output = Path(f"{default_output}/output")
+
+	# If using docker, default to /input/done folder, else $USER/input/done
+	if Path('/input').is_dir():
+		logging.debug("Input/Junk is set to docker directory")
+		junk_dir = Path('/input/done')
+	else:
+		logging.debug("Input/Junk is set to home directory")
+		default_input = Path.home()
+		junk_dir = Path(f"{default_input}/input/done")
+	
+	Path(junk_dir).mkdir(
+		parents=True,
+		exist_ok=True
+	)
 
 	## Metadata variables
 	# Only use subtitle in case of metadata, not file name
@@ -311,38 +337,74 @@ def m4b_data(input_data, metadata, output):
 	else:
 		num_cpus = cpus_to_use
 
-	# Make necessary directories
+	## Make necessary directories
+	# Final output folder
 	Path(book_output).mkdir(
 		parents=True,
 		exist_ok=True
 	)
 
 	## Array for argument use
+	# main metadata args
+	metadata_args = [
+		f"--name=\"{title}\"",
+		f"--album=\"{path_title}\"",
+		f"--artist=\"{narrator}\"",
+		f"--albumartist=\"{author}\"",
+		f"--year=\"{year}\"",
+		f"--description=\"{summary}\""
+	]
+
+	# args for merge  process
+	processing_args = [
+		'--force',
+		'--no-chapter-reindexing',
+		'--no-cleanup',
+		f'--jobs={num_cpus}'
+	]
+
+	# Set logging level of m4b-tool depending upon log_level
+	level = logging.root.level
+	if level == logging.INFO:
+		processing_args.append('-v')
+	elif level == logging.DEBUG:
+		processing_args.append('-vvv')
+
 	# args for multiple input files in a folder
-	if Path(in_dir).is_dir() and num_of_files > 1 or in_ext == None:
+	if (in_dir.is_dir() and num_of_files > 1) or in_ext == None:
 		logging.info("Processing multiple files in a dir...")
 
+		in_dir_glob = Path(in_dir).glob('**/*')
+
+		# If multi-disc, find the extension
+		if not in_ext:
+			dir_select = sorted(in_dir_glob)[0]
+			print(dir_select)
+			in_ext = find_extension(dir_select)[1]
+			logging.debug(f"Guessed multi-disc extension to be: {in_ext}")
+		else:
+			dir_select = in_dir
+
+		dir_select_glob = Path(dir_select).glob('**/*')
+
 		# Find first file with our extension, to check rates against
-		first_file_index = 0
-		while True:
-			if Path(
-				sorted(
-					os.listdir(in_dir))[first_file_index]
-				).suffix == f".{in_ext}":
+		for file in sorted(dir_select_glob):
+			if file.suffix == f".{in_ext}":
+				first_file = file
 				break
-			first_file_index += 1
-		first_file = sorted(os.listdir(in_dir))[first_file_index]
+
+		logging.debug(f"Got file to run mediainfo on: {first_file}")
 
 		## Mediainfo data
 		# Divide bitrate by 1k, round up,
 		# and return back to 1k divisible for round number.
 		target_bitrate = math.ceil(
-			int(mediainfo(f"{in_dir}/{first_file}")['bit_rate']) / 1000
+			int(mediainfo(first_file)['bit_rate']) / 1000
 		) * 1000
 
 		target_samplerate = int(
 			mediainfo(
-				f"{in_dir}/{first_file}"
+				first_file
 			)['sample_rate']
 		)
 
@@ -352,21 +414,19 @@ def m4b_data(input_data, metadata, output):
 		args = [
 			' merge',
 			f"--output-file=\"{book_output}/{file_title}.m4b\"",
-			f"--name=\"{title}\"",
-			f"--album=\"{path_title}\"",
-			f"--artist=\"{narrator}\"",
-			f"--albumartist=\"{author}\"",
-			f"--year=\"{year}\"",
-			f"--description=\"{summary}\"",
 			f"--audio-bitrate=\"{target_bitrate}\"",
-			f"--audio-samplerate=\"{target_samplerate}\"",
-			'--force',
-			'--no-chapter-reindexing',
-			'--no-cleanup',
-			f'--jobs={num_cpus}'
+			f"--audio-samplerate=\"{target_samplerate}\""
 		]
+		# Add in main metadata and merge args
+		args.extend(metadata_args)
+		args.extend(processing_args)
+
 		if series:
-			args.append(f'--series \"{series}\"')
+			args.append(f"--series=\"{series}\"")
+
+		if in_ext == "m4b" or in_ext == "m4a":
+			logging.info(f"Multiple {in_ext} files, not converting")
+			args.append(f'--no-conversion')
 
 		# m4b command with passed args
 		m4b_cmd = (
@@ -374,7 +434,14 @@ def m4b_data(input_data, metadata, output):
 		' '.join(args) + 
 		f" \"{in_dir}\""
 		)
+		logging.debug(f"M4B command: {m4b_cmd}")
 		os.system(m4b_cmd)
+
+		# Move obsolete input to processed folder
+		shutil.move(
+			f"{in_dir}",
+			f"{junk_dir}"
+		)
 
 		m4b_fix_chapters(
 			f"{book_output}/{file_title}.chapters.txt",
@@ -383,7 +450,9 @@ def m4b_data(input_data, metadata, output):
 			)
 		
 	# args for single m4b input file
-	elif Path(in_dir).is_file() and in_ext == "m4b":
+	elif (in_dir.is_file()) and (in_ext == "m4b" or in_ext == "m4a"):
+		logging.info(f"Processing single {in_ext} input...")
+
 		## Mediainfo data
 		# Divide bitrate by 1k, round up,
 		# and return back to 1k divisible for round number.
@@ -394,30 +463,28 @@ def m4b_data(input_data, metadata, output):
 		target_samplerate =	int(mediainfo(in_dir)['sample_rate'])
 		##
 
-		logging.info("Processing single M4B input...")
 		m4b_cmd = (
 			m4b_tool + 
 		' meta ' + 
 		f'--export-chapters=\"\"' + 
 		f" \"{in_dir}\""
 		)
+		logging.debug(f"M4B command: {m4b_cmd}")
 		os.system(m4b_cmd)
+		
 		shutil.move(
 			f"{in_dir.parent}/{in_dir.stem}.chapters.txt",
 			f"{book_output}/{file_title}.chapters.txt"
 			)
 
 		args = [
-			' meta',
-			f"--name=\"{title}\"",
-			f"--album=\"{path_title}\"",
-			f"--artist=\"{narrator}\"",
-			f"--albumartist=\"{author}\"",
-			f"--year=\"{year}\"",
-			f"--description=\"{summary}\""
+			' meta'
 		]
+		# Add in main metadata args
+		args.extend(metadata_args)
+
 		if series:
-			args.append(f"--series \"{series}\"")
+			args.append(f"--series=\"{series}\"")
 
 		# make backup file
 		shutil.copy(
@@ -430,12 +497,29 @@ def m4b_data(input_data, metadata, output):
 			m4b_tool + 
 			' '.join(args) + 
 			f" \"{in_dir.parent}/{in_dir.stem}.new.m4b\"")
+		logging.debug(f"M4B command: {m4b_cmd}")
 		os.system(m4b_cmd)
 
 		# Move completed file
 		shutil.move(
 			f"{in_dir.parent}/{in_dir.stem}.new.m4b",
 			f"{book_output}/{file_title}.m4b"
+		)
+
+		# Move obsolete input to processed folder
+		if Path(in_dir.parent, 'done') == junk_dir:
+			logging.debug("Junk dir is direct parent")
+			move_dir = in_dir
+		elif Path(in_dir.parents[1], 'done') == junk_dir:
+			logging.debug("Junk dir is double parent")
+			move_dir = in_dir.parent
+		else:
+			logging.warning("Couldn't find junk dir relative to input")
+
+		if move_dir:
+			shutil.move(
+				f"{move_dir}",
+				f"{junk_dir}"
 			)
 
 		m4b_fix_chapters(
@@ -444,8 +528,71 @@ def m4b_data(input_data, metadata, output):
 			m4b_tool
 			)
 
+	elif in_dir.is_file() and in_ext == "mp3":
+		logging.info(f"Processing single {in_ext} input...")
+
+		## Mediainfo data
+		# Divide bitrate by 1k, round up,
+		# and return back to 1k divisible for round number.
+		target_bitrate = math.ceil(
+			int(mediainfo(f"{in_dir}")['bit_rate']) / 1000
+		) * 1000
+
+		target_samplerate = int(
+			mediainfo(
+				f"{in_dir}"
+			)['sample_rate']
+		)
+
+		logging.info(f"Source bitrate: {target_bitrate}")
+		logging.info(f"Source samplerate: {target_samplerate}")
+		##
+		args = [
+			' merge',
+			f"--output-file=\"{book_output}/{file_title}.m4b\"",
+			f"--audio-bitrate=\"{target_bitrate}\"",
+			f"--audio-samplerate=\"{target_samplerate}\"",
+			'--skip-cover'
+		]
+		# Add in main metadata and merge args
+		args.extend(metadata_args)
+		args.extend(processing_args)
+
+		if series:
+			args.append(f"--series=\"{series}\"")
+
+		# m4b command with passed args
+		m4b_cmd = (
+			m4b_tool + 
+		' '.join(args) + 
+		f" \"{in_dir}\""
+		)
+		logging.debug(f"M4B command: {m4b_cmd}")
+		os.system(m4b_cmd)
+
+		# Move obsolete input to processed folder
+		if Path(in_dir.parent, 'done') == junk_dir:
+			logging.debug("Junk dir is direct parent")
+			move_dir = in_dir
+		elif Path(in_dir.parents[1], 'done') == junk_dir:
+			logging.debug("Junk dir is double parent")
+			move_dir = in_dir.parent
+		else:
+			logging.warning("Couldn't find junk dir relative to input")
+
+		if move_dir:
+			shutil.move(
+				f"{move_dir}",
+				f"{junk_dir}"
+			)
+
+		logging.warning(f"Not processing chapters for  {title}, since it's an mp3")
+
 	elif not in_ext:
 		logging.error(f"No recognized filetypes found for {title}")
+
+	else:
+		logging.error(f"Couldn't determine input type/extension for {title}")
 
 def m4b_fix_chapters(input, target, m4b_tool):
 	new_file_content = ""
@@ -486,7 +633,7 @@ def call(inputs):
 		# If no auth file exists, call login function
 		audible_login()
 
-	print(f"Working on: {inputs}")
+	logging.info(f"Working on: {inputs}")
 	input_data = get_directory(inputs)
 	asin = input("Audiobook ASIN: ")
 	metadata = audible_parser(asin)
@@ -520,4 +667,7 @@ if __name__ == "__main__":
 		logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 	# Run through inputs
 	for inputs in args.inputs:
-		call(inputs)
+		if inputs.exists():
+			call(inputs)
+		else:
+			logging.error(f"Input \"{inputs}\" does not exist")

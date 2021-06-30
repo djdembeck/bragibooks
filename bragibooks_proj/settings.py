@@ -31,7 +31,7 @@ with open(SECRET_PATH) as f:
 	SECRET_KEY = f.read().strip()
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = False
 
 ALLOWED_HOSTS = ['*']
 
@@ -126,15 +126,23 @@ STATIC_URL = '/static/'
 # Set environment variable DJANGO_LOG_LEVEL to desired level
 # https://docs.djangoproject.com/en/2.2/topics/logging/
 LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
-        },
-    },
-    'root': {
-        'handlers': ['console'],
-        'level': os.getenv('LOG_LEVEL', 'INFO'),
-    },
+	'version': 1,
+	'disable_existing_loggers': False,
+	'handlers': {
+		'console': {
+			'level': os.getenv('LOG_LEVEL', 'INFO'),
+			'class': 'logging.StreamHandler',
+		},
+	},
+	'root': {
+		'handlers': ['console'],
+		'level': os.getenv('LOG_LEVEL', 'INFO'),
+	},
+	'loggers': {
+		'gunicorn': {  # this was what I was missing, I kept using django and not seeing any server logs
+			'level': os.getenv('LOG_LEVEL', 'INFO'),
+			'handlers': ['console'],
+			'propagate': True,
+		},
+	},
 }
