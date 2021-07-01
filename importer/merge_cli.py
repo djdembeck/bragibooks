@@ -378,8 +378,13 @@ def m4b_data(input_data, metadata, output):
 
 		# If multi-disc, find the extension
 		if not in_ext:
-			dir_select = sorted(in_dir_glob)[0]
-			print(dir_select)
+			i = 0
+			sorted_multi=sorted(in_dir_glob)
+			while not sorted_multi[i].is_dir():
+				logging.debug("Looking for first dir in multi-dir...")
+				i += 1
+			dir_select = sorted_multi[i]
+			logging.debug(f"Result was #{i+1} for first dir: {dir_select}")
 			in_ext = find_extension(dir_select)[1]
 			logging.debug(f"Guessed multi-disc extension to be: {in_ext}")
 		else:
