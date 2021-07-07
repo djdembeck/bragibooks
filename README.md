@@ -1,6 +1,6 @@
 # Bragi Books
 **Bragi - (god of poetry in [Norse mythology](https://en.wikipedia.org/wiki/Bragi)):**
-An audiobook library cleanup & management app, written for both web use (Django) and CLI (Python). Leveraging Audible's unofficial API to source metadata. Successor of [m4b-merge](https://github.com/djdembeck/m4b-merge)
+An audiobook library cleanup & management app, written for both web use (Django) and CLI (Python). Leveraging Audible's unofficial API to source metadata. Core logic and processing done by my other tool, [m4b-merge](https://github.com/djdembeck/m4b-merge)
 
 ## Screens
 
@@ -40,28 +40,6 @@ Which all together should look like:
 From within the `bragibooks` folder you cloned:
   - `python manage.py migrate`
   - `gunicorn bragibooks_proj.wsgi`
-
----
-
-### CLI:
-You can run the core logic from the terminal without any running server or database
-
-
-```
-usage: merge_cli.py [-h] -i INPUTS [INPUTS ...] [--log_level LOG_LEVEL]
-
-Bragi Books merge cli
-
-optional arguments:
-  -h, --help            show this help message and exit
-  -i INPUTS [INPUTS ...], --inputs INPUTS [INPUTS ...]
-                        Input paths to process
-  --log_level LOG_LEVEL
-                        Set logging level
-```
-  - Check the user editable variables in [merge_cli.py](importer/merge_cli.py), and see if there's anything you need to change.
-
-  - On first run, you will be prompted to signin to Audible. This is a one-time process that will be saved to the `config` folder.
 
 ---
 

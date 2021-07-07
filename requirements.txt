@@ -1,7 +1,2 @@
-html2text==2020.1.16
-pydub==0.25.1
-requests==2.24.0
 Django==2.2.4
-pathvalidate==2.4.1
-audible==0.5.4
 gunicorn==20.1.0
