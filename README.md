@@ -38,6 +38,7 @@ Which all together should look like:
 
 ### Webserver (Gunicorn + Django):
 From within the `bragibooks` folder you cloned:
+  - Install [m4b-merge](https://github.com/djdembeck/m4b-merge) and it's requirements
   - `python manage.py migrate`
   - `gunicorn bragibooks_proj.wsgi`
 
