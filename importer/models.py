@@ -5,9 +5,6 @@ class BookManager(models.Manager):
     def book_asin_validator(self, asin):
         errors = {}
 
-        if Book.objects.filter(asin=asin):
-            errors["dupe_asin"] = f"A book with the ASIN {asin} already exists"
-
         if len(asin) != 10 and len(asin) != 0:
             errors['invalid_asin'] = f"Invalid ASIN format for {asin}"
 

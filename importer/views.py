@@ -1,4 +1,7 @@
+# Django imports
 from django.shortcuts import render, redirect
+from django.contrib import messages
+# System imports
 import logging
 import os
 from pathlib import Path
@@ -6,7 +9,6 @@ from pathlib import Path
 from .models import Book, Author, Narrator
 # core merge logic:
 from m4b_merge import audible_helper, config, helpers, m4b_helper
-from django.contrib import messages
 # To display book length
 from datetime import timedelta
 
@@ -59,7 +61,7 @@ def match(request):
     return render(request, "match.html", context)
 
 
-def make_models(asin, input_data):
+def run_m4b_merge(asin, input_data):
     # Create BookData object from asin response
     aud = audible_helper.BookData(asin)
     metadata = aud.parser()
@@ -69,6 +71,18 @@ def make_models(asin, input_data):
     m4b = m4b_helper.M4bMerge(input_data, metadata, chapters)
     m4b.run_merge()
 
+    # Make models only if book doesn't exist
+    if not Book.objects.filter(asin=asin):
+        new_book = make_book_model(metadata, m4b, asin, input_data)
+        make_author_model(metadata, new_book)
+        make_narrator_model(metadata, new_book)
+    else:
+        logger.warning(
+            "Book already exists in database, only merging files"
+        )
+
+
+def make_book_model(metadata, m4b, asin, input_data):
     # Book DB entry
     if 'subtitle' in metadata:
         base_title = metadata['title']
@@ -104,7 +118,10 @@ def make_models(asin, input_data):
         new_book.series = metadata['series']
 
     new_book.save()
+    return new_book
 
+
+def make_author_model(metadata, new_book):
     # Author DB entry
     # Create new entry for each author if there's more than one
     if len(metadata['authors']) > 1:
@@ -199,6 +216,8 @@ def make_models(asin, input_data):
             existing_author.books.add(new_book)
             existing_author.save()
 
+
+def make_narrator_model(metadata, new_book):
     # Narrator DB entry
     # Create new entry for each narrator if there's more than one
     if len(metadata['narrators']) > 1:
@@ -282,15 +301,13 @@ def get_asin(request):
                 return redirect('/import/match')
             else:
                 # Check that asin actually returns data from audible
-                check = helpers.validate_asin(asin)
-                if check == 200:
-                    asin_arr.append(asin)
-                    logger.info(f"Validated ASIN: {asin}")
-                else:
-                    logger.error(
-                        "Got http error during ASIN check"
-                    )
+                try:
+                    helpers.validate_asin(asin)
+                except ValueError:
+                    messages.error(request, "Bad ASIN: " + asin)
                     return redirect('/import/match')
+                else:
+                    asin_arr.append(asin)
 
     for i in range(len(asin_arr)):
         input_data = helpers.get_directory(
@@ -300,7 +317,7 @@ def get_asin(request):
             f"Making models and merging files for: "
             f"{request.session['input_dir'][i]}"
         )
-        make_models(asin_arr[i], input_data)
+        run_m4b_merge(asin_arr[i], input_data)
 
     request.session['asins'] = asin_arr
     return redirect('/import/confirm')
