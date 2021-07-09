@@ -185,4 +185,5 @@ CMD python manage.py migrate && \
     --workers=2 \
     --threads=4 \
     --worker-class=gthread \
-    --reload
+    --reload \
+    --enable-stdio-inheritance
