@@ -57,7 +57,7 @@ def match(request):
     context_item = []
     for this_dir in request.session['input_dir']:
         try:
-            book = Book.objects.get(src_path=Path(rootdir, this_dir))
+            book = Book.objects.get(src_path=f"{rootdir}/{this_dir}")
         except Book.DoesNotExist:
             context_item.append({'src_path': this_dir})
         else:
@@ -82,7 +82,7 @@ def run_m4b_merge(asin, input_data):
 
     # Make models only if book doesn't exist
     if not Book.objects.filter(asin=asin):
-        new_book = make_book_model(metadata, m4b, asin, input_data)
+        new_book = make_book_model(metadata, m4b, asin, input_data, original_path)
         make_author_model(metadata, new_book)
         make_narrator_model(metadata, new_book)
     else:
@@ -91,7 +91,7 @@ def run_m4b_merge(asin, input_data):
         )
 
 
-def make_book_model(metadata, m4b, asin, input_data):
+def make_book_model(metadata, m4b, asin, input_data, original_path):
     # Book DB entry
     if 'subtitle' in metadata:
         base_title = metadata['title']
@@ -111,7 +111,7 @@ def make_book_model(metadata, m4b, asin, input_data):
         runtime_length_minutes=metadata['runtime_length_min'],
         format_type=metadata['format_type'],
         converted=True,
-        src_path=input_data[0],
+        src_path=original_path,
         dest_path=(
             f"\""
             f"{m4b.book_output}/"
@@ -319,14 +319,15 @@ def get_asin(request):
                     asin_arr.append(asin)
 
     for i in range(len(asin_arr)):
+        original_path = f"{rootdir}/{request.session['input_dir'][i]}"
         input_data = helpers.get_directory(
-            Path(rootdir, request.session['input_dir'][i])
+            Path(original_path)
         )
         logger.info(
             f"Making models and merging files for: "
             f"{request.session['input_dir'][i]}"
         )
-        run_m4b_merge(asin_arr[i], input_data)
+        run_m4b_merge(asin_arr[i], input_data, original_path)
 
     request.session['asins'] = asin_arr
     return redirect('/import/confirm')
