@@ -52,7 +52,16 @@ def match(request):
         )
         return redirect('/import')
 
-    context_item = request.session['input_dir']
+    # Check if any of these inputs exist in our DB
+    # If so, prepopulate their asins
+    context_item = []
+    for this_dir in request.session['input_dir']:
+        try:
+            book = Book.objects.get(src_path=Path(rootdir, this_dir))
+        except Book.DoesNotExist:
+            context_item.append({'src_path': this_dir})
+        else:
+            context_item.append({'src_path': this_dir, 'asin': book.asin})
 
     context = {
         "this_input": context_item
