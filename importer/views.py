@@ -70,7 +70,7 @@ def match(request):
     return render(request, "match.html", context)
 
 
-def run_m4b_merge(asin, input_data):
+def run_m4b_merge(asin, input_data, original_path):
     # Create BookData object from asin response
     aud = audible_helper.BookData(asin)
     metadata = aud.parser()
@@ -82,7 +82,9 @@ def run_m4b_merge(asin, input_data):
 
     # Make models only if book doesn't exist
     if not Book.objects.filter(asin=asin):
-        new_book = make_book_model(metadata, m4b, asin, input_data, original_path)
+        new_book = make_book_model(
+            metadata, m4b, asin, input_data, original_path
+        )
         make_author_model(metadata, new_book)
         make_narrator_model(metadata, new_book)
     else:
