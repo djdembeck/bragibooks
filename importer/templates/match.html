@@ -54,7 +54,7 @@
 									<div class="field-body">
 										<div class="field">
 											<div class="control">
-												<input class="input is-fullwidth" name="asin-{{ forloop.counter|add:"-1" }}" type="text" placeholder="{{ input }}">
+												<input class="input is-fullwidth" name="asin-{{ forloop.counter|add:"-1" }}" type="text" {% if input.asin %}value="{{ input.asin }}"{% else %}placeholder="{{ input.src_path }}"{% endif %}>
 											</div>
 										</div>
 									</div>
