@@ -1,76 +1,35 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-	<meta charset="UTF-8">
-	<meta http-equiv="X-UA-Compatible" content="IE=edge">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>Bragi Books</title>
-	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.2/css/bulma.min.css">
-</head>
-<body>
-	<section class="hero is-small is-warning">
-		<nav class="level">
-			<div class="hero-body">
-				<p class="title">
-					Bragi Books
-				</p>
-			</div>
-			<nav class="breadcrumb is-medium is-right" aria-label="breadcrumbs">
-				<ul>
-					<li><a href="/import">Import</a></li>
-					<li><a href="/import/match">Match</a></li>
-					<li class="is-active" aria-current="page"><a class="has-text-weight-light" href="/import/confirm">Confirm</a></li>
-				</ul>
-			</nav>
-		</nav>
-	</section>
-	<section class="section has-background-warning-dark">
-		<div class="container">
-			{% if messages %}
-			<div class="notification is-danger">
-				<ul>
-					{% for message in messages %}
-					<li>{{message}}</li>
-					{% endfor %}
-				</ul>
-			</div>
-			<div class="block"></div> 
-			{% endif %}
-		</div>
-		<div class="container">
-			{% for this_book, book_length in finished_books %}
-				<div class="columns">
-					{% if this_book.asin %}
-					<div class="column is-one-quarter">
-						<div class="box">
-							<div class="content">
-								<ul style="list-style: none; margin-left: 0; margin-top: 0;">
-									<li><span class="has-text-weight-bold is-size-4">Title:</span> <span class="is-size-5"> {{ this_book.title }}{% if this_book.subtitle %} - {{ this_book.subtitle }}{% endif %}</span></li>
-									<li><span class="has-text-weight-semibold is-size-6">Author(s):</span> {% for author in this_book.authors.all %}{% if not forloop.first %}{% if forloop.last %} and {% else %}, {% endif %}{% endif %}{{ author.first_name }} {{ author.last_name }}{% endfor %}</li>
-									<li><span class="has-text-weight-semibold is-size-6">Narrator(s):</span> {% for narrator in this_book.narrators.all %}{% if not forloop.first %}{% if forloop.last %} and {% else %}, {% endif %}{% endif %}{{ narrator.first_name }} {{ narrator.last_name }}{% endfor %} </li>
-									{% if this_book.series %}<li><span class="has-text-weight-semibold is-size-6">Series:</span> {{ this_book.series }}</li>{% endif %}
-									<li><span class="has-text-weight-semibold is-size-6">Length:</span> {{ book_length }} </li>
-									<li><span class="has-text-weight-semibold is-size-6">Type:</span> <span style="text-transform:capitalize">{{ this_book.format_type }}</span></li>
-									<li><span class="has-text-weight-semibold is-size-6">Release Date:</span> {{ this_book.release_date }}</li>
-									<li><span class="has-text-weight-semibold is-size-6">Language:</span> <span style="text-transform:capitalize">{{ this_book.lang }}</span></li>
-									<li><span class="has-text-weight-semibold is-size-6">Publisher:</span> <span style="text-transform:capitalize">{{ this_book.publisher }}</span></li>
-								</ul>
-							</div>
-						</div>
-					</div>
-					<div class="box">
-						<div class="content">
-							<span class="has-text-weight-semibold is-size-3">Description:</span>
-							<p>
-							{{ this_book.long_desc|safe }}
-							</p>
-						</div>
-					</div>
-					<div class="block"></div>
-					{% endif %}
-				</div>
-			{% endfor %}
-		</div>
-	</section>
-</body>
-</html>
+{% extends "base.html" %}
+{% block content %}
+{% for this_book, book_length in finished_books %}
+    <div class="columns">
+        {% if this_book.asin %}
+        <div class="column is-one-quarter">
+            <div class="box">
+                <div class="content">
+                    <ul style="list-style: none; margin-left: 0; margin-top: 0;">
+                        <li><span class="has-text-weight-bold is-size-4">Title:</span> <span class="is-size-5"> {{ this_book.title }}{% if this_book.subtitle %} - {{ this_book.subtitle }}{% endif %}</span></li>
+                        <li><span class="has-text-weight-semibold is-size-6">Author(s):</span> {% for author in this_book.authors.all %}{% if not forloop.first %}{% if forloop.last %} and {% else %}, {% endif %}{% endif %}{{ author.first_name }} {{ author.last_name }}{% endfor %}</li>
+                        <li><span class="has-text-weight-semibold is-size-6">Narrator(s):</span> {% for narrator in this_book.narrators.all %}{% if not forloop.first %}{% if forloop.last %} and {% else %}, {% endif %}{% endif %}{{ narrator.first_name }} {{ narrator.last_name }}{% endfor %} </li>
+                        {% if this_book.series %}<li><span class="has-text-weight-semibold is-size-6">Series:</span> {{ this_book.series }}</li>{% endif %}
+                        <li><span class="has-text-weight-semibold is-size-6">Length:</span> {{ book_length }} </li>
+                        <li><span class="has-text-weight-semibold is-size-6">Type:</span> <span style="text-transform:capitalize">{{ this_book.format_type }}</span></li>
+                        <li><span class="has-text-weight-semibold is-size-6">Release Date:</span> {{ this_book.release_date }}</li>
+                        <li><span class="has-text-weight-semibold is-size-6">Language:</span> <span style="text-transform:capitalize">{{ this_book.lang }}</span></li>
+                        <li><span class="has-text-weight-semibold is-size-6">Publisher:</span> <span style="text-transform:capitalize">{{ this_book.publisher }}</span></li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        <div class="box">
+            <div class="content">
+                <span class="has-text-weight-semibold is-size-3">Description:</span>
+                <p>
+                {{ this_book.long_desc|safe }}
+                </p>
+            </div>
+        </div>
+        <div class="block"></div>
+        {% endif %}
+    </div>
+{% endfor %}
+{% endblock %}
