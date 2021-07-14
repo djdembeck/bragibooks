@@ -297,6 +297,9 @@ def get_asin(request):
     # check that user is signed into audible api
     auth_file = Path(config.config_path, ".aud_auth.txt")
     if not auth_file.exists():
+        messages.error(
+            request, "You need to login to the Audible API (one-time)"
+        )
         return redirect('/import/api_auth')
 
     asin_arr = []

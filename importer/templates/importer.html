@@ -1,82 +1,41 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-	<meta charset="UTF-8">
-	<meta http-equiv="X-UA-Compatible" content="IE=edge">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>Bragi Books</title>
-	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.2/css/bulma.min.css">
-</head>
-<body>
-	<section class="hero is-small is-warning">
-		<nav class="level">
-			<div class="hero-body">
-				<p class="title">
-					Bragi Books
-				</p>
-			</div>
-			<nav class="breadcrumb is-medium is-right" aria-label="breadcrumbs">
-				<ul>
-					<li class="is-active" aria-current="page"><a class="has-text-weight-light" href="/import">Import</a></li>
-					<li><a href="/import/match">Match</a></li>
-					<li><a href="/import/confirm">Confirm</a></li>
-				</ul>
-			</nav>
-		</nav>
-	</section>
-	<section class="section has-background-warning-dark">
-		<div class="container">
-			{% if messages %}
-			<div class="notification is-danger">
-				<ul>
-					{% for message in messages %}
-					<li>{{message}}</li>
-					{% endfor %}
-				</ul>
-			</div>
-			<div class="block"></div> 
-			{% endif %}
-		</div>
-		<div class="container">
-			<div class="columns">
-				<div class="column">
-					<div class="card">
-						<div class="card-header is-center">
-							<div class="card-header-title">
-								<p class="title">Select input</p>
-							</div>
-						</div>
-						<form action="/import/dir_selection" method="POST">
-							{% csrf_token %}
-							<div class="card-content">
-								<div class="field is-horizontal">
-									<div class="field-body">
-										<div class="field">
-											<div class="control">
-												<div class="select is-multiple is-fullwidth">
-													<select multiple size="15" name="input_dir">
-														{% for list_item in this_dir %}
-														<option value="{{ list_item }}"><p>{{ list_item }}</p></option>
-														{% endfor %}
-													</select>
-												</div>
-											</div>
-										</div>
-									</div>
-								</div>
-							</div>
-							<footer class="card-footer">
-								<div class="card-footer-item">
-									<div class="control">
-										<button class="button is-link is-fullwidth">Next</button>
-									</div>
-								</div>
-							</footer>
-						</form>
-					</div>
-				</div>
-			</div>
-		</div>
-	</section>
-</body>
-</html>
+{% extends "base.html" %}
+{% block content %}
+<div class="columns">
+    <div class="column">
+        <div class="card">
+            <div class="card-header is-center">
+                <div class="card-header-title">
+                    <p class="title">Select input</p>
+                </div>
+            </div>
+            <form action="/import/dir_selection" method="POST">
+                {% csrf_token %}
+                <div class="card-content">
+                    <div class="field is-horizontal">
+                        <div class="field-body">
+                            <div class="field">
+                                <div class="control">
+                                    <div class="select is-multiple is-fullwidth">
+                                        <select multiple size="15" name="input_dir">
+                                            {% for list_item in this_dir %}
+                                            <option value="{{ list_item }}"><p>{{ list_item }}</p></option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <footer class="card-footer">
+                    <div class="card-footer-item">
+                        <div class="control">
+                            <button class="button is-link is-fullwidth">Next</button>
+                        </div>
+                    </div>
+                </footer>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

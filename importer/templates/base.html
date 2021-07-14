@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Bragi Books{% endblock %}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.2/css/bulma.min.css">
+</head>
+<body>
+    <section class="hero is-small is-warning">
+        <nav class="level">
+            <div class="hero-body">
+                <p class="title">
+                    Bragi Books
+                </p>
+            </div>
+            <nav class="breadcrumb is-medium is-right" aria-label="breadcrumbs">
+                {% with request.resolver_match.url_name as url_name %}
+                <ul>
+                    <li {% if url_name == 'home' %}class="is-active" aria-current="page"{% endif %}><a {% if url_name == 'home' %}class="has-text-weight-light"{% endif %} href="{% url 'home' %}">Import</a></li>
+                    <li {% if url == 'match' %}class="is-active" aria-current="page"{% endif %}><a {% if url_name == 'match' %}class="has-text-weight-light"{% endif %} href="{% url 'match' %}">Match</a></li>
+                    <li {% if url == 'finish' %}class="is-active" aria-current="page"{% endif %}><a {% if url_name == 'finish' %}class="has-text-weight-light"{% endif %} href="{% url 'finish' %}">Confirm</a></li>
+                </ul>
+                {% endwith %}
+            </nav>
+        </nav>
+    </section>
+    <section class="section has-background-warning-dark">
+        <div class="container">
+            {% if messages %}
+            <div class="notification is-danger">
+                <ul>
+                    {% for message in messages %}
+                    <li>{{message}}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+            <div class="block"></div> 
+            {% endif %}
+        </div>
+        <div class="container">
+            {% block content %}{% endblock %}
+        </div>
+    </section>
+</body>
+</html>
