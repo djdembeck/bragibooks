@@ -335,7 +335,9 @@ def get_asin(request):
             )
             run_m4b_merge(asin_arr[i], input_data, original_path)
         else:
-            messages.error(request, "Stale directory data, please try again")
+            messages.error(
+                request, f"No supported files in {original_path}"
+            )
             return redirect('/import/match')
 
     request.session['asins'] = asin_arr
