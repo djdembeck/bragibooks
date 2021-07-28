@@ -36,7 +36,7 @@ To run Bragi Books as a container, you need to pass some paramaters in the run c
     
 Which all together should look like: 
 
-	docker run --rm -d -v /path/to/input:/input -v /path/to/output:/output -v /appdata/bragibooks/config:/config -p 8000:8000/tcp -e LOG_LEVEL=WARNING ghcr.io/djdembeck/bragibooks:latest
+	docker run --rm -d --name bragibooks -v /path/to/input:/input -v /path/to/output:/output -v /appdata/bragibooks/config:/config -p 8000:8000/tcp -e LOG_LEVEL=WARNING ghcr.io/djdembeck/bragibooks:main
 	
 ---
 

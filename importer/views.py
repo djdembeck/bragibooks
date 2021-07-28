@@ -328,11 +328,17 @@ def get_asin(request):
         input_data = helpers.get_directory(
             Path(original_path)
         )
-        logger.info(
-            f"Making models and merging files for: "
-            f"{request.session['input_dir'][i]}"
-        )
-        run_m4b_merge(asin_arr[i], input_data, original_path)
+        if input_data:
+            logger.info(
+                f"Making models and merging files for: "
+                f"{request.session['input_dir'][i]}"
+            )
+            run_m4b_merge(asin_arr[i], input_data, original_path)
+        else:
+            messages.error(
+                request, f"No supported files in {original_path}"
+            )
+            return redirect('/import/match')
 
     request.session['asins'] = asin_arr
     return redirect('/import/confirm')
