@@ -1,6 +1,7 @@
 # Django imports
 from django.shortcuts import render, redirect
 from django.contrib import messages
+from django.views.generic import TemplateView
 # System imports
 import logging
 import os
@@ -22,158 +23,168 @@ else:
     rootdir = f"{str(Path.home())}/input"
 
 
-def importer(request):
-    folder_arr = []
-    for path in sorted(
-        Path(rootdir).iterdir(),
-        key=os.path.getmtime,
-        reverse=True
-    ):
-        base = os.path.basename(path)
-        folder_arr.append(base)
+class AuthView(TemplateView):
+    template_name = "authenticate.html"
 
-    context = {
-        "this_dir": folder_arr,
-    }
-    return render(request, "importer.html", context)
+    def post(self):
+        aud_reg = audible_helper.AudibleAuth(
+            USERNAME=self.request.POST['aud_email'],
+            PASSWORD=self.request.POST['aud_pass'])
+        aud_reg.register()
+        return redirect("match")
 
 
-def dir_selection(request):
-    request.session['input_dir'] = request.POST.getlist('input_dir')
-    return redirect('/import/match')
+class ImportView(TemplateView):
+    template_name = "importer.html"
+
+    def get_context_data(self, **kwargs):
+        folder_arr = []
+        for path in sorted(
+            Path(rootdir).iterdir(),
+            key=os.path.getmtime,
+            reverse=True
+        ):
+            base = os.path.basename(path)
+            folder_arr.append(base)
+
+        context = {
+            "this_dir": folder_arr,
+        }
+        return context
+
+    def post(self, request):
+        request.session['input_dir'] = request.POST.getlist('input_dir')
+        return redirect("match")
 
 
-def match(request):
-    # Redirect if this is a new session
-    if 'input_dir' not in request.session:
-        logger.warning(
-            "No session data found, "
-            "returning to import page"
-        )
-        return redirect('/import')
+class MatchView(TemplateView):
+    template_name = "match.html"
 
-    # Check if any of these inputs exist in our DB
-    # If so, prepopulate their asins
-    context_item = []
-    for this_dir in request.session['input_dir']:
-        try:
-            book = Book.objects.get(src_path=f"{rootdir}/{this_dir}")
-        except Book.DoesNotExist:
-            context_item.append({'src_path': this_dir})
-        else:
-            context_item.append({'src_path': this_dir, 'asin': book.asin})
+    def get(self, request):
+        # Redirect if this is a new session
+        if 'input_dir' not in request.session:
+            logger.warning(
+                "No session data found, "
+                "returning to import page"
+            )
+            return redirect("home")
+        return render(request, self.template_name, self.get_context_data())
 
-    context = {
-        "this_input": context_item
-    }
-
-    return render(request, "match.html", context)
-
-
-def api_auth(request):
-    return render(request, "authenticate.html")
-
-
-def get_auth(request):
-    aud_reg = audible_helper.AudibleAuth(
-        USERNAME=request.POST['aud_email'],
-        PASSWORD=request.POST['aud_pass'])
-    aud_reg.register()
-    return redirect('/import/match')
-
-
-def get_asin(request):
-    if 'input_dir' not in request.session:
-        logger.warning(
-            "No session data found, "
-            "returning to import page"
-        )
-        return redirect('/import')
-
-    # check that user is signed into audible api
-    auth_file = Path(config.config_path, ".aud_auth.txt")
-    if not auth_file.exists():
-        messages.error(
-            request, "You need to login to the Audible API (one-time)"
-        )
-        return redirect('/import/api_auth')
-
-    asin_arr = []
-    dict1 = request.POST
-    for key, value in dict1.items():
-        if key != "csrfmiddlewaretoken":
-            asin = value
-            # Check for validation errors
-            errors = Book.objects.book_asin_validator(asin)
-            if len(errors) > 0:
-                for k, v in errors.items():
-                    messages.error(request, v)
-                return redirect('/import/match')
+    def get_context_data(self, **kwargs):
+        # Check if any of these inputs exist in our DB
+        # If so, prepopulate their asins
+        context_item = []
+        for this_dir in self.request.session['input_dir']:
+            try:
+                book = Book.objects.get(src_path=f"{rootdir}/{this_dir}")
+            except Book.DoesNotExist:
+                context_item.append({'src_path': this_dir})
             else:
-                # Check that asin actually returns data from audible
-                try:
-                    helpers.validate_asin(asin)
-                except ValueError:
-                    messages.error(request, "Bad ASIN: " + asin)
-                    return redirect('/import/match')
-                else:
-                    asin_arr.append(asin)
+                context_item.append({'src_path': this_dir, 'asin': book.asin})
 
-    for i in range(len(asin_arr)):
-        original_path = f"{rootdir}/{request.session['input_dir'][i]}"
-        input_data = helpers.get_directory(
-            Path(original_path)
-        )
-        if input_data:
-            logger.info(
-                f"Making models and merging files for: "
-                f"{request.session['input_dir'][i]}"
+        context = {
+            "this_input": context_item
+        }
+
+        return context
+
+    def post(self, request):
+        if 'input_dir' not in request.session:
+            logger.warning(
+                "No session data found, "
+                "returning to import page"
             )
-            # Create Merge class object
-            merge_object = Merge(
-                asin_arr[i], input_data, original_path
-            )
-            # Run merge function for the object
-            merge_object.run_m4b_merge()
-        else:
+            return redirect("home")
+
+        # check that user is signed into audible api
+        auth_file = Path(config.config_path, ".aud_auth.txt")
+        if not auth_file.exists():
             messages.error(
-                request, f"No supported files in {original_path}"
+                request, "You need to login to the Audible API (one-time)"
             )
-            return redirect('/import/match')
+            return redirect("auth")
 
-    request.session['asins'] = asin_arr
-    return redirect('/import/confirm')
+        asin_arr = []
+        dict1 = request.POST
+        for key, value in dict1.items():
+            if key != "csrfmiddlewaretoken":
+                asin = value
+                # Check for validation errors
+                errors = Book.objects.book_asin_validator(asin)
+                if len(errors) > 0:
+                    for k, v in errors.items():
+                        messages.error(request, v)
+                    return redirect("match")
+                else:
+                    # Check that asin actually returns data from audible
+                    try:
+                        helpers.validate_asin(asin)
+                    except ValueError:
+                        messages.error(request, "Bad ASIN: " + asin)
+                        return redirect("match")
+                    else:
+                        asin_arr.append(asin)
+
+        for i in range(len(asin_arr)):
+            original_path = f"{rootdir}/{request.session['input_dir'][i]}"
+            input_data = helpers.get_directory(
+                Path(original_path)
+            )
+            if input_data:
+                logger.info(
+                    f"Making models and merging files for: "
+                    f"{request.session['input_dir'][i]}"
+                )
+                # Create Merge class object
+                merge_object = Merge(
+                    asin_arr[i], input_data, original_path
+                )
+                # Run merge function for the object
+                merge_object.run_m4b_merge()
+            else:
+                messages.error(
+                    request, f"No supported files in {original_path}"
+                )
+                return redirect("match")
+
+        request.session['asins'] = asin_arr
+        return redirect("finish")
 
 
-def finish(request):
-    # Redirect if this is a new session
-    if 'asins' not in request.session:
-        logger.warning(
-            "No session data found, "
-            "returning to import page"
-        )
-        return redirect('/import')
+class FinishView(TemplateView):
+    template_name = "finish.html"
 
-    asins = request.session['asins']
-    this_book = Book.objects.filter(asin__in=asins)
+    def get(self, request):
+        # Redirect if this is a new session
+        if 'asins' not in request.session:
+            logger.warning(
+                "No session data found, "
+                "returning to import page"
+            )
+            return redirect("home")
+        return render(request, self.template_name, self.get_context_data())
 
-    # Calculate time object into sentence
-    length_arr = []
-    for book in this_book:
-        d = timedelta(minutes=book.runtime_length_minutes)
-        book_length_calc = (
-            f'{d.seconds//3600} hrs and {(d.seconds//60)%60} minutes'
-        )
-        length_arr.append(book_length_calc)
+    def get_context_data(self, **kwargs):
+        asins = self.request.session['asins']
+        this_book = Book.objects.filter(asin__in=asins)
 
-    context = {
-        "finished_books": zip(this_book, length_arr),
-    }
+        # Calculate time object into sentence
+        length_arr = []
+        for book in this_book:
+            d = timedelta(minutes=book.runtime_length_minutes)
+            book_length_calc = (
+                f'{d.seconds//3600} hrs and {(d.seconds//60)%60} minutes'
+            )
+            length_arr.append(book_length_calc)
 
-    # Clear this session on finish
-    request.session.flush()
+        context = {
+            "finished_books": zip(this_book, length_arr),
+        }
 
-    return render(request, "finish.html", context)
+        # Clear this session on finish
+        self.request.session.flush()
+
+        return context
 
 
 # Class to handle merge and model generation operations
