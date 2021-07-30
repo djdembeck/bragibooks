@@ -24,8 +24,8 @@ if not os.path.exists(SECRET_PATH):
     f.write(get_random_secret_key())
     f.close()
     python_bin = shutil.which('m4b-tool')
-    subprocess.run(python_bin, "manage.py", "makemigrations"])
-    subprocess.run(python_bin, "manage.py", "migrate"])
+    subprocess.run([python_bin, "manage.py", "makemigrations"])
+    subprocess.run([python_bin, "manage.py", "migrate"])
 
 
 def main():
