@@ -119,7 +119,7 @@ RUN \
 
 # Get dependencies for m4b-tool/ffmpeg
 RUN	apt-get update && \
-    apt-get install -y \
+    apt-get install --no-install-recommends -y \
     fdkaac \
     php-cli \
     php-common \
@@ -131,22 +131,18 @@ RUN	apt-get update && \
 
 RUN \
     M4B_TOOL_PRE_RELEASE_LINK="$(wget -q -O - https://github.com/sandreas/m4b-tool/releases/tag/latest | grep -o 'M4B_TOOL_DOWNLOAD_LINK=[^ ]*' | head -1 | cut -d '=' -f 2)" && \
-    wget "$M4B_TOOL_PRE_RELEASE_LINK" -O /tmp/m4b-tool.tar.gz && \
+    wget --progress=dot:giga "$M4B_TOOL_PRE_RELEASE_LINK" -O /tmp/m4b-tool.tar.gz && \
     tar -xf /tmp/m4b-tool.tar.gz -C /tmp && \
     rm /tmp/m4b-tool.tar.gz && \
     mv /tmp/m4b-tool.phar /usr/local/bin/m4b-tool && \
-    chmod +x /usr/local/bin/m4b-tool
-
-RUN wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/libmp4v2-2_2.0.0~dfsg0-6_amd64.deb && \
+    chmod +x /usr/local/bin/m4b-tool && \
+    wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/libmp4v2-2_2.0.0~dfsg0-6_amd64.deb && \
     wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
     dpkg -i libmp4v2-2_2.0.0~dfsg0-6_amd64.deb && \
     dpkg -i mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
-    rm *.deb
-
-RUN apt-get remove -y wget
-
-# set work directory
-RUN mkdir -p $DockerHOME
+    rm ./*.deb && \
+    apt-get remove -y wget && \
+    mkdir -p $DockerHOME
 
 # where your code lives  
 WORKDIR $DockerHOME
@@ -156,7 +152,7 @@ ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
 # install dependencies
-RUN pip install --upgrade pip
+RUN pip install --no-cache-dir --upgrade pip
 
 # copy whole project to your docker home directory.
 COPY . $DockerHOME

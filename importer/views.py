@@ -115,17 +115,16 @@ class MatchView(TemplateView):
                     for k, v in errors.items():
                         messages.error(request, v)
                     return redirect("match")
+                # Check that asin actually returns data from audible
+                try:
+                    helpers.validate_asin(asin)
+                except ValueError:
+                    messages.error(request, "Bad ASIN: " + asin)
+                    return redirect("match")
                 else:
-                    # Check that asin actually returns data from audible
-                    try:
-                        helpers.validate_asin(asin)
-                    except ValueError:
-                        messages.error(request, "Bad ASIN: " + asin)
-                        return redirect("match")
-                    else:
-                        asin_arr.append(asin)
+                    asin_arr.append(asin)
 
-        for i in range(len(asin_arr)):
+        for i, item in enumerate(asin_arr):
             original_path = f"{rootdir}/{request.session['input_dir'][i]}"
             input_data = helpers.get_directory(
                 Path(original_path)
