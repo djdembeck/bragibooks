@@ -130,7 +130,7 @@ RUN	apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 RUN \
-    M4B_TOOL_PRE_RELEASE_LINK="$(wget -q -O - https://github.com/sandreas/m4b-tool/releases/tag/latest | grep -o 'M4B_TOOL_DOWNLOAD_LINK=[^ ]*' | head -1 | cut -d '=' -f 2)" && \
+    M4B_TOOL_PRE_RELEASE_LINK="$(wget -nv -O - https://github.com/sandreas/m4b-tool/releases/tag/latest | grep -o 'M4B_TOOL_DOWNLOAD_LINK=[^ ]*' | head -1 | cut -d '=' -f 2)" && \
     wget --progress=dot:giga "$M4B_TOOL_PRE_RELEASE_LINK" -O /tmp/m4b-tool.tar.gz && \
     tar -xf /tmp/m4b-tool.tar.gz -C /tmp && \
     rm /tmp/m4b-tool.tar.gz && \
