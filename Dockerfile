@@ -124,9 +124,6 @@ RUN	apt-get update && \
     php-mbstring \
     php-xml \
     wget && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN \
     M4B_TOOL_PRE_RELEASE_LINK="$(wget -nv -O - https://github.com/sandreas/m4b-tool/releases/tag/latest | grep -o 'M4B_TOOL_DOWNLOAD_LINK=[^ ]*' | head -1 | cut -d '=' -f 2)" && \
     wget --progress=dot:giga "$M4B_TOOL_PRE_RELEASE_LINK" -O /tmp/m4b-tool.tar.gz && \
     tar -xf /tmp/m4b-tool.tar.gz -C /tmp && \
@@ -138,6 +135,7 @@ RUN \
     dpkg -i libmp4v2-2_2.0.0~dfsg0-6_amd64.deb && \
     dpkg -i mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
     rm ./*.deb && \
+    rm -rf /var/lib/apt/lists/* && \
     apt-get remove -y wget && \
     mkdir -p $DockerHOME
 
