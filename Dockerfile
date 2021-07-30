@@ -136,8 +136,8 @@ RUN \
     rm /tmp/m4b-tool.tar.gz && \
     mv /tmp/m4b-tool.phar /usr/local/bin/m4b-tool && \
     chmod +x /usr/local/bin/m4b-tool && \
-    wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/libmp4v2-2_2.0.0~dfsg0-6_amd64.deb && \
-    wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
+    wget --progress=dot:giga http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/libmp4v2-2_2.0.0~dfsg0-6_amd64.deb && \
+    wget --progress=dot:giga http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
     dpkg -i libmp4v2-2_2.0.0~dfsg0-6_amd64.deb && \
     dpkg -i mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
     rm ./*.deb && \
