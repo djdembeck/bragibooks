@@ -1,11 +1,8 @@
 from django.urls import path
 from . import views
 urlpatterns = [
-    path('', views.importer, name='home'),
-    path('dir_selection', views.dir_selection),
-    path('match', views.match, name='match'),
-    path('get_asin', views.get_asin),
-    path('confirm', views.finish, name='finish'),
-    path('api_auth', views.api_auth),
-    path('get_auth', views.get_auth)
+    path('', views.ImportView.as_view(), name='home'),
+    path('match', views.MatchView.as_view(), name='match'),
+    path('confirm', views.FinishView.as_view(), name='finish'),
+    path('auth', views.AuthView.as_view(), name="auth"),
 ]
