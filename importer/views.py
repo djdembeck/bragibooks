@@ -26,7 +26,7 @@ else:
 class AuthView(TemplateView):
     template_name = "authenticate.html"
 
-    def post(self):
+    def post(self, request):
         aud_reg = audible_helper.AudibleAuth(
             USERNAME=self.request.POST['aud_email'],
             PASSWORD=self.request.POST['aud_pass'])

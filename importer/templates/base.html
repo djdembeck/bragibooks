@@ -20,7 +20,7 @@
                 <ul>
                     <li {% if url_name == 'home' %}class="is-active" aria-current="page"{% endif %}><a {% if url_name == 'home' %}class="has-text-weight-light"{% endif %} href="{% url 'home' %}">Import</a></li>
                     <li {% if url == 'match' %}class="is-active" aria-current="page"{% endif %}><a {% if url_name == 'match' %}class="has-text-weight-light"{% endif %} href="{% url 'match' %}">Match</a></li>
-                    <li {% if url == 'finish' %}class="is-active" aria-current="page"{% endif %}>Confirm</li>
+                    <li {% if url == 'finish' %}class="is-active" aria-current="page"{% endif %}><a {% if url_name == 'finish' %}class="has-text-weight-light"{% endif %} href="{% url 'finish' %}">Confirm</a></li>
                 </ul>
                 {% endwith %}
             </nav>
