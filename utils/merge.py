@@ -27,7 +27,7 @@ class Merge:
         self.m4b.run_merge()
 
         # Make models only if book doesn't exist
-        if not Book.objects.filter(asin=self.asin):
+        if not Book.objects.filter(asin=self.asin).exists():
             self.new_book = self.make_book_model()
             self.make_author_model()
             self.make_narrator_model()
@@ -102,7 +102,7 @@ class Merge:
                 # Check if author is in database
                 if not Author.objects.filter(
                     **_filter_vals
-                ):
+                ).exists():
                     new_author = Author.objects.create(
                         asin=author_asin,
                         first_name=author_name_split[0],
@@ -147,7 +147,7 @@ class Merge:
             # Check if author is in database
             if not Author.objects.filter(
                 **_filter_vals
-            ):
+            ).exists():
                 new_author = Author.objects.create(
                     asin=author_asin,
                     first_name=author_name_split[0],
@@ -179,7 +179,7 @@ class Merge:
                 if not Narrator.objects.filter(
                     first_name=narr_name_split[0],
                     last_name=narr_name_split[last_name_index]
-                ):
+                ).exists():
                     new_narrator = Narrator.objects.create(
                         first_name=narr_name_split[0],
                         last_name=narr_name_split[last_name_index]
@@ -199,7 +199,7 @@ class Merge:
             if not Narrator.objects.filter(
                 first_name=narr_name_split[0],
                 last_name=narr_name_split[last_name_index]
-            ):
+            ).exists():
                 new_narrator = Narrator.objects.create(
                     first_name=narr_name_split[0],
                     last_name=narr_name_split[last_name_index]
