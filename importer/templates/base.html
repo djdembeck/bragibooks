@@ -6,14 +6,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Bragi Books{% endblock %}</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.3/css/bulma.min.css">
+    {% load static %}
+    <link rel="shortcut icon" href="{% static 'images/favicon.ico' %}" >
 </head>
 <body>
     <section class="hero is-small is-warning">
         <nav class="level">
             <div class="hero-body">
-                <p class="title">
-                    Bragi Books
-                </p>
+                <div class="level">
+                    <div class="level-left">
+                        <div class="level-item">
+                            <img src="{% static 'images/logo-small-black.svg' %}" width="64px" alt="">
+                        </div>
+                        <div class="level-item">
+                            <p class="title">
+                                Bragi Books
+                            </p>
+                        </div>
+                    </div>
+                </div>
             </div>
             <nav class="breadcrumb is-medium is-right" aria-label="breadcrumbs">
                 {% with request.resolver_match.url_name as url_name %}
