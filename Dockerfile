@@ -155,7 +155,8 @@ COPY . $DockerHOME
 # run this command to install all dependencies
 RUN pip install --no-cache-dir -r https://raw.githubusercontent.com/djdembeck/m4b-merge/main/requirements.txt \
     pip install --no-cache-dir https://codeload.github.com/djdembeck/m4b-merge/zip/refs/heads/main \
-    pip install -r requirements.txt
+    pip install -r requirements.txt && \
+    python manage.py collectstatic
 
 # port where the Django app runs
 EXPOSE 8000
