@@ -5,7 +5,6 @@
 [![Docker Image Version (latest by date)](https://img.shields.io/docker/v/djdembeck/bragibooks)](https://hub.docker.com/r/djdembeck/bragibooks)
 [![CodeFactor Grade](https://img.shields.io/codefactor/grade/github/djdembeck/bragibooks)](https://www.codefactor.io/repository/github/djdembeck/bragibooks)
 
-# Bragi Books
 ![Logo](../assets/logo-horizontal.png?raw=true)
 **Bragi - (god of poetry in [Norse mythology](https://en.wikipedia.org/wiki/Bragi)):**
 An audiobook library cleanup & management app, written for both web use (Django) and CLI (Python). Leveraging Audible's unofficial API to source metadata. Core logic and processing done by my other tool, [m4b-merge](https://github.com/djdembeck/m4b-merge)
