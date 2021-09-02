@@ -1,4 +1,4 @@
 audible==0.5.5
-Django==3.2.5
+Django==3.2.7
 gunicorn==20.1.0
 whitenoise==5.3.0
