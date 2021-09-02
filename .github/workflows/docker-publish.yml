@@ -7,8 +7,6 @@ on:
     - develop
     # Publish semver tags as releases.
     tags: [ 'v*.*.*' ]
-  pull_request:
-    branches: [ main ]
 
 jobs:
   push_to_registries:
