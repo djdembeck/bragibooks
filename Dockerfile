@@ -1,4 +1,4 @@
-FROM alpine:3.10 AS ffbase
+FROM alpine:3.14.2 AS ffbase
 
 RUN buildDeps="autoconf \
     automake \
