@@ -18,7 +18,7 @@ class Merge:
     def run_m4b_merge(self):
         # Create BookData object from asin response
         aud = audible_helper.BookData(self.asin)
-        self.metadata = aud.parser()
+        self.metadata = aud.fetch_api_data()
         self.chapters = aud.get_chapters()
 
         # Process metadata and run components to merge files
