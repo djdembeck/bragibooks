@@ -1,8 +1,7 @@
+.python-version
 .vscode
+/static/
+__pycache__/
+config/
 env/
 venv/
-__pycache__/
-.vscode/
-config/
-.python-version
-/static/

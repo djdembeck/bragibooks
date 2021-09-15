@@ -8,7 +8,7 @@ import os
 # Models import
 from .models import Book
 # core merge logic:
-from m4b_merge import config, helpers
+from m4b_merge import helpers
 # Import Merge functions for django
 from utils.merge import Merge
 # To display book length
