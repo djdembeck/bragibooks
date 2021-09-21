@@ -1,17 +1,14 @@
-# Django imports
-from django.shortcuts import render, redirect
 from django.contrib import messages
+from django.shortcuts import render, redirect
 from django.views.generic import TemplateView
 # System imports
+from pathlib import Path
 import logging
 import os
-from pathlib import Path
-# from login.models import User
+# Models import
 from .models import Book
 # core merge logic:
-from m4b_merge import config, helpers
-# Import audible register function
-# from utils.audible import AudibleAuth
+from m4b_merge import helpers
 # Import Merge functions for django
 from utils.merge import Merge
 # To display book length
@@ -25,18 +22,6 @@ if Path('/input').is_dir():
     rootdir = "/input"
 else:
     rootdir = f"{str(Path.home())}/input"
-
-
-class AuthView(TemplateView):
-    template_name = "authenticate.html"
-
-    # def post(self, request):
-    #     aud_reg = AudibleAuth(
-    #         USERNAME=self.request.POST['aud_email'],
-    #         PASSWORD=self.request.POST['aud_pass'],
-    #         OTP=self.request.POST['aud_otp'])
-    #     aud_reg.register()
-    #     return redirect("match")
 
 
 class ImportView(TemplateView):
@@ -100,14 +85,6 @@ class MatchView(TemplateView):
                 "returning to import page"
             )
             return redirect("home")
-
-        # check that user is signed into audible api
-        auth_file = Path(config.config_path, ".aud_auth.txt")
-        if not auth_file.exists():
-            messages.error(
-                request, "You need to login to the Audible API (one-time)"
-            )
-            return redirect("auth")
 
         asin_arr = []
         dict1 = request.POST

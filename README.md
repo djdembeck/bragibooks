@@ -8,7 +8,7 @@
 ![Logo](../assets/logos/logo-horizontal.png?raw=true)
 
 **Bragi - (god of poetry in [Norse mythology](https://en.wikipedia.org/wiki/Bragi)):**
-An audiobook library cleanup & management app, written for both web use (Django) and CLI (Python). Leveraging Audible's unofficial API to source metadata. Core logic and processing done by my other tool, [m4b-merge](https://github.com/djdembeck/m4b-merge)
+An audiobook library cleanup & management app, written as a frontend for web use of [m4b-merge](https://github.com/djdembeck/m4b-merge).
 
 ## Screens
 
@@ -51,8 +51,3 @@ From within the `bragibooks` folder you cloned:
   - `python manage.py collectstatic`
   - `python manage.py migrate`
   - `gunicorn bragibooks_proj.wsgi`
-
----
-
-## Notes
-- About API auth method: This project uses the [Audible for Python](https://github.com/mkb79/Audible) module by [mkb79](https://github.com/mkb79) for it's auth/api calls. For persistent authentication, Bragi uses the [Register an Audible device](https://audible.readthedocs.io/en/latest/auth/register.html) method of logging in, to avoid asking for log in constantly.

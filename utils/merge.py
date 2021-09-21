@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from importer.models import Book, Author, Narrator
 # core merge logic:
 from m4b_merge import audible_helper, m4b_helper
@@ -17,7 +18,7 @@ class Merge:
     def run_m4b_merge(self):
         # Create BookData object from asin response
         aud = audible_helper.BookData(self.asin)
-        self.metadata = aud.parser()
+        self.metadata = aud.fetch_api_data()
         self.chapters = aud.get_chapters()
 
         # Process metadata and run components to merge files
@@ -48,13 +49,14 @@ class Merge:
         new_book = Book.objects.create(
             title=self.metadata['title'],
             asin=self.asin,
-            short_desc=self.metadata['short_summary'],
-            long_desc=self.metadata['long_summary'],
-            release_date=self.metadata['release_date'],
-            publisher=self.metadata['publisher_name'],
+            short_desc=self.metadata['description'],
+            long_desc=self.metadata['summary'],
+            release_date=datetime.strptime(
+                self.metadata['releaseDate'], '%Y-%m-%dT%H:%M:%S.%fZ'),
+            publisher=self.metadata['publisherName'],
             lang=self.metadata['language'],
-            runtime_length_minutes=self.metadata['runtime_length_min'],
-            format_type=self.metadata['format_type'],
+            runtime_length_minutes=self.metadata['runtimeLengthMin'],
+            format_type=self.metadata['formatType'],
             converted=True,
             src_path=self.original_path,
             dest_path=(
@@ -68,8 +70,8 @@ class Merge:
         )
 
         # Only add in series if it exists
-        if 'series' in self.metadata:
-            new_book.series = self.metadata['series']
+        if 'primarySeries' in self.metadata:
+            new_book.series = self.metadata['primarySeries']['name']
 
         new_book.save()
         return new_book
@@ -174,7 +176,7 @@ class Merge:
         # Create new entry for each narrator if there's more than one
         if len(self.metadata['narrators']) > 1:
             for narrator in self.metadata['narrators']:
-                narr_name_split = narrator.split()
+                narr_name_split = narrator['name'].split()
                 last_name_index = len(narr_name_split) - 1
                 if not Narrator.objects.filter(
                     first_name=narr_name_split[0],
@@ -194,7 +196,7 @@ class Merge:
                     existing_narrator.books.add(self.new_book)
                     existing_narrator.save()
         else:
-            narr_name_split = self.metadata['narrators'][0].split()
+            narr_name_split = self.metadata['narrators'][0]['name'].split()
             last_name_index = len(narr_name_split) - 1
             if not Narrator.objects.filter(
                 first_name=narr_name_split[0],
