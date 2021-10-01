@@ -46,6 +46,11 @@ class Merge:
         else:
             title = self.metadata['title']
 
+        if 'runtimeLengthMin' in self.metadata:
+            runtime = self.metadata['runtimeLengthMin']
+        else:
+            runtime = 0
+
         new_book = Book.objects.create(
             title=self.metadata['title'],
             asin=self.asin,
@@ -55,7 +60,7 @@ class Merge:
                 self.metadata['releaseDate'], '%Y-%m-%dT%H:%M:%S.%fZ'),
             publisher=self.metadata['publisherName'],
             lang=self.metadata['language'],
-            runtime_length_minutes=self.metadata['runtimeLengthMin'],
+            runtime_length_minutes=runtime,
             format_type=self.metadata['formatType'],
             converted=True,
             src_path=self.original_path,
