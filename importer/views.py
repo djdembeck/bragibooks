@@ -152,7 +152,11 @@ class FinishView(TemplateView):
         # Calculate time object into sentence
         length_arr = []
         for book in this_book:
-            d = timedelta(minutes=book.runtime_length_minutes).total_seconds()
+            d = int(
+                timedelta(
+                    minutes=book.runtime_length_minutes
+                ).total_seconds()
+            )
             book_length_calc = (
                 f'{d//3600} hrs and {(d//60)%60} minutes'
             )
