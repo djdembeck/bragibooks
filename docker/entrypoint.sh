@@ -1,4 +1,4 @@
 #!/bin/sh
 
-chown -R appuser:appgroup /config /input /output
+chown -R worker:worker /config /input /output
 exec runuser -u worker "$@"
