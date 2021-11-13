@@ -197,9 +197,8 @@ class SettingView(TemplateView):
                 existing_settings.output_scheme = form_data['output_scheme']
                 existing_settings.save()
             return redirect("home")
-        else:
-            messages.error(request, "Form is invalid")
-            return redirect("setting")
+        messages.error(request, "Form is invalid")
+        return redirect("setting")
 
 
 class FinishView(TemplateView):
