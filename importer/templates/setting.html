@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="columns">
+    <div class="column">
+        <div class="card">
+            <div class="card-header is-center">
+                <div class="card-header-title">
+                    <p class="title">Settings</p>
+                </div>
+            </div>
+            <form action="/import/setting" method="POST">
+                {% csrf_token %}
+                <div class="card-content">
+                    {% for field in form %}
+                        <div class="field is-horizontal">
+                            <div class="field-body">
+                                <div class="field">
+                                    {{ field.label_tag }}
+                                    <div class="control">
+                                        {{ field }}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    {% endfor %}
+                </div>
+                <footer class="card-footer">
+                    <div class="card-footer-item">
+                        <div class="control">
+                            <button class="button is-link is-fullwidth">Save</button>
+                        </div>
+                    </div>
+                </footer>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

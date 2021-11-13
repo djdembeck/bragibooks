@@ -1,4 +1,5 @@
 from django.db import models
+from pathlib import Path
 
 
 class BookManager(models.Manager):
@@ -11,6 +12,15 @@ class BookManager(models.Manager):
         if len(asin) == 0:
             errors['blank_asin'] = "Must fill in all ASIN fields"
 
+        return errors
+
+
+class SettingManager(models.Manager):
+    def file_path_validator(self, path):
+        errors = {}
+
+        if not Path(path).is_dir():
+            errors['invalid_path'] = f"Path is not a directory: {path}"
         return errors
 
 
@@ -63,3 +73,14 @@ class Genre(models.Model):
     narrators = models.ManyToManyField(Narrator, related_name="genres")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+class Setting(models.Model):
+    api_url = models.CharField(max_length=255)
+    completed_directory = models.CharField(max_length=255)
+    input_directory = models.CharField(max_length=255)
+    num_cpus = models.IntegerField()
+    output_directory = models.CharField(max_length=255)
+    output_scheme = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    objects = SettingManager()

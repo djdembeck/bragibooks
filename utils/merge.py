@@ -1,8 +1,8 @@
 import logging
 from datetime import datetime
-from importer.models import Book, Author, Narrator
+from importer.models import Book, Author, Narrator, Setting
 # core merge logic:
-from m4b_merge import audible_helper, m4b_helper
+from m4b_merge import audible_helper, config, m4b_helper
 
 # Get an instance of a logger
 logger = logging.getLogger(__name__)
@@ -25,6 +25,13 @@ class Merge:
         self.m4b = m4b_helper.M4bMerge(
             self.input_data, self.metadata, self.chapters
         )
+        # Check/apply settings
+        existing_settings = Setting.objects.first()
+        if existing_settings:
+            config.api_url = existing_settings.api_url
+            config.junk_dir = existing_settings.completed_directory
+            config.num_cpus = existing_settings.num_cpus
+            config.output = existing_settings.output_directory
         self.m4b.run_merge()
 
         # Make models only if book doesn't exist
