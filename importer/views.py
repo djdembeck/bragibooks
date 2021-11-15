@@ -180,22 +180,23 @@ class SettingView(TemplateView):
                     return redirect("setting")
             if not existing_settings:
                 settings = Setting.objects.create(
-                    api_url = form_data['api_url'],
-                    completed_directory = form_data['completed_directory'],
-                    input_directory = form_data['input_directory'],
-                    num_cpus = form_data['num_cpus'],
-                    output_directory = form_data['output_directory'],
-                    output_scheme = form_data['output_scheme']
+                    api_url=form_data['api_url'],
+                    completed_directory=form_data['completed_directory'],
+                    input_directory=form_data['input_directory'],
+                    num_cpus=form_data['num_cpus'],
+                    output_directory=form_data['output_directory'],
+                    output_scheme=form_data['output_scheme']
                 )
                 settings.save()
             else:
-                existing_settings.api_url = form_data['api_url']
-                existing_settings.completed_directory = form_data['completed_directory']
-                existing_settings.input_directory = form_data['input_directory']
-                existing_settings.num_cpus = form_data['num_cpus']
-                existing_settings.output_directory = form_data['output_directory']
-                existing_settings.output_scheme = form_data['output_scheme']
-                existing_settings.save()
+                es = existing_settings
+                es.api_url = form_data['api_url']
+                es.completed_directory = form_data['completed_directory']
+                es.input_directory = form_data['input_directory']
+                es.num_cpus = form_data['num_cpus']
+                es.output_directory = form_data['output_directory']
+                es.output_scheme = form_data['output_scheme']
+                es.save()
             return redirect("home")
         messages.error(request, "Form is invalid")
         return redirect("setting")

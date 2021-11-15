@@ -74,6 +74,7 @@ class Genre(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+
 class Setting(models.Model):
     api_url = models.CharField(max_length=255)
     completed_directory = models.CharField(max_length=255)
