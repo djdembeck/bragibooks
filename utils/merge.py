@@ -16,15 +16,6 @@ class Merge:
         self.original_path = original_path
 
     def run_m4b_merge(self):
-        # Create BookData object from asin response
-        aud = audible_helper.BookData(self.asin)
-        self.metadata = aud.fetch_api_data()
-        self.chapters = aud.get_chapters()
-
-        # Process metadata and run components to merge files
-        self.m4b = m4b_helper.M4bMerge(
-            self.input_data, self.metadata, self.chapters
-        )
         # Check/apply settings
         existing_settings = Setting.objects.first()
         if existing_settings:
@@ -32,6 +23,16 @@ class Merge:
             config.junk_dir = existing_settings.completed_directory
             config.num_cpus = existing_settings.num_cpus
             config.output = existing_settings.output_directory
+
+        # Create BookData object from asin response
+        aud = audible_helper.BookData(self.asin)
+        self.metadata = aud.fetch_api_data(config.api_url)
+        self.chapters = aud.get_chapters()
+
+        # Process metadata and run components to merge files
+        self.m4b = m4b_helper.M4bMerge(
+            self.input_data, self.metadata, self.chapters
+        )
         self.m4b.run_merge()
 
         # Make models only if book doesn't exist
