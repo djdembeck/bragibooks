@@ -101,7 +101,8 @@ class MatchView(TemplateView):
                     return redirect("match")
                 # Check that asin actually returns data from audible
                 try:
-                    helpers.validate_asin(asin)
+                    existing_settings = Setting.objects.first()
+                    helpers.validate_asin(existing_settings.api_url, asin)
                 except ValueError:
                     messages.error(request, "Bad ASIN: " + asin)
                     return redirect("match")
