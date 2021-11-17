@@ -14,7 +14,7 @@ class SettingForm(forms.ModelForm):
         )
         labels = {
             'api_url': 'Custom API URL',
-            'completed_directory': 'Directory for original input files',
+            'completed_directory': 'Directory for copy of original input files',
             'input_directory': 'Input directory path',
             'num_cpus': 'Number of CPUs to use (0 will use all available)',
             'output_directory': 'Output directory path',
