@@ -18,7 +18,7 @@ class SettingForm(forms.ModelForm):
             'input_directory': 'Input directory path',
             'num_cpus': 'Number of CPUs to use (0 will use all available)',
             'output_directory': 'Output directory path',
-            'output_scheme': 'Output format ('/' denotes folder)'
+            'output_scheme': 'Output format (`/` denotes folder)'
         }
         widgets = {
             'api_url': forms.URLInput(attrs={'class': 'input is-fullwidth'}),
