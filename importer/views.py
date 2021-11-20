@@ -146,7 +146,7 @@ class SettingView(TemplateView):
             'input_directory': '/input',
             'num_cpus': 0,
             'output_directory': '/output',
-            'output_scheme': 'placeholder'
+            'output_scheme': 'author/title - subtitle'
         }
         if existing_settings:
             form = SettingForm(instance=existing_settings)

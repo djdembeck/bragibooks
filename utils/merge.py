@@ -23,6 +23,7 @@ class Merge:
             config.junk_dir = existing_settings.completed_directory
             config.num_cpus = existing_settings.num_cpus
             config.output = existing_settings.output_directory
+            config.path_format = existing_settings.output_scheme
 
         # Create BookData object from asin response
         aud = audible_helper.BookData(self.asin)
