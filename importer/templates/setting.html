@@ -11,13 +11,15 @@
             <form action="/import/setting" method="POST">
                 {% csrf_token %}
                 <div class="card-content">
-                    <blockquote>
-                        <p>
-                            Supported output scheme keywords are:
-                            <br>
-                            author, narrator, series_name, series_position, subtitle, title, year
-                        </p>
-                    </blockquote>
+                    <div class="content">
+                        <blockquote>
+                            <p>
+                                Supported output scheme keywords are:
+                                <br>
+                                author, narrator, series_name, series_position, subtitle, title, year
+                            </p>
+                        </blockquote>
+                    </div>
                     {% for field in form %}
                         <div class="field is-horizontal">
                             <div class="field-body">
