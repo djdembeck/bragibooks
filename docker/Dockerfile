@@ -12,7 +12,7 @@ COPY . $DockerHOME
 COPY ./importer/static static
 
 # run this command to install all dependencies
-RUN pip install --user --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # port where the Django app runs
 EXPOSE 8000

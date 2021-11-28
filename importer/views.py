@@ -5,8 +5,10 @@ from django.views.generic import TemplateView
 from pathlib import Path
 import logging
 import os
+# Forms import
+from .forms import SettingForm
 # Models import
-from .models import Book
+from .models import Book, Setting
 # core merge logic:
 from m4b_merge import helpers
 # Import Merge functions for django
@@ -99,7 +101,8 @@ class MatchView(TemplateView):
                     return redirect("match")
                 # Check that asin actually returns data from audible
                 try:
-                    helpers.validate_asin(asin)
+                    existing_settings = Setting.objects.first()
+                    helpers.validate_asin(existing_settings.api_url, asin)
                 except ValueError:
                     messages.error(request, "Bad ASIN: " + asin)
                     return redirect("match")
@@ -130,6 +133,74 @@ class MatchView(TemplateView):
 
         request.session['asins'] = asin_arr
         return redirect("finish")
+
+
+class SettingView(TemplateView):
+    template_name = "setting.html"
+
+    def get_context_data(self, **kwargs):
+        existing_settings = Setting.objects.first()
+        default_data = {
+            'api_url': 'https://api.audnex.us',
+            'completed_directory': '/input/done',
+            'input_directory': '/input',
+            'num_cpus': 0,
+            'output_directory': '/output',
+            'output_scheme': 'author/title/title - subtitle'
+        }
+        if existing_settings:
+            form = SettingForm(instance=existing_settings)
+        else:
+            form = SettingForm(initial=default_data)
+        all_settings = Setting.objects.first()
+
+        context = {
+            "form": form,
+            "settings": all_settings,
+        }
+        return context
+
+    def post(self, request):
+        existing_settings = Setting.objects.first()
+
+        form = SettingForm(request.POST)
+        if form.is_valid():
+            paths_to_check = [
+                'completed_directory',
+                'input_directory',
+                'output_directory'
+            ]
+            form_data = form.cleaned_data
+
+            # Check file path validity
+            for path in paths_to_check:
+                errors = Setting.objects.file_path_validator(form_data[path])
+                if len(errors) > 0:
+                    for k, v in errors.items():
+                        messages.error(request, v)
+                    return redirect("setting")
+            if not existing_settings:
+                settings = Setting.objects.create(
+                    api_url=form_data['api_url'],
+                    completed_directory=form_data['completed_directory'],
+                    input_directory=form_data['input_directory'],
+                    num_cpus=form_data['num_cpus'],
+                    output_directory=form_data['output_directory'],
+                    output_scheme=form_data['output_scheme']
+                )
+                settings.save()
+            else:
+                es = existing_settings
+                es.api_url = form_data['api_url']
+                es.completed_directory = form_data['completed_directory']
+                es.input_directory = form_data['input_directory']
+                es.num_cpus = form_data['num_cpus']
+                es.output_directory = form_data['output_directory']
+                es.output_scheme = form_data['output_scheme']
+                es.save()
+            return redirect("home")
+        messages.error(request, "Form is invalid")
+        return redirect("setting")
 
 
 class FinishView(TemplateView):

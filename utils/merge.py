@@ -1,8 +1,8 @@
 import logging
 from datetime import datetime
-from importer.models import Book, Author, Narrator
+from importer.models import Book, Author, Narrator, Setting
 # core merge logic:
-from m4b_merge import audible_helper, m4b_helper
+from m4b_merge import audible_helper, config, m4b_helper
 
 # Get an instance of a logger
 logger = logging.getLogger(__name__)
@@ -16,9 +16,18 @@ class Merge:
         self.original_path = original_path
 
     def run_m4b_merge(self):
+        # Check/apply settings
+        existing_settings = Setting.objects.first()
+        if existing_settings:
+            config.api_url = existing_settings.api_url
+            config.junk_dir = existing_settings.completed_directory
+            config.num_cpus = existing_settings.num_cpus
+            config.output = existing_settings.output_directory
+            config.path_format = existing_settings.output_scheme
+
         # Create BookData object from asin response
         aud = audible_helper.BookData(self.asin)
-        self.metadata = aud.fetch_api_data()
+        self.metadata = aud.fetch_api_data(config.api_url)
         self.chapters = aud.get_chapters()
 
         # Process metadata and run components to merge files
