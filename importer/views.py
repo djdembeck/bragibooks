@@ -45,6 +45,17 @@ class ImportView(TemplateView):
         return context
 
     def post(self, request):
+        # Redirect if this is a new session
+        existing_settings = Setting.objects.first()
+        if not existing_settings:
+            logger.warning(
+                "No settings found, "
+                "returning to settings page"
+            )
+            messages.error(
+                request, "Settings must be configured before import"
+            )
+            return redirect("setting")
         request.session['input_dir'] = request.POST.getlist('input_dir')
         return redirect("match")
 
