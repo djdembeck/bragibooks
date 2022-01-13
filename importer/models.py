@@ -31,7 +31,6 @@ class Book(models.Model):
     long_desc = models.TextField()
     release_date = models.DateField()
     series = models.CharField(max_length=255, blank=True, default='')
-    # genre = models.TextField()
     publisher = models.CharField(max_length=255)
     lang = models.CharField(max_length=25)
     runtime_length_minutes = models.IntegerField()
@@ -61,16 +60,6 @@ class Narrator(models.Model):
     books = models.ManyToManyField(Book, related_name="narrators")
     short_desc = models.TextField(blank=True, default='')
     long_desc = models.TextField(blank=True, default='')
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-
-class Genre(models.Model):
-    name = models.CharField(max_length=255)
-    asin = models.CharField(max_length=10)
-    books = models.ManyToManyField(Book, related_name="genres")
-    authors = models.ManyToManyField(Author, related_name="genres")
-    narrators = models.ManyToManyField(Narrator, related_name="genres")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
