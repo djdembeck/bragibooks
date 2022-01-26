@@ -20,7 +20,12 @@ class SettingManager(models.Manager):
         errors = {}
 
         if not Path(path).is_dir():
-            errors['invalid_path'] = f"Path is not a directory: {path}"
+            try:
+                Path(path).mkdir(parents=True, exist_ok=True)
+            except OSError:
+                errors['invalid_path'] = (
+                    f"Invalid path: {path}"
+                )
         return errors
 
 
