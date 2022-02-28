@@ -82,6 +82,8 @@ To run Bragibooks as a container, you need to pass some paramaters in the run co
   | `-v /appdata/bragibooks/config:/config` | Persistent config storage |
   | `-p 8000:8000/tcp` | Port for your browser to use |
   | `-e LOG_LEVEL=WARNING` | Choose any [logging level](https://www.loggly.com/ultimate-guide/python-logging-basics/) |
+  | `-e UID=99` | User ID to run the container as (default 99)|
+  | `-e GID=100` | Group ID to run the container as (default 100)|
 
 
 Which all together should look like: 
