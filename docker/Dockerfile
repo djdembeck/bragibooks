@@ -17,7 +17,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # port where the Django app runs
 EXPOSE 8000
 
-USER root
 ENTRYPOINT ["/bin/sh", "docker/entrypoint.sh"]
 
 # start server
