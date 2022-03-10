@@ -21,7 +21,10 @@ class Merge:
         if existing_settings:
             config.api_url = existing_settings.api_url
             config.junk_dir = existing_settings.completed_directory
-            config.num_cpus = existing_settings.num_cpus
+            config.num_cpus = (
+                existing_settings.num_cpus if existing_settings.num_cpus > 0
+                else os.cpu_count()
+                )
             config.output = existing_settings.output_directory
             config.path_format = existing_settings.output_scheme
 
