@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime
+import os
 from importer.models import Book, Author, Narrator, Setting
 # core merge logic:
 from m4b_merge import audible_helper, config, m4b_helper
@@ -27,6 +28,15 @@ class Merge:
                 )
             config.output = existing_settings.output_directory
             config.path_format = existing_settings.output_scheme
+        # Log Level
+        env_log_level = os.environ.get("LOG_LEVEL", "INFO")
+        logging.basicConfig(level=env_log_level)
+        # Log all Settings
+        logger.debug(f'Using API URL: {config.api_url}')
+        logger.debug(f'Using junk path: {config.junk_dir}')
+        logger.debug(f'Using CPU cores: {config.num_cpus}')
+        logger.debug(f'Using output path: {config.output}')
+        logger.debug(f'Using output format: {config.path_format}')
 
         # Create BookData object from asin response
         aud = audible_helper.BookData(self.asin)
