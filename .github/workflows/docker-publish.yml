@@ -1,50 +1,51 @@
 name: Publish Docker image
 
 on:
-  push:
-    branches:
-    - main
-    - develop
-    # Publish semver tags as releases.
-    tags: [ 'v*.*.*' ]
+    workflow_dispatch:
+    push:
+        branches:
+            - main
+            - develop
+        # Publish semver tags as releases.
+        tags: ['v*.*.*']
 
 jobs:
-  push_to_registries:
-    name: Push Docker image to multiple registries
-    runs-on: ubuntu-latest
-    permissions:
-      packages: write
-      contents: read
-    steps:
-      - name: Check out the repo
-        uses: actions/checkout@v3
+    push_to_registries:
+        name: Push Docker image to multiple registries
+        runs-on: ubuntu-latest
+        permissions:
+            packages: write
+            contents: read
+        steps:
+            - name: Check out the repo
+              uses: actions/checkout@v3
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@21f251affc0769ccac8a1cf17e937592fb492337
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+            - name: Log in to Docker Hub
+              uses: docker/login-action@21f251affc0769ccac8a1cf17e937592fb492337
+              with:
+                  username: ${{ secrets.DOCKER_USERNAME }}
+                  password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Log in to the Container registry
-        uses: docker/login-action@21f251affc0769ccac8a1cf17e937592fb492337
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+            - name: Log in to the Container registry
+              uses: docker/login-action@21f251affc0769ccac8a1cf17e937592fb492337
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@59bc9ddfd5a31eb6f5b55e89b65578fe3bbba85e
-        with:
-          images: |
-            djdembeck/bragibooks
-            ghcr.io/${{ github.repository }}
+            - name: Extract metadata (tags, labels) for Docker
+              id: meta
+              uses: docker/metadata-action@59bc9ddfd5a31eb6f5b55e89b65578fe3bbba85e
+              with:
+                  images: |
+                      djdembeck/bragibooks
+                      ghcr.io/${{ github.repository }}
 
-      - name: Build and push Docker images
-        uses: docker/build-push-action@e27bcee4eb9e7b4bc168418e3364c4482120393a
-        with:
-          file: docker/Dockerfile
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+            - name: Build and push Docker images
+              uses: docker/build-push-action@e27bcee4eb9e7b4bc168418e3364c4482120393a
+              with:
+                  file: docker/Dockerfile
+                  context: .
+                  push: true
+                  tags: ${{ steps.meta.outputs.tags }}
+                  labels: ${{ steps.meta.outputs.labels }}
