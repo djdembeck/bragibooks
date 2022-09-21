@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime
 import os
+from pathlib import Path
 from importer.models import Book, Author, Narrator, Setting
 # core merge logic:
 from m4b_merge import audible_helper, config, m4b_helper
@@ -25,7 +26,7 @@ class Merge:
             config.num_cpus = (
                 existing_settings.num_cpus if existing_settings.num_cpus > 0
                 else os.cpu_count()
-                )
+            )
             config.output = existing_settings.output_directory
             config.path_format = existing_settings.output_scheme
         # Log Level
@@ -45,7 +46,8 @@ class Merge:
 
         # Process metadata and run components to merge files
         self.m4b = m4b_helper.M4bMerge(
-            self.input_data, self.metadata, self.chapters
+            self.input_data, self.metadata, Path(
+                self.original_path), self.chapters
         )
         self.m4b.run_merge()
 
