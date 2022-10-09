@@ -35,7 +35,7 @@ jobs:
 
             - name: Extract metadata (tags, labels) for Docker
               id: meta
-              uses: docker/metadata-action@59bc9ddfd5a31eb6f5b55e89b65578fe3bbba85e
+              uses: docker/metadata-action@210d783f42dfbd5492271c72e5f4232408f1d169
               with:
                   images: |
                       djdembeck/bragibooks
