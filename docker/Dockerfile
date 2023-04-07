@@ -17,7 +17,7 @@ WORKDIR $DockerHOME
 COPY . $DockerHOME
 
 # run this command to install all dependencies
-RUN pip install --upgrade pip && \
+RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # port where the Django app runs
