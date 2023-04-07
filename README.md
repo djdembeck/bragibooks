@@ -117,13 +117,14 @@ Which all together should look like:
 
 The Bragibooks process is a linear, 3 step process:
 1. __Select input__ - Use the file multi-select box to choose which books to process this session, and click next.
-2. __Submit ASINs__ - Enter the 10-character ASIN for each book, found on [Audible.com](https://www.audible.com) (US only) and submit.
-3. Wait for books to finish processing. This can take anywhere from 10 seconds to a few hours, depending on the number and type of files submitted.
-4. __Finish page__ - Page where you can see the data assigned to each book after it has finished processing.
+2. __Submit ASINs__ - Bragi will auto search for the audiobook data on [Audible.com](https://www.audible.com) (US only). If the data found is incorrect you can do a custom search to find the correct title and then submit for processing.
+3. Wait for books to finish processing. This can take anywhere from 10 seconds to a few hours, depending on the number and type of files submitted. This will be done in the background.
+4. __Books page__ - Page where you can see the data assigned to each book after it has finished processing. You can also check the status of the books still being processed.
 
 ## ⛏️ Built Using <a name = "built_using"></a>
 
 - [Django](https://www.djangoproject.com/) - Server/web framework
+- [Celery](https://docs.celeryq.dev/en/stable/getting-started/introduction.html) - Task queue and worker
 - [Bulma](https://bulma.io/) - Frontend CSS framework
 - [audnexus](https://github.com/laxamentumtech/audnexus) - API backend for metadata
 - [m4b-merge](https://github.com/djdembeck/m4b-merge) - File merging and tagging

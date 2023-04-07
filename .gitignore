@@ -5,3 +5,6 @@ __pycache__/
 config/
 env/
 venv/
+demo/
+.DS_Store
+admin/
