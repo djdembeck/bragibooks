@@ -14,6 +14,7 @@ from importer.models import (Author, Book, Narrator, Setting, Status,
 # Get an instance of a logger
 logger = logging.getLogger(__name__)
 
+
 def set_configs():
     existing_settings = Setting.objects.first()
     if existing_settings:
@@ -25,6 +26,7 @@ def set_configs():
         )
         config.output = existing_settings.output_directory
         config.path_format = existing_settings.output_scheme
+
 
 def run_m4b_merge(asin: str):
     # Log Level
@@ -41,16 +43,17 @@ def run_m4b_merge(asin: str):
     logger.debug(f'Using output format: {config.path_format}')
 
     book = Book.objects.get(asin=asin)
-    logger.info(f"{'-' * 15} Starting to process {asin}: {book.title} {'-' * 15}")
+    logger.info(
+        f"{'-' * 15} Starting to process {asin}: {book.title} {'-' * 15}")
 
     input_data = helpers.get_directory(Path(book.src_path))
     audible = audible_helper.BookData(asin)
 
     # Process metadata and run components to merge files
     m4b = m4b_helper.M4bMerge(
-        input_data, 
-        audible.fetch_api_data(config.api_url), 
-        Path(book.src_path), 
+        input_data,
+        audible.fetch_api_data(config.api_url),
+        Path(book.src_path),
         audible.get_chapters()
     )
 
@@ -60,28 +63,30 @@ def run_m4b_merge(asin: str):
     except Exception as e:
         logger.error(f"Error occured while merging '{input_data}: {e}'")
         book.status.status = StatusChoices.ERROR
-        message = str(e) + "\n" + traceback.format_exc() if settings.DEBUG else e
+        message = str(e) + "\n" + \
+            traceback.format_exc() if settings.DEBUG else e
         book.status.message = message
         book.status.save()
         return
 
-    book.dest_path=Path(
-            f"\""
-            f"{m4b.book_output}/"
-            f"{audible.fetch_api_data(config.api_url)['authors'][0]}/"
-            f"{book.title}/"
-            f"{book.title}.m4b"
-            f"\""
-        )
+    book.dest_path = Path(
+        f"\""
+        f"{m4b.book_output}/"
+        f"{audible.fetch_api_data(config.api_url)['authors'][0]}/"
+        f"{book.title}/"
+        f"{book.title}.m4b"
+        f"\""
+    )
     book.status.status = StatusChoices.DONE
     book.status.save()
     logger.info(f"{'-' * 15} Done processing {asin} {'-' * 15}")
+
 
 def create_book(asin, original_path) -> Book:
     # Make models only if book doesn't exist
     if not Book.objects.filter(asin=asin).exists():
         book = make_book_model(asin, original_path)
-        
+
     else:
         book = Book.objects.get(asin=asin)
         book.status.status = StatusChoices.PROCESSING
@@ -90,6 +95,7 @@ def create_book(asin, original_path) -> Book:
         logger.warning("Book already exists in database, only merging files")
 
     return book
+
 
 def make_book_model(asin, original_path) -> Book:
     set_configs()
@@ -123,19 +129,20 @@ def make_book_model(asin, original_path) -> Book:
         runtime_length_minutes=runtime,
         format_type=metadata['formatType'],
         converted=True,
-        status = status,
+        status=status,
         src_path=original_path
     )
 
     # Only add in series if it exists
     if 'primarySeries' in metadata:
         book.series = metadata['primarySeries']['name']
-        book.save() 
+        book.save()
 
     make_author_model(book, metadata['authors'])
     make_narrator_model(book, metadata['narrators'])
 
     return book
+
 
 def make_author_model(book, authors: list[dict[str, str]]):
     # Author DB entry
@@ -172,19 +179,20 @@ def make_author_model(book, authors: list[dict[str, str]]):
                 asin=author_asin,
                 first_name=author_name_split[0],
                 last_name=author_name_split[last_name_index]
-            )  
+            )
 
         author.books.add(book)
         author.save()
-            
+
+
 def make_narrator_model(book, narrators: list[dict[str, str]]):
     # Narrator DB entry
     # Create new entry for each narrator if there's more than one
     for narrator in narrators:
-        
+
         narr_name_split = narrator['name'].split()
         last_name_index = len(narr_name_split) - 1
-        
+
         if not (narrator := Narrator.objects.filter(
             first_name=narr_name_split[0],
             last_name=narr_name_split[last_name_index]
@@ -193,6 +201,6 @@ def make_narrator_model(book, narrators: list[dict[str, str]]):
                 first_name=narr_name_split[0],
                 last_name=narr_name_split[last_name_index]
             )
-            
+
         narrator.books.add(book)
         narrator.save()

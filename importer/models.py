@@ -34,12 +34,14 @@ class StatusChoices(models.TextChoices):
     DONE = "Done"
     ERROR = "Error"
 
+
 class Status(models.Model):
     status = models.CharField(max_length=10, choices=StatusChoices.choices)
     message = models.TextField()
 
     def __str__(self) -> str:
         return self.status
+
 
 class Book(models.Model):
     title = models.CharField(max_length=255)
@@ -63,6 +65,7 @@ class Book(models.Model):
     def __str__(self) -> str:
         return f"{self.title}: by {', '.join(str(author) for author in self.authors.all())}"
 
+
 class Author(models.Model):
     first_name = models.CharField(max_length=45)
     last_name = models.CharField(max_length=45)
@@ -76,6 +79,7 @@ class Author(models.Model):
     def __str__(self) -> str:
         return f"{self.first_name} {self.last_name}"
 
+
 class Narrator(models.Model):
     first_name = models.CharField(max_length=45)
     last_name = models.CharField(max_length=45)
@@ -87,6 +91,7 @@ class Narrator(models.Model):
 
     def __str__(self) -> str:
         return f"{self.first_name} {self.last_name}"
+
 
 class Setting(models.Model):
     api_url = models.CharField(max_length=255)

@@ -124,14 +124,17 @@ class MatchView(TemplateView):
 
         # create objects for each book, setting their status to processing
         for i, asin in enumerate(asin_arr):
-            original_path = Path(f"{rootdir}/{request.session['input_dir'][i]}")
+            original_path = Path(
+                f"{rootdir}/{request.session['input_dir'][i]}")
             input_data = helpers.get_directory(original_path)
 
             if not input_data:
-                messages.error(request, f"No supported files in {original_path}")
+                messages.error(
+                    request, f"No supported files in {original_path}")
                 return redirect("match")
 
-            logger.info(f"Making models and merging files for: {request.session['input_dir'][i]}")
+            logger.info(
+                f"Making models and merging files for: {request.session['input_dir'][i]}")
 
             book = create_book(asin, original_path)
 
@@ -164,17 +167,20 @@ class AsinSearch(View):
             Search for an album.
         """
         # Instantiate search helper
-        search_helper = SearchTool(filename=media_dir, title=title, author=author, keywords=keywords)
+        search_helper = SearchTool(
+            filename=media_dir, title=title, author=author, keywords=keywords)
 
         # Call search API
         results = self.call_search_api(search_helper)
 
         # Write search result status to log
         if not results:
-            logger.warn(f'No results found for query {search_helper.normalizedFileName}')
+            logger.warn(
+                f'No results found for query {search_helper.normalizedFileName}')
             return JsonResponse([], safe=False)
 
-        logger.debug(f'Found {len(results)} result(s) for query "{search_helper.normalizedFileName}"')
+        logger.debug(
+            f'Found {len(results)} result(s) for query "{search_helper.normalizedFileName}"')
 
         results = self.process_results(search_helper, results)
 
@@ -189,7 +195,8 @@ class AsinSearch(View):
         # Walk the found items and gather extended information
         logger.debug(msg="Search results")
         for index, result_dict in enumerate(result):
-            score_helper = ScoreTool(helper, index, settings.LANGUAGE_CODE, result_dict)
+            score_helper = ScoreTool(
+                helper, index, settings.LANGUAGE_CODE, result_dict)
             scored_results.append(score_helper.run_score_book())
 
             # Print separators for easy reading
@@ -214,21 +221,23 @@ class BookListView(TemplateView):
 
     def get(self, request):
         done_books = Book.objects.filter(status__status=StatusChoices.DONE)
-        processing_books = Book.objects.filter(status__status=StatusChoices.PROCESSING)
+        processing_books = Book.objects.filter(
+            status__status=StatusChoices.PROCESSING)
         error_books = Book.objects.filter(status__status=StatusChoices.ERROR)
-        
+
         return render(request, self.template_name, self.get_context_data(
             done_books=done_books, processing_books=processing_books, error_books=error_books))
 
     def get_context_data(self, **kwargs) -> dict:
         context = {"default_view": "done"}
-        
+
         redirect_url = self.request.META.get('HTTP_REFERER', '')
-        if redirect_url.rsplit('/', 1)[1] == "match":        
+        if redirect_url.rsplit('/', 1)[1] == "match":
             context.update({"default_view": "processing"})
 
         for key, books in filter(lambda item: 'books' in item[0], kwargs.items()):
-            context.update({key: list(zip(books, self.calcBookLength(list(books))))})
+            context.update(
+                {key: list(zip(books, self.calcBookLength(list(books))))})
 
         return context
 
@@ -246,7 +255,7 @@ class BookListView(TemplateView):
             )
             length_arr.append(book_length_calc)
         return length_arr
-    
+
 
 class SettingView(TemplateView):
     template_name = "setting.html"

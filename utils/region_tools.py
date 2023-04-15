@@ -1,5 +1,6 @@
 from utils import available_regions
 
+
 class RegionTool:
     """
         Used to generate URLs for different regions for both Audible and Audnexus.

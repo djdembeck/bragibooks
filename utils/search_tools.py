@@ -14,6 +14,7 @@ from .region_tools import RegionTool
 # Setup logger
 logger = logging.getLogger(__name__)
 
+
 class SearchTool:
     def __init__(self, filename: str, title: str = "", author: str = "", keywords: str = "", region_override: str = ""):
         self.filename = filename
@@ -34,17 +35,18 @@ class SearchTool:
         query = []
 
         if self.normalizedFileName or self.keywords:
-            query.append('keywords=' + urllib.parse.quote(self.normalizedFileName or self.keywords))
+            query.append(
+                'keywords=' + urllib.parse.quote(self.normalizedFileName or self.keywords))
 
         if self.title:
             query.append('title=' + urllib.parse.quote(self.title))
 
         if self.author:
             query.append('author=' + urllib.parse.quote(self.author))
-        
+
         if not query:
             return ""
-        
+
         return "&".join(query)
 
     def normalize_name(self, name) -> str:
@@ -62,7 +64,8 @@ class SearchTool:
         # Remove unwanted characters
         name = re.sub(r'[^\w\s]', '', name)
         # Remove unwanted words
-        name = re.sub(r'\b(official|audiobook|unabridged|abridged)\b', '', name, flags=re.IGNORECASE)
+        name = re.sub(r'\b(official|audiobook|unabridged|abridged)\b',
+                      '', name, flags=re.IGNORECASE)
         # Remove unwanted whitespaces
         name = re.sub(r'\s+', ' ', name)
         # Remove leading and trailing whitespaces
@@ -84,8 +87,8 @@ class SearchTool:
         logger.debug('Search URL: %s', search_url)
 
         return search_url
-    
-    def parse_api_response(self, api_response: dict[str, list[dict]]) -> list[dict[str, str|int]]:
+
+    def parse_api_response(self, api_response: dict[str, list[dict]]) -> list[dict[str, str | int]]:
         """
             Collects keys used for each item from API response,
             for Plex search results.
@@ -119,7 +122,6 @@ class SearchTool:
     def remove_diacritics(s):
         nkfd_form = unicodedata.normalize('NFKD', str(s))
         return u"".join([c for c in nkfd_form if not unicodedata.combining(c)])
-
 
 
 class ScoreTool:
@@ -246,7 +248,7 @@ class ScoreTool:
 
         # Create result dict
         return self.score_create_result(score)
-                
+
     def score_album(self, title: str):
         """
             Compare the input album similarity to the search result album.
@@ -256,7 +258,7 @@ class ScoreTool:
         if not scorebase1:
             logger.error('No album title found in file metadata')
             return 50
-        scorebase2 = title #.encode('utf-8')
+        scorebase2 = title  # .encode('utf-8')
         album_score = distance(
             self.reduce_string(scorebase1),
             self.reduce_string(scorebase2)
