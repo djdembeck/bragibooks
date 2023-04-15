@@ -3,13 +3,32 @@
 <head>
     <meta charset="UTF-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Bragi Books{% endblock %}</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.3/css/bulma.min.css">
     {% load static %}
-    <link rel="shortcut icon" href="{% static 'images/favicon.ico' %}" >
+    <link rel="shortcut icon" href="{% static 'images/favicon.ico' %}">
+    <style>
+        body {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+          }
+      
+          .main-section {
+            flex-grow: 1;
+            margin-top: 30px;
+            margin-bottom: 30px;
+          }
+      
+          footer {
+            margin-top: auto;
+          }
+          
+          {% block style %}{% endblock %}
+    </style>
 </head>
-<body>
+<body class="has-background-warning-dark">
     <section class="hero is-small is-warning">
         <nav class="level">
             <div class="hero-body">
@@ -29,16 +48,16 @@
             <nav class="breadcrumb is-medium is-right" aria-label="breadcrumbs">
                 {% with request.resolver_match.url_name as url_name %}
                 <ul>
-                    <li {% if url_name == 'home' %}class="is-active" aria-current="page"{% endif %}><a {% if url_name == 'home' %}class="has-text-weight-light"{% endif %} href="{% url 'home' %}">Import</a></li>
-                    <li {% if url == 'match' %}class="is-active" aria-current="page"{% endif %}><a {% if url_name == 'match' %}class="has-text-weight-light"{% endif %} href="{% url 'match' %}">Match</a></li>
-                    <li {% if url == 'finish' %}class="is-active" aria-current="page"{% endif %}><a {% if url_name == 'finish' %}class="has-text-weight-light"{% endif %} href="{% url 'finish' %}">Confirm</a></li>
-                    <li {% if url == 'setting' %}class="is-active" aria-current="page"{% endif %}><a {% if url_name == 'setting' %}class="has-text-weight-light"{% endif %} href="{% url 'setting' %}">Settings</a></li>
+                    <li {% if url_name == 'import' %}class="is-active" aria-current="page"{% endif %}><a {% if url_name == 'import' %}class="has-text-weight-light"{% endif %} href="{% url 'import' %}">Import</a></li>
+                    <li {% if url_name == 'match' %}class="is-active" aria-current="page"{% endif %}><a {% if url_name == 'match' %}class="has-text-weight-light"{% endif %} href="{% url 'match' %}">Match</a></li>
+                    <li {% if url_name == 'books' %}class="is-active" aria-current="page"{% endif %}><a {% if url_name == 'books' %}class="has-text-weight-light"{% endif %} href="{% url 'books' %}">Books</a></li>
+                    <li {% if url_name == 'setting' %}class="is-active" aria-current="page"{% endif %}><a {% if url_name == 'setting' %}class="has-text-weight-light"{% endif %} href="{% url 'setting' %}">Settings</a></li>
                 </ul>
                 {% endwith %}
             </nav>
         </nav>
     </section>
-    <section class="section has-background-warning-dark">
+    <section class="main-section">
         <div class="container">
             {% if messages %}
             <div class="notification is-danger">
@@ -64,5 +83,9 @@
             </p>
         </div>
     </footer>
+    <script>
+        {% block script %}
+        {% endblock %}
+    </script>
 </body>
 </html>

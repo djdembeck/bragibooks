@@ -1,20 +1,28 @@
-from django.contrib import messages
-from django.shortcuts import render, redirect
-from django.views.generic import TemplateView
 # System imports
-from pathlib import Path
 import logging
 import os
+from datetime import timedelta
+from pathlib import Path
+
+import requests
+from django.conf import settings
+from django.contrib import messages
+from django.http import HttpRequest, HttpResponseBadRequest, JsonResponse
+from django.shortcuts import redirect, render
+from django.views.generic import TemplateView, View
+# core merge logic:
+from m4b_merge import helpers
+
+# Import Merge functions for django
+from utils.merge import create_book
+# Import Search tools
+from utils.search_tools import ScoreTool, SearchTool
+
 # Forms import
 from .forms import SettingForm
 # Models import
-from .models import Book, Setting
-# core merge logic:
-from m4b_merge import helpers
-# Import Merge functions for django
-from utils.merge import Merge
-# To display book length
-from datetime import timedelta
+from .models import Book, Setting, StatusChoices
+from .tasks import m4b_merge_task
 
 # Get an instance of a logger
 logger = logging.getLogger(__name__)
@@ -31,32 +39,31 @@ class ImportView(TemplateView):
 
     def get_context_data(self, **kwargs):
         folder_arr = []
-        for path in sorted(
-            Path(rootdir).iterdir(),
-            key=os.path.getmtime,
-            reverse=True
-        ):
+        for path in sorted(Path(rootdir).iterdir(), key=os.path.getmtime, reverse=True):
             base = os.path.basename(path)
             folder_arr.append(base)
 
         context = {
-            "this_dir": folder_arr,
+            "import_dir": folder_arr,
         }
+
         return context
 
     def post(self, request):
         # Redirect if this is a new session
         existing_settings = Setting.objects.first()
         if not existing_settings:
-            logger.warning(
-                "No settings found, "
-                "returning to settings page"
-            )
+            logger.debug("No settings found, returning to settings page")
             messages.error(
                 request, "Settings must be configured before import"
             )
             return redirect("setting")
-        request.session['input_dir'] = request.POST.getlist('input_dir')
+
+        if not (input_dir := request.POST.getlist('input_dir')):
+            messages.error(request, "You must select content to import")
+            return redirect("import")
+
+        request.session['input_dir'] = input_dir
         return redirect("match")
 
 
@@ -66,53 +73,48 @@ class MatchView(TemplateView):
     def get(self, request):
         # Redirect if this is a new session
         if 'input_dir' not in request.session:
-            logger.warning(
-                "No session data found, "
-                "returning to import page"
-            )
-            return redirect("home")
+            logger.debug("No session data found, returning to import page")
+            return redirect("import")
+
         return render(request, self.template_name, self.get_context_data())
 
-    def get_context_data(self, **kwargs):
+    def get_context_data(self, **kwargs) -> dict:
         # Check if any of these inputs exist in our DB
         # If so, prepopulate their asins
-        context_item = []
+        context = []
         for this_dir in self.request.session['input_dir']:
             try:
                 book = Book.objects.get(src_path=f"{rootdir}/{this_dir}")
             except Book.DoesNotExist:
-                context_item.append({'src_path': this_dir})
+                context.append({'src_path': this_dir})
             else:
-                context_item.append({'src_path': this_dir, 'asin': book.asin})
+                context.append({'src_path': this_dir, 'asin': book.asin})
 
-        context = {
-            "this_input": context_item
-        }
+        return {"context": context}
 
-        return context
-
-    def post(self, request):
+    def post(self, request: HttpRequest):
         if 'input_dir' not in request.session:
-            logger.warning(
-                "No session data found, "
-                "returning to import page"
-            )
-            return redirect("home")
+            logger.debug("No session data found, returning to import page")
+            return redirect("import")
 
         asin_arr = []
-        dict1 = request.POST
-        for key, value in dict1.items():
+        for key, asin in request.POST.items():
             if key != "csrfmiddlewaretoken":
-                asin = value
+
                 # Check for validation errors
                 errors = Book.objects.book_asin_validator(asin)
                 if len(errors) > 0:
                     for k, v in errors.items():
                         messages.error(request, v)
                     return redirect("match")
+
+                existing_settings = Setting.objects.first()
+                if not existing_settings:
+                    messages.error(request, "Settings not set")
+                    return redirect("setting")
+
                 # Check that asin actually returns data from audible
                 try:
-                    existing_settings = Setting.objects.first()
                     helpers.validate_asin(existing_settings.api_url, asin)
                 except ValueError:
                     messages.error(request, "Bad ASIN: " + asin)
@@ -120,31 +122,131 @@ class MatchView(TemplateView):
                 else:
                     asin_arr.append(asin)
 
-        for i, item in enumerate(asin_arr):
-            original_path = f"{rootdir}/{request.session['input_dir'][i]}"
-            input_data = helpers.get_directory(
-                Path(original_path)
-            )
-            if input_data:
-                logger.info(
-                    f"Making models and merging files for: "
-                    f"{request.session['input_dir'][i]}"
-                )
-                # Create Merge class object
-                merge_object = Merge(
-                    asin_arr[i], input_data, original_path
-                )
-                # Run merge function for the object
-                merge_object.run_m4b_merge()
-            else:
-                messages.error(
-                    request, f"No supported files in {original_path}"
-                )
+        # create objects for each book, setting their status to processing
+        for i, asin in enumerate(asin_arr):
+            original_path = Path(f"{rootdir}/{request.session['input_dir'][i]}")
+            input_data = helpers.get_directory(original_path)
+
+            if not input_data:
+                messages.error(request, f"No supported files in {original_path}")
                 return redirect("match")
 
-        request.session['asins'] = asin_arr
-        return redirect("finish")
+            logger.info(f"Making models and merging files for: {request.session['input_dir'][i]}")
 
+            book = create_book(asin, original_path)
+
+            logger.info(f"Adding book {book} to processing queue")
+            m4b_merge_task.delay(asin)
+
+        request.session.flush()
+        return redirect("books")
+
+
+class AsinSearch(View):
+    def get(self, request):
+        accepted_keywords = ["media_dir", "title", "author", "keywords"]
+
+        if any(key not in accepted_keywords for key in request.GET.keys()):
+            return HttpResponseBadRequest(
+                f"'{', '.join(request.GET.keys() -  accepted_keywords)}' are not valid parameters. \
+                Valid search parameters are {accepted_keywords}"
+            )
+
+        return self.search(
+            request.GET.get("media_dir"),
+            request.GET.get("title"),
+            request.GET.get("author"),
+            request.GET.get("keywords")
+        )
+
+    def search(self, media_dir: str = "", title: str = "", author: str = "", keywords: str = "") -> JsonResponse:
+        """
+            Search for an album.
+        """
+        # Instantiate search helper
+        search_helper = SearchTool(filename=media_dir, title=title, author=author, keywords=keywords)
+
+        # Call search API
+        results = self.call_search_api(search_helper)
+
+        # Write search result status to log
+        if not results:
+            logger.warn(f'No results found for query {search_helper.normalizedFileName}')
+            return JsonResponse([], safe=False)
+
+        logger.debug(f'Found {len(results)} result(s) for query "{search_helper.normalizedFileName}"')
+
+        results = self.process_results(search_helper, results)
+
+        return JsonResponse(results, safe=False)
+
+    @staticmethod
+    def process_results(helper: SearchTool, result) -> list[dict[str, str | int]]:
+        """
+            Process the results from the API call.
+        """
+        scored_results = []
+        # Walk the found items and gather extended information
+        logger.debug(msg="Search results")
+        for index, result_dict in enumerate(result):
+            score_helper = ScoreTool(helper, index, settings.LANGUAGE_CODE, result_dict)
+            scored_results.append(score_helper.run_score_book())
+
+            # Print separators for easy reading
+            if index <= len(result):
+                logger.debug("-" * 35)
+
+        return sorted(scored_results, key=lambda inf: inf['score'], reverse=True)
+
+    @staticmethod
+    def call_search_api(helper: SearchTool):
+        '''
+            Builds URL then calls API, returns the JSON to helper function.
+        '''
+        query = helper.build_search_args()
+        search_url = helper.build_url(query)
+        request = requests.get(search_url)
+        return helper.parse_api_response(request.json())
+
+
+class BookListView(TemplateView):
+    template_name = "book_tabs.html"
+
+    def get(self, request):
+        done_books = Book.objects.filter(status__status=StatusChoices.DONE)
+        processing_books = Book.objects.filter(status__status=StatusChoices.PROCESSING)
+        error_books = Book.objects.filter(status__status=StatusChoices.ERROR)
+        
+        return render(request, self.template_name, self.get_context_data(
+            done_books=done_books, processing_books=processing_books, error_books=error_books))
+
+    def get_context_data(self, **kwargs) -> dict:
+        context = {"default_view": "done"}
+        
+        redirect_url = self.request.META.get('HTTP_REFERER', '')
+        if redirect_url.rsplit('/', 1)[1] == "match":        
+            context.update({"default_view": "processing"})
+
+        for key, books in filter(lambda item: 'books' in item[0], kwargs.items()):
+            context.update({key: list(zip(books, self.calcBookLength(list(books))))})
+
+        return context
+
+    def calcBookLength(self, books: list[Book]) -> list[str]:
+        # Calculate time object into sentence
+        length_arr = []
+        for book in books:
+            d = int(
+                timedelta(
+                    minutes=book.runtime_length_minutes
+                ).total_seconds()
+            )
+            book_length_calc = (
+                f'{d//3600} hrs and {(d//60)%60} minutes'
+            )
+            length_arr.append(book_length_calc)
+        return length_arr
+    
 
 class SettingView(TemplateView):
     template_name = "setting.html"
@@ -209,46 +311,8 @@ class SettingView(TemplateView):
                 es.output_directory = form_data['output_directory']
                 es.output_scheme = form_data['output_scheme']
                 es.save()
-            return redirect("home")
+
+            return redirect("import")
+
         messages.error(request, "Form is invalid")
         return redirect("setting")
-
-
-class FinishView(TemplateView):
-    template_name = "finish.html"
-
-    def get(self, request):
-        # Redirect if this is a new session
-        if 'asins' not in request.session:
-            logger.warning(
-                "No session data found, "
-                "returning to import page"
-            )
-            return redirect("home")
-        return render(request, self.template_name, self.get_context_data())
-
-    def get_context_data(self, **kwargs):
-        asins = self.request.session['asins']
-        this_book = Book.objects.filter(asin__in=asins)
-
-        # Calculate time object into sentence
-        length_arr = []
-        for book in this_book:
-            d = int(
-                timedelta(
-                    minutes=book.runtime_length_minutes
-                ).total_seconds()
-            )
-            book_length_calc = (
-                f'{d//3600} hrs and {(d//60)%60} minutes'
-            )
-            length_arr.append(book_length_calc)
-
-        context = {
-            "finished_books": zip(this_book, length_arr),
-        }
-
-        # Clear this session on finish
-        self.request.session.flush()
-
-        return context

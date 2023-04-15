@@ -1,0 +1,51 @@
+{% if books|length > 0 %}
+    {% for book, book_length in books %}
+        <div class="columns">
+            {% if book.asin %}
+            <div class="column is-one-quarter">
+                <div class="box">
+                    <div class="content">
+                        <ul style="list-style: none; margin-left: 0; margin-top: 0;">
+                            <li><span class="has-text-weight-bold is-size-4">Title:</span> <span class="is-size-5"> {{ book.title }}{% if book.subtitle %} - {{ book.subtitle }}{% endif %}</span></li>
+                            <li><span class="has-text-weight-semibold is-size-6">Author(s):</span> {% for author in book.authors.all %}{% if not forloop.first %}{% if forloop.last %} and {% else %}, {% endif %}{% endif %}{{ author.first_name }} {{ author.last_name }}{% endfor %}</li>
+                            <li><span class="has-text-weight-semibold is-size-6">Narrator(s):</span> {% for narrator in book.narrators.all %}{% if not forloop.first %}{% if forloop.last %} and {% else %}, {% endif %}{% endif %}{{ narrator.first_name }} {{ narrator.last_name }}{% endfor %} </li>
+                            {% if book.series %}<li><span class="has-text-weight-semibold is-size-6">Series:</span> {{ book.series }}</li>{% endif %}
+                            <li><span class="has-text-weight-semibold is-size-6">Length:</span> {{ book_length }} </li>
+                            <li><span class="has-text-weight-semibold is-size-6">Type:</span> <span style="text-transform:capitalize">{{ book.format_type }}</span></li>
+                            <li><span class="has-text-weight-semibold is-size-6">Release Date:</span> {{ book.release_date }}</li>
+                            <li><span class="has-text-weight-semibold is-size-6">Language:</span> <span style="text-transform:capitalize">{{ book.lang }}</span></li>
+                            <li><span class="has-text-weight-semibold is-size-6">Publisher:</span> <span style="text-transform:capitalize">{{ book.publisher }}</span></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="column is-three-quarter">
+                <div class="box">
+                    <div class="content">
+                        <span class="has-text-weight-semibold is-size-3">Description:</span>
+                        {% if book.status.status == 'Error' %}
+                        <p>{{ book.status.message }}</p>
+                        {% else %}
+                        <p>
+                        {{ book.long_desc|safe }}
+                        </p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            <div class="block"></div>
+            {% endif %}
+        </div>
+    {% endfor %}
+{% else %}
+    <div class="columns">
+        <div class="column">
+            <div class="box">
+                <div class="content has-text-centered">
+                    <h3>Nothing to see here.</h3>
+                </div>
+            </div>
+        </div>
+    </div>
+{% endif %}
+

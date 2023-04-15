@@ -1,37 +1,103 @@
 {% extends "base.html" %}
+{% block style %}
+.modal-card {
+    position: fixed;
+    top: 10%;
+    }
+.modal-card-foot {
+    display: flex;
+    justify-content: space-between;
+}
+
+.notification {
+    flex-grow: 1;
+    text-align: left;
+}
+{% endblock %}
 {% block content %}
 <div class="columns">
     <div class="column">
-        <div class="card">
-            <div class="card-header">
-                <div class="card-header-title">
-                    <p class="title">Submit ASINs</p>
+        <form action="{% url 'match' %}" method="POST">
+        {% csrf_token %}
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-header-title">
+                        <p class="title">Submit ASINs</p>
+                    </div>
                 </div>
-            </div>
-            <form action="/import/match" method="POST">
-                {% csrf_token %}
                 <div class="card-content">
-                    {% for input in this_input %}
-                    <div class="field is-horizontal">
-                        <div class="field-body">
-                            <div class="field">
-                                <div class="control">
-                                    <input class="input is-fullwidth" name="asin-{{ forloop.counter|add:"-1" }}" type="text" placeholder="{{ input.src_path }}" {% if input.asin %}value="{{ input.asin }}"{% endif %}>
+                    <div class="container">
+                        {% for input in context %}
+                        <div class="column is-grouped">
+                            <label class="label">{{ input.src_path }}</label>
+                            <div class="field is-flex is-flex-direction-column">
+                                <div class="control is-inline-flex">
+                                    <div class="select is-loading mr-3 is-fullwidth">
+                                        <select class="asin-select" id="asin-select-{{ forloop.counter|add:"-1" }}" name="{{ input.src_path }}">
+                                            <option>{{ input.src_path }}</option>
+                                        </select>
+                                    </div>
+                                    <button class="button is-link" type="button" onclick="openSearchPanel('{{ input.src_path }}', 'asin-select-{{ forloop.counter|add:"-1" }}')">Custom Search</button>
                                 </div>
                             </div>
                         </div>
+                        {% endfor %}
                     </div>
-                    {% endfor %}
                 </div>
                 <footer class="card-footer">
                     <div class="card-footer-item">
                         <div class="control">
-                            <button class="button is-link is-fullwidth">Submit ASINs</button>
+                            <button class="button is-link is-fullwidth" id="match-form-submit">Submit ASINs</button>
                         </div>
                     </div>
                 </footer>
-            </form>
-        </div>
+            </div>
+        </form>
     </div>
 </div>
+
+<!-- Modal -->
+<div class="modal" id="custom-search-modal">
+    <div class="modal-background"></div>
+    <div class="modal-card">
+        <header class="modal-card-head">
+            <p class="modal-card-title is-flex-shrink-1"></p>
+            <button class="delete" aria-label="close" onclick="closeSearchPanel()"></button>
+        </header>
+        <section class="modal-card-body">
+            <form>
+                <div class="field">
+                    <label class="label">Title</label>
+                    <div class="control">
+                        <input class="input" type="text" id="title" placeholder="Title">
+                    </div>
+                </div>
+                <div class="field">
+                    <label class="label">Author</label>
+                    <div class="control">
+                        <input class="input" type="text" id="author" placeholder="Author">
+                    </div>
+                </div>
+                <div class="field">
+                    <label class="label">Keywords</label>
+                    <div class="control">
+                        <input class="input" type="text" id="keywords" placeholder="Keywords">
+                    </div>
+                </div>
+            </form>
+        </section>
+        <footer class="modal-card-foot">
+            <div class="notification is-warning" id="search-notification" style="margin: 10px; display: none;">
+                No results found for this search...
+            </div>
+            <div style="padding-left: 10px;">
+                <button class="button is-link" onclick="searchAsin(document.getElementById('title').value, document.getElementById('author').value, document.getElementById('keywords').value)" >Search</button>
+                <button class="button" onclick="closeSearchPanel()">Cancel</button>
+            </div>
+        </footer>
+    </div>
+</div>
+{% endblock %}
+{% block script %}
+    {% include "match.js" %}
 {% endblock %}
