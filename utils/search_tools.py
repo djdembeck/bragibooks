@@ -59,12 +59,14 @@ class SearchTool:
 
         # Remove Diacritics
         name = self.remove_diacritics(name)
+        # Remove number prefix
+        name = re.sub(r'^\d+\s', '', name)
         # Remove brackets and text inside
         name = re.sub(r'\[[^"]*\]', '', name)
         # Remove unwanted characters
         name = re.sub(r'[^\w\s]', '', name)
         # Remove unwanted words
-        name = re.sub(r'\b(official|audiobook|unabridged|abridged)\b',
+        name = re.sub(r'\b(official|audiobook|unabridged|abridged|mp3|m4b)\b',
                       '', name, flags=re.IGNORECASE)
         # Remove unwanted whitespaces
         name = re.sub(r'\s+', ' ', name)
