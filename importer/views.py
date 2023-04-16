@@ -220,10 +220,13 @@ class BookListView(TemplateView):
     template_name = "book_tabs.html"
 
     def get(self, request):
-        done_books = Book.objects.filter(status__status=StatusChoices.DONE)
+        done_books = Book.objects.filter(status__status=StatusChoices.DONE).order_by(
+            '-created_at')
         processing_books = Book.objects.filter(
-            status__status=StatusChoices.PROCESSING)
-        error_books = Book.objects.filter(status__status=StatusChoices.ERROR)
+            status__status=StatusChoices.PROCESSING).order_by(
+            '-created_at')
+        error_books = Book.objects.filter(status__status=StatusChoices.ERROR).order_by(
+            '-created_at')
 
         return render(request, self.template_name, self.get_context_data(
             done_books=done_books, processing_books=processing_books, error_books=error_books))
