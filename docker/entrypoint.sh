@@ -14,13 +14,13 @@ do
 done
 
 
-until gosu "$USER_ID":"$GROUP_ID" python manage.py migrate
+until python manage.py migrate
 do
     echo "Waiting for db to be ready..."
     sleep 2
 done
 
-gosu "$USER_ID":"$GROUP_ID" python manage.py collectstatic --noinput
+python manage.py collectstatic --noinput
 
 # Start Celery Worker
 gosu "$USER_ID":"$GROUP_ID" celery -A bragibooks_proj worker --loglevel=info --concurrency 1 -E &
