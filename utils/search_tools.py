@@ -59,6 +59,8 @@ class SearchTool:
 
         # Remove Diacritics
         name = self.remove_diacritics(name)
+        # Remove file extension
+        name = re.sub(r'\.\w+$', '', name)
         # Remove number prefix
         name = re.sub(r'^\d+\s', '', name)
         # Remove brackets and text inside
