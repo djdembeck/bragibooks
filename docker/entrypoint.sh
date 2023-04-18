@@ -20,7 +20,7 @@ do
     sleep 2
 done
 
-gosu "$USER_ID":"$GROUP_ID"python manage.py collectstatic --noinput
+gosu "$USER_ID":"$GROUP_ID" python manage.py collectstatic --noinput
 
 # Start Celery Worker
 gosu "$USER_ID":"$GROUP_ID" celery -A bragibooks_proj worker --loglevel=info --concurrency 1 -E &
