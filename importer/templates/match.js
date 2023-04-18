@@ -15,16 +15,16 @@ function closeSearchPanel() {
 function constructQueryParams(media_dir, title, author, keywords) {
     let params = [];
     if (media_dir) {
-        params.push(`media_dir=${media_dir}`);
+        params.push(`media_dir=${encodeURIComponent(media_dir)}`);
     }
     if (title) {
-      params.push(`title=${title}`);
+      params.push(`title=${encodeURIComponent(title)}`);
     }
     if (author) {
-      params.push(`author=${author}`);
+      params.push(`author=${encodeURIComponent(author)}`);
     }
     if (keywords) {
-      params.push(`keywords=${keywords}`);
+      params.push(`keywords=${encodeURIComponent(keywords)}`);
     }
     return `?${params.join('&')}`;
 }
