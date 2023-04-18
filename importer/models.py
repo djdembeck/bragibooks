@@ -29,6 +29,20 @@ class SettingManager(models.Manager):
         return errors
 
 
+class StatusChoices(models.TextChoices):
+    PROCESSING = "Processing"
+    DONE = "Done"
+    ERROR = "Error"
+
+
+class Status(models.Model):
+    status = models.CharField(max_length=10, choices=StatusChoices.choices)
+    message = models.TextField()
+
+    def __str__(self) -> str:
+        return self.status
+
+
 class Book(models.Model):
     title = models.CharField(max_length=255)
     asin = models.CharField(max_length=10)
@@ -41,11 +55,15 @@ class Book(models.Model):
     runtime_length_minutes = models.IntegerField()
     format_type = models.CharField(max_length=25)
     converted = models.BooleanField()
-    src_path = models.FilePathField()
-    dest_path = models.FilePathField()
+    src_path = models.TextField()
+    dest_path = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    status = models.OneToOneField(Status, on_delete=models.CASCADE)
     objects = BookManager()
+
+    def __str__(self) -> str:
+        return f"{self.title}: by {', '.join(str(author) for author in self.authors.all())}"
 
 
 class Author(models.Model):
@@ -58,6 +76,9 @@ class Author(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    def __str__(self) -> str:
+        return f"{self.first_name} {self.last_name}"
+
 
 class Narrator(models.Model):
     first_name = models.CharField(max_length=45)
@@ -67,6 +88,9 @@ class Narrator(models.Model):
     long_desc = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self) -> str:
+        return f"{self.first_name} {self.last_name}"
 
 
 class Setting(models.Model):

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="box">
+    <div class="tabs is-fullwidth is-toggle" style="background: white;" data-default={{ default_view }}>
+        <ul>
+            <li class="tab is-active" id="done-tab" onclick="openTab('done')"><a>Done</a></li>
+            <li class="tab" id="processing-tab" onclick="openTab('processing')"><a>Processing</a></li>
+            <li class="tab" id="error-tab" onclick="openTab('error')"><a>Error</a></li>
+        </ul>
+    </div>
+
+    <div class="tab-content">
+        <div class="tab-pane" id="done">
+            {% include "book_list.html" with books=done_books %}
+        </div>
+        <div class="tab-pane" id="processing" style="display: none;">
+            {% include "book_list.html" with books=processing_books %}
+        </div>
+        <div class="tab-pane" id="error" style="display: none;">
+            {% include "book_list.html" with books=error_books %}
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block script %}
+    {% include "book_tabs.js" %}
+{% endblock %}

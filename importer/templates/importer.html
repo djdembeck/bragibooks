@@ -8,7 +8,7 @@
                     <p class="title">Select input</p>
                 </div>
             </div>
-            <form action="/import/" method="POST">
+            <form action="{% url 'import' %}" method="POST">
                 {% csrf_token %}
                 <div class="card-content">
                     <div class="field is-horizontal">
@@ -17,7 +17,7 @@
                                 <div class="control">
                                     <div class="select is-multiple is-fullwidth">
                                         <select multiple size="15" name="input_dir">
-                                            {% for list_item in this_dir %}
+                                            {% for list_item in import_dir %}
                                             <option value="{{ list_item }}"><p>{{ list_item }}</p></option>
                                             {% endfor %}
                                         </select>
