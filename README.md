@@ -51,11 +51,11 @@ Some basics of what Bragi does:
 
 Folder/file selection             |  ASIN input
 :-------------------------:|:-------------------------:
-![file-selection](../assets/screens/file-selection.png)  |  ![asin-pre](../assets/screens/asin-pre.png)
+![file-selection](../assets/screens/file_picker.png)  |  ![asin-auto-search](../assets/screens/auto_search_panel.png)
 
 Folder/file selection             |  Post-proccess overview
 :-------------------------:|:-------------------------:
-![asin-input](../assets/screens/asin-input.png)  |  ![post-process](../assets/screens/post-process.png)
+![asin-custom-search](../assets/screens/custom_search.png)  |  ![post-process](../assets/screens/processing_panel.png)
 
 ## 🏁 Getting Started <a name = "getting_started"></a>
 
