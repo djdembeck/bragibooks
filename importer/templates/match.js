@@ -9,6 +9,15 @@ function openSearchPanel(srcPath, select_id) {
 }
 
 function closeSearchPanel() {
+    // Clear the input fields
+    modal.querySelector('#title').value = '';
+    modal.querySelector('#author').value = '';
+    modal.querySelector('#keywords').value = '';
+
+    // Clear the search notification
+    document.getElementById('search-notification').style.display = "none";
+
+    // Close the panel
     document.getElementById("custom-search-modal").classList.remove("is-active");
 }
 
@@ -18,13 +27,13 @@ function constructQueryParams(media_dir, title, author, keywords) {
         params.push(`media_dir=${encodeURIComponent(media_dir)}`);
     }
     if (title) {
-      params.push(`title=${encodeURIComponent(title)}`);
+        params.push(`title=${encodeURIComponent(title)}`);
     }
     if (author) {
-      params.push(`author=${encodeURIComponent(author)}`);
+        params.push(`author=${encodeURIComponent(author)}`);
     }
     if (keywords) {
-      params.push(`keywords=${encodeURIComponent(keywords)}`);
+        params.push(`keywords=${encodeURIComponent(keywords)}`);
     }
     return `?${params.join('&')}`;
 }
@@ -33,7 +42,7 @@ async function search(url) {
     try {
         const response = await fetch(url);
         const data = response.json();
-        
+
         console.log(`Received ${data.length} options for select.`);
         return data;
 
@@ -44,7 +53,7 @@ async function search(url) {
 
 function createOption(value, text) {
     const opt = document.createElement("option");
-    if(value) {
+    if (value) {
         opt.value = value;
     }
 
@@ -61,7 +70,7 @@ function noOptionsFound(select) {
 
 function updateOptions(select, data) {
     select.innerHTML = "";
-    
+
     if (!data.length) {
         noOptionsFound(select);
         select.parentElement.classList.remove("is-loading");
@@ -91,15 +100,15 @@ function checkAllSelectsHaveValue() {
             hasValues = false;
             return;
         }
-      });
-      
-      if(!hasValues){
+    });
+
+    if (!hasValues) {
         console.log('button is disabled');
         document.getElementById("match-form-submit").disabled = true;
-      } else {
+    } else {
         console.log("button is enabled");
         document.getElementById("match-form-submit").disabled = false;
-      }
+    }
 }
 
 async function searchAsin(title, author, keywords) {
@@ -114,7 +123,7 @@ async function searchAsin(title, author, keywords) {
     // Call the URL and get response
     var data = await search(url);
 
-    if(!data.length) {
+    if (!data.length) {
         // display message in search panel and return, dont close the search panel
         document.getElementById('search-notification').style.display = "block";
         return;
@@ -122,11 +131,6 @@ async function searchAsin(title, author, keywords) {
 
     // Update the select for the calling custom search
     updateOptions(select, data)
-
-    // Clear the input fields
-    modal.querySelector('#title').value = '';
-    modal.querySelector('#author').value = '';
-    modal.querySelector('#keywords').value = '';
 
     // close the search panel
     closeSearchPanel();
@@ -139,18 +143,18 @@ function fetchOptions() {
     selects.forEach(async select => {
         console.log(`Fetching select:${select}...`);
 
-        const url = "asin-search" + constructQueryParams(select.name);
+        const url = "asin-search" + constructQueryParams(select.name.split('/').pop());
         console.log(`Fetching results at ${url}...`);
-    
+
         var data = await search(url);
-        
+
         updateOptions(select, data);
 
         checkAllSelectsHaveValue();
     });
 
     console.log("Finished fetching select options.");
-   }
+}
 
 console.log(`Fetching select options: ${selects}...`);
 fetchOptions();

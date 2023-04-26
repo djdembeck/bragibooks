@@ -1,0 +1,39 @@
+{% load directory_explorer_tags %}
+
+{% for item in contents %}
+    {% with id=item|generate_id %}
+        {% if item|is_directory %}
+            <label class="panel-block folder" id="{{ id }}" folder-id="{{folder_id}}" style="display: {{ display }};">
+                <div>
+                    <input type="checkbox" name="input_dir" value="{{ item }}">
+                    {% for i in depth|get_range %}
+                        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+                    {% endfor %}
+                    <span class="panel-icon">
+                        <i class="fas fa-folder" aria-hidden="false"></i>
+                    </span>
+                    {{item|basename}}
+                </div>
+                <span class="arrow mr-2 is-medium">
+                    <i class="fas fa-lg fa-angle-right" id="{{ id }}" ></i>
+                </span>
+            </label>
+
+            {% render_directory path=item folder_id=id depth=depth|add_one%}
+        
+        {% else %}
+
+        <label class="panel-block file" style="display: {{ display }};" id="{{ id }}" folder-id="{{ folder_id }}">
+            <input type="checkbox" name="input_dir" value="{{ item }}">
+            {% for i in depth|get_range %}
+                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+            {% endfor %}
+            <span class="panel-icon">
+                <i class="fas fa-file" aria-hidden="false"></i>
+            </span>
+            {{item|basename}}
+        </label>
+
+        {% endif %}
+    {% endwith %}
+{% endfor %}

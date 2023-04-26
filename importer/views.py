@@ -38,15 +38,11 @@ class ImportView(TemplateView):
     template_name = "importer.html"
 
     def get_context_data(self, **kwargs):
-        folder_arr = []
-        for path in sorted(Path(rootdir).iterdir(), key=os.path.getmtime, reverse=True):
-            base = os.path.basename(path)
-            folder_arr.append(base)
-
         context = {
-            "import_dir": folder_arr,
+            "contents": sorted(
+                Path(rootdir).iterdir(), key=os.path.getmtime, reverse=True
+            )
         }
-
         return context
 
     def post(self, request):
