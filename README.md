@@ -90,6 +90,23 @@ To run Bragibooks as a container, you need to pass some paramaters in the run co
 Which all together should look like: 
 
 	docker run --rm -d --name bragibooks -v /path/to/input:/input -v /path/to/output:/output -v /appdata/bragibooks/config:/config -p 8000:8000/tcp -e LOG_LEVEL=WARNING ghcr.io/djdembeck/bragibooks:main
+	
+Or in docker compose format :
+```
+version: '3.3'
+services:
+    bragibooks:
+        container_name: bragibooks
+        volumes:
+            - '/path/to/input:/input'
+            - '/path/to/output:/output'
+            - '/appdata/bragibooks/config:/config'
+        ports:
+            - '8000:8000/tcp'
+        environment:
+            - LOG_LEVEL=WARNING
+        image: 'ghcr.io/djdembeck/bragibooks:main'
+```
 
 #### Direct (Gunicorn)
   - Copy static assets to  project folder:
