@@ -34,6 +34,7 @@
 - [Built Using](#built_using)
 - [Contributing](../CONTRIBUTING.md)
 - [Authors](#authors)
+- [Contributors](#contributors)
 - [Acknowledgments](#acknowledgement)
 
 ## 🧐 About <a name = "about"></a>
@@ -82,8 +83,10 @@ To run Bragibooks as a container, you need to pass some paramaters in the run co
   | `-v /appdata/bragibooks/config:/config` | Persistent config storage |
   | `-p 8000:8000/tcp` | Port for your browser to use |
   | `-e LOG_LEVEL=WARNING` | Choose any [logging level](https://www.loggly.com/ultimate-guide/python-logging-basics/) |
+  | `-e DEBUG=False` | Turn django debug on or off (default False) |
   | `-e UID=99` | User ID to run the container as (default 99)|
   | `-e GID=100` | Group ID to run the container as (default 100)|
+  | `-e CELERY_WORKERS=1` | The number or celery workers for processing books (default 1)|
   | `-e CSRF_TRUSTED_ORIGINS=https://bragibooks.mydomain.com` | Domains to trust if bragibooks is hosted behind a reverse proxy. |
 
 
@@ -99,6 +102,13 @@ Which all together should look like:
   - Create the database:
     ```
     python manage.py migrate
+    ```
+  - Run the celery worker for processing books:
+    ```
+    celery -A bragibooks_proj worker \
+    --loglevel=info \ 
+    --concurrency 1 \
+    -E
     ```
   - Run the web server:
     ```
@@ -130,9 +140,17 @@ The Bragibooks process is a linear, 3 step process:
 - [m4b-merge](https://github.com/djdembeck/m4b-merge) - File merging and tagging
 
 ## ✍️ Authors <a name = "authors"></a>
+  <img src="https://github.com/djdembeck.png?size=100"/>
+  
+  [@djdembeck](https://github.com/djdembeck) - Idea & Initial work
 
-- [@djdembeck](https://github.com/djdembeck) - Idea & Initial work
+## ✨ Contributors
+  <img src="https://github.com/AceTugboat.png?size=100"/>
+  
+  [@acetugboat](https://github.com/AceTugboat)
+
 
 ## 🎉 Acknowledgements <a name = "acknowledgement"></a>
+  <img src="https://github.com/sandreas.png?size=100"/>
 
-- [sandreas](https://github.com/sandreas) for creating and maintaining [m4b-tool](https://github.com/sandreas/m4b-tool)
+  [sandreas](https://github.com/sandreas) for creating and maintaining [m4b-tool](https://github.com/sandreas/m4b-tool)
