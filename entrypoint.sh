@@ -31,7 +31,7 @@ done
 python manage.py collectstatic --noinput
 
 # Start Celery Worker
-gosu "$PUID":"$PGID" celery -A bragibooks_proj worker --loglevel=info --concurrency 1 -E &
+gosu "$PUID":"$PGID" celery -A bragibooks_proj worker --loglevel=info --concurrency ${CELERY_WORKERS:-1} -E &
 
 # If you want to use the admin panel for debugging
 # python manage.py createsuperuser --noinput
