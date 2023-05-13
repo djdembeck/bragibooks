@@ -8,13 +8,13 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 # setup environment variable
-ENV DockerHOME=/home/app/web
+ENV APP_HOME=/home/app/web
 
 # where your code lives  
-WORKDIR $DockerHOME
+WORKDIR $APP_HOME
 
 # copy whole project to your docker home directory.
-COPY . $DockerHOME
+COPY . $APP_HOME
 
 # run this command to install all dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
@@ -23,4 +23,4 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # port where the Django app runs
 EXPOSE 8000
 
-ENTRYPOINT ["/bin/sh", "docker/entrypoint.sh"]
+ENTRYPOINT ["/bin/sh", "entrypoint.sh"]
