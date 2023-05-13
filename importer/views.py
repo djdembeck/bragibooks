@@ -80,7 +80,7 @@ class MatchView(TemplateView):
         context = []
         for this_dir in self.request.session['input_dir']:
             try:
-                book = Book.objects.get(src_path=f"{rootdir}/{this_dir}")
+                book = Book.objects.get(src_path=f"{this_dir}")
             except Book.DoesNotExist:
                 context.append({'src_path': this_dir})
             else:
@@ -121,8 +121,7 @@ class MatchView(TemplateView):
         # create objects for each book, setting their status to processing
         created_books = False
         for i, asin in enumerate(asin_arr):
-            original_path = Path(
-                f"{rootdir}/{request.session['input_dir'][i]}")
+            original_path = Path(f"{request.session['input_dir'][i]}")
             input_data = helpers.get_directory(original_path)
 
             if not input_data:
