@@ -126,7 +126,7 @@ class MatchView(TemplateView):
             input_data = helpers.get_directory(original_path)
 
             if not input_data:
-                messages.warning(
+                messages.error(
                     request, f"No supported files in {original_path}")
                 continue
 
