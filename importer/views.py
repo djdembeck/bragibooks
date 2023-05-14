@@ -130,7 +130,7 @@ class MatchView(TemplateView):
                 continue
 
             logger.info(
-                f"Making models and merging files for: {request.session['input_dir'][i]}")
+                f"Making models and merging files for: {original_path}")
 
             book = create_book(asin, original_path)
             created_books = True
