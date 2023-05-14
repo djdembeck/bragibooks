@@ -47,6 +47,14 @@ def run_m4b_merge(asin: str):
         f"{'-' * 15} Starting to process {asin}: {book.title} {'-' * 15}")
 
     input_data = helpers.get_directory(Path(book.src_path))
+    if not input_data:
+        message = f"invalid input_data: {input_data} for book: {book} at path: {book.src_path}"
+        logger.error(message)
+        book.status.status = StatusChoices.ERROR
+        book.status.message = message
+        book.status.save()
+        return
+
     audible = audible_helper.BookData(asin)
 
     # Process metadata and run components to merge files
