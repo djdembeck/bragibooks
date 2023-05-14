@@ -98,6 +98,8 @@ def create_book(asin, original_path) -> Book:
     else:
         book = Book.objects.get(asin=asin)
         book.src_path = original_path
+        book.save()
+
         book.status.status = StatusChoices.PROCESSING
         book.status.message = ""
         book.status.save()
