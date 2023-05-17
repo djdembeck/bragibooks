@@ -44,7 +44,7 @@ gosu "$PUID":"$PGID" gunicorn bragibooks_proj.wsgi \
     --workers 2 \
     --threads 4 \
     --worker-class gthread \
-    --enable-stdio-inheritance \
+    --enable-stdio-inheritance
 
 # for debug
 #python manage.py runserver 0.0.0.0:8000

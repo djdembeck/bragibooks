@@ -94,7 +94,32 @@ Which all together should look like:
 
 	docker run --rm -d --name bragibooks -v /path/to/input:/input -v /path/to/output:/output -v /appdata/bragibooks/config:/config -p 8000:8000/tcp -e LOG_LEVEL=WARNING ghcr.io/djdembeck/bragibooks:main
 
-#### Direct (Gunicorn)
+## Docker Compose
+```
+version: '3'
+
+services:
+  bragi:
+    image: ghcr.io/djdembeck/bragibooks:main
+    container_name: bragibooks
+    environment:
+      - CSRF_TRUSTED_ORIGINS=https://bragibooks.mydomain.com
+      - LOG_LEVEL=INFO
+      - DEBUG=False
+      - UID=1000
+      - GID=1000
+    volumes:
+      - path/to/config:/config
+      - path/to/input:/input
+      - path/to/output/output:/output
+      - path/to/done:/done
+    ports:
+      - 8000:8000
+    restart: unless-stopped
+```
+
+
+#### Direct Build (Gunicorn)
   - Copy static assets to  project folder:
     ```
     python manage.py collectstatic
