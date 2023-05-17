@@ -141,6 +141,7 @@ def make_book_model(asin, original_path) -> Book:
         format_type=metadata['formatType'],
         converted=True,
         status=status,
+        cover_image_link=metadata['image'],
         src_path=original_path
     )
 

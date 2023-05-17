@@ -100,14 +100,14 @@ class SearchTool:
         search_results = []
         for item in api_response['products']:
             # Only append results which have valid keys
-            item: dict
             if item.keys() >= {
                 "asin",
                 "authors",
                 "language",
                 "narrators",
                 "release_date",
-                "title"
+                "title",
+                "product_images"
             }:
                 search_results.append(
                     {
@@ -118,6 +118,7 @@ class SearchTool:
                         'narrator': item['narrators'],
                         'region': self.region,
                         'title': item['title'],
+                        'product_images': item['product_images']
                     }
                 )
         return search_results
@@ -151,7 +152,6 @@ class ScoreTool:
             Reduces a string to lowercase and removes
             punctuation and spaces.
         """
-        logger.info(f"{string=}")
         normalized = string \
             .lower() \
             .replace("-", "") \
@@ -174,6 +174,7 @@ class ScoreTool:
         self.narrator = self.result_dict['narrator'][0]['name']
         self.region = self.result_dict['region']
         self.title = self.result_dict['title']
+        self.image_link = list(self.result_dict['product_images'].values())
         return self.score_result()
 
     def sum_scores(self, numberlist):
@@ -217,8 +218,12 @@ class ScoreTool:
             data_to_logger.append({'Title is': self.title})
         if self.year:
             score_dict['year'] = self.year
+            data_to_logger.append({'Year is': self.year})
+        if self.image_link:
+            score_dict['image_link'] = self.image_link
+            data_to_logger.append({'Image Link is': self.image_link})
 
-        logger.info(data_to_logger)
+        logger.debug(data_to_logger)
         return score_dict
 
     def score_result(self):
@@ -248,7 +253,7 @@ class ScoreTool:
         # Subtract index to use Audible relevance as weight
         score = self.INITIAL_SCORE - self.sum_scores(all_scores) - self.index
 
-        logger.info(f"Result #{self.index + 1}, Score: {score}")
+        logger.debug(f"Result #{self.index + 1}, Score: {score}")
 
         # Create result dict
         return self.score_create_result(score)
@@ -275,18 +280,18 @@ class ScoreTool:
             Compare the input author similarity to the search result author.
             Score is calculated with LevenshteinDistance
         """
-        if self.helper.author:
-            scorebase3 = self.helper.author
-            scorebase4 = author
-            author_score = distance(
-                self.reduce_string(scorebase3),
-                self.reduce_string(scorebase4)
-            ) * 10
-            logger.debug("Score deduction from author: " + str(author_score))
-            return author_score
-
-        logger.warn('No artist found in file metadata')
-        return 20
+        if not self.helper.author:
+            logger.debug(f'No author found in file metadata for {self.title} - {self.asin}')
+            return 20
+        
+        scorebase3 = self.helper.author
+        scorebase4 = author
+        author_score = distance(
+            self.reduce_string(scorebase3),
+            self.reduce_string(scorebase4)
+        ) * 10
+        logger.debug("Score deduction from author: " + str(author_score))
+        return author_score
 
     def score_language(self, language: str):
         """

@@ -51,7 +51,7 @@ class RegionTool:
             Returns the API parameters.
         """
         return (
-            '?response_groups=contributors,product_desc,product_attrs'
+            '?response_groups=contributors,product_desc,product_attrs,media'
             '&num_results=25&products_sort_by=Relevance'
         )
 

@@ -15,6 +15,24 @@
     flex-grow: 1;
     text-align: left;
 }
+
+.image-label-container {
+    display: flex;
+    align-items: end;
+    gap: 10px;
+    margin-bottom: 10px;
+    margin-left: 20px;
+}
+
+.image-label-container label {
+    line-break: anywhere;
+}
+
+.image-label-container img {
+    width: 150px;
+    border-radius: 10px;
+}
+
 {% endblock %}
 {% block content %}
 <div class="columns">
@@ -31,20 +49,22 @@
                     <div class="container">
                         {% for input in context %}
                         <div class="column is-grouped" id="asin-search-{{ forloop.counter|add:'-1' }}">
-                            <label class="label">{{ input.src_path|basename }}</label>
+                            <div class="image-label-container">
+                                <img src="" id="image-{{ forloop.counter|add:'-1' }}">
+                                <label class="label">{{ input.src_path|basename }}</label>
+                            </div>
                             <div class="field is-flex is-flex-direction-column">
                                 <div class="control is-inline-flex">
                                     <div class="is-flex is-align-items-center">
                                         <i class="fa fa-times mr-2" onclick="openRemoveConfirmationModal('{{ input.src_path|escapejs }}', '{{ forloop.counter|add:'-1' }}')"></i>
                                         <div class="select is-loading mr-3 is-fullwidth">
-                                            <select class="asin-select" id="asin-select-{{ forloop.counter|add:'-1' }}" name="{{ input.src_path }}">
-                                                <option>{{ input.src_path }}</option>
+                                            <select class="asin-select" id="asin-select-{{ forloop.counter|add:'-1' }}" name="{{ input.src_path }}" onchange="updateImage('{{ forloop.counter|add:'-1' }}')">
+                                                <option value="">{{ input.src_path }}</option>
                                             </select>
                                         </div>
                                     </div>
-                                    <button class="button is-link" type="button"
-                                        onclick="openSearchPanel('{{ input.src_path|escapejs }}', 'asin-select-{{ forloop.counter|add:"-1" }}')">
-                                        Custom Search
+                                    <button class="button is-link" type="button" onclick="openSearchPanel('{{ input.src_path|escapejs }}', 'asin-select-{{ forloop.counter|add:"-1" }}')">
+                                    Custom Search
                                     </button>
                                 </div>
                             </div>
