@@ -23,6 +23,32 @@ function closeSearchPanel() {
     modal.classList.remove("is-active");
 }
 
+function openRemoveConfirmationModal(label, column_index) {
+    const modalLabel = document.querySelector("#confirm-modal-title");
+    modalLabel.textContent = `Remove ${label} from search`;
+
+    const modalButton = document.querySelector("#remove-column-button");
+    modalButton.onclick = () => removeColumn(column_index)
+
+    // Get the modal element and set it to active
+    var modal = document.getElementById('remove-confirmation-modal');
+    modal.classList.add('is-active');
+}
+
+function closeRemoveConfirmationModal() {
+    // Get the modal element and remove the active class
+    var modal = document.getElementById('remove-confirmation-modal');
+    modal.classList.remove('is-active');
+}
+
+function removeColumn(column_index) {
+    const columnToRemove = document.querySelector(`#asin-search-${column_index}`);
+    columnToRemove.remove();
+
+    // Close the modal
+    closeRemoveConfirmationModal();
+}
+
 function constructQueryParams(media_dir, title, author, keywords) {
     let params = [];
     if (media_dir) {
