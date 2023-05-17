@@ -1,5 +1,3 @@
-const selects = document.querySelectorAll(".asin-select");
-
 function openSearchPanel(srcPath, select_id) {
     const modal = document.getElementById('custom-search-modal');
     const modalTitle = modal.querySelector('.modal-card-title');
@@ -47,6 +45,9 @@ function removeColumn(column_index) {
 
     // Close the modal
     closeRemoveConfirmationModal();
+
+    // Check all searches have values
+    checkAllSelectsHaveValue();
 }
 
 function constructQueryParams(media_dir, title, author, keywords) {
@@ -121,7 +122,7 @@ function checkAllSelectsHaveValue() {
     console.log("Checking if all selects have values");
     var hasValues = true;
 
-    selects.forEach(select => {
+    document.querySelectorAll(".asin-select").forEach(select => {
         console.log(select.value);
         if (select.value.length != 10) {
             console.log(`${select.value}: set hasValues to false`);
@@ -168,7 +169,7 @@ async function searchAsin(title, author, keywords) {
 }
 
 function fetchOptions() {
-    selects.forEach(async select => {
+    document.querySelectorAll(".asin-select").forEach(async select => {
         console.log(`Fetching select:${select}...`);
 
         const url = "asin-search" + constructQueryParams(select.name.split('/').pop());
@@ -184,6 +185,5 @@ function fetchOptions() {
     console.log("Finished fetching select options.");
 }
 
-console.log(`Fetching select options: ${selects}...`);
 fetchOptions();
 checkAllSelectsHaveValue();
