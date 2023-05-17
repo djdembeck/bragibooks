@@ -71,8 +71,6 @@ async function search(url) {
     try {
         const response = await fetch(url);
         const data = response.json();
-
-        console.log(`Received ${data.length} options for select.`);
         return data;
 
     } catch (error) {
@@ -80,20 +78,21 @@ async function search(url) {
     }
 }
 
-function createOption(value, text) {
+function createOption(value, text, image_link) {
     const opt = document.createElement("option");
     if (value) {
         opt.value = value;
     }
 
     opt.text = text;
+    opt.setAttribute("data-image-link", image_link);
     return opt;
 }
 
 function noOptionsFound(select) {
     select.style.borderColor = "red";
     select.style.borderWidth = "2px";
-    opt = createOption("", "No Audiobook results found, try a custom search...");
+    opt = createOption("", "No Audiobook results found, try a custom search...", "");
     select.appendChild(opt);
 }
 
@@ -110,32 +109,43 @@ function updateOptions(select, data) {
 
     data.forEach(option => {
         text = option.title + " by " + option.author + " - Narrator " + option.narrator + ": " + option.asin;
-        opt = createOption(option.asin, text);
+        opt = createOption(option.asin, text, option.image_link);
         select.appendChild(opt);
     });
 
     select.parentElement.classList.remove("is-loading");
-    console.log(`Added ${data.length} options to select.`);
+}
+
+function updateImage(counter) {
+    // Get the selected value from the select element
+    const selectElement = document.getElementById(`asin-select-${counter}`);
+
+    // Get the corresponding image element
+    var imageElement = document.getElementById(`image-${counter}`);
+
+    // Update the image source
+    image_link = selectElement.options[selectElement.selectedIndex].dataset.imageLink;
+
+    if (!image_link) {
+        image_link = "/static/images/cover_not_available.jpg";
+    }
+
+    imageElement.src = image_link;
 }
 
 function checkAllSelectsHaveValue() {
-    console.log("Checking if all selects have values");
     var hasValues = true;
 
     document.querySelectorAll(".asin-select").forEach(select => {
-        console.log(select.value);
         if (select.value.length != 10) {
-            console.log(`${select.value}: set hasValues to false`);
             hasValues = false;
             return;
         }
     });
 
     if (!hasValues) {
-        console.log('button is disabled');
         document.getElementById("match-form-submit").disabled = true;
     } else {
-        console.log("button is enabled");
         document.getElementById("match-form-submit").disabled = false;
     }
 }
@@ -146,7 +156,7 @@ async function searchAsin(title, author, keywords) {
 
     // Build the query params and url
     var queryParams = constructQueryParams("", title, author, keywords);
-    console.log(queryParams);
+    console.debug(queryParams);
     url = "asin-search" + queryParams;
 
     // Call the URL and get response
@@ -170,19 +180,18 @@ async function searchAsin(title, author, keywords) {
 
 function fetchOptions() {
     document.querySelectorAll(".asin-select").forEach(async select => {
-        console.log(`Fetching select:${select}...`);
-
         const url = "asin-search" + constructQueryParams(select.name.split('/').pop());
-        console.log(`Fetching results at ${url}...`);
-
         var data = await search(url);
 
         updateOptions(select, data);
 
+        document.querySelectorAll(".asin-select").forEach((selectElement) => {
+            const counter = selectElement.id.split('-').pop();
+            updateImage(counter);
+        });
+
         checkAllSelectsHaveValue();
     });
-
-    console.log("Finished fetching select options.");
 }
 
 fetchOptions();

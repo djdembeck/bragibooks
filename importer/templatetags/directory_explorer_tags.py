@@ -41,7 +41,6 @@ def directory_contents(path):
     """
     Returns a list of files and subdirectories in the given path.
     """
-    logger.info(f"{path=}")
     return sorted(Path(path).iterdir(), key=os.path.getmtime, reverse=True)
 
 
