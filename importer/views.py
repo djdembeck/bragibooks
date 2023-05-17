@@ -89,48 +89,35 @@ class MatchView(TemplateView):
         return {"context": context}
 
     def post(self, request: HttpRequest):
-        if 'input_dir' not in request.session:
-            logger.debug("No session data found, returning to import page")
-            return redirect("import")
-
-        asin_arr = []
-        for key, asin in request.POST.items():
-            if key != "csrfmiddlewaretoken":
-
-                # Check for validation errors
-                errors = Book.objects.book_asin_validator(asin)
-                if len(errors) > 0:
-                    for k, v in errors.items():
-                        messages.error(request, v)
-                    return redirect("match")
-
-                existing_settings = Setting.objects.first()
-                if not existing_settings:
-                    messages.error(request, "Settings not set")
-                    return redirect("setting")
-
-                # Check that asin actually returns data from audible
-                try:
-                    helpers.validate_asin(existing_settings.api_url, asin)
-                except ValueError:
-                    messages.error(request, "Bad ASIN: " + asin)
-                    return redirect("match")
-                else:
-                    asin_arr.append(asin)
-
-        # create objects for each book, setting their status to processing
         created_books = False
-        for i, asin in enumerate(asin_arr):
-            original_path = Path(f"{request.session['input_dir'][i]}")
-            input_data = helpers.get_directory(original_path)
-
-            if not input_data:
-                messages.error(
-                    request, f"No supported files in {original_path}")
+        for key, asin in request.POST.items():
+            
+            if key == "csrfmiddlewaretoken":
                 continue
 
-            logger.info(
-                f"Making models and merging files for: {original_path}")
+            # Check for validation errors
+            if len(errors := Book.objects.book_asin_validator(asin)) > 0:
+                for k, v in errors.items():
+                    messages.error(request, v)
+                return redirect("match")
+
+            if not (existing_settings := Setting.objects.first()):
+                messages.error(request, "Settings not set")
+                return redirect("setting")
+
+            # Check that asin actually returns data from audible
+            try:
+                helpers.validate_asin(existing_settings.api_url, asin)
+            except ValueError:
+                messages.error(request, "Bad ASIN: " + asin)
+                return redirect("match")
+            
+            original_path = Path(key)
+            if not helpers.get_directory(original_path):
+                messages.error(request, f"No supported files in {original_path}")
+                continue
+
+            logger.info(f"Making models and merging files for: {original_path}")
 
             book = create_book(asin, original_path)
             created_books = True
@@ -139,7 +126,6 @@ class MatchView(TemplateView):
             m4b_merge_task.delay(asin)
         
         if created_books:
-            request.session.flush()
             return redirect("books")
         else:
             return redirect("match")
