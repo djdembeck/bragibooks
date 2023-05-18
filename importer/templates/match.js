@@ -9,6 +9,8 @@ function openSearchPanel(srcPath, select_id) {
 }
 
 function closeSearchPanel() {
+    const modal = document.getElementById('custom-search-modal');
+
     // Clear the input fields
     modal.querySelector('#title').value = '';
     modal.querySelector('#author').value = '';
@@ -18,7 +20,7 @@ function closeSearchPanel() {
     document.getElementById('search-notification').style.display = "none";
 
     // Close the panel
-    document.getElementById("custom-search-modal").classList.remove("is-active");
+    modal.classList.remove("is-active");
 }
 
 function constructQueryParams(media_dir, title, author, keywords) {

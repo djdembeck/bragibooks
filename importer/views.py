@@ -80,7 +80,7 @@ class MatchView(TemplateView):
         context = []
         for this_dir in self.request.session['input_dir']:
             try:
-                book = Book.objects.get(src_path=f"{rootdir}/{this_dir}")
+                book = Book.objects.get(src_path=f"{this_dir}")
             except Book.DoesNotExist:
                 context.append({'src_path': this_dir})
             else:
@@ -119,26 +119,30 @@ class MatchView(TemplateView):
                     asin_arr.append(asin)
 
         # create objects for each book, setting their status to processing
+        created_books = False
         for i, asin in enumerate(asin_arr):
-            original_path = Path(
-                f"{rootdir}/{request.session['input_dir'][i]}")
+            original_path = Path(f"{request.session['input_dir'][i]}")
             input_data = helpers.get_directory(original_path)
 
             if not input_data:
                 messages.error(
                     request, f"No supported files in {original_path}")
-                return redirect("match")
+                continue
 
             logger.info(
-                f"Making models and merging files for: {request.session['input_dir'][i]}")
+                f"Making models and merging files for: {original_path}")
 
             book = create_book(asin, original_path)
+            created_books = True
 
             logger.info(f"Adding book {book} to processing queue")
             m4b_merge_task.delay(asin)
-
-        request.session.flush()
-        return redirect("books")
+        
+        if created_books:
+            request.session.flush()
+            return redirect("books")
+        else:
+            return redirect("match")
 
 
 class AsinSearch(View):
