@@ -16,6 +16,15 @@
         "ideas",
         "doc"
       ]
+    },
+    {
+      "login": "sandreas",
+      "name": "Andreas",
+      "avatar_url": "https://avatars.githubusercontent.com/u/2050604?v=4",
+      "profile": "https://pilabor.com",
+      "contributions": [
+        "tool"
+      ]
     }
   ],
   "contributorsPerLine": 7,
