@@ -16,6 +16,8 @@
 [![Docker Image Size (latest by date)](https://img.shields.io/docker/image-size/djdembeck/bragibooks)](https://hub.docker.com/r/djdembeck/bragibooks)
 [![Docker Image Version (latest by date)](https://img.shields.io/docker/v/djdembeck/bragibooks)](https://hub.docker.com/r/djdembeck/bragibooks)
 [![CodeFactor Grade](https://img.shields.io/codefactor/grade/github/djdembeck/bragibooks)](https://www.codefactor.io/repository/github/djdembeck/bragibooks)
+[![All Contributors](https://img.shields.io/github/all-contributors/djdembeck/bragibooks?color=ee8449&style=flat-square)](#contributors)
+
 
 
 </div>
@@ -170,9 +172,15 @@ The Bragibooks process is a linear, 3 step process:
   [@djdembeck](https://github.com/djdembeck) - Idea & Initial work
 
 ## ✨ Contributors
-  <img src="https://github.com/AceTugboat.png?size=100"/>
-  
-  [@acetugboat](https://github.com/AceTugboat)
+
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+
+<!-- ALL-CONTRIBUTORS-LIST:END -->
 
 
 ## 🎉 Acknowledgements <a name = "acknowledgement"></a>
