@@ -109,7 +109,7 @@ function updateOptions(select, data) {
 
     data.forEach(option => {
         text = option.title + " by " + option.author + " - Narrator " + option.narrator + ": " + option.asin;
-        opt = createOption(option.asin, text, option.image_link);
+        let opt = createOption(option.asin, text, option.image_link);
         select.appendChild(opt);
     });
 
@@ -126,11 +126,9 @@ function updateImage(counter) {
     // Update the image source
     let image_link = selectElement.options[selectElement.selectedIndex].dataset.imageLink;
 
-    if (!image_link) {
-        image_link = "/static/images/cover_not_available.jpg";
+    if (image_link) {
+        imageElement.src = image_link;
     }
-
-    imageElement.src = image_link;
 }
 
 function checkAllSelectsHaveValue() {
@@ -185,13 +183,11 @@ async function fetchOptions() {
 
         updateOptions(select, data);
 
-        document.querySelectorAll(".asin-select").forEach((selectElement) => {
-            const counter = selectElement.id.split('-').pop();
-            updateImage(counter);
-        });
-
-        checkAllSelectsHaveValue();
+        const counter = select.id.split('-').pop();
+        updateImage(counter);
     });
+
+    checkAllSelectsHaveValue();
 }
 
 fetchOptions();

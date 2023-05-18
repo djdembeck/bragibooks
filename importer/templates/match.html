@@ -50,7 +50,8 @@
                         {% for input in context %}
                         <div class="column is-grouped" id="asin-search-{{ forloop.counter|add:'-1' }}">
                             <div class="image-label-container">
-                                <img src="" id="image-{{ forloop.counter|add:'-1' }}" alt="">
+                                {% load static %}
+                                <img src="{% static 'images/cover_not_available.jpg' %}" id="image-{{ forloop.counter|add:'-1' }}" alt="">
                                 <label class="label">{{ input.src_path|basename }}</label>
                             </div>
                             <div class="field is-flex is-flex-direction-column">
