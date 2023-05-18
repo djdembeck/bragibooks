@@ -4,7 +4,8 @@
 .modal-card {
     position: fixed;
     top: 10%;
-    }
+}
+
 .modal-card-foot {
     display: flex;
     justify-content: space-between;
@@ -19,7 +20,7 @@
 <div class="columns">
     <div class="column">
         <form action="{% url 'match' %}" method="POST">
-        {% csrf_token %}
+            {% csrf_token %}
             <div class="card">
                 <div class="card-header">
                     <div class="card-header-title">
@@ -29,16 +30,21 @@
                 <div class="card-content">
                     <div class="container">
                         {% for input in context %}
-                        <div class="column is-grouped">
+                        <div class="column is-grouped" id="asin-search-{{ forloop.counter|add:'-1' }}">
                             <label class="label">{{ input.src_path|basename }}</label>
                             <div class="field is-flex is-flex-direction-column">
-                                <div class="control is-inline-flex">
+                                <div class="control is-inline-flex is-align-items-center">
+                                    <i class="fa fa-times mr-2" onclick="openRemoveConfirmationModal('{{ input.src_path|escapejs }}', '{{ forloop.counter|add:'-1' }}')"></i>
                                     <div class="select is-loading mr-3 is-fullwidth">
-                                        <select class="asin-select" id="asin-select-{{ forloop.counter|add:"-1" }}" name="{{ input.src_path }}">
+                                        <select class="asin-select" id="asin-select-{{ forloop.counter|add:" -1" }}"
+                                            name="{{ input.src_path }}">
                                             <option>{{ input.src_path }}</option>
                                         </select>
                                     </div>
-                                    <button class="button is-link" type="button" onclick="openSearchPanel('{{ input.src_path|escapejs }}', 'asin-select-{{ forloop.counter|add:"-1" }}')">Custom Search</button>
+                                    <button class="button is-link" type="button"
+                                        onclick="openSearchPanel('{{ input.src_path|escapejs }}', 'asin-select-{{ forloop.counter|add:"-1" }}')">
+                                        Custom Search
+                                    </button>
                                 </div>
                             </div>
                         </div>
@@ -57,7 +63,7 @@
     </div>
 </div>
 
-<!-- Modal -->
+<!-- Modals -->
 <div class="modal" id="custom-search-modal">
     <div class="modal-background"></div>
     <div class="modal-card">
@@ -92,13 +98,31 @@
                 No results found for this search...
             </div>
             <div style="padding-left: 10px;">
-                <button class="button is-link" onclick="searchAsin(document.getElementById('title').value, document.getElementById('author').value, document.getElementById('keywords').value)" >Search</button>
+                <button class="button is-link"
+                    onclick="searchAsin(document.getElementById('title').value, document.getElementById('author').value, document.getElementById('keywords').value)">Search</button>
                 <button class="button" onclick="closeSearchPanel()">Cancel</button>
             </div>
         </footer>
     </div>
 </div>
+
+<div class="modal" id="remove-confirmation-modal">
+    <div class="modal-background"></div>
+    <div class="modal-card">
+        <header class="modal-card-head">
+            <p class="modal-card-title is-flex-shrink-1"></p>
+            <h2 class="title is-4" id="confirm-modal-title">Are you sure you want to remove this item?</h2>
+            <button class="delete" aria-label="close" onclick="closeRemoveConfirmationModal()"></button>
+        </header>
+        <section class="modal-card-body">
+            <div class="buttons is-flex is-justify-content-center">
+                <button class="button is-danger" id="remove-column-button">Yes</button>
+                <button class="button" onclick="closeRemoveConfirmationModal()">No</button>
+            </div>
+        </section>
+    </div>
+</div>
 {% endblock %}
 {% block script %}
-    {% include "match.js" %}
+{% include "match.js" %}
 {% endblock %}
