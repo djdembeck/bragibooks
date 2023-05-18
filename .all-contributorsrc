@@ -1,0 +1,27 @@
+{
+  "files": [
+    "README.md"
+  ],
+  "imageSize": 100,
+  "commit": false,
+  "commitConvention": "angular",
+  "contributors": [
+    {
+      "login": "AceTugboat",
+      "name": "Koby Huckabee",
+      "avatar_url": "https://avatars.githubusercontent.com/u/14910857?v=4",
+      "profile": "https://koby.huckabee.dev",
+      "contributions": [
+        "code",
+        "ideas",
+        "doc"
+      ]
+    }
+  ],
+  "contributorsPerLine": 7,
+  "skipCi": true,
+  "repoType": "github",
+  "repoHost": "https://github.com",
+  "projectName": "bragibooks",
+  "projectOwner": "djdembeck"
+}
