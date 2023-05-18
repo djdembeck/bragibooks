@@ -37,7 +37,6 @@
 - [Contributing](../CONTRIBUTING.md)
 - [Authors](#authors)
 - [Contributors](#contributors)
-- [Acknowledgments](#acknowledgement)
 
 ## 🧐 About <a name = "about"></a>
 
@@ -193,8 +192,3 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
 This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind welcome!
-
-## 🎉 Acknowledgements <a name = "acknowledgement"></a>
-  <img src="https://github.com/sandreas.png?size=100"/>
-
-  [sandreas](https://github.com/sandreas) for creating and maintaining [m4b-tool](https://github.com/sandreas/m4b-tool)
