@@ -6,6 +6,7 @@
                 <div class="box">
                     <div class="content">
                         <ul style="list-style: none; margin-left: 0; margin-top: 0;">
+                            <li><img src="{{ book.cover_image_link }}" style="border-radius: 10px;" alt=""></li>
                             <li><span class="has-text-weight-bold is-size-4">Title:</span> <span class="is-size-5"> {{ book.title }}{% if book.subtitle %} - {{ book.subtitle }}{% endif %}</span></li>
                             <li><span class="has-text-weight-semibold is-size-6">Author(s):</span> {% for author in book.authors.all %}{% if not forloop.first %}{% if forloop.last %} and {% else %}, {% endif %}{% endif %}{{ author.first_name }} {{ author.last_name }}{% endfor %}</li>
                             <li><span class="has-text-weight-semibold is-size-6">Narrator(s):</span> {% for narrator in book.narrators.all %}{% if not forloop.first %}{% if forloop.last %} and {% else %}, {% endif %}{% endif %}{{ narrator.first_name }} {{ narrator.last_name }}{% endfor %} </li>

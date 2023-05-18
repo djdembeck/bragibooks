@@ -1,5 +1,3 @@
-const selects = document.querySelectorAll(".asin-select");
-
 function openSearchPanel(srcPath, select_id) {
     const modal = document.getElementById('custom-search-modal');
     const modalTitle = modal.querySelector('.modal-card-title');
@@ -9,7 +7,47 @@ function openSearchPanel(srcPath, select_id) {
 }
 
 function closeSearchPanel() {
-    document.getElementById("custom-search-modal").classList.remove("is-active");
+    const modal = document.getElementById('custom-search-modal');
+
+    // Clear the input fields
+    modal.querySelector('#title').value = '';
+    modal.querySelector('#author').value = '';
+    modal.querySelector('#keywords').value = '';
+
+    // Clear the search notification
+    document.getElementById('search-notification').style.display = "none";
+
+    // Close the panel
+    modal.classList.remove("is-active");
+}
+
+function openRemoveConfirmationModal(label, column_index) {
+    const modalLabel = document.querySelector("#confirm-modal-title");
+    modalLabel.textContent = `Remove ${label} from search`;
+
+    const modalButton = document.querySelector("#remove-column-button");
+    modalButton.onclick = () => removeColumn(column_index)
+
+    // Get the modal element and set it to active
+    const modal = document.getElementById('remove-confirmation-modal');
+    modal.classList.add('is-active');
+}
+
+function closeRemoveConfirmationModal() {
+    // Get the modal element and remove the active class
+    const modal = document.getElementById('remove-confirmation-modal');
+    modal.classList.remove('is-active');
+}
+
+function removeColumn(column_index) {
+    const columnToRemove = document.querySelector(`#asin-search-${column_index}`);
+    columnToRemove.remove();
+
+    // Close the modal
+    closeRemoveConfirmationModal();
+
+    // Check all searches have values
+    checkAllSelectsHaveValue();
 }
 
 function constructQueryParams(media_dir, title, author, keywords) {
@@ -18,13 +56,13 @@ function constructQueryParams(media_dir, title, author, keywords) {
         params.push(`media_dir=${encodeURIComponent(media_dir)}`);
     }
     if (title) {
-      params.push(`title=${encodeURIComponent(title)}`);
+        params.push(`title=${encodeURIComponent(title)}`);
     }
     if (author) {
-      params.push(`author=${encodeURIComponent(author)}`);
+        params.push(`author=${encodeURIComponent(author)}`);
     }
     if (keywords) {
-      params.push(`keywords=${encodeURIComponent(keywords)}`);
+        params.push(`keywords=${encodeURIComponent(keywords)}`);
     }
     return `?${params.join('&')}`;
 }
@@ -33,8 +71,6 @@ async function search(url) {
     try {
         const response = await fetch(url);
         const data = response.json();
-        
-        console.log(`Received ${data.length} options for select.`);
         return data;
 
     } catch (error) {
@@ -42,26 +78,27 @@ async function search(url) {
     }
 }
 
-function createOption(value, text) {
+function createOption(value, text, image_link) {
     const opt = document.createElement("option");
-    if(value) {
+    if (value) {
         opt.value = value;
     }
 
     opt.text = text;
+    opt.setAttribute("data-image-link", image_link);
     return opt;
 }
 
 function noOptionsFound(select) {
     select.style.borderColor = "red";
     select.style.borderWidth = "2px";
-    opt = createOption("", "No Audiobook results found, try a custom search...");
+    let opt = createOption("", "No Audiobook results found, try a custom search...", "");
     select.appendChild(opt);
 }
 
 function updateOptions(select, data) {
     select.innerHTML = "";
-    
+
     if (!data.length) {
         noOptionsFound(select);
         select.parentElement.classList.remove("is-loading");
@@ -72,34 +109,43 @@ function updateOptions(select, data) {
 
     data.forEach(option => {
         text = option.title + " by " + option.author + " - Narrator " + option.narrator + ": " + option.asin;
-        opt = createOption(option.asin, text);
+        let opt = createOption(option.asin, text, option.image_link);
         select.appendChild(opt);
     });
 
     select.parentElement.classList.remove("is-loading");
-    console.log(`Added ${data.length} options to select.`);
+}
+
+function updateImage(counter) {
+    // Get the selected value from the select element
+    const selectElement = document.getElementById(`asin-select-${counter}`);
+
+    // Get the corresponding image element
+    const imageElement = document.getElementById(`image-${counter}`);
+
+    // Update the image source
+    let image_link = selectElement.options[selectElement.selectedIndex].dataset.imageLink;
+
+    if (image_link) {
+        imageElement.src = image_link;
+    }
 }
 
 function checkAllSelectsHaveValue() {
-    console.log("Checking if all selects have values");
     var hasValues = true;
 
-    selects.forEach(select => {
-        console.log(select.value);
+    document.querySelectorAll(".asin-select").forEach(select => {
         if (select.value.length != 10) {
-            console.log(`${select.value}: set hasValues to false`);
             hasValues = false;
             return;
         }
-      });
-      
-      if(!hasValues){
-        console.log('button is disabled');
+    });
+
+    if (!hasValues) {
         document.getElementById("match-form-submit").disabled = true;
-      } else {
-        console.log("button is enabled");
+    } else {
         document.getElementById("match-form-submit").disabled = false;
-      }
+    }
 }
 
 async function searchAsin(title, author, keywords) {
@@ -107,14 +153,14 @@ async function searchAsin(title, author, keywords) {
     const select = document.getElementById(modal.dataset.value);
 
     // Build the query params and url
-    var queryParams = constructQueryParams("", title, author, keywords);
-    console.log(queryParams);
+    let queryParams = constructQueryParams("", title, author, keywords);
+    console.debug(queryParams);
     url = "asin-search" + queryParams;
 
     // Call the URL and get response
-    var data = await search(url);
+    let data = await search(url);
 
-    if(!data.length) {
+    if (!data.length) {
         // display message in search panel and return, dont close the search panel
         document.getElementById('search-notification').style.display = "block";
         return;
@@ -123,11 +169,6 @@ async function searchAsin(title, author, keywords) {
     // Update the select for the calling custom search
     updateOptions(select, data)
 
-    // Clear the input fields
-    modal.querySelector('#title').value = '';
-    modal.querySelector('#author').value = '';
-    modal.querySelector('#keywords').value = '';
-
     // close the search panel
     closeSearchPanel();
 
@@ -135,23 +176,19 @@ async function searchAsin(title, author, keywords) {
     checkAllSelectsHaveValue();
 }
 
-function fetchOptions() {
-    selects.forEach(async select => {
-        console.log(`Fetching select:${select}...`);
+async function fetchOptions() {
+    document.querySelectorAll(".asin-select").forEach(async select => {
+        const url = "asin-search" + constructQueryParams(select.name.split('/').pop());
+        let data = await search(url);
 
-        const url = "asin-search" + constructQueryParams(select.name);
-        console.log(`Fetching results at ${url}...`);
-    
-        var data = await search(url);
-        
         updateOptions(select, data);
 
-        checkAllSelectsHaveValue();
+        const counter = select.id.split('-').pop();
+        updateImage(counter);
     });
 
-    console.log("Finished fetching select options.");
-   }
+    checkAllSelectsHaveValue();
+}
 
-console.log(`Fetching select options: ${selects}...`);
 fetchOptions();
 checkAllSelectsHaveValue();

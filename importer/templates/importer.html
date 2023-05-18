@@ -1,41 +1,85 @@
 {% extends "base.html" %}
+{% block style %}
+.panel {
+background: white;
+}
+
+.panel-block {
+display: flex;
+}
+
+.panel-block.folder {
+display: flex;
+justify-content: space-between;
+}
+
+.panel-block.folder div {
+display: flex;
+align-items: center;
+}
+
+.panel-block label {
+word-wrap: break-word;
+}
+
+.panel-block-container {
+overflow: auto;
+max-height: 500px;
+min-heigth: 350px;
+display: flex;
+flex-grow: 1;
+flex-direction: column;
+word-break: break-all;
+}
+
+.control.has-icons-right .icon {
+pointer-events: auto;
+}
+
+.clear-search {
+cursor: default;
+}
+
+.has-icons-right {
+position: relative;
+}
+{% endblock %}
+{% load directory_explorer_tags %}
 {% block content %}
 <div class="columns">
     <div class="column">
-        <div class="card">
-            <div class="card-header is-center">
-                <div class="card-header-title">
-                    <p class="title">Select input</p>
-                </div>
+        <nav class="panel">
+            <p class="panel-heading">
+                Choose Files or Directories to process
+            </p>
+            <div class="panel-block">
+                <p class="control has-icons-left has-icons-right">
+                    <input class="input" id="search-input" type="text" placeholder="Search">
+                    <span class="icon is-left">
+                        <i class="fas fa-search" aria-hidden="false"></i>
+                    </span>
+                    <span class="icon is-right clear-search">
+                        <i class="fas fa-times" aria-hidden="false"></i>
+                    </span>
+                </p>
             </div>
+            <label class="panel-block">
+                <input type="checkbox" id="select-all-checkbox">
+                Select All
+            </label>
             <form action="{% url 'import' %}" method="POST">
                 {% csrf_token %}
-                <div class="card-content">
-                    <div class="field is-horizontal">
-                        <div class="field-body">
-                            <div class="field">
-                                <div class="control">
-                                    <div class="select is-multiple is-fullwidth">
-                                        <select multiple size="15" name="input_dir">
-                                            {% for list_item in import_dir %}
-                                            <option value="{{ list_item }}"><p>{{ list_item }}</p></option>
-                                            {% endfor %}
-                                        </select>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                <div class="panel-block-container">
+                    {% include "directory_contents.html" %}
                 </div>
-                <footer class="card-footer">
-                    <div class="card-footer-item">
-                        <div class="control">
-                            <button class="button is-link is-fullwidth">Next</button>
-                        </div>
-                    </div>
-                </footer>
+                <div class="panel-block">
+                    <button class="button is-link is-fullwidth">Next</button>
+                </div>
             </form>
-        </div>
+        </nav>
     </div>
 </div>
+{% endblock %}
+{% block script %}
+{% include "importer.js" %}
 {% endblock %}

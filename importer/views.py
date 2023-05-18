@@ -38,15 +38,11 @@ class ImportView(TemplateView):
     template_name = "importer.html"
 
     def get_context_data(self, **kwargs):
-        folder_arr = []
-        for path in sorted(Path(rootdir).iterdir(), key=os.path.getmtime, reverse=True):
-            base = os.path.basename(path)
-            folder_arr.append(base)
-
         context = {
-            "import_dir": folder_arr,
+            "contents": sorted(
+                Path(rootdir).iterdir(), key=os.path.getmtime, reverse=True
+            )
         }
-
         return context
 
     def post(self, request):
@@ -84,7 +80,7 @@ class MatchView(TemplateView):
         context = []
         for this_dir in self.request.session['input_dir']:
             try:
-                book = Book.objects.get(src_path=f"{rootdir}/{this_dir}")
+                book = Book.objects.get(src_path=f"{this_dir}")
             except Book.DoesNotExist:
                 context.append({'src_path': this_dir})
             else:
@@ -93,56 +89,46 @@ class MatchView(TemplateView):
         return {"context": context}
 
     def post(self, request: HttpRequest):
-        if 'input_dir' not in request.session:
-            logger.debug("No session data found, returning to import page")
-            return redirect("import")
-
-        asin_arr = []
+        created_books = False
         for key, asin in request.POST.items():
-            if key != "csrfmiddlewaretoken":
+            
+            if key == "csrfmiddlewaretoken":
+                continue
 
-                # Check for validation errors
-                errors = Book.objects.book_asin_validator(asin)
-                if len(errors) > 0:
-                    for k, v in errors.items():
-                        messages.error(request, v)
-                    return redirect("match")
-
-                existing_settings = Setting.objects.first()
-                if not existing_settings:
-                    messages.error(request, "Settings not set")
-                    return redirect("setting")
-
-                # Check that asin actually returns data from audible
-                try:
-                    helpers.validate_asin(existing_settings.api_url, asin)
-                except ValueError:
-                    messages.error(request, "Bad ASIN: " + asin)
-                    return redirect("match")
-                else:
-                    asin_arr.append(asin)
-
-        # create objects for each book, setting their status to processing
-        for i, asin in enumerate(asin_arr):
-            original_path = Path(
-                f"{rootdir}/{request.session['input_dir'][i]}")
-            input_data = helpers.get_directory(original_path)
-
-            if not input_data:
-                messages.error(
-                    request, f"No supported files in {original_path}")
+            # Check for validation errors
+            if len(errors := Book.objects.book_asin_validator(asin)) > 0:
+                for k, v in errors.items():
+                    messages.error(request, v)
                 return redirect("match")
 
-            logger.info(
-                f"Making models and merging files for: {request.session['input_dir'][i]}")
+            if not (existing_settings := Setting.objects.first()):
+                messages.error(request, "Settings not set")
+                return redirect("setting")
+
+            # Check that asin actually returns data from audible
+            try:
+                helpers.validate_asin(existing_settings.api_url, asin)
+            except ValueError:
+                messages.error(request, "Bad ASIN: " + asin)
+                return redirect("match")
+            
+            original_path = Path(key)
+            if not helpers.get_directory(original_path):
+                messages.error(request, f"No supported files in {original_path}")
+                continue
+
+            logger.info(f"Making models and merging files for: {original_path}")
 
             book = create_book(asin, original_path)
+            created_books = True
 
             logger.info(f"Adding book {book} to processing queue")
             m4b_merge_task.delay(asin)
-
-        request.session.flush()
-        return redirect("books")
+        
+        if created_books:
+            return redirect("books")
+        else:
+            return redirect("match")
 
 
 class AsinSearch(View):

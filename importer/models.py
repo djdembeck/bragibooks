@@ -60,6 +60,7 @@ class Book(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     status = models.OneToOneField(Status, on_delete=models.CASCADE)
+    cover_image_link = models.URLField()
     objects = BookManager()
 
     def __str__(self) -> str:

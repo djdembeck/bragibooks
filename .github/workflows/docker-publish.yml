@@ -21,13 +21,13 @@ jobs:
               uses: actions/checkout@v3
 
             - name: Log in to Docker Hub
-              uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+              uses: docker/login-action@40891eba8c2bcd1309b07ba8b11232f313e86779
               with:
                   username: ${{ secrets.DOCKER_USERNAME }}
                   password: ${{ secrets.DOCKER_PASSWORD }}
 
             - name: Log in to the Container registry
-              uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+              uses: docker/login-action@40891eba8c2bcd1309b07ba8b11232f313e86779
               with:
                   registry: ghcr.io
                   username: ${{ github.actor }}
@@ -35,14 +35,14 @@ jobs:
 
             - name: Extract metadata (tags, labels) for Docker
               id: meta
-              uses: docker/metadata-action@3f6690a76cbcbe44da6bac853d66df365ab3af27
+              uses: docker/metadata-action@c4ee3adeed93b1fa6a762f209fb01608c1a22f1e
               with:
                   images: |
                       djdembeck/bragibooks
                       ghcr.io/${{ github.repository }}
 
             - name: Build and push Docker images
-              uses: docker/build-push-action@817ed59f97d2974e2c1d92f170242f52fd3feae4
+              uses: docker/build-push-action@eafaea8d0f5853934deece2ffa67af59d936562b
               with:
                   file: docker/Dockerfile
                   context: .

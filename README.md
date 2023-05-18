@@ -34,6 +34,7 @@
 - [Built Using](#built_using)
 - [Contributing](../CONTRIBUTING.md)
 - [Authors](#authors)
+- [Contributors](#contributors)
 - [Acknowledgments](#acknowledgement)
 
 ## 🧐 About <a name = "about"></a>
@@ -51,11 +52,11 @@ Some basics of what Bragi does:
 
 Folder/file selection             |  ASIN input
 :-------------------------:|:-------------------------:
-![file-selection](../assets/screens/file-selection.png)  |  ![asin-pre](../assets/screens/asin-pre.png)
+![file-selection](../assets/screens/file_picker.png)  |  ![asin-auto-search](../assets/screens/auto_search_panel.png)
 
 Folder/file selection             |  Post-proccess overview
 :-------------------------:|:-------------------------:
-![asin-input](../assets/screens/asin-input.png)  |  ![post-process](../assets/screens/post-process.png)
+![asin-custom-search](../assets/screens/custom_search.png)  |  ![post-process](../assets/screens/processing_panel.png)
 
 ## 🏁 Getting Started <a name = "getting_started"></a>
 
@@ -82,8 +83,10 @@ To run Bragibooks as a container, you need to pass some paramaters in the run co
   | `-v /appdata/bragibooks/config:/config` | Persistent config storage |
   | `-p 8000:8000/tcp` | Port for your browser to use |
   | `-e LOG_LEVEL=WARNING` | Choose any [logging level](https://www.loggly.com/ultimate-guide/python-logging-basics/) |
+  | `-e DEBUG=False` | Turn django debug on or off (default False) |
   | `-e UID=99` | User ID to run the container as (default 99)|
   | `-e GID=100` | Group ID to run the container as (default 100)|
+  | `-e CELERY_WORKERS=1` | The number or celery workers for processing books (default 1)|
   | `-e CSRF_TRUSTED_ORIGINS=https://bragibooks.mydomain.com` | Domains to trust if bragibooks is hosted behind a reverse proxy. |
 
 
@@ -91,7 +94,32 @@ Which all together should look like:
 
 	docker run --rm -d --name bragibooks -v /path/to/input:/input -v /path/to/output:/output -v /appdata/bragibooks/config:/config -p 8000:8000/tcp -e LOG_LEVEL=WARNING ghcr.io/djdembeck/bragibooks:main
 
-#### Direct (Gunicorn)
+## Docker Compose
+```
+version: '3'
+
+services:
+  bragi:
+    image: ghcr.io/djdembeck/bragibooks:main
+    container_name: bragibooks
+    environment:
+      - CSRF_TRUSTED_ORIGINS=https://bragibooks.mydomain.com
+      - LOG_LEVEL=INFO
+      - DEBUG=False
+      - UID=1000
+      - GID=1000
+    volumes:
+      - path/to/config:/config
+      - path/to/input:/input
+      - path/to/output/output:/output
+      - path/to/done:/done
+    ports:
+      - 8000:8000
+    restart: unless-stopped
+```
+
+
+#### Direct Build (Gunicorn)
   - Copy static assets to  project folder:
     ```
     python manage.py collectstatic
@@ -99,6 +127,13 @@ Which all together should look like:
   - Create the database:
     ```
     python manage.py migrate
+    ```
+  - Run the celery worker for processing books:
+    ```
+    celery -A bragibooks_proj worker \
+    --loglevel=info \ 
+    --concurrency 1 \
+    -E
     ```
   - Run the web server:
     ```
@@ -130,9 +165,17 @@ The Bragibooks process is a linear, 3 step process:
 - [m4b-merge](https://github.com/djdembeck/m4b-merge) - File merging and tagging
 
 ## ✍️ Authors <a name = "authors"></a>
+  <img src="https://github.com/djdembeck.png?size=100"/>
+  
+  [@djdembeck](https://github.com/djdembeck) - Idea & Initial work
 
-- [@djdembeck](https://github.com/djdembeck) - Idea & Initial work
+## ✨ Contributors
+  <img src="https://github.com/AceTugboat.png?size=100"/>
+  
+  [@acetugboat](https://github.com/AceTugboat)
+
 
 ## 🎉 Acknowledgements <a name = "acknowledgement"></a>
+  <img src="https://github.com/sandreas.png?size=100"/>
 
-- [sandreas](https://github.com/sandreas) for creating and maintaining [m4b-tool](https://github.com/sandreas/m4b-tool)
+  [sandreas](https://github.com/sandreas) for creating and maintaining [m4b-tool](https://github.com/sandreas/m4b-tool)
