@@ -1,5 +1,3 @@
-const selects = document.querySelectorAll(".asin-select");
-
 function openSearchPanel(srcPath, select_id) {
     const modal = document.getElementById('custom-search-modal');
     const modalTitle = modal.querySelector('.modal-card-title');
@@ -21,6 +19,35 @@ function closeSearchPanel() {
 
     // Close the panel
     modal.classList.remove("is-active");
+}
+
+function openRemoveConfirmationModal(label, column_index) {
+    const modalLabel = document.querySelector("#confirm-modal-title");
+    modalLabel.textContent = `Remove ${label} from search`;
+
+    const modalButton = document.querySelector("#remove-column-button");
+    modalButton.onclick = () => removeColumn(column_index)
+
+    // Get the modal element and set it to active
+    var modal = document.getElementById('remove-confirmation-modal');
+    modal.classList.add('is-active');
+}
+
+function closeRemoveConfirmationModal() {
+    // Get the modal element and remove the active class
+    var modal = document.getElementById('remove-confirmation-modal');
+    modal.classList.remove('is-active');
+}
+
+function removeColumn(column_index) {
+    const columnToRemove = document.querySelector(`#asin-search-${column_index}`);
+    columnToRemove.remove();
+
+    // Close the modal
+    closeRemoveConfirmationModal();
+
+    // Check all searches have values
+    checkAllSelectsHaveValue();
 }
 
 function constructQueryParams(media_dir, title, author, keywords) {
@@ -95,7 +122,7 @@ function checkAllSelectsHaveValue() {
     console.log("Checking if all selects have values");
     var hasValues = true;
 
-    selects.forEach(select => {
+    document.querySelectorAll(".asin-select").forEach(select => {
         console.log(select.value);
         if (select.value.length != 10) {
             console.log(`${select.value}: set hasValues to false`);
@@ -142,7 +169,7 @@ async function searchAsin(title, author, keywords) {
 }
 
 function fetchOptions() {
-    selects.forEach(async select => {
+    document.querySelectorAll(".asin-select").forEach(async select => {
         console.log(`Fetching select:${select}...`);
 
         const url = "asin-search" + constructQueryParams(select.name.split('/').pop());
@@ -158,6 +185,5 @@ function fetchOptions() {
     console.log("Finished fetching select options.");
 }
 
-console.log(`Fetching select options: ${selects}...`);
 fetchOptions();
 checkAllSelectsHaveValue();
