@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [1.2.0](https://github.com/djdembeck/bragibooks/compare/v1.0.0...v1.2.0) (2023-05-18)
+
+
+### Features
+
+* add 'x' to remove search selection ([#166](https://github.com/djdembeck/bragibooks/issues/166)) ([f1f8f6d](https://github.com/djdembeck/bragibooks/commit/f1f8f6ddfcf30a945f263a69ac949c9ed728b460))
+* add cover images to search results ([#167](https://github.com/djdembeck/bragibooks/issues/167)) ([e5acbc0](https://github.com/djdembeck/bragibooks/commit/e5acbc0e32b2a3e4d2803994f2352db0763080d0))
+* updated the file picker ([#153](https://github.com/djdembeck/bragibooks/issues/153)) ([aed75dd](https://github.com/djdembeck/bragibooks/commit/aed75ddbffc939e0b394fe7fc063fcc92cffeac4))
+
+
+### Bug Fixes
+
+* :bug: entrypoint wasn't setting user permissions for processes ([b3bd8a7](https://github.com/djdembeck/bragibooks/commit/b3bd8a765c040ce14d57e0b483fdf689669b976b))
+* updates to Dockerfile and fix bugs ([#163](https://github.com/djdembeck/bragibooks/issues/163)) ([3e0a7b3](https://github.com/djdembeck/bragibooks/commit/3e0a7b3f13b96307e43ad47222f1b3d4fd1fc726))
+
 ## [1.0.0](https://github.com/djdembeck/bragibooks/compare/v0.3.7...v1.0.0) (2023-04-18)
 
 
