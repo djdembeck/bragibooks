@@ -29,13 +29,13 @@ function openRemoveConfirmationModal(label, column_index) {
     modalButton.onclick = () => removeColumn(column_index)
 
     // Get the modal element and set it to active
-    var modal = document.getElementById('remove-confirmation-modal');
+    const modal = document.getElementById('remove-confirmation-modal');
     modal.classList.add('is-active');
 }
 
 function closeRemoveConfirmationModal() {
     // Get the modal element and remove the active class
-    var modal = document.getElementById('remove-confirmation-modal');
+    const modal = document.getElementById('remove-confirmation-modal');
     modal.classList.remove('is-active');
 }
 
@@ -71,8 +71,6 @@ async function search(url) {
     try {
         const response = await fetch(url);
         const data = response.json();
-
-        console.log(`Received ${data.length} options for select.`);
         return data;
 
     } catch (error) {
@@ -80,20 +78,21 @@ async function search(url) {
     }
 }
 
-function createOption(value, text) {
+function createOption(value, text, image_link) {
     const opt = document.createElement("option");
     if (value) {
         opt.value = value;
     }
 
     opt.text = text;
+    opt.setAttribute("data-image-link", image_link);
     return opt;
 }
 
 function noOptionsFound(select) {
     select.style.borderColor = "red";
     select.style.borderWidth = "2px";
-    opt = createOption("", "No Audiobook results found, try a custom search...");
+    let opt = createOption("", "No Audiobook results found, try a custom search...", "");
     select.appendChild(opt);
 }
 
@@ -110,32 +109,41 @@ function updateOptions(select, data) {
 
     data.forEach(option => {
         text = option.title + " by " + option.author + " - Narrator " + option.narrator + ": " + option.asin;
-        opt = createOption(option.asin, text);
+        let opt = createOption(option.asin, text, option.image_link);
         select.appendChild(opt);
     });
 
     select.parentElement.classList.remove("is-loading");
-    console.log(`Added ${data.length} options to select.`);
+}
+
+function updateImage(counter) {
+    // Get the selected value from the select element
+    const selectElement = document.getElementById(`asin-select-${counter}`);
+
+    // Get the corresponding image element
+    const imageElement = document.getElementById(`image-${counter}`);
+
+    // Update the image source
+    let image_link = selectElement.options[selectElement.selectedIndex].dataset.imageLink;
+
+    if (image_link) {
+        imageElement.src = image_link;
+    }
 }
 
 function checkAllSelectsHaveValue() {
-    console.log("Checking if all selects have values");
     var hasValues = true;
 
     document.querySelectorAll(".asin-select").forEach(select => {
-        console.log(select.value);
         if (select.value.length != 10) {
-            console.log(`${select.value}: set hasValues to false`);
             hasValues = false;
             return;
         }
     });
 
     if (!hasValues) {
-        console.log('button is disabled');
         document.getElementById("match-form-submit").disabled = true;
     } else {
-        console.log("button is enabled");
         document.getElementById("match-form-submit").disabled = false;
     }
 }
@@ -145,12 +153,12 @@ async function searchAsin(title, author, keywords) {
     const select = document.getElementById(modal.dataset.value);
 
     // Build the query params and url
-    var queryParams = constructQueryParams("", title, author, keywords);
-    console.log(queryParams);
+    let queryParams = constructQueryParams("", title, author, keywords);
+    console.debug(queryParams);
     url = "asin-search" + queryParams;
 
     // Call the URL and get response
-    var data = await search(url);
+    let data = await search(url);
 
     if (!data.length) {
         // display message in search panel and return, dont close the search panel
@@ -170,19 +178,16 @@ async function searchAsin(title, author, keywords) {
 
 async function fetchOptions() {
     document.querySelectorAll(".asin-select").forEach(async select => {
-        console.log(`Fetching select:${select}...`);
-
         const url = "asin-search" + constructQueryParams(select.name.split('/').pop());
-        console.log(`Fetching results at ${url}...`);
-
-        var data = await search(url);
+        let data = await search(url);
 
         updateOptions(select, data);
 
-        checkAllSelectsHaveValue();
+        const counter = select.id.split('-').pop();
+        updateImage(counter);
     });
 
-    console.log("Finished fetching select options.");
+    checkAllSelectsHaveValue();
 }
 
 fetchOptions();
