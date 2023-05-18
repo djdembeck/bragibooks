@@ -1,12 +1,10 @@
 function openTab(tabId) {
-    var tabPanes, tabLinks;
-    
-    tabLinks = document.querySelectorAll(".tab");
+    const tabLinks = document.querySelectorAll(".tab");
     tabLinks.forEach(tab => {
         tab.classList.remove("is-active");
     });
 
-    tabPanes = document.querySelectorAll(".tab-pane");
+    const tabPanes = document.querySelectorAll(".tab-pane");
     tabPanes.forEach(pane => {
         pane.style.display = "none";
     });
@@ -15,7 +13,7 @@ function openTab(tabId) {
     document.getElementById(`${tabId}-tab`).classList.add("is-active");
 }
 
-window.addEventListener('load', function() {
-    var defaultTab = document.querySelector(".tabs").dataset.default
+window.addEventListener('load', function () {
+    const defaultTab = document.querySelector(".tabs").dataset.default
     openTab(defaultTab);
 });

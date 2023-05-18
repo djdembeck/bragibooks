@@ -23,8 +23,8 @@ arrows.forEach(arrow => {
 });
 
 function fuzzyMatch(needle, haystack) {
-    const hlen = haystack.length;
-    const nlen = needle.length;
+    let hlen = haystack.length;
+    let nlen = needle.length;
     if (nlen > hlen) {
         return false;
     }
@@ -72,7 +72,7 @@ const panelBlock = document.querySelector('.panel-block-container');
 // Add an input event listener to the search input
 searchInput.addEventListener('input', () => {
     // Get the search query
-    const query = searchInput.value.toLowerCase();
+    let query = searchInput.value.toLowerCase();
 
     if (query) {
         // Loop through each label in the panel

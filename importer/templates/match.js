@@ -29,13 +29,13 @@ function openRemoveConfirmationModal(label, column_index) {
     modalButton.onclick = () => removeColumn(column_index)
 
     // Get the modal element and set it to active
-    var modal = document.getElementById('remove-confirmation-modal');
+    const modal = document.getElementById('remove-confirmation-modal');
     modal.classList.add('is-active');
 }
 
 function closeRemoveConfirmationModal() {
     // Get the modal element and remove the active class
-    var modal = document.getElementById('remove-confirmation-modal');
+    const modal = document.getElementById('remove-confirmation-modal');
     modal.classList.remove('is-active');
 }
 
@@ -92,7 +92,7 @@ function createOption(value, text, image_link) {
 function noOptionsFound(select) {
     select.style.borderColor = "red";
     select.style.borderWidth = "2px";
-    opt = createOption("", "No Audiobook results found, try a custom search...", "");
+    let opt = createOption("", "No Audiobook results found, try a custom search...", "");
     select.appendChild(opt);
 }
 
@@ -121,10 +121,10 @@ function updateImage(counter) {
     const selectElement = document.getElementById(`asin-select-${counter}`);
 
     // Get the corresponding image element
-    var imageElement = document.getElementById(`image-${counter}`);
+    const imageElement = document.getElementById(`image-${counter}`);
 
     // Update the image source
-    image_link = selectElement.options[selectElement.selectedIndex].dataset.imageLink;
+    let image_link = selectElement.options[selectElement.selectedIndex].dataset.imageLink;
 
     if (!image_link) {
         image_link = "/static/images/cover_not_available.jpg";
@@ -155,12 +155,12 @@ async function searchAsin(title, author, keywords) {
     const select = document.getElementById(modal.dataset.value);
 
     // Build the query params and url
-    var queryParams = constructQueryParams("", title, author, keywords);
+    let queryParams = constructQueryParams("", title, author, keywords);
     console.debug(queryParams);
     url = "asin-search" + queryParams;
 
     // Call the URL and get response
-    var data = await search(url);
+    let data = await search(url);
 
     if (!data.length) {
         // display message in search panel and return, dont close the search panel
@@ -178,10 +178,10 @@ async function searchAsin(title, author, keywords) {
     checkAllSelectsHaveValue();
 }
 
-function fetchOptions() {
+async function fetchOptions() {
     document.querySelectorAll(".asin-select").forEach(async select => {
         const url = "asin-search" + constructQueryParams(select.name.split('/').pop());
-        var data = await search(url);
+        let data = await search(url);
 
         updateOptions(select, data);
 
