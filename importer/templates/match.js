@@ -168,7 +168,7 @@ async function searchAsin(title, author, keywords) {
     checkAllSelectsHaveValue();
 }
 
-function fetchOptions() {
+async function fetchOptions() {
     document.querySelectorAll(".asin-select").forEach(async select => {
         console.log(`Fetching select:${select}...`);
 
