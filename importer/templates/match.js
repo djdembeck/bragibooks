@@ -177,16 +177,19 @@ async function searchAsin(title, author, keywords) {
 }
 
 async function fetchOptions() {
-    document.querySelectorAll(".asin-select").forEach(async select => {
-        const url = "asin-search" + constructQueryParams(select.name.split('/').pop());
-        let data = await search(url);
+    const selects = document.querySelectorAll(".asin-select");
 
+    const searchPromises = Array.from(selects).map(async select => {
+        const url = "asin-search" + constructQueryParams(select.name.split('/').pop());
+
+        const data = await search(url);
         updateOptions(select, data);
 
         const counter = select.id.split('-').pop();
         updateImage(counter);
     });
 
+    await Promise.all(searchPromises);
     checkAllSelectsHaveValue();
 }
 
