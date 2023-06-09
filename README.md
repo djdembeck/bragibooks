@@ -17,7 +17,7 @@
 [![Docker Image Version (latest by date)](https://img.shields.io/docker/v/djdembeck/bragibooks)](https://hub.docker.com/r/djdembeck/bragibooks)
 [![CodeFactor Grade](https://img.shields.io/codefactor/grade/github/djdembeck/bragibooks)](https://www.codefactor.io/repository/github/djdembeck/bragibooks)
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/github/all-contributors/djdembeck/bragibooks?color=ee8449&style=flat-square)](#contributors)
+[![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg?style=flat-square)](#contributors-)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 
 </div>
@@ -37,7 +37,6 @@
 - [Contributing](../CONTRIBUTING.md)
 - [Authors](#authors)
 - [Contributors](#contributors)
-- [Acknowledgments](#acknowledgement)
 
 ## 🧐 About <a name = "about"></a>
 
@@ -182,6 +181,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
   <tbody>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://koby.huckabee.dev"><img src="https://avatars.githubusercontent.com/u/14910857?v=4?s=100" width="100px;" alt="Koby Huckabee"/><br /><sub><b>Koby Huckabee</b></sub></a><br /><a href="https://github.com/djdembeck/bragibooks/commits?author=AceTugboat" title="Code">💻</a> <a href="#ideas-AceTugboat" title="Ideas, Planning, & Feedback">🤔</a> <a href="https://github.com/djdembeck/bragibooks/commits?author=AceTugboat" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://pilabor.com"><img src="https://avatars.githubusercontent.com/u/2050604?v=4?s=100" width="100px;" alt="Andreas"/><br /><sub><b>Andreas</b></sub></a><br /><a href="#tool-sandreas" title="Tools">🔧</a></td>
     </tr>
   </tbody>
 </table>
@@ -192,8 +192,3 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
 This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind welcome!
-
-## 🎉 Acknowledgements <a name = "acknowledgement"></a>
-  <img src="https://github.com/sandreas.png?size=100"/>
-
-  [sandreas](https://github.com/sandreas) for creating and maintaining [m4b-tool](https://github.com/sandreas/m4b-tool)
