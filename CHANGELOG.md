@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [1.2.1](https://github.com/djdembeck/bragibooks/compare/v1.2.0...v1.2.1) (2023-06-09)
+
+
+### Bug Fixes
+
+* button disabled bug [#178](https://github.com/djdembeck/bragibooks/issues/178) ([#183](https://github.com/djdembeck/bragibooks/issues/183)) ([ab378d5](https://github.com/djdembeck/bragibooks/commit/ab378d518b37c22535ef4ccae5a2832b093e94b2))
+
 ## [1.2.0](https://github.com/djdembeck/bragibooks/compare/v1.0.0...v1.2.0) (2023-05-18)
 
 
