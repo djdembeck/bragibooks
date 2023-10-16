@@ -5,4 +5,4 @@ kombu==5.3.2 # this has the latest update needed to use sqlalchemy>=2.0
 Levenshtein==0.23.0
 requests>=2.28
 sqlalchemy>=2.0.0 # for celery to use sqlite as broker
-whitenoise==6.5.0
+whitenoise==6.6.0
