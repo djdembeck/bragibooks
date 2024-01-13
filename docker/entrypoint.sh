@@ -13,9 +13,6 @@ chown -R appuser:appuser $APP_HOME
 
 echo "Starting with UID: $PUID, GID: $PGID"
 
-# Fix permissions
-chown -R "$PUID":"$PGID" /config /input /output
-
 until cd /home/app/web
 do
     echo "Waiting for server volume..."
@@ -28,6 +25,16 @@ do
     sleep 2
 done
 
+# Fix permissions
+#
+
+chown -R "$PUID":"$PGID" /config
+
+if [ ${FIX_MEDIA_PERMISSIONS:-true} = true ]; then
+    chown -R "$PUID":"$PGID" /input /output
+fi
+
+echo "Collecting static"
 python manage.py collectstatic --noinput
 
 # Start Celery Worker
