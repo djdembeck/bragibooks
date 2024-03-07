@@ -18,7 +18,7 @@ jobs:
             contents: read
         steps:
             - name: Check out the repo
-              uses: actions/checkout@v3
+              uses: actions/checkout@v4
 
             - name: Log in to Docker Hub
               uses: docker/login-action@5139682d94efc37792e6b54386b5b470a68a4737
