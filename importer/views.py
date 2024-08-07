@@ -221,7 +221,7 @@ class BookListView(TemplateView):
         context = {"default_view": "done"}
 
         redirect_url = self.request.META.get('HTTP_REFERER', '')
-        if redirect_url.contains("match"):
+        if 'match' in redirect_url:
             context.update({"default_view": "processing"})
 
         for key, books in filter(lambda item: 'books' in item[0], kwargs.items()):
