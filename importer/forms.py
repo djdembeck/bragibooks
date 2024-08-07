@@ -23,7 +23,7 @@ class SettingForm(forms.ModelForm):
         }
         widgets = {
             'api_url': forms.URLInput(attrs={'class': 'input is-fullwidth'}),
-            'completed_directory': forms.TextInput(attrs={'class': 'input is-fullwidth'}, required=False),
+            'completed_directory': forms.TextInput(attrs={'class': 'input is-fullwidth', "required": False}),
             'input_directory': forms.TextInput(attrs={'class': 'input is-fullwidth'}),
             'num_cpus': forms.NumberInput(attrs={'class': 'input is-fullwidth'}),
             'output_directory': forms.TextInput(attrs={'class': 'input is-fullwidth'}),
