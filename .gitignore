@@ -8,3 +8,5 @@ venv/
 demo/
 .DS_Store
 admin/
+
+.opencode
