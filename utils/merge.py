@@ -117,7 +117,8 @@ def run_m4b_merge(asin: str):
         book.status.status = StatusChoices.ERROR
         book.status.message = message
         book.status.save()
-        return
+        # Re-raise to allow Celery retry mechanism to work
+        raise
 
     # Log output for debugging
     if result.stdout:
