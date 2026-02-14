@@ -86,19 +86,17 @@ def run_m4b_merge(asin: str):
         "m4b-merge",
         "--inputs",
         str(src_path),
-        "--asin",
-        asin,
-        "--api-url",
+        "--api_url",
         cli_args["api_url"],
         "--output",
         cli_args["output_directory"],
-        "--completed-directory",
+        "--completed_directory",
         cli_args["completed_directory"],
-        "--num-cpus",
+        "--num_cpus",
         str(cli_args["num_cpus"]),
-        "--path-format",
+        "--path_format",
         cli_args["path_format"],
-        "--log-level",
+        "--log_level",
         env_log_level,
     ]
 
@@ -107,7 +105,8 @@ def run_m4b_merge(asin: str):
     try:
         result = subprocess.run(
             cmd,
-            timeout=14400,  # 4 hours default timeout
+            input=asin + "\n",
+            timeout=14400,
             capture_output=True,
             text=True,
         )
@@ -220,9 +219,9 @@ def make_book_model(asin, original_path) -> Book:
         asin=asin,
         short_desc=metadata["description"],
         long_desc=metadata["summary"],
-        release_date=datetime.strptime(
-            metadata["releaseDate"], "%Y-%m-%dT%H:%M:%S.%fZ"
-        ),
+        release_date=datetime.fromisoformat(
+            metadata["releaseDate"].replace("Z", "+00:00")
+        ).date(),
         publisher=metadata["publisherName"],
         lang=metadata["language"],
         runtime_length_minutes=runtime,
