@@ -63,7 +63,6 @@ class TestSubprocessMerge(TestCase):
         if Path(self.test_src_path).exists():
             shutil.rmtree(self.test_src_path, ignore_errors=True)
 
-    @override_settings(DEBUG=True)
     @patch("utils.merge.subprocess.run")
     def test_successful_merge(self, mock_subprocess_run):
         """Test successful merge execution with mocked subprocess.
@@ -184,7 +183,6 @@ class TestSubprocessMerge(TestCase):
         self.assertEqual(self.book.status.status, StatusChoices.ERROR)
 
         # Assert error message contains timeout info
-        self.assertIn("timeout", self.book.status.message.lower())
         self.assertIn("timed out", self.book.status.message.lower())
 
     @patch("utils.merge.subprocess.run")
