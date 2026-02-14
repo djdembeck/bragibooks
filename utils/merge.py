@@ -41,7 +41,7 @@ def fetch_audible_metadata(asin: str, api_url: str = "https://api.audnex.us") ->
         response.raise_for_status()
         return response.json()
     except requests.RequestException as e:
-        logger.error(f"Failed to fetch metadata for ASIN {asin}: {e}")
+        logger.exception(f"Failed to fetch metadata for ASIN {asin}: {e}")
         raise
 
 
@@ -112,7 +112,7 @@ def run_m4b_merge(asin: str):
         )
     except subprocess.TimeoutExpired:
         message = f"m4b-merge timed out after 4 hours for ASIN: {asin}"
-        logger.error(message)
+        logger.exception(message)
         book.status.status = StatusChoices.ERROR
         book.status.message = message
         book.status.save()
@@ -120,7 +120,7 @@ def run_m4b_merge(asin: str):
         raise
     except OSError as e:
         message = f"m4b-merge failed with OSError for ASIN: {asin}: {e}"
-        logger.error(message)
+        logger.exception(message)
         book.status.status = StatusChoices.ERROR
         book.status.message = message
         book.status.save()
@@ -247,8 +247,14 @@ def make_author_model(book, authors: list[dict[str, str]]):
     # Author DB entry
     # Create new entry for each author if there's more than one
     for author in authors:
-        author_name_full = author["name"]
+        author_name_full = author.get("name", "")
         author_name_split = author_name_full.split()
+
+        # Skip authors with empty names
+        if not author_name_split:
+            logger.warning(f"Skipping author with empty name")
+            continue
+
         last_name_index = len(author_name_split) - 1
 
         # Check if author asin exists
@@ -282,7 +288,14 @@ def make_narrator_model(book, narrators: list[dict[str, str]]):
     # Narrator DB entry
     # Create new entry for each narrator if there's more than one
     for narrator in narrators:
-        narr_name_split = narrator["name"].split()
+        narr_name_full = narrator.get("name", "")
+        narr_name_split = narr_name_full.split()
+
+        # Skip narrators with empty names
+        if not narr_name_split:
+            logger.warning(f"Skipping narrator with empty name")
+            continue
+
         last_name_index = len(narr_name_split) - 1
 
         if not (
