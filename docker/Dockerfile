@@ -14,8 +14,11 @@ RUN apk add --no-cache \
     openssl-libs-static \
     git
 
+# Build arg for m4b-merge branch/tag
+ARG M4B_MERGE_REF=develop
+
 # Clone m4b-merge from source
-RUN git clone --depth 1 --branch develop https://github.com/djdembeck/m4b-merge.git /build/m4b-merge
+RUN git clone --depth 1 --branch ${M4B_MERGE_REF} https://github.com/djdembeck/m4b-merge.git /build/m4b-merge
 
 WORKDIR /build/m4b-merge
 
