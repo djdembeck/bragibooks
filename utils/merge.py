@@ -1,31 +1,48 @@
 import logging
 import os
+import re
+import subprocess
 import traceback
 from datetime import datetime
 from pathlib import Path
 
+import requests
 from django.conf import settings
-# core merge logic:
-from m4b_merge import audible_helper, config, helpers, m4b_helper
 
-from importer.models import (Author, Book, Narrator, Setting, Status,
-                             StatusChoices)
+from importer.models import Author, Book, Narrator, Setting, Status, StatusChoices
 
 # Get an instance of a logger
 logger = logging.getLogger(__name__)
 
 
 def set_configs():
+    """Get settings from database and return CLI arguments dict for subprocess."""
     existing_settings = Setting.objects.first()
-    if existing_settings:
-        config.api_url = existing_settings.api_url
-        config.junk_dir = existing_settings.completed_directory
-        config.num_cpus = (
-            existing_settings.num_cpus if existing_settings.num_cpus > 0
+    if not existing_settings:
+        return None
+
+    return {
+        "api_url": existing_settings.api_url,
+        "completed_directory": existing_settings.completed_directory,
+        "num_cpus": (
+            existing_settings.num_cpus
+            if existing_settings.num_cpus > 0
             else os.cpu_count()
-        )
-        config.output = existing_settings.output_directory
-        config.path_format = existing_settings.output_scheme
+        ),
+        "output_directory": existing_settings.output_directory,
+        "path_format": existing_settings.output_scheme,
+    }
+
+
+def fetch_audible_metadata(asin: str, api_url: str = "https://api.audnex.us") -> dict:
+    """Fetch book metadata from Audible API using ASIN."""
+    try:
+        response = requests.get(f"{api_url}/books/{asin}", timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        logger.error(f"Failed to fetch metadata for ASIN {asin}: {e}")
+        raise
 
 
 def run_m4b_merge(asin: str):
@@ -33,59 +50,114 @@ def run_m4b_merge(asin: str):
     env_log_level = os.environ.get("LOG_LEVEL", "INFO")
     logging.basicConfig(level=env_log_level)
 
-    set_configs()
+    # Get settings for CLI arguments
+    cli_args = set_configs()
+    if not cli_args:
+        message = "No settings found in database"
+        logger.error(message)
+        book = Book.objects.get(asin=asin)
+        book.status.status = StatusChoices.ERROR
+        book.status.message = message
+        book.status.save()
+        return
 
     # Log all Settings
-    logger.debug(f'Using API URL: {config.api_url}')
-    logger.debug(f'Using junk path: {config.junk_dir}')
-    logger.debug(f'Using CPU cores: {config.num_cpus}')
-    logger.debug(f'Using output path: {config.output}')
-    logger.debug(f'Using output format: {config.path_format}')
+    logger.debug(f"Using API URL: {cli_args['api_url']}")
+    logger.debug(f"Using completed directory: {cli_args['completed_directory']}")
+    logger.debug(f"Using CPU cores: {cli_args['num_cpus']}")
+    logger.debug(f"Using output path: {cli_args['output_directory']}")
+    logger.debug(f"Using output format: {cli_args['path_format']}")
 
     book = Book.objects.get(asin=asin)
-    logger.info(
-        f"{'-' * 15} Starting to process {asin}: {book.title} {'-' * 15}")
+    logger.info(f"{'-' * 15} Starting to process {asin}: {book.title} {'-' * 15}")
 
-    input_data = helpers.get_directory(Path(book.src_path))
-    if not input_data:
-        message = f"invalid input_data: {input_data} for book: {book} at path: {book.src_path}"
+    # Resolve absolute path for input directory
+    src_path = Path(book.src_path).resolve()
+    if not src_path.exists():
+        message = f"Input path does not exist: {src_path}"
         logger.error(message)
         book.status.status = StatusChoices.ERROR
         book.status.message = message
         book.status.save()
         return
 
-    audible = audible_helper.BookData(asin)
+    # Build CLI arguments list for subprocess
+    cmd = [
+        "m4b-merge",
+        "--inputs",
+        str(src_path),
+        "--asin",
+        asin,
+        "--api-url",
+        cli_args["api_url"],
+        "--output",
+        cli_args["output_directory"],
+        "--completed-directory",
+        cli_args["completed_directory"],
+        "--num-cpus",
+        str(cli_args["num_cpus"]),
+        "--path-format",
+        cli_args["path_format"],
+        "--log-level",
+        env_log_level,
+    ]
 
-    # Process metadata and run components to merge files
-    m4b = m4b_helper.M4bMerge(
-        input_data,
-        audible.fetch_api_data(config.api_url),
-        Path(book.src_path),
-        audible.get_chapters()
-    )
+    logger.info(f"Running: {' '.join(cmd)}")
 
     try:
-        logger.info(f"Processing {book.title}")
-        m4b.run_merge()
-    except Exception as e:
-        logger.error(f"Error occured while merging '{input_data}: {e}'")
+        result = subprocess.run(
+            cmd,
+            timeout=14400,  # 4 hours default timeout
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.TimeoutExpired:
+        message = f"m4b-merge timed out after 4 hours for ASIN: {asin}"
+        logger.error(message)
         book.status.status = StatusChoices.ERROR
-        message = str(e) + "\n" + \
-            traceback.format_exc() if settings.DEBUG else e
         book.status.message = message
         book.status.save()
         return
 
-    book.dest_path = Path(
-        f"\""
-        f"{m4b.book_output}/"
-        f"{audible.fetch_api_data(config.api_url)['authors'][0]}/"
-        f"{book.title}/"
-        f"{book.title}.m4b"
-        f"\""
-    )
+    # Log output for debugging
+    if result.stdout:
+        logger.debug(f"m4b-merge stdout: {result.stdout}")
+    if result.stderr:
+        logger.debug(f"m4b-merge stderr: {result.stderr}")
+
+    # Check exit code
+    if result.returncode != 0:
+        message = (
+            f"m4b-merge failed with exit code {result.returncode}: {result.stderr}"
+        )
+        logger.error(message)
+        book.status.status = StatusChoices.ERROR
+        book.status.message = message
+        book.status.save()
+        return
+
+    # Parse output to extract output file path
+    # Rust binary outputs: "1. /path/to/output/file.m4b"
+    dest_path = None
+    output_pattern = r"^\d+\.\s+(.+)$"
+    for line in result.stdout.splitlines():
+        match = re.match(output_pattern, line.strip())
+        if match:
+            dest_path = Path(match.group(1))
+            break
+
+    if dest_path:
+        book.dest_path = str(dest_path)
+        logger.info(f"Output file: {dest_path}")
+    else:
+        # Fallback: construct path from known pattern
+        logger.warning(f"Could not parse output path from Rust output, using fallback")
+        # The Rust binary constructs path based on path_format template
+        # Fallback to setting the src_path as dest_path if parsing fails
+        book.dest_path = str(src_path)
+
     book.status.status = StatusChoices.DONE
+    book.status.message = ""
     book.status.save()
     logger.info(f"{'-' * 15} Done processing {asin} {'-' * 15}")
 
@@ -109,20 +181,23 @@ def create_book(asin, original_path) -> Book:
 
 
 def make_book_model(asin, original_path) -> Book:
-    set_configs()
-    # Create BookData object from asin response
-    metadata = audible_helper.BookData(asin).fetch_api_data(config.api_url)
+    # Get API URL from settings
+    cli_args = set_configs()
+    api_url = cli_args["api_url"] if cli_args else "https://api.audnex.us"
+
+    # Fetch metadata from Audible API
+    metadata = fetch_audible_metadata(asin, api_url)
 
     # Book DB entry
-    if 'subtitle' in metadata:
-        base_title = metadata['title']
-        base_subtitle = metadata['subtitle']
+    if "subtitle" in metadata:
+        base_title = metadata["title"]
+        base_subtitle = metadata["subtitle"]
         title = f"{base_title} - {base_subtitle}"
     else:
-        title = metadata['title']
+        title = metadata["title"]
 
-    if 'runtimeLengthMin' in metadata:
-        runtime = metadata['runtimeLengthMin']
+    if "runtimeLengthMin" in metadata:
+        runtime = metadata["runtimeLengthMin"]
     else:
         runtime = 0
 
@@ -131,27 +206,28 @@ def make_book_model(asin, original_path) -> Book:
     book = Book.objects.create(
         title=title,
         asin=asin,
-        short_desc=metadata['description'],
-        long_desc=metadata['summary'],
+        short_desc=metadata["description"],
+        long_desc=metadata["summary"],
         release_date=datetime.strptime(
-            metadata['releaseDate'], '%Y-%m-%dT%H:%M:%S.%fZ'),
-        publisher=metadata['publisherName'],
-        lang=metadata['language'],
+            metadata["releaseDate"], "%Y-%m-%dT%H:%M:%S.%fZ"
+        ),
+        publisher=metadata["publisherName"],
+        lang=metadata["language"],
         runtime_length_minutes=runtime,
-        format_type=metadata['formatType'],
+        format_type=metadata["formatType"],
         converted=True,
         status=status,
-        cover_image_link=metadata['image'],
-        src_path=original_path
+        cover_image_link=metadata["image"],
+        src_path=original_path,
     )
 
     # Only add in series if it exists
-    if 'primarySeries' in metadata:
-        book.series = metadata['primarySeries']['name']
+    if "primarySeries" in metadata:
+        book.series = metadata["primarySeries"]["name"]
         book.save()
 
-    make_author_model(book, metadata['authors'])
-    make_narrator_model(book, metadata['narrators'])
+    make_author_model(book, metadata["authors"])
+    make_narrator_model(book, metadata["narrators"])
 
     return book
 
@@ -160,37 +236,31 @@ def make_author_model(book, authors: list[dict[str, str]]):
     # Author DB entry
     # Create new entry for each author if there's more than one
     for author in authors:
-        author_name_full = author['name']
+        author_name_full = author["name"]
         author_name_split = author_name_full.split()
         last_name_index = len(author_name_split) - 1
 
         # Check if author asin exists
-        if 'asin' in author:
-            author_asin = author['asin']
-            _filter_vals = {'asin': author_asin}
+        if "asin" in author:
+            author_asin = author["asin"]
+            _filter_vals = {"asin": author_asin}
 
         # If author doesn't exist, search by name and set asin to none
         else:
             author_asin = None
             _filter_vals = {
-                'first_name': author_name_split[0],
-                'last_name': author_name_split[last_name_index]
+                "first_name": author_name_split[0],
+                "last_name": author_name_split[last_name_index],
             }
-            logger.warning(
-                f"No author ASIN for: "
-                f"{author_name_full}"
-            )
+            logger.warning(f"No author ASIN for: {author_name_full}")
 
         # Check if author is in database
         if not (author := Author.objects.filter(**_filter_vals).first()):
-            logger.info(
-                f"Using existing db entry for author: "
-                f"{author_name_full}"
-            )
+            logger.info(f"Using existing db entry for author: {author_name_full}")
             author = Author.objects.create(
                 asin=author_asin,
                 first_name=author_name_split[0],
-                last_name=author_name_split[last_name_index]
+                last_name=author_name_split[last_name_index],
             )
 
         author.books.add(book)
@@ -201,17 +271,18 @@ def make_narrator_model(book, narrators: list[dict[str, str]]):
     # Narrator DB entry
     # Create new entry for each narrator if there's more than one
     for narrator in narrators:
-
-        narr_name_split = narrator['name'].split()
+        narr_name_split = narrator["name"].split()
         last_name_index = len(narr_name_split) - 1
 
-        if not (narrator := Narrator.objects.filter(
-            first_name=narr_name_split[0],
-            last_name=narr_name_split[last_name_index]
-        ).first()):
+        if not (
+            narrator := Narrator.objects.filter(
+                first_name=narr_name_split[0],
+                last_name=narr_name_split[last_name_index],
+            ).first()
+        ):
             narrator = Narrator.objects.create(
                 first_name=narr_name_split[0],
-                last_name=narr_name_split[last_name_index]
+                last_name=narr_name_split[last_name_index],
             )
 
         narrator.books.add(book)
