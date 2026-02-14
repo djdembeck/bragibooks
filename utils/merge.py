@@ -160,12 +160,13 @@ def run_m4b_merge(asin: str):
         book.save(update_fields=["dest_path"])
         logger.info(f"Output file: {dest_path}")
     else:
-        # Fallback: construct path from known pattern
-        logger.warning("Could not parse output path from Rust output, using fallback")
-        # The Rust binary constructs path based on path_format template
-        # Fallback to setting the src_path as dest_path if parsing fails
-        book.dest_path = str(src_path)
-        book.save(update_fields=["dest_path"])
+        # Parse failure - treat as error
+        message = f"Could not parse output path from Rust output: {result.stdout}"
+        logger.error(message)
+        book.status.status = StatusChoices.ERROR
+        book.status.message = message
+        book.status.save()
+        raise ValueError(message)
 
     book.status.status = StatusChoices.DONE
     book.status.message = ""
