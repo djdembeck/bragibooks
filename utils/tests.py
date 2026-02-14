@@ -1,4 +1,5 @@
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -31,8 +32,8 @@ class TestSubprocessMerge(TestCase):
         )
 
         # Create a test Book with a valid source path
-        # Using a path that exists (temp directory for tests)
-        self.test_src_path = "/tmp/test_input"
+        # Using a unique temp directory for tests
+        self.test_src_path = tempfile.mkdtemp()
         self.test_asin = "B012345678"
 
         self.book = Book.objects.create(
@@ -51,9 +52,6 @@ class TestSubprocessMerge(TestCase):
             src_path=self.test_src_path,
             dest_path="",
         )
-
-        # Create the test source directory
-        Path(self.test_src_path).mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
         """Clean up test fixtures."""
@@ -170,7 +168,8 @@ class TestSubprocessMerge(TestCase):
         )
 
         # Call the function under test
-        run_m4b_merge(self.test_asin)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_m4b_merge(self.test_asin)
 
         # Refresh book from database
         self.book.refresh_from_db()

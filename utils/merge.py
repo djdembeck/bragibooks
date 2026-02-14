@@ -27,7 +27,7 @@ def set_configs():
         "num_cpus": (
             existing_settings.num_cpus
             if existing_settings.num_cpus > 0
-            else os.cpu_count()
+            else (os.cpu_count() or 1)
         ),
         "output_directory": existing_settings.output_directory,
         "path_format": existing_settings.output_scheme,
@@ -149,13 +149,15 @@ def run_m4b_merge(asin: str):
 
     if dest_path:
         book.dest_path = str(dest_path)
+        book.save(update_fields=["dest_path"])
         logger.info(f"Output file: {dest_path}")
     else:
         # Fallback: construct path from known pattern
-        logger.warning(f"Could not parse output path from Rust output, using fallback")
+        logger.warning("Could not parse output path from Rust output, using fallback")
         # The Rust binary constructs path based on path_format template
         # Fallback to setting the src_path as dest_path if parsing fails
         book.dest_path = str(src_path)
+        book.save(update_fields=["dest_path"])
 
     book.status.status = StatusChoices.DONE
     book.status.message = ""
@@ -257,7 +259,7 @@ def make_author_model(book, authors: list[dict[str, str]]):
 
         # Check if author is in database
         if not (author := Author.objects.filter(**_filter_vals).first()):
-            logger.info(f"Using existing db entry for author: {author_name_full}")
+            logger.info(f"Creating new db entry for author: {author_name_full}")
             author = Author.objects.create(
                 asin=author_asin,
                 first_name=author_name_split[0],
