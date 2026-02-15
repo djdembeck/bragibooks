@@ -17,7 +17,28 @@ ENV APP_HOME=/home/app/web
 WORKDIR $APP_HOME
 
 # Install gosu for user switching in entrypoint
-RUN apk add --no-cache gosu
+# Note: This build step requires internet access to GitHub and keys.openpgp.org
+# Install gosu from GitHub releases (not available in Alpine repos)
+# Architectures supported by gosu: amd64, arm64, armel, armhf, i386, mips64le, ppc64le, riscv64, s390x
+ENV GOSU_VERSION=1.17
+RUN set -eux; \
+    apk add --no-cache --virtual .gosu-deps \
+        ca-certificates \
+        dpkg \
+        gnupg \
+        wget; \
+    dpkgArch="$(dpkg --print-architecture | awk -F- '{ print $NF }')"; \
+    wget -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${dpkgArch}"; \
+    wget -O /usr/local/bin/gosu.asc "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${dpkgArch}.asc"; \
+    export GNUPGHOME="$(mktemp -d)"; \
+    gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4; \
+    gpg --batch --verify /usr/local/bin/gosu.asc /usr/local/bin/gosu; \
+    gpgconf --kill gpg-agent; \
+    rm -rf "$GNUPGHOME" /usr/local/bin/gosu.asc; \
+    chmod +x /usr/local/bin/gosu; \
+    gosu --version; \
+    gosu nobody true; \
+    apk del --no-network .gosu-deps
 
 # Copy the necessary files to the container
 COPY requirements.txt .
