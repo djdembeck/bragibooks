@@ -70,7 +70,7 @@ function constructQueryParams(media_dir, title, author, keywords) {
 async function search(url) {
     try {
         const response = await fetch(url);
-        const data = response.json();
+        const data = await response.json();
         return data;
 
     } catch (error) {
@@ -99,7 +99,10 @@ function noOptionsFound(select) {
 function updateOptions(select, data) {
     select.innerHTML = "";
 
-    if (!data.length) {
+    // Handle both old (raw array) and new ({results: []}) API response formats
+    const results = Array.isArray(data) ? data : (data?.results || []);
+
+    if (!results.length) {
         noOptionsFound(select);
         select.parentElement.classList.remove("is-loading");
         return;
@@ -107,8 +110,8 @@ function updateOptions(select, data) {
 
     select.removeAttribute("style");
 
-    data.forEach(option => {
-        text = option.title + " by " + option.author + " - Narrator " + option.narrator + ": " + option.asin;
+    results.forEach(option => {
+        let text = option.title + " by " + option.author + " - Narrator " + option.narrator + ": " + option.asin;
         let opt = createOption(option.asin, text, option.image_link);
         select.appendChild(opt);
     });
@@ -160,7 +163,10 @@ async function searchAsin(title, author, keywords) {
     // Call the URL and get response
     let data = await search(url);
 
-    if (!data.length) {
+    // Handle both old (raw array) and new ({results: []}) API response formats
+    const results = Array.isArray(data) ? data : data.results || [];
+
+    if (!results.length) {
         // display message in search panel and return, dont close the search panel
         document.getElementById('search-notification').style.display = "block";
         return;
