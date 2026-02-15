@@ -16,7 +16,7 @@ else:
 SECRET_PATH = os.path.join(CONFIG_DIR, "secret_key.txt")
 
 # Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/2.2/howto/deployment/checklist/
+# See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
 with open(SECRET_PATH) as f:
@@ -88,7 +88,7 @@ DATABASES = {
 DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
 
 # Password validation
-# https://docs.djangoproject.com/en/2.2/ref/settings/#auth-password-validators
+# https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -106,7 +106,7 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 # Internationalization
-# https://docs.djangoproject.com/en/2.2/topics/i18n/
+# https://docs.djangoproject.com/en/5.2/topics/i18n/
 
 LANGUAGE_CODE = "en-us"
 
@@ -119,13 +119,13 @@ USE_L10N = True
 USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/2.2/howto/static-files/
+# https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_ROOT = os.path.join(BASE_DIR, "static")
 STATIC_URL = "/static/"
 
 # Set environment variable DJANGO_LOG_LEVEL to desired level
-# https://docs.djangoproject.com/en/2.2/topics/logging/
+# https://docs.djangoproject.com/en/5.2/topics/logging/
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
