@@ -173,7 +173,7 @@ async function searchAsin(title, author, keywords) {
     }
 
     // Update the select for the calling custom search
-    updateOptions(select, results)
+    updateOptions(select, data)
 
     // update cover image
     const counter = select.id.split('-').pop();
