@@ -41,7 +41,7 @@ def fetch_audible_metadata(asin: str, api_url: str = "https://api.audnex.us") ->
         response.raise_for_status()
         return response.json()
     except requests.RequestException as e:
-        logger.exception(f"Failed to fetch metadata for ASIN {asin}: {e}")
+        logger.exception("Failed to fetch metadata for ASIN %s", asin)
         raise
 
 
@@ -252,7 +252,7 @@ def make_author_model(book, authors: list[dict[str, str]]):
 
         # Skip authors with empty names
         if not author_name_split:
-            logger.warning(f"Skipping author with empty name")
+            logger.warning("Skipping author with empty name")
             continue
 
         last_name_index = len(author_name_split) - 1
@@ -269,7 +269,7 @@ def make_author_model(book, authors: list[dict[str, str]]):
                 "first_name": author_name_split[0],
                 "last_name": author_name_split[last_name_index],
             }
-            logger.warning(f"No author ASIN for: {author_name_full}")
+            logger.warning("No author ASIN for: %s", author_name_full)
 
         # Check if author is in database
         if not (author := Author.objects.filter(**_filter_vals).first()):
@@ -293,7 +293,7 @@ def make_narrator_model(book, narrators: list[dict[str, str]]):
 
         # Skip narrators with empty names
         if not narr_name_split:
-            logger.warning(f"Skipping narrator with empty name")
+            logger.warning("Skipping narrator with empty name")
             continue
 
         last_name_index = len(narr_name_split) - 1
