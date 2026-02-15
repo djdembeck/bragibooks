@@ -164,7 +164,7 @@ class AsinSearch(View):
 
         # Write search result status to log
         if not results:
-            logger.warn(
+            logger.warning(
                 f"No results found for query {search_helper.normalizedFileName}"
             )
             return JsonResponse({"results": []})
@@ -238,7 +238,9 @@ class BookListView(TemplateView):
             context.update({"default_view": "processing"})
 
         for key, books in filter(lambda item: "books" in item[0], kwargs.items()):
-            context.update({key: list(zip(books, self.calcBookLength(list(books))))})
+            context.update(
+                {key: list(zip(books, self.calcBookLength(list(books)), strict=True))}
+            )
 
         return context
 
