@@ -74,7 +74,9 @@ class TestSubprocessMerge(TestCase):
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = (
-            "1. /output/author/title.m4b\n   Input files: 5\n   Metadata applied: Yes\n"
+            "Audiobook ASIN: job begin: /output/author/title.m4b\n"
+            "Processing input files...\n"
+            "job end\n"
         )
         mock_result.stderr = ""
         mock_subprocess_run.return_value = mock_result
@@ -244,12 +246,12 @@ class TestSubprocessMerge(TestCase):
         self.assertIn("no settings found", self.book.status.message.lower())
 
     @patch("utils.merge.subprocess.run")
-    def test_output_path_parsing_fallback(self, mock_subprocess_run):
-        """Test fallback when output path cannot be parsed from stdout.
+    def test_output_path_parsing_failure(self, mock_subprocess_run):
+        """Test handling when output path cannot be parsed from stdout.
 
         Verifies:
-        - When stdout doesn't match expected format, dest_path falls back to src_path
-        - Book status is still set to DONE
+        - When stdout doesn't match expected format, a ValueError is raised
+        - Book status is set to ERROR with appropriate message
         """
         # Setup mock subprocess return value with unparseable output
         mock_result = MagicMock()
@@ -258,16 +260,19 @@ class TestSubprocessMerge(TestCase):
         mock_result.stderr = ""
         mock_subprocess_run.return_value = mock_result
 
-        # Call the function under test
-        run_m4b_merge(self.test_asin)
+        # Call the function under test - should raise ValueError
+        with self.assertRaises(ValueError) as context:
+            run_m4b_merge(self.test_asin)
 
         # Refresh book from database
         self.book.refresh_from_db()
         self.book.status.refresh_from_db()
 
-        # Assert book status is DONE (merge succeeded)
-        self.assertEqual(self.book.status.status, StatusChoices.DONE)
+        # Assert book status is ERROR
+        self.assertEqual(self.book.status.status, StatusChoices.ERROR)
 
-        # Assert dest_path falls back to src_path (resolved absolute path)
-        expected_fallback = str(Path(self.test_src_path).resolve())
-        self.assertEqual(self.book.dest_path, expected_fallback)
+        # Assert error message indicates parsing failure
+        self.assertIn("Could not parse output path", self.book.status.message)
+
+        # Verify ValueError was raised with correct message
+        self.assertIn("Could not parse output path", str(context.exception))

@@ -145,11 +145,11 @@ def run_m4b_merge(asin: str):
         return
 
     # Parse output to extract output file path
-    # Rust binary outputs: "1. /path/to/output/file.m4b"
+    # Rust binary outputs: "job begin: /path/to/output/file.m4b"
     dest_path = None
-    output_pattern = r"^\d+\.\s+(.+)$"
+    output_pattern = r"job begin:\s+(.+)$"
     for line in result.stdout.splitlines():
-        match = re.match(output_pattern, line.strip())
+        match = re.search(output_pattern, line.strip())
         if match:
             dest_path = Path(match.group(1))
             break
