@@ -1,5 +1,5 @@
 celery>=5.2
-Django>=4.2
+Django>=5.2,<6.0
 gunicorn>=20.1.0
 kombu==5.6.2 # this has the latest update needed to use sqlalchemy>=2.0
 Levenshtein==0.27.3
