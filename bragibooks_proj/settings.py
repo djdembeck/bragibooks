@@ -157,6 +157,8 @@ CELERY_BROKER_URL = os.environ.get(
 # Security settings for production (only enabled when DEBUG=False)
 if not DEBUG:
     SECURE_SSL_REDIRECT = True
+    # Uncomment when Django is behind a proxy that terminates SSL
+    # SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     SECURE_HSTS_SECONDS = 31536000  # 1 year
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
