@@ -16,6 +16,9 @@ ENV APP_HOME=/home/app/web
 # Where your code lives
 WORKDIR $APP_HOME
 
+# Install gosu for user switching in entrypoint
+RUN apk add --no-cache gosu
+
 # Copy the necessary files to the container
 COPY requirements.txt .
 

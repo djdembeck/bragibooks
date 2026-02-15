@@ -4,17 +4,31 @@
 PUID=${UID:-99}
 PGID=${GID:-100}
 
-# create a user and group with specified UID and GID
-addgroup -g $PGID appgroup
-adduser -D -u $PUID -G appgroup appuser
+EXISTING_GROUP=$(getent group "$PGID" | cut -d: -f1)
+if [ -n "$EXISTING_GROUP" ]; then
+    echo "Group with GID $PGID already exists: $EXISTING_GROUP"
+    GROUP_NAME="$EXISTING_GROUP"
+else
+    addgroup -g "$PGID" appgroup
+    GROUP_NAME="appgroup"
+fi
 
-mkdir -p $APP_HOME
-chown -R appuser:appuser $APP_HOME
+EXISTING_USER=$(getent passwd "$PUID" | cut -d: -f1)
+if [ -n "$EXISTING_USER" ]; then
+    echo "User with UID $PUID already exists: $EXISTING_USER"
+    USER_NAME="$EXISTING_USER"
+else
+    adduser -D -u "$PUID" -G "$GROUP_NAME" appuser
+    USER_NAME="appuser"
+fi
 
-echo "Starting with UID: $PUID, GID: $PGID"
+mkdir -p "$APP_HOME"
+chown -R "$USER_NAME":"$GROUP_NAME" "$APP_HOME"
+
+echo "Starting with UID: $PUID, GID: $PGID (user: $USER_NAME, group: $GROUP_NAME)"
 
 # Fix permissions
-chown -R "$PUID":"$PGID" /config /input /output
+chown -R "$USER_NAME":"$GROUP_NAME" /config /input /output
 
 until cd /home/app/web
 do
@@ -28,7 +42,7 @@ do
     sleep 2
 done
 
-python manage.py collectstatic --noinput
+gosu "$PUID":"$PGID" python manage.py collectstatic --noinput
 
 # Start Celery Worker
 gosu "$PUID":"$PGID" celery -A bragibooks_proj worker --loglevel=info --concurrency ${CELERY_WORKERS:-1} -E &
