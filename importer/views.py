@@ -10,16 +10,19 @@ from django.contrib import messages
 from django.http import HttpRequest, HttpResponseBadRequest, JsonResponse
 from django.shortcuts import redirect, render
 from django.views.generic import TemplateView, View
+
 # core merge logic:
 from m4b_merge import helpers
 
 # Import Merge functions for django
 from utils.merge import create_book
+
 # Import Search tools
 from utils.search_tools import ScoreTool, SearchTool
 
 # Forms import
 from .forms import SettingForm
+
 # Models import
 from .models import Book, Setting, StatusChoices
 from .tasks import m4b_merge_task
@@ -28,7 +31,7 @@ from .tasks import m4b_merge_task
 logger = logging.getLogger(__name__)
 
 # If using docker, default to /input folder, else $USER/input
-if Path('/input').is_dir():
+if Path("/input").is_dir():
     rootdir = "/input"
 else:
     rootdir = f"{str(Path.home())}/input"
@@ -50,16 +53,14 @@ class ImportView(TemplateView):
         existing_settings = Setting.objects.first()
         if not existing_settings:
             logger.debug("No settings found, returning to settings page")
-            messages.error(
-                request, "Settings must be configured before import"
-            )
+            messages.error(request, "Settings must be configured before import")
             return redirect("setting")
 
-        if not (input_dir := request.POST.getlist('input_dir')):
+        if not (input_dir := request.POST.getlist("input_dir")):
             messages.error(request, "You must select content to import")
             return redirect("import")
 
-        request.session['input_dir'] = input_dir
+        request.session["input_dir"] = input_dir
         return redirect("match")
 
 
@@ -68,7 +69,7 @@ class MatchView(TemplateView):
 
     def get(self, request):
         # Redirect if this is a new session
-        if 'input_dir' not in request.session:
+        if "input_dir" not in request.session:
             logger.debug("No session data found, returning to import page")
             return redirect("import")
 
@@ -78,20 +79,19 @@ class MatchView(TemplateView):
         # Check if any of these inputs exist in our DB
         # If so, prepopulate their asins
         context = []
-        for this_dir in self.request.session['input_dir']:
+        for this_dir in self.request.session["input_dir"]:
             try:
                 book = Book.objects.get(src_path=f"{this_dir}")
             except Book.DoesNotExist:
-                context.append({'src_path': this_dir})
+                context.append({"src_path": this_dir})
             else:
-                context.append({'src_path': this_dir, 'asin': book.asin})
+                context.append({"src_path": this_dir, "asin": book.asin})
 
         return {"context": context}
 
     def post(self, request: HttpRequest):
         created_books = False
         for key, asin in request.POST.items():
-            
             if key == "csrfmiddlewaretoken":
                 continue
 
@@ -111,7 +111,7 @@ class MatchView(TemplateView):
             except ValueError:
                 messages.error(request, "Bad ASIN: " + asin)
                 return redirect("match")
-            
+
             original_path = Path(key)
             if not helpers.get_directory(original_path):
                 messages.error(request, f"No supported files in {original_path}")
@@ -124,7 +124,7 @@ class MatchView(TemplateView):
 
             logger.info(f"Adding book {book} to processing queue")
             m4b_merge_task.delay(asin)
-        
+
         if created_books:
             return redirect("books")
         else:
@@ -137,7 +137,7 @@ class AsinSearch(View):
 
         if any(key not in accepted_keywords for key in request.GET.keys()):
             return HttpResponseBadRequest(
-                f"'{', '.join(request.GET.keys() -  accepted_keywords)}' are not valid parameters. \
+                f"'{', '.join(request.GET.keys() - accepted_keywords)}' are not valid parameters. \
                 Valid search parameters are {accepted_keywords}"
             )
 
@@ -145,16 +145,19 @@ class AsinSearch(View):
             request.GET.get("media_dir"),
             request.GET.get("title"),
             request.GET.get("author"),
-            request.GET.get("keywords")
+            request.GET.get("keywords"),
         )
 
-    def search(self, media_dir: str = "", title: str = "", author: str = "", keywords: str = "") -> JsonResponse:
+    def search(
+        self, media_dir: str = "", title: str = "", author: str = "", keywords: str = ""
+    ) -> JsonResponse:
         """
-            Search for an album.
+        Search for an album.
         """
         # Instantiate search helper
         search_helper = SearchTool(
-            filename=media_dir, title=title, author=author, keywords=keywords)
+            filename=media_dir, title=title, author=author, keywords=keywords
+        )
 
         # Call search API
         results = self.call_search_api(search_helper)
@@ -162,40 +165,41 @@ class AsinSearch(View):
         # Write search result status to log
         if not results:
             logger.warn(
-                f'No results found for query {search_helper.normalizedFileName}')
-            return JsonResponse([], safe=False)
+                f"No results found for query {search_helper.normalizedFileName}"
+            )
+            return JsonResponse({"results": []})
 
         logger.debug(
-            f'Found {len(results)} result(s) for query "{search_helper.normalizedFileName}"')
+            f'Found {len(results)} result(s) for query "{search_helper.normalizedFileName}"'
+        )
 
         results = self.process_results(search_helper, results)
 
-        return JsonResponse(results, safe=False)
+        return JsonResponse({"results": results})
 
     @staticmethod
     def process_results(helper: SearchTool, result) -> list[dict[str, str | int]]:
         """
-            Process the results from the API call.
+        Process the results from the API call.
         """
         scored_results = []
         # Walk the found items and gather extended information
         logger.debug(msg="Search results")
         for index, result_dict in enumerate(result):
-            score_helper = ScoreTool(
-                helper, index, settings.LANGUAGE_CODE, result_dict)
+            score_helper = ScoreTool(helper, index, settings.LANGUAGE_CODE, result_dict)
             scored_results.append(score_helper.run_score_book())
 
             # Print separators for easy reading
             if index <= len(result):
                 logger.debug("-" * 35)
 
-        return sorted(scored_results, key=lambda inf: inf['score'], reverse=True)
+        return sorted(scored_results, key=lambda inf: inf["score"], reverse=True)
 
     @staticmethod
     def call_search_api(helper: SearchTool):
-        '''
-            Builds URL then calls API, returns the JSON to helper function.
-        '''
+        """
+        Builds URL then calls API, returns the JSON to helper function.
+        """
         query = helper.build_search_args()
         search_url = helper.build_url(query)
         request = requests.get(search_url)
@@ -207,26 +211,34 @@ class BookListView(TemplateView):
 
     def get(self, request):
         done_books = Book.objects.filter(status__status=StatusChoices.DONE).order_by(
-            '-created_at')
+            "-created_at"
+        )
         processing_books = Book.objects.filter(
-            status__status=StatusChoices.PROCESSING).order_by(
-            '-created_at')
+            status__status=StatusChoices.PROCESSING
+        ).order_by("-created_at")
         error_books = Book.objects.filter(status__status=StatusChoices.ERROR).order_by(
-            '-created_at')
+            "-created_at"
+        )
 
-        return render(request, self.template_name, self.get_context_data(
-            done_books=done_books, processing_books=processing_books, error_books=error_books))
+        return render(
+            request,
+            self.template_name,
+            self.get_context_data(
+                done_books=done_books,
+                processing_books=processing_books,
+                error_books=error_books,
+            ),
+        )
 
     def get_context_data(self, **kwargs) -> dict:
         context = {"default_view": "done"}
 
-        redirect_url = self.request.META.get('HTTP_REFERER', '')
-        if 'match' in redirect_url:
+        redirect_url = self.request.META.get("HTTP_REFERER", "")
+        if "match" in redirect_url:
             context.update({"default_view": "processing"})
 
-        for key, books in filter(lambda item: 'books' in item[0], kwargs.items()):
-            context.update(
-                {key: list(zip(books, self.calcBookLength(list(books))))})
+        for key, books in filter(lambda item: "books" in item[0], kwargs.items()):
+            context.update({key: list(zip(books, self.calcBookLength(list(books))))})
 
         return context
 
@@ -234,14 +246,8 @@ class BookListView(TemplateView):
         # Calculate time object into sentence
         length_arr = []
         for book in books:
-            d = int(
-                timedelta(
-                    minutes=book.runtime_length_minutes
-                ).total_seconds()
-            )
-            book_length_calc = (
-                f'{d//3600} hrs and {(d//60)%60} minutes'
-            )
+            d = int(timedelta(minutes=book.runtime_length_minutes).total_seconds())
+            book_length_calc = f"{d // 3600} hrs and {(d // 60) % 60} minutes"
             length_arr.append(book_length_calc)
         return length_arr
 
@@ -252,12 +258,12 @@ class SettingView(TemplateView):
     def get_context_data(self, **kwargs):
         existing_settings = Setting.objects.first()
         default_data = {
-            'api_url': 'https://api.audnex.us',
-            'completed_directory': '/input/done',
-            'input_directory': '/input',
-            'num_cpus': 0,
-            'output_directory': '/output',
-            'output_scheme': 'author/title/title - subtitle'
+            "api_url": "https://api.audnex.us",
+            "completed_directory": "/input/done",
+            "input_directory": "/input",
+            "num_cpus": 0,
+            "output_directory": "/output",
+            "output_scheme": "author/title/title - subtitle",
         }
         if existing_settings:
             form = SettingForm(instance=existing_settings)
@@ -277,9 +283,9 @@ class SettingView(TemplateView):
         form = SettingForm(request.POST)
         if form.is_valid():
             paths_to_check = [
-                'completed_directory',
-                'input_directory',
-                'output_directory'
+                "completed_directory",
+                "input_directory",
+                "output_directory",
             ]
             form_data = form.cleaned_data
 
@@ -292,22 +298,22 @@ class SettingView(TemplateView):
                     return redirect("setting")
             if not existing_settings:
                 settings = Setting.objects.create(
-                    api_url=form_data['api_url'],
-                    completed_directory=form_data['completed_directory'],
-                    input_directory=form_data['input_directory'],
-                    num_cpus=form_data['num_cpus'],
-                    output_directory=form_data['output_directory'],
-                    output_scheme=form_data['output_scheme']
+                    api_url=form_data["api_url"],
+                    completed_directory=form_data["completed_directory"],
+                    input_directory=form_data["input_directory"],
+                    num_cpus=form_data["num_cpus"],
+                    output_directory=form_data["output_directory"],
+                    output_scheme=form_data["output_scheme"],
                 )
                 settings.save()
             else:
                 es = existing_settings
-                es.api_url = form_data['api_url']
-                es.completed_directory = form_data['completed_directory']
-                es.input_directory = form_data['input_directory']
-                es.num_cpus = form_data['num_cpus']
-                es.output_directory = form_data['output_directory']
-                es.output_scheme = form_data['output_scheme']
+                es.api_url = form_data["api_url"]
+                es.completed_directory = form_data["completed_directory"]
+                es.input_directory = form_data["input_directory"]
+                es.num_cpus = form_data["num_cpus"]
+                es.output_directory = form_data["output_directory"]
+                es.output_scheme = form_data["output_scheme"]
                 es.save()
 
             return redirect("import")
