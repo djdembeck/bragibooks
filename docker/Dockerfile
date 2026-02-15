@@ -1,3 +1,6 @@
+# =============================================================================
+# Runtime stage - Bragibooks with m4b-merge
+# =============================================================================
 # Base image
 FROM ghcr.io/djdembeck/m4b-merge:develop
 
@@ -10,7 +13,7 @@ ENV PYTHONUNBUFFERED=1
 # Setup environment variable
 ENV APP_HOME=/home/app/web
 
-# Where your code lives  
+# Where your code lives
 WORKDIR $APP_HOME
 
 # Copy the necessary files to the container
