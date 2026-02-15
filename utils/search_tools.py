@@ -7,7 +7,7 @@ import urllib.parse
 from functools import reduce
 
 from django.conf import settings
-from Levenshtein import distance
+from rapidfuzz.distance import Levenshtein
 
 from .region_tools import RegionTool
 
@@ -16,7 +16,14 @@ logger = logging.getLogger(__name__)
 
 
 class SearchTool:
-    def __init__(self, filename: str, title: str = "", author: str = "", keywords: str = "", region_override: str = ""):
+    def __init__(
+        self,
+        filename: str,
+        title: str = "",
+        author: str = "",
+        keywords: str = "",
+        region_override: str = "",
+    ):
         self.filename = filename
         self.title = title
         self.author = author
@@ -26,7 +33,7 @@ class SearchTool:
 
     def build_search_args(self) -> str:
         """
-            Builds the search arguments for the API call.
+        Builds the search arguments for the API call.
         """
         # First, normalize the name
         if not self.title and not self.author and not self.keywords:
@@ -36,13 +43,15 @@ class SearchTool:
 
         if self.normalizedFileName or self.keywords:
             query.append(
-                'keywords=' + urllib.parse.quote(self.normalizedFileName or self.keywords))
+                "keywords="
+                + urllib.parse.quote(self.normalizedFileName or self.keywords)
+            )
 
         if self.title:
-            query.append('title=' + urllib.parse.quote(self.title))
+            query.append("title=" + urllib.parse.quote(self.title))
 
         if self.author:
-            query.append('author=' + urllib.parse.quote(self.author))
+            query.append("author=" + urllib.parse.quote(self.author))
 
         if not query:
             return ""
@@ -51,54 +60,60 @@ class SearchTool:
 
     def normalize_name(self, name) -> str:
         """
-            Normalizes the album name by removing
-            unwanted characters and words.
+        Normalizes the album name by removing
+        unwanted characters and words.
         """
         # Get name from either album or title
-        logger.debug('Input Name: %s', name)
+        logger.debug("Input Name: %s", name)
 
         # Remove Diacritics
         name = self.remove_diacritics(name)
         # Remove file extension
-        name = re.sub(r'\.\w+$', '', name)
+        name = re.sub(r"\.\w+$", "", name)
         # Remove number prefix
-        name = re.sub(r'^\d+\s', '', name)
+        name = re.sub(r"^\d+\s", "", name)
         # Remove brackets and text inside
-        name = re.sub(r'\[[^"]*\]', '', name)
+        name = re.sub(r'\[[^"]*\]', "", name)
         # Remove unwanted characters
-        name = re.sub(r'[^\w\s]', '', name)
+        name = re.sub(r"[^\w\s]", "", name)
         # Remove unwanted words
-        name = re.sub(r'\b(official|audiobook|unabridged|abridged|mp3|m4b)\b',
-                      '', name, flags=re.IGNORECASE)
+        name = re.sub(
+            r"\b(official|audiobook|unabridged|abridged|mp3|m4b)\b",
+            "",
+            name,
+            flags=re.IGNORECASE,
+        )
         # Remove unwanted whitespaces
-        name = re.sub(r'\s+', ' ', name)
+        name = re.sub(r"\s+", " ", name)
         # Remove leading and trailing whitespaces
         name = name.strip()
 
-        logger.debug(f'Normalized Name: {name}')
+        logger.debug(f"Normalized Name: {name}")
 
         return name
 
     def build_url(self, query):
         """
-            Generates the URL string with search paramaters for API call.
+        Generates the URL string with search paramaters for API call.
         """
         # Setup region helper to get search URL
         region_helper = RegionTool(region=self.region, query=query)
 
         search_url = region_helper.get_api_search_url()
 
-        logger.debug('Search URL: %s', search_url)
+        logger.debug("Search URL: %s", search_url)
 
         return search_url
 
-    def parse_api_response(self, api_response: dict[str, list[dict]]) -> list[dict[str, str | int]]:
+    def parse_api_response(
+        self, api_response: dict[str, list[dict]]
+    ) -> list[dict[str, str | int]]:
         """
-            Collects keys used for each item from API response,
-            for Plex search results.
+        Collects keys used for each item from API response,
+        for Plex search results.
         """
         search_results = []
-        for item in api_response['products']:
+        for item in api_response["products"]:
             # Only append results which have valid keys
             if item.keys() >= {
                 "asin",
@@ -107,40 +122,33 @@ class SearchTool:
                 "narrators",
                 "release_date",
                 "title",
-                "product_images"
+                "product_images",
             }:
                 search_results.append(
                     {
-                        'asin': item['asin'],
-                        'author': item['authors'],
-                        'date': item['release_date'],
-                        'language': item['language'],
-                        'narrator': item['narrators'],
-                        'region': self.region,
-                        'title': item['title'],
-                        'product_images': item['product_images']
+                        "asin": item["asin"],
+                        "author": item["authors"],
+                        "date": item["release_date"],
+                        "language": item["language"],
+                        "narrator": item["narrators"],
+                        "region": self.region,
+                        "title": item["title"],
+                        "product_images": item["product_images"],
                     }
                 )
         return search_results
 
     @staticmethod
     def remove_diacritics(s):
-        nkfd_form = unicodedata.normalize('NFKD', str(s))
-        return u"".join([c for c in nkfd_form if not unicodedata.combining(c)])
+        nkfd_form = unicodedata.normalize("NFKD", str(s))
+        return "".join([c for c in nkfd_form if not unicodedata.combining(c)])
 
 
 class ScoreTool:
     # Starting value for score before deductions are taken.
     INITIAL_SCORE = 100
 
-    def __init__(
-        self,
-        helper: SearchTool,
-        index,
-        locale,
-        result_dict,
-        year=None
-    ):
+    def __init__(self, helper: SearchTool, index, locale, result_dict, year=None):
         self.helper: SearchTool = helper
         self.index = index
         self.english_locale = locale
@@ -149,86 +157,85 @@ class ScoreTool:
 
     def reduce_string(self, string: str):
         """
-            Reduces a string to lowercase and removes
-            punctuation and spaces.
+        Reduces a string to lowercase and removes
+        punctuation and spaces.
         """
-        normalized = string \
-            .lower() \
-            .replace("-", "") \
-            .replace(' ', '') \
-            .replace('.', '') \
-            .replace(',', '')
+        normalized = (
+            string.lower()
+            .replace("-", "")
+            .replace(" ", "")
+            .replace(".", "")
+            .replace(",", "")
+        )
         return normalized
 
     def run_score_book(self):
         """
-            Scores a book result.
+        Scores a book result.
         """
-        self.asin = self.result_dict['asin']
-        self.authors_concat = ', '.join(
-            author['name'] for author in self.result_dict['author']
+        self.asin = self.result_dict["asin"]
+        self.authors_concat = ", ".join(
+            author["name"] for author in self.result_dict["author"]
         )
-        self.author = self.result_dict['author'][0]['name']
-        self.date = self.result_dict['date']
-        self.language = self.result_dict['language'].title()
-        self.narrator = self.result_dict['narrator'][0]['name']
-        self.region = self.result_dict['region']
-        self.title = self.result_dict['title']
-        self.image_link = list(self.result_dict['product_images'].values())
+        self.author = self.result_dict["author"][0]["name"]
+        self.date = self.result_dict["date"]
+        self.language = self.result_dict["language"].title()
+        self.narrator = self.result_dict["narrator"][0]["name"]
+        self.region = self.result_dict["region"]
+        self.title = self.result_dict["title"]
+        self.image_link = list(self.result_dict["product_images"].values())
         return self.score_result()
 
     def sum_scores(self, numberlist):
         """
-            Sums a list of numbers.
+        Sums a list of numbers.
         """
         # Because builtin sum() isn't available
-        return reduce(
-            lambda x, y: x + y, numberlist, 0
-        )
+        return reduce(lambda x, y: x + y, numberlist, 0)
 
     def score_create_result(self, score) -> dict[str, str]:
         """
-            Creates a result dict for the score.
-            Logs the score and the data used to calculate it.
+        Creates a result dict for the score.
+        Logs the score and the data used to calculate it.
         """
         data_to_logger = []
         score_dict = {}
 
         # Go through all the keys for the result and log as we go
         if self.asin:
-            score_dict['asin'] = self.asin
-            data_to_logger.append({'ASIN is': self.asin})
+            score_dict["asin"] = self.asin
+            data_to_logger.append({"ASIN is": self.asin})
         if self.author:
-            score_dict['author'] = self.author
-            data_to_logger.append({'Author is': self.author})
+            score_dict["author"] = self.author
+            data_to_logger.append({"Author is": self.author})
         if self.date:
-            score_dict['date'] = self.date
-            data_to_logger.append({'Date is': self.date})
+            score_dict["date"] = self.date
+            data_to_logger.append({"Date is": self.date})
         if self.narrator:
-            score_dict['narrator'] = self.narrator
-            data_to_logger.append({'Narrator is': self.narrator})
+            score_dict["narrator"] = self.narrator
+            data_to_logger.append({"Narrator is": self.narrator})
         if self.region:
-            score_dict['region'] = self.region
-            data_to_logger.append({'Region is': self.region})
+            score_dict["region"] = self.region
+            data_to_logger.append({"Region is": self.region})
         if score is not None:
-            score_dict['score'] = score
-            data_to_logger.append({'Score is': str(score)})
+            score_dict["score"] = score
+            data_to_logger.append({"Score is": str(score)})
         if self.title:
-            score_dict['title'] = self.title
-            data_to_logger.append({'Title is': self.title})
+            score_dict["title"] = self.title
+            data_to_logger.append({"Title is": self.title})
         if self.year:
-            score_dict['year'] = self.year
-            data_to_logger.append({'Year is': self.year})
+            score_dict["year"] = self.year
+            data_to_logger.append({"Year is": self.year})
         if self.image_link:
-            score_dict['image_link'] = self.image_link
-            data_to_logger.append({'Image Link is': self.image_link})
+            score_dict["image_link"] = self.image_link
+            data_to_logger.append({"Image Link is": self.image_link})
 
         logger.debug(data_to_logger)
         return score_dict
 
     def score_result(self):
         """
-            Scores a result.
+        Scores a result.
         """
         # Array to hold score points for processing
         all_scores = []
@@ -260,58 +267,64 @@ class ScoreTool:
 
     def score_album(self, title: str):
         """
-            Compare the input album similarity to the search result album.
-            Score is calculated with LevenshteinDistance
+        Compare the input album similarity to the search result album.
+        Score is calculated with LevenshteinDistance
         """
         scorebase1 = self.helper.title or self.helper.filename
         if not scorebase1:
-            logger.error('No album title found in file metadata')
+            logger.error("No album title found in file metadata")
             return 50
         scorebase2 = title  # .encode('utf-8')
-        album_score = distance(
-            self.reduce_string(scorebase1),
-            self.reduce_string(scorebase2)
-        ) * 2
+        album_score = (
+            Levenshtein.distance(
+                self.reduce_string(scorebase1), self.reduce_string(scorebase2)
+            )
+            * 2
+        )
         logger.debug("Score deduction from album: " + str(album_score))
         return album_score
 
     def score_author(self, author: str):
         """
-            Compare the input author similarity to the search result author.
-            Score is calculated with LevenshteinDistance
+        Compare the input author similarity to the search result author.
+        Score is calculated with LevenshteinDistance
         """
         if not self.helper.author:
-            logger.debug(f'No author found in file metadata for {self.title} - {self.asin}')
+            logger.debug(
+                f"No author found in file metadata for {self.title} - {self.asin}"
+            )
             return 20
-        
+
         scorebase3 = self.helper.author
         scorebase4 = author
-        author_score = distance(
-            self.reduce_string(scorebase3),
-            self.reduce_string(scorebase4)
-        ) * 10
+        author_score = (
+            Levenshtein.distance(
+                self.reduce_string(scorebase3), self.reduce_string(scorebase4)
+            )
+            * 10
+        )
         logger.debug("Score deduction from author: " + str(author_score))
         return author_score
 
     def score_language(self, language: str):
         """
-            Compare the library language to search results
-            and knock off 2 points if they don't match.
+        Compare the library language to search results
+        and knock off 2 points if they don't match.
         """
         lang_dict = {
-            self.english_locale: 'English',
-            'de': 'German',
-            'es': 'Spanish',
-            'fr': 'French',
-            'it': 'Italian',
-            'ja': 'Japanese',
+            self.english_locale: "English",
+            "de": "German",
+            "es": "Spanish",
+            "fr": "French",
+            "it": "Italian",
+            "ja": "Japanese",
         }
 
         if language != lang_dict[settings.LANGUAGE_CODE]:
             logger.debug(
-                'Audible language: %s; Library language: %s',
+                "Audible language: %s; Library language: %s",
                 language,
-                lang_dict[settings.LANGUAGE_CODE]
+                lang_dict[settings.LANGUAGE_CODE],
             )
             logger.debug("Book is not library language, deduct 2 points")
             return 2
