@@ -23,7 +23,7 @@ class SearchTool:
         author: str = "",
         keywords: str = "",
         region_override: str = "",
-    ):
+    ) -> None:
         self.filename = filename
         self.title = title
         self.author = author
