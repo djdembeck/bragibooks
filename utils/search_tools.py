@@ -88,7 +88,7 @@ class SearchTool:
         # Remove leading and trailing whitespaces
         name = name.strip()
 
-        logger.debug(f"Normalized Name: {name}")
+        logger.debug("Normalized Name: %s", name)
 
         return name
 
@@ -139,7 +139,7 @@ class SearchTool:
         return search_results
 
     @staticmethod
-    def remove_diacritics(s):
+    def remove_diacritics(s) -> str:
         nkfd_form = unicodedata.normalize("NFKD", str(s))
         return "".join([c for c in nkfd_form if not unicodedata.combining(c)])
 
@@ -260,7 +260,7 @@ class ScoreTool:
         # Subtract index to use Audible relevance as weight
         score = self.INITIAL_SCORE - self.sum_scores(all_scores) - self.index
 
-        logger.debug(f"Result #{self.index + 1}, Score: {score}")
+        logger.debug("Result #%s, Score: %s", self.index + 1, score)
 
         # Create result dict
         return self.score_create_result(score)
@@ -281,7 +281,7 @@ class ScoreTool:
             )
             * 2
         )
-        logger.debug("Score deduction from album: " + str(album_score))
+        logger.debug("Score deduction from album: %s", album_score)
         return album_score
 
     def score_author(self, author: str):
@@ -291,7 +291,7 @@ class ScoreTool:
         """
         if not self.helper.author:
             logger.debug(
-                f"No author found in file metadata for {self.title} - {self.asin}"
+                "No author found in file metadata for %s - %s", self.title, self.asin
             )
             return 20
 
@@ -303,7 +303,7 @@ class ScoreTool:
             )
             * 10
         )
-        logger.debug("Score deduction from author: " + str(author_score))
+        logger.debug("Score deduction from author: %s", author_score)
         return author_score
 
     def score_language(self, language: str):
