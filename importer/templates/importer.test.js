@@ -7,12 +7,26 @@ class MockElement {
         this.tagName = tagName;
         this.style = {};
         this.children = [];
-        this.classList = new MockClassList();
+        this.classList = new MockClassList(this);
         this.eventListeners = new Map();
         this.textContent = '';
         this.attributes = new Map();
         this.parentElement = null;
         this.id = '';
+        this._className = '';
+    }
+
+    set className(value) {
+        this._className = value;
+        // Sync classList with className
+        this.classList.classes.clear();
+        value.split(/\s+/).forEach(cls => {
+            if (cls) this.classList.classes.add(cls);
+        });
+    }
+
+    get className() {
+        return this._className;
     }
 
     matches(selector) {
@@ -123,14 +137,27 @@ class MockElement {
 }
 
 class MockClassList {
-    constructor() { this.classes = new Set(); }
+    constructor(parent) {
+        this.parent = parent;
+        this.classes = new Set();
+    }
     contains(className) { return this.classes.has(className); }
-    add(className) { this.classes.add(className); }
-    remove(className) { this.classes.delete(className); }
-    toggle(className) {
-        if (this.classes.has(className)) { this.classes.delete(className); return false; }
+    add(className) {
         this.classes.add(className);
-        return true;
+        if (this.parent) this.parent._className = Array.from(this.classes).join(' ');
+    }
+    remove(className) {
+        this.classes.delete(className);
+        if (this.parent) this.parent._className = Array.from(this.classes).join(' ');
+    }
+    toggle(className) {
+        if (this.classes.has(className)) {
+            this.classes.delete(className);
+        } else {
+            this.classes.add(className);
+        }
+        if (this.parent) this.parent._className = Array.from(this.classes).join(' ');
+        return this.classes.has(className);
     }
 }
 
@@ -237,7 +264,7 @@ describe('hideLoadingOverlay', () => {
 });
 
 describe('expandFolder', () => {
-    it('should create and remove spinner element when expanding a collapsed folder', () => {
+    it('should create and remove spinner element when expanding a collapsed folder', async () => {
         const mockDoc = new MockDocument();
         const folder = new MockElement('div');
         folder.classList.add('folder');
@@ -258,12 +285,26 @@ describe('expandFolder', () => {
         mockDoc.addMockElement(item);
 
         const originalDoc = global.document;
-        global.document = mockDoc;
-        expandFolder('folder-test');
-        global.document = originalDoc;
+        try {
+            global.document = mockDoc;
+            expandFolder('folder-test');
 
-        assert.strictEqual(item.style.display, '', 'Item should be visible after expansion');
-        assert.strictEqual(arrowIcon.classList.contains('fa-rotate-90'), true, 'Arrow should have fa-rotate-90 class');
+            // Assert spinner was created immediately
+            const spinnerCreated = folder.children.some(child => child.classList && child.classList.contains('folder-loading'));
+            assert.strictEqual(spinnerCreated, true, 'Spinner element should be created immediately after expandFolder call');
+
+            // Flush the requestAnimationFrame callback (mocked as setTimeout(callback, 0))
+            await new Promise(resolve => setTimeout(resolve, 0));
+
+            // Assert spinner was removed after async operation
+            const spinnerRemoved = !folder.children.some(child => child.classList && child.classList.contains('folder-loading'));
+            assert.strictEqual(spinnerRemoved, true, 'Spinner element should be removed after requestAnimationFrame callback');
+
+            assert.strictEqual(item.style.display, '', 'Item should be visible after expansion');
+            assert.strictEqual(arrowIcon.classList.contains('fa-rotate-90'), true, 'Arrow should have fa-rotate-90 class');
+        } finally {
+            global.document = originalDoc;
+        }
     });
 
     it('should handle already-expanded folders by collapsing them', () => {
@@ -329,8 +370,11 @@ describe('initArrowListeners', () => {
 
         const originalDoc = global.document;
         global.document = mockDoc;
-        initArrowListeners();
-        global.document = originalDoc;
+        try {
+            initArrowListeners();
+        } finally {
+            global.document = originalDoc;
+        }
 
         assert.strictEqual(arrowIcon.eventListeners.has('click'), true, 'Click listener should be attached');
     });
@@ -359,14 +403,17 @@ describe('initArrowListeners', () => {
 
         const originalDoc = global.document;
         global.document = mockDoc;
-        initArrowListeners();
+        try {
+            initArrowListeners();
 
-        const clickEvent = { preventDefault: () => {} };
-        const handlers = arrowIcon.eventListeners.get('click');
-        assert.ok(handlers && handlers.length > 0, 'Click handlers should exist');
+            const clickEvent = { preventDefault: () => {} };
+            const handlers = arrowIcon.eventListeners.get('click');
+            assert.ok(handlers && handlers.length > 0, 'Click handlers should exist');
 
-        handlers[0](clickEvent);
-        global.document = originalDoc;
+            handlers[0](clickEvent);
+        } finally {
+            global.document = originalDoc;
+        }
 
         assert.strictEqual(item.style.display, '', 'Item should be visible after click');
     });
