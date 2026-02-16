@@ -23,12 +23,16 @@ else
 fi
 
 mkdir -p "$APP_HOME"
-chown -R "$USER_NAME":"$GROUP_NAME" "$APP_HOME"
+if find "$APP_HOME" ! -user "$PUID" -o ! -group "$PGID" | head -n 1 | grep -q .; then
+    chown -R "$USER_NAME":"$GROUP_NAME" "$APP_HOME"
+fi
 
 echo "Starting with UID: $PUID, GID: $PGID (user: $USER_NAME, group: $GROUP_NAME)"
 
 # Fix permissions
-chown -R "$USER_NAME":"$GROUP_NAME" /config /input /output
+if find /config /input /output ! -user "$PUID" -o ! -group "$PGID" | head -n 1 | grep -q .; then
+    chown -R "$USER_NAME":"$GROUP_NAME" /config /input /output
+fi
 
 until cd /home/app/web
 do
