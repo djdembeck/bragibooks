@@ -328,20 +328,26 @@ describe('expandFolder', () => {
         mockDoc.addMockElement(item);
 
         const originalDoc = global.document;
-        global.document = mockDoc;
-        expandFolder('folder-test');
-        global.document = originalDoc;
+        try {
+            global.document = mockDoc;
+            expandFolder('folder-test');
 
-        assert.strictEqual(item.style.display, 'none', 'Item should be hidden after collapse');
-        assert.strictEqual(arrowIcon.classList.contains('fa-rotate-90'), false, 'Arrow should not have fa-rotate-90 class');
+            assert.strictEqual(item.style.display, 'none', 'Item should be hidden after collapse');
+            assert.strictEqual(arrowIcon.classList.contains('fa-rotate-90'), false, 'Arrow should not have fa-rotate-90 class');
+        } finally {
+            global.document = originalDoc;
+        }
     });
 
     it('should handle missing folder element gracefully', () => {
         const mockDoc = new MockDocument();
         const originalDoc = global.document;
-        global.document = mockDoc;
-        assert.doesNotThrow(() => expandFolder('non-existent-folder'));
-        global.document = originalDoc;
+        try {
+            global.document = mockDoc;
+            assert.doesNotThrow(() => expandFolder('non-existent-folder'));
+        } finally {
+            global.document = originalDoc;
+        }
     });
 
     it('should handle missing arrow element gracefully', () => {
@@ -352,9 +358,12 @@ describe('expandFolder', () => {
         mockDoc.addMockElement(folder);
 
         const originalDoc = global.document;
-        global.document = mockDoc;
-        assert.doesNotThrow(() => expandFolder('folder-test'));
-        global.document = originalDoc;
+        try {
+            global.document = mockDoc;
+            assert.doesNotThrow(() => expandFolder('folder-test'));
+        } finally {
+            global.document = originalDoc;
+        }
     });
 });
 
@@ -369,8 +378,8 @@ describe('initArrowListeners', () => {
         mockDoc.addMockElement(arrowDiv);
 
         const originalDoc = global.document;
-        global.document = mockDoc;
         try {
+            global.document = mockDoc;
             initArrowListeners();
         } finally {
             global.document = originalDoc;
@@ -402,8 +411,8 @@ describe('initArrowListeners', () => {
         mockDoc.addMockElement(item);
 
         const originalDoc = global.document;
-        global.document = mockDoc;
         try {
+            global.document = mockDoc;
             initArrowListeners();
 
             const clickEvent = { preventDefault: () => {} };
@@ -476,10 +485,12 @@ describe('resetPanel', () => {
 
         const originalDoc = global.document;
         global.document = mockDoc;
-        resetPanel();
-        global.document = originalDoc;
-
-        assert.strictEqual(depth0Item.style.display, '', 'Depth-0 item should be visible');
+        try {
+            resetPanel();
+            assert.strictEqual(depth0Item.style.display, '', 'Depth-0 item should be visible');
+        } finally {
+            global.document = originalDoc;
+        }
     });
 
     it('should hide non-depth-0 items', () => {
@@ -497,10 +508,12 @@ describe('resetPanel', () => {
 
         const originalDoc = global.document;
         global.document = mockDoc;
-        resetPanel();
-        global.document = originalDoc;
-
-        assert.strictEqual(depthItem.style.display, 'none', 'Non-depth-0 item should be hidden');
+        try {
+            resetPanel();
+            assert.strictEqual(depthItem.style.display, 'none', 'Non-depth-0 item should be hidden');
+        } finally {
+            global.document = originalDoc;
+        }
     });
 
     it('should remove fa-rotate-90 class from arrows', () => {
@@ -518,18 +531,23 @@ describe('resetPanel', () => {
 
         const originalDoc = global.document;
         global.document = mockDoc;
-        resetPanel();
-        global.document = originalDoc;
-
-        assert.strictEqual(arrowIcon.classList.contains('fa-rotate-90'), false, 'fa-rotate-90 class should be removed');
+        try {
+            resetPanel();
+            assert.strictEqual(arrowIcon.classList.contains('fa-rotate-90'), false, 'fa-rotate-90 class should be removed');
+        } finally {
+            global.document = originalDoc;
+        }
     });
 
     it('should handle missing panel-block-container gracefully', () => {
         const mockDoc = new MockDocument();
         const originalDoc = global.document;
         global.document = mockDoc;
-        assert.doesNotThrow(() => resetPanel());
-        global.document = originalDoc;
+        try {
+            assert.doesNotThrow(() => resetPanel());
+        } finally {
+            global.document = originalDoc;
+        }
     });
 });
 
@@ -546,10 +564,12 @@ describe('initSearch', () => {
 
         const originalDoc = global.document;
         global.document = mockDoc;
-        initSearch();
-        global.document = originalDoc;
-
-        assert.strictEqual(searchInput.eventListeners.has('input'), true, 'Input listener should be attached');
+        try {
+            initSearch();
+            assert.strictEqual(searchInput.eventListeners.has('input'), true, 'Input listener should be attached');
+        } finally {
+            global.document = originalDoc;
+        }
     });
 
     it('should update DOM visibility based on fuzzy matching', () => {
@@ -574,16 +594,18 @@ describe('initSearch', () => {
 
         const originalDoc = global.document;
         global.document = mockDoc;
-        initSearch();
+        try {
+            initSearch();
 
-        const handlers = searchInput.eventListeners.get('input');
-        assert.ok(handlers && handlers.length > 0, 'Input handlers should exist');
-        handlers[0]();
+            const handlers = searchInput.eventListeners.get('input');
+            assert.ok(handlers && handlers.length > 0, 'Input handlers should exist');
+            handlers[0]();
 
-        global.document = originalDoc;
-
-        assert.strictEqual(label1.style.display, '', 'Matching label should be visible');
-        assert.strictEqual(label2.style.display, 'none', 'Non-matching label should be hidden');
+            assert.strictEqual(label1.style.display, '', 'Matching label should be visible');
+            assert.strictEqual(label2.style.display, 'none', 'Non-matching label should be hidden');
+        } finally {
+            global.document = originalDoc;
+        }
     });
 
     it('should call resetPanel when search query is empty', () => {
@@ -612,16 +634,18 @@ describe('initSearch', () => {
 
         const originalDoc = global.document;
         global.document = mockDoc;
-        initSearch();
+        try {
+            initSearch();
 
-        const handlers = searchInput.eventListeners.get('input');
-        assert.ok(handlers && handlers.length > 0, 'Input handlers should exist');
-        handlers[0]();
+            const handlers = searchInput.eventListeners.get('input');
+            assert.ok(handlers && handlers.length > 0, 'Input handlers should exist');
+            handlers[0]();
 
-        global.document = originalDoc;
-
-        assert.strictEqual(depth0Item.style.display, '', 'resetPanel should show depth-0 items');
-        assert.strictEqual(nonDepthItem.style.display, 'none', 'resetPanel should hide non-depth-0 items');
+            assert.strictEqual(depth0Item.style.display, '', 'resetPanel should show depth-0 items');
+            assert.strictEqual(nonDepthItem.style.display, 'none', 'resetPanel should hide non-depth-0 items');
+        } finally {
+            global.document = originalDoc;
+        }
     });
 
     it('should attach clear search button listener if present', () => {
@@ -640,10 +664,12 @@ describe('initSearch', () => {
 
         const originalDoc = global.document;
         global.document = mockDoc;
-        initSearch();
-        global.document = originalDoc;
-
-        assert.strictEqual(clearButton.eventListeners.has('click'), true, 'Clear button should have click listener');
+        try {
+            initSearch();
+            assert.strictEqual(clearButton.eventListeners.has('click'), true, 'Clear button should have click listener');
+        } finally {
+            global.document = originalDoc;
+        }
     });
 
     it('should handle missing search input gracefully', () => {
@@ -654,8 +680,11 @@ describe('initSearch', () => {
 
         const originalDoc = global.document;
         global.document = mockDoc;
-        assert.doesNotThrow(() => initSearch());
-        global.document = originalDoc;
+        try {
+            assert.doesNotThrow(() => initSearch());
+        } finally {
+            global.document = originalDoc;
+        }
     });
 
     it('should handle missing panel-block-container gracefully', () => {
@@ -666,7 +695,10 @@ describe('initSearch', () => {
 
         const originalDoc = global.document;
         global.document = mockDoc;
-        assert.doesNotThrow(() => initSearch());
-        global.document = originalDoc;
+        try {
+            assert.doesNotThrow(() => initSearch());
+        } finally {
+            global.document = originalDoc;
+        }
     });
 });
