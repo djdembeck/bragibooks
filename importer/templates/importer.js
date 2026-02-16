@@ -1,6 +1,16 @@
 function expandFolder(folderId) {
     const folderElement = document.querySelector(`.folder[id^='${folderId}']`);
+    if (!folderElement) return;
     const arrow = folderElement.querySelector('.arrow i');
+    if (!arrow) return;
+
+    // Create and append loading spinner synchronously
+    // This gives the browser a paint opportunity before expansion
+    const loader = document.createElement('span');
+    loader.className = 'folder-loading';
+    folderElement.appendChild(loader);
+
+    // Perform expansion synchronously (fast operation)
     const isExpanded = arrow.classList.contains('fa-rotate-90');
     const items = document.querySelectorAll(`.panel-block[folder-id^='${folderId}']`);
 
@@ -9,15 +19,23 @@ function expandFolder(folderId) {
     items.forEach(item => {
         item.style.display = item.style.display === 'none' ? '' : 'none';
     });
+
+    // Defer spinner removal to next frame so user sees it briefly
+    requestAnimationFrame(() => {
+        const spinner = folderElement.querySelector('.folder-loading');
+        if (spinner) spinner.remove();
+    });
 }
 
-const arrows = document.querySelectorAll(".arrow i");
-arrows.forEach(arrow => {
-    arrow.addEventListener("click", (event) => {
-        event.preventDefault();
-        expandFolder(arrow.id)
+function initArrowListeners() {
+    const arrows = document.querySelectorAll(".arrow i");
+    arrows.forEach(arrow => {
+        arrow.addEventListener("click", (event) => {
+            event.preventDefault();
+            expandFolder(arrow.id);
+        });
     });
-});
+}
 
 function fuzzyMatch(needle, haystack) {
     let hlen = haystack.length;
@@ -42,6 +60,9 @@ function fuzzyMatch(needle, haystack) {
 
 function resetPanel() {
     // reset the file explorer to its base config
+    const panelBlock = document.querySelector('.panel-block-container');
+    if (!panelBlock) return;
+
     const depth0 = panelBlock.querySelectorAll('label.panel-block[folder-id=""]');
     const everythingElse = panelBlock.querySelectorAll('label.panel-block:not([folder-id=""])');
 
@@ -62,53 +83,78 @@ function resetPanel() {
     });
 }
 
-// Get the search input and panel elements
-const searchInput = document.getElementById('search-input');
-const panelBlock = document.querySelector('.panel-block-container');
+function initSearch() {
+    // Get the search input and panel elements
+    const searchInput = document.getElementById('search-input');
+    const panelBlock = document.querySelector('.panel-block-container');
 
-// Add an input event listener to the search input
-searchInput.addEventListener('input', () => {
-    // Get the search query
-    let query = searchInput.value.toLowerCase();
+    if (!searchInput || !panelBlock) return;
 
-    if (query) {
-        // Loop through each label in the panel
-        panelBlock.querySelectorAll('label').forEach(label => {
-            // Get the label text
-            const labelText = label.textContent.toLowerCase().trim();
+    // Add an input event listener to the search input
+    searchInput.addEventListener('input', () => {
+        // Get the search query
+        let query = searchInput.value.toLowerCase();
 
-            // Show or hide the label based on whether the query matches the label text
-            if (fuzzyMatch(query, labelText)) {
-                label.style.display = '';
-            } else {
-                label.style.display = 'none';
-            }
-        });
-    } else {
-        resetPanel();
-    }
-});
+        if (query) {
+            // Loop through each label in the panel
+            panelBlock.querySelectorAll('label').forEach(label => {
+                // Get the label text
+                const labelText = label.textContent.toLowerCase().trim();
 
-
-
-// add action to make the select all checkbox select/deselect all top level objects
-const selectAllCheckbox = document.getElementById("select-all-checkbox");
-const checkboxes = document.querySelectorAll('.panel-block-container label[folder-id=""] input[type="checkbox"]');
-selectAllCheckbox.addEventListener("change", function () {
-    checkboxes.forEach(function (checkbox) {
-        checkbox.checked = selectAllCheckbox.checked;
+                // Show or hide the label based on whether the query matches the label text
+                if (fuzzyMatch(query, labelText)) {
+                    label.style.display = '';
+                } else {
+                    label.style.display = 'none';
+                }
+            });
+        } else {
+            resetPanel();
+        }
     });
-});
 
-const clearSearchButton = document.querySelector('.clear-search');
-clearSearchButton.addEventListener('click', () => {
-    searchInput.value = '';
-    resetPanel();
-});
+    // add action to make the select all checkbox select/deselect all top level objects
+    const selectAllCheckbox = document.getElementById("select-all-checkbox");
+    const checkboxes = document.querySelectorAll('.panel-block-container label[folder-id=""] input[type="checkbox"]');
+    if (selectAllCheckbox) {
+        selectAllCheckbox.addEventListener("change", function () {
+            checkboxes.forEach(function (checkbox) {
+                checkbox.checked = selectAllCheckbox.checked;
+            });
+        });
+    }
 
-document.addEventListener('DOMContentLoaded', () => {
-    const loadingOverlay = document.getElementById('loading-overlay');
-    if (loadingOverlay) {
+    const clearSearchButton = document.querySelector('.clear-search');
+    if (clearSearchButton) {
+        clearSearchButton.addEventListener('click', () => {
+            searchInput.value = '';
+            resetPanel();
+        });
+    }
+}
+
+/**
+ * Hides the loading overlay when called.
+ * Exported for testing purposes.
+ * @param {Document} doc - The document object (defaults to global document)
+ */
+function hideLoadingOverlay(doc = document) {
+    const loadingOverlay = doc.getElementById('loading-overlay');
+    if (loadingOverlay && loadingOverlay.style) {
         loadingOverlay.style.display = 'none';
     }
-});
+}
+
+// Initialize on DOMContentLoaded for browser usage
+if (typeof document !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', () => {
+        initArrowListeners();
+        initSearch();
+        hideLoadingOverlay();
+    });
+}
+
+// Export for testing (works in Node.js module context)
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { hideLoadingOverlay };
+}

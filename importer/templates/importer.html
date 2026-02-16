@@ -61,6 +61,22 @@ z-index: 100;
 .column {
 position: relative;
 }
+
+.folder-loading {
+display: inline-block;
+width: 1em;
+height: 1em;
+border: 2px solid #dbdbdb;
+border-top-color: #3273dc;
+border-radius: 50%;
+animation: folder-loading-spin 0.75s linear infinite;
+margin-left: 0.5em;
+vertical-align: middle;
+}
+
+@keyframes folder-loading-spin {
+to { transform: rotate(360deg); }
+}
 {% endblock %}
 {% load directory_explorer_tags %}
 {% block content %}
@@ -69,7 +85,7 @@ position: relative;
         <div id="loading-overlay" class="loading-overlay" role="status" aria-live="polite" aria-label="Loading">
             <h3 class="title is-4">Loading directories...</h3>
             <div class="loader">
-                <button class="button is-loading is-medium" aria-hidden="true">Loading</button>
+                <span class="button is-loading is-medium" aria-hidden="true">Loading</span>
             </div>
         </div>
         <nav class="panel">
