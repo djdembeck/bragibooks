@@ -64,6 +64,7 @@ class DirectoryApiTests(TestCase):
     @patch("importer.views.Path")
     def test_returns_empty_directories_when_root_not_found(self, mock_path_class):
         """Test that API returns empty directories when root directory doesn't exist."""
+        self.client.force_login(self.user)
         # Mock /input not being a directory
         mock_input_path = MagicMock()
         mock_input_path.is_dir.return_value = False
@@ -291,7 +292,7 @@ class BuildDirectoryTreeTests(SimpleTestCase):
         Test that symlink cycles are detected using the visited set.
 
         When build_directory_tree processes a directory whose contents include
-        a symlink back to a directory already in the visited set, the visited‑set
+        a symlink back to a directory already in the visited set, the visited-set
         logic skips reentering that directory so the final children list only
         contains the file.
         """
@@ -312,10 +313,10 @@ class BuildDirectoryTreeTests(SimpleTestCase):
 
         # Configure directory_contents to simulate a symlink cycle:
         # 1. Root path returns cycle_dir
-        # 2. cycle_dir's contents include itself (self‑reference) + the file
+        # 2. cycle_dir's contents include itself (self-reference) + the file
         mock_directory_contents.side_effect = [
             [mock_dir],  # Root path ("cycle_dir")
-            [mock_dir, mock_file],  # cycle_dir contents: self‑reference + file
+            [mock_dir, mock_file],  # cycle_dir contents: self-reference + file
         ]
 
         result = build_directory_tree("/some/path", max_depth=50)
