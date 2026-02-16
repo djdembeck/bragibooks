@@ -322,7 +322,7 @@ class SettingView(TemplateView):
                 es.save()
 
             return redirect("import")
-
+        else:
             messages.error(request, "Form is invalid")
         return redirect("setting")
 

@@ -233,7 +233,7 @@ function buildDirectoryTree(items, container, depth, parentId) {
             arrowSpan.className = 'arrow mr-2 is-medium';
             const arrowI = document.createElement('i');
             arrowI.className = 'fas fa-lg fa-angle-right';
-            arrowI.id = id;
+            arrowI.id = id + '_arrow';
             arrowSpan.appendChild(arrowI);
             label.appendChild(arrowSpan);
         } else {
