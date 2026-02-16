@@ -36,7 +36,7 @@ class DirectoryApiTests(TestCase):
         mock_directory_contents.return_value = [mock_file]
 
         mock_path_class.return_value = mock_input_path
-        mock_path_class.home.return_value = "/home/testuser"
+        mock_path_class.home.return_value = mock_input_path
 
         response = self.client.get("/api/directories/", follow=True)
 
@@ -58,7 +58,7 @@ class DirectoryApiTests(TestCase):
         mock_input_path.exists.return_value = False
 
         mock_path_class.return_value = mock_input_path
-        mock_path_class.home.return_value = "/home/testuser"
+        mock_path_class.home.return_value = mock_input_path
 
         response = self.client.get("/api/directories/", follow=True)
 
@@ -95,7 +95,7 @@ class DirectoryApiTests(TestCase):
 
         mock_input_path.iterdir.return_value = [mock_subdir, mock_file]
         mock_path_class.return_value = mock_input_path
-        mock_path_class.home.return_value = "/home/testuser"
+        mock_path_class.home.return_value = mock_input_path
 
         # Mock subdirectory contents
         mock_nested_file = MagicMock()
@@ -147,7 +147,7 @@ class DirectoryApiTests(TestCase):
         mock_input_path.iterdir.return_value = [mock_file]
 
         mock_path_class.return_value = mock_input_path
-        mock_path_class.home.return_value = "/home/testuser"
+        mock_path_class.home.return_value = mock_input_path
 
         response = self.client.get("/api/directories/", follow=True)
         data = json.loads(response.content)
@@ -162,7 +162,7 @@ class DirectoryApiTests(TestCase):
         mock_input_path.exists.return_value = False
 
         mock_path_class.return_value = mock_input_path
-        mock_path_class.home.return_value = "/home/testuser"
+        mock_path_class.home.return_value = mock_input_path
 
         response = self.client.get("/api/directories/", follow=True)
 

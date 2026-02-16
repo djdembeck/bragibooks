@@ -7,6 +7,7 @@ from pathlib import Path
 import requests
 from django.conf import settings
 from django.contrib import messages
+from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import (
     HttpRequest,
     HttpResponseBadRequest,
@@ -14,6 +15,7 @@ from django.http import (
 )
 from django.shortcuts import redirect, render
 from django.views.generic import TemplateView, View
+from django.db import DatabaseError
 
 # core merge logic:
 from m4b_merge import helpers
@@ -53,7 +55,7 @@ def get_input_root_dir():
         setting = Setting.objects.first()
         if setting and setting.input_directory:
             return setting.input_directory
-    except Exception as e:
+    except DatabaseError as e:
         logger.debug("Could not read input_directory from Setting: %s", e)
 
     # Fallback to default logic
@@ -417,7 +419,7 @@ def build_directory_tree(path, max_depth=50, current_depth=0, visited=None):
     return entries
 
 
-class DirectoryListView(View):
+class DirectoryListView(LoginRequiredMixin, View):
     """
     API endpoint that returns directory contents as JSON.
     """
