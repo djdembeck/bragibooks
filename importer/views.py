@@ -47,7 +47,7 @@ def get_input_root_dir():
     """
     if Path("/input").is_dir():
         return "/input"
-    return f"{str(Path.home())}/input"
+    return str(Path.home() / "input")
 
 
 # Module-level rootdir for ImportView compatibility
