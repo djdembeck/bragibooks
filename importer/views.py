@@ -42,22 +42,31 @@ def get_input_root_dir():
     """
     Determine the input root directory.
 
+    Reads from Setting.input_directory if available, otherwise falls back to
+    /input (if running in Docker) or ~/input.
+
     Returns:
-        Path to the input directory (/input if running in Docker, otherwise ~/input).
+        Path to the input directory as a string.
     """
+    # Try to get the configured directory from settings
+    try:
+        setting = Setting.objects.first()
+        if setting and setting.input_directory:
+            return setting.input_directory
+    except Exception as e:
+        logger.debug("Could not read input_directory from Setting: %s", e)
+
+    # Fallback to default logic
     if Path("/input").is_dir():
         return "/input"
     return str(Path.home() / "input")
-
-
-# Module-level rootdir for ImportView compatibility
-rootdir = get_input_root_dir()
 
 
 class ImportView(TemplateView):
     template_name = "importer.html"
 
     def get_context_data(self, **kwargs):
+        rootdir = get_input_root_dir()
         try:
             contents = sorted(
                 Path(rootdir).iterdir(), key=os.path.getmtime, reverse=True

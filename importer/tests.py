@@ -403,3 +403,116 @@ class BuildDirectoryTreeTests(SimpleTestCase):
         self.assertEqual(result[0]["children"][0]["children"], [])
         # Verify directory_contents was called twice (root + subdir), not infinitely
         self.assertEqual(mock_directory_contents.call_count, 2)
+
+    @patch("importer.views.directory_contents")
+    def test_path_resolution_permission_error_returns_empty_list(
+        self, mock_directory_contents
+    ):
+        """
+        Test that path resolution raising PermissionError returns empty list.
+
+        When Path.resolve() raises PermissionError, the function should return
+        an empty list and log a debug message.
+        """
+        # Create a mock path that raises PermissionError on resolve()
+        mock_path = MagicMock()
+        mock_path.name = "unreadable_dir"
+        mock_path.__str__.return_value = "/some/unreadable"
+
+        # Make resolve() raise PermissionError
+        mock_path.resolve.side_effect = PermissionError(
+            "Permission denied: /some/unreadable"
+        )
+
+        # Configure directory_contents to return valid items
+        # but they won't be reached because resolve() fails first
+        mock_directory_contents.return_value = []
+
+        result = build_directory_tree(mock_path)
+
+        # Should return empty list
+        self.assertEqual(result, [])
+        # directory_contents should not be called because resolve failed
+        mock_directory_contents.assert_not_called()
+
+    @patch("importer.views.directory_contents")
+    def test_path_resolution_os_error_returns_empty_list(self, mock_directory_contents):
+        """
+        Test that path resolution raising OSError returns empty list.
+
+        When Path.resolve() raises OSError, the function should return
+        an empty list and log a debug message.
+        """
+        # Create a mock path that raises OSError on resolve()
+        mock_path = MagicMock()
+        mock_path.name = "bad_link"
+        mock_path.__str__.return_value = "/some/bad_link"
+
+        # Make resolve() raise OSError
+        mock_path.resolve.side_effect = OSError("Input/output error: /some/bad_link")
+
+        # Configure directory_contents
+        mock_directory_contents.return_value = []
+
+        result = build_directory_tree(mock_path)
+
+        # Should return empty list
+        self.assertEqual(result, [])
+        # directory_contents should not be called because resolve failed
+        mock_directory_contents.assert_not_called()
+
+    @patch("importer.views.directory_contents")
+    def test_directory_access_permission_error_returns_empty_entries(
+        self, mock_directory_contents
+    ):
+        """
+        Test that directory access raising PermissionError returns empty entries list.
+
+        When directory_contents() raises PermissionError, the function should return
+        empty entries list and log a warning.
+        """
+        # Create a mock path
+        mock_path = MagicMock()
+        mock_path.name = "restricted_dir"
+        mock_path.is_dir.return_value = True
+        mock_path.__str__.return_value = "/restricted/dir"
+        mock_path.resolve.return_value = Path("/restricted/dir")
+
+        # Make directory_contents raise PermissionError
+        mock_directory_contents.side_effect = PermissionError(
+            "Permission denied: /restricted/dir"
+        )
+
+        result = build_directory_tree(mock_path)
+
+        # Should return empty list (no entries added)
+        self.assertEqual(result, [])
+        # directory_contents should be called once
+        mock_directory_contents.assert_called_once()
+
+    @patch("importer.views.directory_contents")
+    def test_directory_access_os_error_returns_empty_entries(
+        self, mock_directory_contents
+    ):
+        """
+        Test that directory access raising OSError returns empty entries list.
+
+        When directory_contents() raises OSError, the function should return
+        empty entries list and log a warning.
+        """
+        # Create a mock path
+        mock_path = MagicMock()
+        mock_path.name = "unreadable"
+        mock_path.is_dir.return_value = True
+        mock_path.__str__.return_value = "/unreadable"
+        mock_path.resolve.return_value = Path("/unreadable")
+
+        # Make directory_contents raise OSError
+        mock_directory_contents.side_effect = OSError("I/O error: /unreadable")
+
+        result = build_directory_tree(mock_path)
+
+        # Should return empty list (no entries added)
+        self.assertEqual(result, [])
+        # directory_contents should be called once
+        mock_directory_contents.assert_called_once()
