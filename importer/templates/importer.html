@@ -43,11 +43,35 @@ cursor: default;
 .has-icons-right {
 position: relative;
 }
+
+.loading-overlay {
+position: absolute;
+top: 0;
+left: 0;
+right: 0;
+bottom: 0;
+background: rgba(255, 255, 255, 0.8);
+display: flex;
+flex-direction: column;
+justify-content: center;
+align-items: center;
+z-index: 100;
+}
+
+.column {
+position: relative;
+}
 {% endblock %}
 {% load directory_explorer_tags %}
 {% block content %}
 <div class="columns">
     <div class="column">
+        <div id="loading-overlay" class="loading-overlay" role="status" aria-live="polite" aria-label="Loading">
+            <h3 class="title is-4">Loading directories...</h3>
+            <div class="loader">
+                <button class="button is-loading is-medium" aria-hidden="true">Loading</button>
+            </div>
+        </div>
         <nav class="panel">
             <p class="panel-heading">
                 Choose Files or Directories to process

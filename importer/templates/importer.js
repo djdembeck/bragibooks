@@ -1,14 +1,11 @@
 function expandFolder(folderId) {
-    // Select the arrow element
-    const arrow = document.querySelector(`.folder[id^='${folderId}'] .arrow i`);
-
-    // Toggle the rotation class on the arrow element
-    arrow.classList.toggle('fa-rotate-90');
-
-    // Select all items in the folder
+    const folderElement = document.querySelector(`.folder[id^='${folderId}']`);
+    const arrow = folderElement.querySelector('.arrow i');
+    const isExpanded = arrow.classList.contains('fa-rotate-90');
     const items = document.querySelectorAll(`.panel-block[folder-id^='${folderId}']`);
 
-    // Toggle the display style of each item
+    arrow.classList.toggle('fa-rotate-90');
+
     items.forEach(item => {
         item.style.display = item.style.display === 'none' ? '' : 'none';
     });
@@ -88,7 +85,7 @@ searchInput.addEventListener('input', () => {
             }
         });
     } else {
-        resetPanel()
+        resetPanel();
     }
 });
 
@@ -106,5 +103,12 @@ selectAllCheckbox.addEventListener("change", function () {
 const clearSearchButton = document.querySelector('.clear-search');
 clearSearchButton.addEventListener('click', () => {
     searchInput.value = '';
-    resetPanel()
+    resetPanel();
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+    const loadingOverlay = document.getElementById('loading-overlay');
+    if (loadingOverlay) {
+        loadingOverlay.style.display = 'none';
+    }
 });
