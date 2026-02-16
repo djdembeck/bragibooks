@@ -44,7 +44,6 @@ class DirectoryApiTests(TestCase):
         mock_file = MagicMock()
         mock_file.name = "test_file.txt"
         mock_file.is_dir.return_value = False
-        mock_input_path.iterdir.return_value = [mock_file]
         mock_directory_contents.return_value = [mock_file]
 
         mock_path_class.return_value = mock_input_path
@@ -162,7 +161,6 @@ class DirectoryApiTests(TestCase):
         mock_file = MagicMock()
         mock_file.name = "test.txt"
         mock_file.is_dir.return_value = False
-        mock_input_path.iterdir.return_value = [mock_file]
         mock_directory_contents.return_value = [mock_file]
 
         mock_path_class.return_value = mock_input_path
@@ -176,6 +174,7 @@ class DirectoryApiTests(TestCase):
     @patch("importer.views.Path")
     def test_error_field_has_message_on_failure(self, mock_path_class):
         """Test that error field has message when directory doesn't exist."""
+        self.client.force_login(self.user)
         mock_input_path = MagicMock()
         mock_input_path.is_dir.return_value = False
         mock_input_path.exists.return_value = False
@@ -400,8 +399,6 @@ class BuildDirectoryTreeTests(SimpleTestCase):
         across multiple recursive calls, the self-reference detection prevents
         infinite recursion by skipping self-referential items.
         """
-        from pathlib import Path
-
         # Create a mock directory that will be revisited
         mock_dir = MagicMock()
         mock_dir.name = "same_dir"
