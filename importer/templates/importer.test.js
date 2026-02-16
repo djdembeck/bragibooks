@@ -24,7 +24,8 @@ class MockElement {
         if (selector.startsWith('#')) {
             return this.attributes.get('id') === selector.slice(1);
         }
-        return true;
+        console.warn('Unsupported selector pattern:', selector);
+        return false;
     }
 
     querySelector(selector) {
