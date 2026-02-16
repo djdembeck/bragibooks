@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [Unreleased]
+
+### Major Updates
+
+- **Django 5.2 LTS Modernization** (#407)
+  - Upgraded from Django 4.2 to Django 5.2 LTS
+  - Fixed wildcard ALLOWED_HOSTS security issue
+  - Improved CSRF_TRUSTED_ORIGINS parsing
+  - Added production security headers
+  - Migrated packaging to modern `pyproject.toml` format
+  - Switched from python-Levenshtein to rapidfuzz for better performance
+
+- **m4b-merge migrated to Rust** (#406)
+  - Replaced Python m4b-merge library with high-performance Rust binary
+  - Added multi-stage Docker build for Rust compilation
+  - Improved processing speed and reliability
+  - Added retry logic for subprocess operations
+
+### Features & Improvements
+
+- **Loading States** (#409)
+  - Added loading indicators to the import page for better UX
+  - Users can now see when operations are in progress
+
+- **Performance Optimizations**
+  - Skip chown operations when file ownership is already correct
+  - Reduced container startup time
+
+- **Dependency Updates**
+  - Upgraded kombu to v5.6.2
+  - Upgraded whitenoise to v6.11.0
+  - Migrated Levenshtein to rapidfuzz for faster fuzzy matching
+
+- **Docker Improvements**
+  - Fixed gosu installation for Alpine v3.15 compatibility
+  - Fixed Docker container startup failures
+  - Improved file permission handling
+
+### Bug Fixes
+
+- Fixed output path parsing regex for Rust m4b-merge binary
+- Fixed installation to use pyproject.toml for all Django dependencies
+- Fixed ALLOWED_HOSTS to use environment variable with sensible defaults
+- Fixed CSRF_TRUSTED_ORIGINS to return empty list instead of string when not set
+
+---
+
 ## [1.2.2](https://github.com/djdembeck/bragibooks/compare/v1.2.1...v1.2.2) (2024-08-07)
 
 
