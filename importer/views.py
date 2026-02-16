@@ -58,11 +58,18 @@ class ImportView(TemplateView):
     template_name = "importer.html"
 
     def get_context_data(self, **kwargs):
-        context = {
-            "contents": sorted(
+        try:
+            contents = sorted(
                 Path(rootdir).iterdir(), key=os.path.getmtime, reverse=True
             )
-        }
+        except (OSError, PermissionError) as e:
+            logger.warning(
+                "Cannot access input directory %s: %s. Falling back to empty list.",
+                rootdir,
+                e,
+            )
+            contents = []
+        context = {"contents": contents}
         return context
 
     def post(self, request):

@@ -32,7 +32,8 @@ function initArrowListeners() {
     arrows.forEach(arrow => {
         arrow.addEventListener("click", (event) => {
             event.preventDefault();
-            expandFolder(arrow.id);
+            const folderId = arrow.id.replace("_arrow", "");
+            expandFolder(folderId);
         });
     });
 }
