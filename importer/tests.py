@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from django.contrib.auth.models import User
 from django.test import Client, SimpleTestCase, TestCase, override_settings
 
 from importer.views import build_directory_tree
@@ -14,8 +15,11 @@ class DirectoryApiTests(TestCase):
     """Tests for the /api/directories/ API endpoint."""
 
     def setUp(self):
-        """Set up test client."""
+        """Set up test client and user."""
         self.client = Client()
+        self.user = User.objects.create_user(
+            username="testuser", password="testpass123"
+        )
 
     def test_unauthenticated_request_redirects_to_login(self):
         """Test that unauthenticated requests are redirected to login page."""
@@ -30,6 +34,7 @@ class DirectoryApiTests(TestCase):
         self, mock_directory_contents, mock_path_class
     ):
         """Test that API returns 200 status with valid JSON structure."""
+        self.client.force_login(self.user)
         # Mock /input being a directory
         mock_input_path = MagicMock()
         mock_input_path.is_dir.return_value = True
@@ -84,6 +89,7 @@ class DirectoryApiTests(TestCase):
         self, mock_directory_contents, mock_path_class
     ):
         """Test that API returns nested directory structure correctly."""
+        self.client.force_login(self.user)
         # Mock /input being a directory
         mock_input_path = MagicMock()
         mock_input_path.is_dir.return_value = True
@@ -147,6 +153,7 @@ class DirectoryApiTests(TestCase):
         self, mock_directory_contents, mock_path_class
     ):
         """Test that error field is null when directory exists."""
+        self.client.force_login(self.user)
         mock_input_path = MagicMock()
         mock_input_path.is_dir.return_value = True
         mock_input_path.exists.return_value = True
@@ -283,8 +290,10 @@ class BuildDirectoryTreeTests(SimpleTestCase):
         """
         Test that symlink cycles are detected using the visited set.
 
-        When a symlink points to a directory already in the visited set,
-        the function should return an empty children list to prevent infinite loops.
+        When build_directory_tree processes a directory whose contents include
+        a symlink back to a directory already in the visited set, the visited‑set
+        logic skips reentering that directory so the final children list only
+        contains the file.
         """
         # Create a mock directory that will be revisited (simulating a symlink cycle)
         mock_dir = MagicMock()
@@ -301,19 +310,19 @@ class BuildDirectoryTreeTests(SimpleTestCase):
         mock_file.__str__.return_value = "/path/cycle_dir/file.txt"
         mock_file.resolve.return_value = Path("/path/cycle_dir/file.txt")
 
-        # Return the same directory twice to simulate a cycle
+        # Configure directory_contents to simulate a symlink cycle:
+        # 1. Root path returns cycle_dir
+        # 2. cycle_dir's contents include itself (self‑reference) + the file
         mock_directory_contents.side_effect = [
-            [mock_dir],  # First visit to cycle_dir
-            [mock_file],  # Contents of cycle_dir
-            [mock_dir],  # Second visit (cycle detected here)
+            [mock_dir],  # Root path ("cycle_dir")
+            [mock_dir, mock_file],  # cycle_dir contents: self‑reference + file
         ]
 
         result = build_directory_tree("/some/path", max_depth=50)
 
-        # First visit should work normally
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["name"], "cycle_dir")
-        # Children should be present from first visit
+        # Children list contains only the file (directory skipped due to visited set)
         self.assertEqual(len(result[0]["children"]), 1)
         self.assertEqual(result[0]["children"][0]["name"], "file.txt")
 
@@ -386,8 +395,9 @@ class BuildDirectoryTreeTests(SimpleTestCase):
         """
         Test that the visited set prevents infinite recursion on circular references.
 
-        This test verifies that the same resolved path is tracked across
-        recursive calls to prevent infinite loops.
+        This test verifies that when directory_contents returns the same directory
+        across multiple recursive calls, the self-reference detection prevents
+        infinite recursion by skipping self-referential items.
         """
         from pathlib import Path
 
@@ -408,11 +418,10 @@ class BuildDirectoryTreeTests(SimpleTestCase):
         # Should return one entry (directory is added on first visit)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["name"], "same_dir")
-        # Children contain one entry from first visit (second visit returns empty due to cycle)
-        self.assertEqual(len(result[0]["children"]), 1)
-        self.assertEqual(result[0]["children"][0]["name"], "same_dir")
-        self.assertEqual(result[0]["children"][0]["children"], [])
-        # Verify directory_contents was called twice (root + subdir), not infinitely
+        # The self-reference in the directory's contents is skipped (detected by
+        # comparing resolved path with current directory's path), resulting in empty children
+        self.assertEqual(len(result[0]["children"]), 0)
+        # Verify directory_contents was called twice (root + one recursive call), not infinitely
         self.assertEqual(mock_directory_contents.call_count, 2)
 
     @patch("importer.views.directory_contents")

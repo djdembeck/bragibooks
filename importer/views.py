@@ -384,22 +384,32 @@ def build_directory_tree(path, max_depth=50, current_depth=0, visited=None):
     try:
         # Resolve path to detect real identity for cycle detection
         resolved_path = str(path.resolve()) if hasattr(path, "resolve") else str(path)
-
-        # Check for cycles from symlinks
-        if resolved_path in visited:
-            logger.debug("Cycle detected, skipping: %s", resolved_path)
-            return []
-
-        visited.add(resolved_path)
     except (PermissionError, OSError) as e:
         logger.debug("Could not resolve path %s: %s", path, e)
         return []
+
+    # Check for cycles from symlinks
+    if resolved_path in visited:
+        logger.debug("Cycle detected, skipping: %s", resolved_path)
+        return []
+
+    visited.add(resolved_path)
 
     entries = []
     try:
         contents = directory_contents(path)
         for item in contents:
             is_dir = item.is_dir()
+            if is_dir:
+                try:
+                    item_resolved = str(item.resolve())
+                    if item_resolved == resolved_path:
+                        logger.debug(
+                            "Self-reference detected, skipping: %s", item_resolved
+                        )
+                        continue
+                except (PermissionError, OSError):
+                    pass
             entry = {
                 "name": item.name,
                 "path": str(item),
