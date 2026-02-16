@@ -42,10 +42,13 @@ RUN set -eux; \
 
 # Copy the necessary files to the container
 COPY requirements.txt .
+COPY pyproject.toml .
+COPY README.md .
 
 # Run this command to install all dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -e .
 
 # Copy whole project to your docker home directory.
 COPY bragibooks_proj $APP_HOME/bragibooks_proj/
