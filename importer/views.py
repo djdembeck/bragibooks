@@ -23,6 +23,9 @@ from utils.search_tools import ScoreTool, SearchTool
 # Forms import
 from .forms import SettingForm
 
+# Template tags import for directory_contents
+from .templatetags.directory_explorer_tags import directory_contents
+
 # Models import
 from .models import Book, Setting, StatusChoices
 from .tasks import m4b_merge_task
@@ -320,5 +323,50 @@ class SettingView(TemplateView):
 
             return redirect("import")
 
-        messages.error(request, "Form is invalid")
+            messages.error(request, "Form is invalid")
         return redirect("setting")
+
+
+def build_directory_tree(path):
+    """
+    Recursively build directory tree structure for JSON response.
+    """
+    entries = []
+    try:
+        contents = directory_contents(path)
+        for item in contents:
+            is_dir = item.is_dir()
+            entry = {
+                "name": item.name,
+                "path": str(item),
+                "is_directory": is_dir,
+                "children": build_directory_tree(item) if is_dir else [],
+            }
+            entries.append(entry)
+    except (PermissionError, OSError):
+        pass
+    return entries
+
+
+class DirectoryListView(View):
+    """
+    API endpoint that returns directory contents as JSON.
+    """
+
+    def get(self, request):
+        # Determine root directory (same logic as ImportView)
+        if Path("/input").is_dir():
+            rootdir = "/input"
+        else:
+            rootdir = f"{str(Path.home())}/input"
+
+        # Check if root directory exists
+        if not Path(rootdir).exists():
+            return JsonResponse(
+                {"directories": [], "error": f"Directory not found: {rootdir}"}
+            )
+
+        # Build directory tree
+        directories = build_directory_tree(rootdir)
+
+        return JsonResponse({"directories": directories, "error": None})
