@@ -1,6 +1,8 @@
-from django.test import TestCase, SimpleTestCase, Client, override_settings
-from unittest.mock import patch, MagicMock
 import json
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from django.test import Client, SimpleTestCase, TestCase, override_settings
 
 from importer.views import build_directory_tree
 
@@ -60,7 +62,7 @@ class DirectoryApiTests(TestCase):
 
         response = self.client.get("/api/directories/", follow=True)
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 404)
         data = json.loads(response.content)
 
         # Verify empty directories and error message
@@ -163,6 +165,8 @@ class DirectoryApiTests(TestCase):
         mock_path_class.home.return_value = "/home/testuser"
 
         response = self.client.get("/api/directories/", follow=True)
+
+        self.assertEqual(response.status_code, 404)
         data = json.loads(response.content)
 
         self.assertIsNotNone(data["error"])
@@ -198,13 +202,13 @@ class BuildDirectoryTreeTests(SimpleTestCase):
         mock_file.name = "file.txt"
         mock_file.is_dir.return_value = False
         mock_file.__str__.return_value = "/path/file.txt"
-        mock_file.resolve.return_value = MagicMock().__str__ = "/path/file.txt"
+        mock_file.resolve.return_value = Path("/path/file.txt")
 
         mock_subdir = MagicMock()
         mock_subdir.name = "subdir"
         mock_subdir.is_dir.return_value = True
         mock_subdir.__str__.return_value = "/path/subdir"
-        mock_subdir.resolve.return_value = MagicMock().__str__ = "/path/subdir"
+        mock_subdir.resolve.return_value = Path("/path/subdir")
 
         mock_directory_contents.return_value = [mock_file, mock_subdir]
 
@@ -230,22 +234,20 @@ class BuildDirectoryTreeTests(SimpleTestCase):
         mock_file.name = "root_file.txt"
         mock_file.is_dir.return_value = False
         mock_file.__str__.return_value = "/path/root_file.txt"
-        mock_file.resolve.return_value = MagicMock().__str__ = "/path/root_file.txt"
+        mock_file.resolve.return_value = Path("/path/root_file.txt")
 
         mock_subdir = MagicMock()
         mock_subdir.name = "subdir"
         mock_subdir.is_dir.return_value = True
         mock_subdir.__str__.return_value = "/path/subdir"
-        mock_subdir.resolve.return_value = MagicMock().__str__ = "/path/subdir"
+        mock_subdir.resolve.return_value = Path("/path/subdir")
 
         # Create mock items for second level
         mock_nested_file = MagicMock()
         mock_nested_file.name = "nested.txt"
         mock_nested_file.is_dir.return_value = False
         mock_nested_file.__str__.return_value = "/path/subdir/nested.txt"
-        mock_nested_file.resolve.return_value = MagicMock().__str__ = (
-            "/path/subdir/nested.txt"
-        )
+        mock_nested_file.resolve.return_value = Path("/path/subdir/nested.txt")
 
         # Configure side_effect to return different contents at each level
         mock_directory_contents.side_effect = [
@@ -279,16 +281,14 @@ class BuildDirectoryTreeTests(SimpleTestCase):
         mock_dir.is_dir.return_value = True
         mock_dir.__str__.return_value = "/path/cycle_dir"
         resolved_path = "/path/cycle_dir"
-        mock_dir.resolve.return_value = MagicMock().__str__ = resolved_path
+        mock_dir.resolve.return_value = Path(resolved_path)
 
         # Create a mock file in the directory
         mock_file = MagicMock()
         mock_file.name = "file.txt"
         mock_file.is_dir.return_value = False
         mock_file.__str__.return_value = "/path/cycle_dir/file.txt"
-        mock_file.resolve.return_value = MagicMock().__str__ = (
-            "/path/cycle_dir/file.txt"
-        )
+        mock_file.resolve.return_value = Path("/path/cycle_dir/file.txt")
 
         # Return the same directory twice to simulate a cycle
         mock_directory_contents.side_effect = [
@@ -322,7 +322,7 @@ class BuildDirectoryTreeTests(SimpleTestCase):
             mock_dir.is_dir.return_value = True
             mock_dir.__str__.return_value = f"{parent_path}/{name}"
             resolved = f"{parent_path}/{name}"
-            mock_dir.resolve.return_value = MagicMock().__str__ = resolved
+            mock_dir.resolve.return_value = Path(resolved)
             return mock_dir
 
         # Create 5 levels of directories
@@ -339,7 +339,7 @@ class BuildDirectoryTreeTests(SimpleTestCase):
         mock_file.__str__.return_value = (
             "/path/level0/level1/level2/level3/level4/deep_file.txt"
         )
-        mock_file.resolve.return_value = MagicMock().__str__ = (
+        mock_file.resolve.return_value = Path(
             "/path/level0/level1/level2/level3/level4/deep_file.txt"
         )
 

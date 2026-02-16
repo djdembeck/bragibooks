@@ -223,7 +223,7 @@ function buildDirectoryTree(items, container, depth, parentId) {
             iconSpan.className = 'panel-icon';
             const iconI = document.createElement('i');
             iconI.className = 'fas fa-folder';
-            iconI.setAttribute('aria-hidden', 'false');
+            iconI.setAttribute('aria-hidden', 'true');
             iconSpan.appendChild(iconI);
             contentDiv.appendChild(iconSpan);
 
@@ -252,7 +252,7 @@ function buildDirectoryTree(items, container, depth, parentId) {
             iconSpan.className = 'panel-icon';
             const iconI = document.createElement('i');
             iconI.className = 'fas fa-file';
-            iconI.setAttribute('aria-hidden', 'false');
+            iconI.setAttribute('aria-hidden', 'true');
             iconSpan.appendChild(iconI);
             label.appendChild(iconSpan);
 
@@ -283,5 +283,5 @@ if (typeof document !== 'undefined') {
 
  // Export for testing (works in Node.js module context)
  if (typeof module !== 'undefined' && module.exports) {
-     module.exports = { hideLoadingOverlay, expandFolder, initArrowListeners, initSearch, fuzzyMatch, resetPanel };
+     module.exports = { hideLoadingOverlay, expandFolder, initArrowListeners, initSearch, fuzzyMatch, resetPanel, generateId, fetchAndRenderDirectories, buildDirectoryTree };
  }

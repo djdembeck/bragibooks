@@ -7,7 +7,11 @@ from pathlib import Path
 import requests
 from django.conf import settings
 from django.contrib import messages
-from django.http import HttpRequest, HttpResponseBadRequest, JsonResponse
+from django.http import (
+    HttpRequest,
+    HttpResponseBadRequest,
+    JsonResponse,
+)
 from django.shortcuts import redirect, render
 from django.views.generic import TemplateView, View
 
@@ -23,12 +27,12 @@ from utils.search_tools import ScoreTool, SearchTool
 # Forms import
 from .forms import SettingForm
 
-# Template tags import for directory_contents
-from .templatetags.directory_explorer_tags import directory_contents
-
 # Models import
 from .models import Book, Setting, StatusChoices
 from .tasks import m4b_merge_task
+
+# Template tags import for directory_contents
+from .templatetags.directory_explorer_tags import directory_contents
 
 # Get an instance of a logger
 logger = logging.getLogger(__name__)
@@ -351,7 +355,9 @@ def build_directory_tree(path, max_depth=50, current_depth=0, visited=None):
         List of directory entry dictionaries.
     """
     if current_depth >= max_depth:
-        logger.debug(f"Max depth ({max_depth}) reached, stopping recursion at: {path}")
+        logger.debug(
+            "Max depth (%s) reached, stopping recursion at: %s", max_depth, path
+        )
         return []
 
     if visited is None:
@@ -363,12 +369,12 @@ def build_directory_tree(path, max_depth=50, current_depth=0, visited=None):
 
         # Check for cycles from symlinks
         if resolved_path in visited:
-            logger.debug(f"Cycle detected, skipping: {resolved_path}")
+            logger.debug("Cycle detected, skipping: %s", resolved_path)
             return []
 
         visited.add(resolved_path)
     except (PermissionError, OSError) as e:
-        logger.debug(f"Could not resolve path {path}: {e}")
+        logger.debug("Could not resolve path %s: %s", path, e)
         return []
 
     entries = []
@@ -388,9 +394,9 @@ def build_directory_tree(path, max_depth=50, current_depth=0, visited=None):
             }
             entries.append(entry)
     except PermissionError as e:
-        logger.warning(f"Permission denied accessing {path}: {e}")
+        logger.warning("Permission denied accessing %s: %s", path, e)
     except OSError as e:
-        logger.warning(f"OS error accessing {path}: {e}")
+        logger.warning("OS error accessing %s: %s", path, e)
 
     return entries
 
@@ -406,7 +412,8 @@ class DirectoryListView(View):
         # Check if root directory exists
         if not Path(rootdir).exists():
             return JsonResponse(
-                {"directories": [], "error": f"Directory not found: {rootdir}"}
+                {"directories": [], "error": f"Directory not found: {rootdir}"},
+                status=404,
             )
 
         # Build directory tree
