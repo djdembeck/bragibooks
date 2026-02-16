@@ -151,7 +151,7 @@ function hideLoadingOverlay(doc = document) {
 }
 
 function generateId() {
-    return 'id_' + Math.random().toString(36).substr(2, 9);
+    return 'id_' + Math.random().toString(36).substring(2, 11);
 }
 
 async function fetchAndRenderDirectories() {
@@ -185,6 +185,7 @@ async function fetchAndRenderDirectories() {
         hideLoadingOverlay();
     } catch (error) {
         console.error('Failed to fetch directories:', error);
+        hideLoadingOverlay();
         if (loadingEl) loadingEl.style.display = 'none';
         if (errorEl) errorEl.style.display = '';
         if (errorMessageEl) errorMessageEl.textContent = 'Failed to load directories: ' + error.message;
