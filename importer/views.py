@@ -33,11 +33,21 @@ from .tasks import m4b_merge_task
 # Get an instance of a logger
 logger = logging.getLogger(__name__)
 
-# If using docker, default to /input folder, else $USER/input
-if Path("/input").is_dir():
-    rootdir = "/input"
-else:
-    rootdir = f"{str(Path.home())}/input"
+
+def get_input_root_dir():
+    """
+    Determine the input root directory.
+
+    Returns:
+        Path to the input directory (/input if running in Docker, otherwise ~/input).
+    """
+    if Path("/input").is_dir():
+        return "/input"
+    return f"{str(Path.home())}/input"
+
+
+# Module-level rootdir for ImportView compatibility
+rootdir = get_input_root_dir()
 
 
 class ImportView(TemplateView):
@@ -327,10 +337,40 @@ class SettingView(TemplateView):
         return redirect("setting")
 
 
-def build_directory_tree(path):
+def build_directory_tree(path, max_depth=50, current_depth=0, visited=None):
     """
     Recursively build directory tree structure for JSON response.
+
+    Args:
+        path: Current directory path to explore.
+        max_depth: Maximum recursion depth to prevent infinite loops (default: 50).
+        current_depth: Current recursion depth (default: 0).
+        visited: Set of resolved paths to detect symlink cycles (default: None).
+
+    Returns:
+        List of directory entry dictionaries.
     """
+    if current_depth >= max_depth:
+        logger.debug(f"Max depth ({max_depth}) reached, stopping recursion at: {path}")
+        return []
+
+    if visited is None:
+        visited = set()
+
+    try:
+        # Resolve path to detect real identity for cycle detection
+        resolved_path = str(path.resolve()) if hasattr(path, "resolve") else str(path)
+
+        # Check for cycles from symlinks
+        if resolved_path in visited:
+            logger.debug(f"Cycle detected, skipping: {resolved_path}")
+            return []
+
+        visited.add(resolved_path)
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Could not resolve path {path}: {e}")
+        return []
+
     entries = []
     try:
         contents = directory_contents(path)
@@ -340,11 +380,18 @@ def build_directory_tree(path):
                 "name": item.name,
                 "path": str(item),
                 "is_directory": is_dir,
-                "children": build_directory_tree(item) if is_dir else [],
+                "children": build_directory_tree(
+                    item, max_depth, current_depth + 1, visited
+                )
+                if is_dir
+                else [],
             }
             entries.append(entry)
-    except (PermissionError, OSError):
-        pass
+    except PermissionError as e:
+        logger.warning(f"Permission denied accessing {path}: {e}")
+    except OSError as e:
+        logger.warning(f"OS error accessing {path}: {e}")
+
     return entries
 
 
@@ -354,11 +401,7 @@ class DirectoryListView(View):
     """
 
     def get(self, request):
-        # Determine root directory (same logic as ImportView)
-        if Path("/input").is_dir():
-            rootdir = "/input"
-        else:
-            rootdir = f"{str(Path.home())}/input"
+        rootdir = get_input_root_dir()
 
         # Check if root directory exists
         if not Path(rootdir).exists():
