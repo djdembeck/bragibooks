@@ -17,6 +17,13 @@ class DirectoryApiTests(TestCase):
         """Set up test client."""
         self.client = Client()
 
+    def test_unauthenticated_request_redirects_to_login(self):
+        """Test that unauthenticated requests are redirected to login page."""
+        response = self.client.get("/api/directories/")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login", response.url)
+
     @patch("importer.views.Path")
     @patch("importer.views.directory_contents")
     def test_api_returns_200_with_valid_json_structure(
@@ -135,7 +142,10 @@ class DirectoryApiTests(TestCase):
         self.assertEqual(file_entry["children"], [])
 
     @patch("importer.views.Path")
-    def test_error_field_is_null_on_success(self, mock_path_class):
+    @patch("importer.views.directory_contents")
+    def test_error_field_is_null_on_success(
+        self, mock_directory_contents, mock_path_class
+    ):
         """Test that error field is null when directory exists."""
         mock_input_path = MagicMock()
         mock_input_path.is_dir.return_value = True
@@ -145,6 +155,7 @@ class DirectoryApiTests(TestCase):
         mock_file.name = "test.txt"
         mock_file.is_dir.return_value = False
         mock_input_path.iterdir.return_value = [mock_file]
+        mock_directory_contents.return_value = [mock_file]
 
         mock_path_class.return_value = mock_input_path
         mock_path_class.home.return_value = mock_input_path
