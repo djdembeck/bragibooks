@@ -1,6 +1,10 @@
-const { describe, it } = require('node:test');
+const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const { hideLoadingOverlay, expandFolder, initArrowListeners, initSearch, fuzzyMatch, resetPanel } = require('./importer.js');
+
+// Save the original requestAnimationFrame before any reassignment
+// Note: requestAnimationFrame is undefined in Node.js by default
+const _origRequestAnimationFrame = global.requestAnimationFrame;
 
 class MockElement {
     constructor(tagName = 'div') {
@@ -240,7 +244,14 @@ class MockDocument {
     createElement(tagName) { return new MockElement(tagName); }
 }
 
-global.requestAnimationFrame = (callback) => setTimeout(callback, 0);
+// Use before/after hooks to manage the override
+before(() => {
+    global.requestAnimationFrame = (callback) => setTimeout(callback, 0);
+});
+
+after(() => {
+    global.requestAnimationFrame = _origRequestAnimationFrame;
+});
 
 describe('hideLoadingOverlay', () => {
     it('should set loading-overlay display to none when element exists', () => {
