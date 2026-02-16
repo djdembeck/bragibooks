@@ -15,21 +15,90 @@
             display: flex;
             flex-direction: column;
           }
-      
+
           .main-section {
             flex-grow: 1;
             margin-top: 30px;
             margin-bottom: 30px;
           }
-      
+
           footer {
             margin-top: auto;
           }
-          
+          .pre-loader {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #ffe08a; /* matches has-background-warning-dark theme */
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 9999;
+            transition: opacity 0.3s ease-out, visibility 0.3s ease-out;
+          }
+
+          .pre-loader.hidden {
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+          }
+
+          .pre-loader-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1.5rem;
+          }
+
+          .pre-loader .loader {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 0.75rem;
+          }
+
+          .pre-loader .spinner {
+            width: 3rem;
+            height: 3rem;
+            border: 4px solid #dbdbdb;
+            border-top-color: #3273dc;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+          }
+
+          @keyframes spin {
+              to { transform: rotate(360deg); }
+          }
+
+          .pre-loader h2 {
+            color: #0a0a0a;
+            font-size: 1.5rem;
+            margin: 0;
+            font-weight: 600;
+          }
+
+          .pre-loader p {
+            color: #4a4a4a;
+            font-size: 1rem;
+            margin: 0;
+          }
+
           {% block style %}{% endblock %}
     </style>
 </head>
 <body class="has-background-warning-dark">
+    <div id="pre-loader" class="pre-loader" role="status" aria-live="polite" aria-label="Loading" style="position:fixed;top:0;left:0;width:100%;height:100%;background-color:#ffe08a;display:flex;flex-direction:column;justify-content:center;align-items:center;z-index:9999">
+        <div class="pre-loader-content">
+            <div class="loader">
+                <div class="spinner" aria-hidden="true"></div>
+            </div>
+            <h2>Loading Bragi Books...</h2>
+            <p>Please wait while we set things up.</p>
+        </div>
+    </div>
     <section class="hero is-small is-warning">
         <nav class="level">
             <div class="hero-body">
@@ -85,8 +154,33 @@
         </div>
     </footer>
     <script>
-        {% block script %}
-        {% endblock %}
+        // Pre-loader management - hide when page is ready
+        (function() {
+            'use strict';
+
+            var preLoader = document.getElementById('pre-loader');
+
+            function hidePreLoader() {
+                if (preLoader) {
+                    preLoader.classList.add('hidden');
+                    setTimeout(function() {
+                        if (preLoader && preLoader.parentNode) {
+                            preLoader.parentNode.removeChild(preLoader);
+                        }
+                    }, 300);
+                }
+            }
+
+            // Hide pre-loader when DOM is fully loaded
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', hidePreLoader);
+            } else {
+                hidePreLoader();
+            }
+
+            {% block script %}
+            {% endblock %}
+        })();
     </script>
 </body>
 </html>

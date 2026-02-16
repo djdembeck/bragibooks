@@ -145,16 +145,15 @@ function hideLoadingOverlay(doc = document) {
     }
 }
 
-// Initialize on DOMContentLoaded for browser usage
-if (typeof document !== 'undefined') {
-    document.addEventListener('DOMContentLoaded', () => {
-        initArrowListeners();
-        initSearch();
-        hideLoadingOverlay();
-    });
-}
+ // Initialize on DOMContentLoaded for browser usage
+ if (typeof document !== 'undefined') {
+     document.addEventListener('DOMContentLoaded', () => {
+         initArrowListeners();
+         initSearch();
+     });
+ }
 
-// Export for testing (works in Node.js module context)
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { hideLoadingOverlay, expandFolder, initArrowListeners, initSearch, fuzzyMatch, resetPanel };
-}
+ // Export for testing (works in Node.js module context)
+ if (typeof module !== 'undefined' && module.exports) {
+     module.exports = { hideLoadingOverlay, expandFolder, initArrowListeners, initSearch, fuzzyMatch, resetPanel };
+ }
