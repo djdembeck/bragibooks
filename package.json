@@ -4,8 +4,8 @@
   "description": "JavaScript tests for Bragibooks frontend",
   "type": "commonjs",
   "scripts": {
-    "test": "node --test importer/templates/importer.test.js",
-    "test:watch": "node --test --watch importer/templates/importer.test.js"
+    "test": "node --test 'importer/**/*.test.js'",
+    "test:watch": "node --test --watch 'importer/**/*.test.js'"
   },
   "engines": {
     "node": ">=18.0.0"

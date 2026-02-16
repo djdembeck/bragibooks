@@ -156,5 +156,5 @@ if (typeof document !== 'undefined') {
 
 // Export for testing (works in Node.js module context)
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { hideLoadingOverlay };
+    module.exports = { hideLoadingOverlay, expandFolder, initArrowListeners, initSearch, fuzzyMatch, resetPanel };
 }
