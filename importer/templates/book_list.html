@@ -27,7 +27,7 @@
                         {% if book.status.status == 'Error' %}
                         <p>{{ book.status.message }}</p>
                         {% else %}
-                        <p>
+                        <p class="book-description">
                         {{ book.long_desc|safe }}
                         </p>
                         {% endif %}
