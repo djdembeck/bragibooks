@@ -17,9 +17,7 @@ class DirectoryApiTests(TestCase):
     def setUp(self):
         """Set up test client and user."""
         self.client = Client()
-        self.user = User.objects.create_user(
-            username="testuser", password="testpass123"
-        )
+        self.user = User.objects.create_user(username="testuser")
 
     def test_unauthenticated_request_redirects_to_login(self):
         """Test that unauthenticated requests are redirected to login page."""
