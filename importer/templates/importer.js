@@ -244,55 +244,73 @@ async function fetchAndRenderDirectories() {
     if (treeContainer) treeContainer.innerHTML = '';
 
     try {
-        const response = await fetch('/api/directories/');
+        const response = await fetch('/api/directories/stream/');
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
-        const data = await response.json();
 
-        if (data.error) {
-            throw new Error(data.error);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let loadedItems = 0;
+        let currentItemName = '';
+        const container = treeContainer;
+        const parentMap = new Map();
+        let fragment = document.createDocumentFragment();
+        let batchCount = 0;
+        const BATCH_SIZE = 10;
+        parentMap.set('', container);
+
+        updateProgress(0, 0, 'Loading files and folders...', '');
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (!line.trim()) continue;
+
+                try {
+                    const entry = JSON.parse(line);
+                    currentItemName = entry.name;
+
+                    const element = buildStreamingEntry(entry, parentMap);
+                    if (element) {
+                        fragment.appendChild(element);
+                        batchCount++;
+                        if (batchCount >= BATCH_SIZE) {
+                            container.appendChild(fragment);
+                            fragment = document.createDocumentFragment();
+                            batchCount = 0;
+                            updateProgress(loadedItems, 0, 'Loading files and folders...', currentItemName);
+                            await new Promise(resolve => setTimeout(resolve, 0));
+                        }
+                    }
+                    loadedItems++;
+                } catch (parseError) {
+                    console.warn('Failed to parse entry:', parseError, line);
+                }
+            }
         }
 
-        if (treeContainer && data.directories) {
-            const totalItems = countDirectoryItems(data.directories);
-            let loadedItems = 0;
-            let currentItemName = '';
-            const container = treeContainer;
-            let lastProgressUpdate = 0;
-
-            const processItems = async (items, depth, parentId) => {
-                for (const item of items) {
-                    currentItemName = item.name;
-                    buildDirectoryTree([item], container, depth, parentId, () => {
-                        loadedItems++;
-                    });
-
-                    // Yield control every 50 items to allow UI updates
-                    if (loadedItems % 50 === 0) {
-                        await new Promise(resolve => setTimeout(resolve, 0));
-                    }
-
-                    if (item.children && item.children.length > 0) {
-                        await processItems(item.children, depth + 1, generateId());
-                    }
+        if (buffer.trim()) {
+            try {
+                const entry = JSON.parse(buffer);
+                const element = buildStreamingEntry(entry, parentMap);
+                if (element) {
+                    fragment.appendChild(element);
                 }
-            };
+            } catch (parseError) {
+                console.warn('Failed to parse final entry:', parseError);
+            }
+        }
 
-            const updateProgressLoop = () => {
-                if (loadedItems > lastProgressUpdate) {
-                    const itemNameAtUpdate = currentItemName;
-                    updateProgress(loadedItems, totalItems, 'Loading files and folders...', itemNameAtUpdate);
-                    lastProgressUpdate = loadedItems;
-                }
-
-                if (loadedItems < totalItems) {
-                    requestAnimationFrame(updateProgressLoop);
-                }
-            };
-
-            requestAnimationFrame(updateProgressLoop);
-            await processItems(data.directories, 0, '');
+        if (fragment.childNodes.length > 0) {
+            container.appendChild(fragment);
         }
 
         if (loadingEl) loadingEl.style.display = 'none';
@@ -306,6 +324,75 @@ async function fetchAndRenderDirectories() {
         if (errorEl) errorEl.style.display = '';
         if (errorMessageEl) errorMessageEl.textContent = 'Failed to load directories: ' + error.message;
     }
+}
+
+function buildStreamingEntry(entry, parentMap) {
+    const depth = entry.depth || 0;
+    const parentId = depth === 0 ? '' : findParentId(entry.path, depth, parentMap);
+    const isDirectory = entry.is_directory;
+    const display = depth === 0 ? '' : 'none';
+    const indent = '\u00A0'.repeat(5).repeat(depth);
+    const id = generateId();
+
+    const label = document.createElement('label');
+    label.className = isDirectory ? 'panel-block folder' : 'panel-block file';
+    label.id = id;
+    label.setAttribute('folder-id', parentId);
+    label.style.display = display;
+
+    if (isDirectory) {
+        const contentDiv = document.createElement('div');
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.name = 'input_dir';
+        checkbox.value = entry.path;
+        contentDiv.appendChild(checkbox);
+
+        if (indent) {
+            contentDiv.appendChild(document.createTextNode(indent));
+        }
+
+        const iconSpan = document.createElement('span');
+        iconSpan.className = 'panel-icon';
+        const iconI = document.createElement('i');
+        iconI.className = 'fas fa-folder';
+        iconI.setAttribute('aria-hidden', 'true');
+        iconSpan.appendChild(iconI);
+        contentDiv.appendChild(iconSpan);
+        contentDiv.appendChild(document.createTextNode(entry.name));
+        label.appendChild(contentDiv);
+
+        const arrowSpan = document.createElement('span');
+        arrowSpan.className = 'arrow mr-2 is-medium';
+        const arrowI = document.createElement('i');
+        arrowI.className = 'fas fa-lg fa-angle-right';
+        arrowI.id = id + '_arrow';
+        arrowSpan.appendChild(arrowI);
+        label.appendChild(arrowSpan);
+
+        parentMap.set(entry.path, id);
+    } else {
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.name = 'input_dir';
+        checkbox.value = entry.path;
+        label.appendChild(checkbox);
+
+        if (indent) {
+            label.appendChild(document.createTextNode(indent));
+        }
+
+        const iconSpan = document.createElement('span');
+        iconSpan.className = 'panel-icon';
+        const iconI = document.createElement('i');
+        iconI.className = 'fas fa-file';
+        iconI.setAttribute('aria-hidden', 'true');
+        iconSpan.appendChild(iconI);
+        label.appendChild(iconSpan);
+        label.appendChild(document.createTextNode(entry.name));
+    }
+
+    return label;
 }
 
 function buildDirectoryTree(items, container, depth, parentId, onProgress = null) {
@@ -415,6 +502,7 @@ if (typeof module !== 'undefined' && module.exports) {
         updateProgress,
         fetchAndRenderDirectories,
         buildDirectoryTree,
-        findParentId
+        findParentId,
+        buildStreamingEntry
     };
 }
