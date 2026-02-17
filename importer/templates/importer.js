@@ -214,18 +214,18 @@ async function fetchAndRenderDirectories() {
             const totalItems = countDirectoryItems(data.directories);
             let loadedItems = 0;
             const container = treeContainer;
+            let lastProgressUpdate = 0;
 
             const processItems = async (items, depth, parentId) => {
                 for (const item of items) {
-                    await new Promise(resolve => {
-                        requestAnimationFrame(() => {
-                            buildDirectoryTree([item], container, depth, parentId, (increment) => {
-                                loadedItems += increment;
-                                updateProgress(loadedItems, totalItems, 'Loading files and folders...');
-                            });
-                            resolve();
-                        });
+                    buildDirectoryTree([item], container, depth, parentId, () => {
+                        loadedItems++;
                     });
+
+                    // Yield control every 50 items to allow UI updates
+                    if (loadedItems % 50 === 0) {
+                        await new Promise(resolve => setTimeout(resolve, 0));
+                    }
 
                     if (item.children && item.children.length > 0) {
                         await processItems(item.children, depth + 1, generateId());
@@ -233,6 +233,18 @@ async function fetchAndRenderDirectories() {
                 }
             };
 
+            const updateProgressLoop = () => {
+                if (loadedItems > lastProgressUpdate) {
+                    updateProgress(loadedItems, totalItems, 'Loading files and folders...');
+                    lastProgressUpdate = loadedItems;
+                }
+
+                if (loadedItems < totalItems) {
+                    requestAnimationFrame(updateProgressLoop);
+                }
+            };
+
+            requestAnimationFrame(updateProgressLoop);
             await processItems(data.directories, 0, '');
         }
 
