@@ -155,11 +155,45 @@ function generateId() {
     return 'id_' + Math.random().toString(36).substring(2, 11);
 }
 
+function countDirectoryItems(items) {
+    let count = 0;
+    items.forEach(item => {
+        count++;
+        if (item.children && item.children.length > 0) {
+            count += countDirectoryItems(item.children);
+        }
+    });
+    return count;
+}
+
+function updateProgress(current, total, status) {
+    const progressContainer = document.getElementById('progress-container');
+    const progressFill = document.getElementById('progress-fill');
+    const progressStatus = document.getElementById('progress-status');
+    const progressCount = document.getElementById('progress-count');
+
+    if (progressContainer) {
+        progressContainer.style.display = 'block';
+    }
+    if (progressFill) {
+        const percentage = total > 0 ? Math.min(100, Math.max(0, (current / total) * 100)) : 0;
+        progressFill.style.width = percentage + '%';
+    }
+    if (progressStatus && status) {
+        progressStatus.textContent = status;
+    }
+    if (progressCount) {
+        progressCount.textContent = `${current} / ${total} items`;
+    }
+}
+
 async function fetchAndRenderDirectories() {
     const loadingEl = document.getElementById('directory-loading');
     const errorEl = document.getElementById('directory-error');
     const treeContainer = document.getElementById('directory-tree');
     const errorMessageEl = document.getElementById('directory-error-message');
+
+    updateProgress(0, 0, 'Scanning directories...');
 
     if (loadingEl) loadingEl.style.display = '';
     if (errorEl) errorEl.style.display = 'none';
@@ -177,7 +211,29 @@ async function fetchAndRenderDirectories() {
         }
 
         if (treeContainer && data.directories) {
-            buildDirectoryTree(data.directories, treeContainer, 0, '');
+            const totalItems = countDirectoryItems(data.directories);
+            let loadedItems = 0;
+            const container = treeContainer;
+
+            const processItems = async (items, depth, parentId) => {
+                for (const item of items) {
+                    await new Promise(resolve => {
+                        requestAnimationFrame(() => {
+                            buildDirectoryTree([item], container, depth, parentId, (increment) => {
+                                loadedItems += increment;
+                                updateProgress(loadedItems, totalItems, 'Loading files and folders...');
+                            });
+                            resolve();
+                        });
+                    });
+
+                    if (item.children && item.children.length > 0) {
+                        await processItems(item.children, depth + 1, generateId());
+                    }
+                }
+            };
+
+            await processItems(data.directories, 0, '');
         }
 
         if (loadingEl) loadingEl.style.display = 'none';
@@ -193,7 +249,7 @@ async function fetchAndRenderDirectories() {
     }
 }
 
-function buildDirectoryTree(items, container, depth, parentId) {
+function buildDirectoryTree(items, container, depth, parentId, onProgress = null) {
     const indent = '\u00A0'.repeat(5).repeat(depth);
 
     items.forEach(item => {
@@ -262,8 +318,12 @@ function buildDirectoryTree(items, container, depth, parentId) {
 
         container.appendChild(label);
 
+        if (onProgress) {
+            onProgress(1);
+        }
+
         if (item.children && item.children.length > 0) {
-            buildDirectoryTree(item.children, container, depth + 1, id);
+            buildDirectoryTree(item.children, container, depth + 1, id, onProgress);
         }
     });
 }
@@ -282,7 +342,19 @@ if (typeof document !== 'undefined') {
     });
 }
 
- // Export for testing (works in Node.js module context)
- if (typeof module !== 'undefined' && module.exports) {
-     module.exports = { hideLoadingOverlay, expandFolder, initArrowListeners, initSearch, fuzzyMatch, resetPanel, generateId, fetchAndRenderDirectories, buildDirectoryTree };
- }
+// Export for testing (works in Node.js module context)
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        hideLoadingOverlay,
+        expandFolder,
+        initArrowListeners,
+        initSearch,
+        fuzzyMatch,
+        resetPanel,
+        generateId,
+        countDirectoryItems,
+        updateProgress,
+        fetchAndRenderDirectories,
+        buildDirectoryTree
+    };
+}
