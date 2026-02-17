@@ -192,6 +192,9 @@ function updateProgress(current, total, status) {
         if (progressBar) {
             progressBar.classList.remove('determinate');
         }
+        if (progressFill) {
+            progressFill.style.width = '0%';
+        }
         if (progressCount) {
             progressCount.textContent = '';
         }
