@@ -206,9 +206,13 @@ function updateProgress(current, total, status, currentFile) {
         progressStatus.textContent = status;
     }
 
-    if (currentFileContainer && currentFileName && currentFile) {
-        currentFileContainer.style.display = 'block';
-        currentFileName.textContent = currentFile;
+    if (currentFileContainer && currentFileName) {
+        if (currentFile) {
+            currentFileContainer.style.display = 'block';
+            currentFileName.textContent = currentFile;
+        } else {
+            currentFileContainer.style.display = 'none';
+        }
     }
 }
 
@@ -262,7 +266,8 @@ async function fetchAndRenderDirectories() {
 
             const updateProgressLoop = () => {
                 if (loadedItems > lastProgressUpdate) {
-                    updateProgress(loadedItems, totalItems, 'Loading files and folders...', currentItemName);
+                    const itemNameAtUpdate = currentItemName;
+                    updateProgress(loadedItems, totalItems, 'Loading files and folders...', itemNameAtUpdate);
                     lastProgressUpdate = loadedItems;
                 }
 
