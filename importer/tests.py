@@ -19,12 +19,12 @@ class DirectoryApiTests(TestCase):
         self.client = Client()
         self.user = User.objects.create_user(username="testuser")
 
-    def test_unauthenticated_request_redirects_to_login(self):
-        """Test that unauthenticated requests are redirected to login page."""
+    def test_unauthenticated_request_returns_directories(self):
+        """Test that unauthenticated requests can access the API."""
         response = self.client.get("/api/directories/")
 
-        self.assertEqual(response.status_code, 302)
-        self.assertIn("/login", response.url)
+        # Should return 200 or 404 depending on if /input exists
+        self.assertIn(response.status_code, [200, 404])
 
     @patch("importer.views.Path")
     @patch("importer.views.directory_contents")

@@ -7,7 +7,6 @@ from pathlib import Path
 import requests
 from django.conf import settings
 from django.contrib import messages
-from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import (
     HttpRequest,
     HttpResponseBadRequest,
@@ -429,7 +428,7 @@ def build_directory_tree(path, max_depth=50, current_depth=0, visited=None):
     return entries
 
 
-class DirectoryListView(LoginRequiredMixin, View):
+class DirectoryListView(View):
     """
     API endpoint that returns directory contents as JSON.
     """
