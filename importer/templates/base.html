@@ -171,12 +171,19 @@
                 }
             }
 
-            // Hide pre-loader when DOM is fully loaded
+            // Export hidePreLoader globally for importer.js
+            window.hidePreLoader = hidePreLoader;
+
+            {% with request.resolver_match.url_name as url_name %}
+            {% if url_name != 'import' %}
+            // Hide pre-loader when DOM is fully loaded (skip on import page)
             if (document.readyState === 'loading') {
                 document.addEventListener('DOMContentLoaded', hidePreLoader);
             } else {
                 hidePreLoader();
             }
+            {% endif %}
+            {% endwith %}
 
             {% block script %}
             {% endblock %}

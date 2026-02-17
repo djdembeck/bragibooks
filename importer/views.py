@@ -7,9 +7,15 @@ from pathlib import Path
 import requests
 from django.conf import settings
 from django.contrib import messages
-from django.http import HttpRequest, HttpResponseBadRequest, JsonResponse
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.http import (
+    HttpRequest,
+    HttpResponseBadRequest,
+    JsonResponse,
+)
 from django.shortcuts import redirect, render
 from django.views.generic import TemplateView, View
+from django.db import DatabaseError
 
 # core merge logic:
 from m4b_merge import helpers
@@ -27,25 +33,54 @@ from .forms import SettingForm
 from .models import Book, Setting, StatusChoices
 from .tasks import m4b_merge_task
 
+# Template tags import for directory_contents
+from .templatetags.directory_explorer_tags import directory_contents
+
 # Get an instance of a logger
 logger = logging.getLogger(__name__)
 
-# If using docker, default to /input folder, else $USER/input
-if Path("/input").is_dir():
-    rootdir = "/input"
-else:
-    rootdir = f"{str(Path.home())}/input"
+
+def get_input_root_dir():
+    """
+    Determine the input root directory.
+
+    Reads from Setting.input_directory if available, otherwise falls back to
+    /input (if running in Docker) or ~/input.
+
+    Returns:
+        Path to the input directory as a string.
+    """
+    # Try to get the configured directory from settings
+    try:
+        setting = Setting.objects.first()
+        if setting and setting.input_directory:
+            return setting.input_directory
+    except DatabaseError as e:
+        logger.debug("Could not read input_directory from Setting: %s", e)
+
+    # Fallback to default logic
+    if Path("/input").is_dir():
+        return "/input"
+    return str(Path.home() / "input")
 
 
 class ImportView(TemplateView):
     template_name = "importer.html"
 
     def get_context_data(self, **kwargs):
-        context = {
-            "contents": sorted(
+        rootdir = get_input_root_dir()
+        try:
+            contents = sorted(
                 Path(rootdir).iterdir(), key=os.path.getmtime, reverse=True
             )
-        }
+        except (OSError, PermissionError) as e:
+            logger.warning(
+                "Cannot access input directory %s: %s. Falling back to empty list.",
+                rootdir,
+                e,
+            )
+            contents = []
+        context = {"contents": contents}
         return context
 
     def post(self, request):
@@ -319,6 +354,97 @@ class SettingView(TemplateView):
                 es.save()
 
             return redirect("import")
-
-        messages.error(request, "Form is invalid")
+        else:
+            messages.error(request, "Form is invalid")
         return redirect("setting")
+
+
+def build_directory_tree(path, max_depth=50, current_depth=0, visited=None):
+    """
+    Recursively build directory tree structure for JSON response.
+
+    Args:
+        path: Current directory path to explore.
+        max_depth: Maximum recursion depth to prevent infinite loops (default: 50).
+        current_depth: Current recursion depth (default: 0).
+        visited: Set of resolved paths to detect symlink cycles (default: None).
+
+    Returns:
+        List of directory entry dictionaries.
+    """
+    if current_depth >= max_depth:
+        logger.debug(
+            "Max depth (%s) reached, stopping recursion at: %s", max_depth, path
+        )
+        return []
+
+    if visited is None:
+        visited = set()
+
+    try:
+        # Resolve path to detect real identity for cycle detection
+        resolved_path = str(path.resolve()) if hasattr(path, "resolve") else str(path)
+    except (PermissionError, OSError) as e:
+        logger.debug("Could not resolve path %s: %s", path, e)
+        return []
+
+    # Check for cycles from symlinks
+    if resolved_path in visited:
+        logger.debug("Cycle detected, skipping: %s", resolved_path)
+        return []
+
+    visited.add(resolved_path)
+
+    entries = []
+    try:
+        contents = directory_contents(path)
+        for item in contents:
+            is_dir = item.is_dir()
+            if is_dir:
+                try:
+                    item_resolved = str(item.resolve())
+                    if item_resolved == resolved_path:
+                        logger.debug(
+                            "Self-reference detected, skipping: %s", item_resolved
+                        )
+                        continue
+                except (PermissionError, OSError):
+                    pass
+            entry = {
+                "name": item.name,
+                "path": str(item),
+                "is_directory": is_dir,
+                "children": build_directory_tree(
+                    item, max_depth, current_depth + 1, visited
+                )
+                if is_dir
+                else [],
+            }
+            entries.append(entry)
+    except PermissionError as e:
+        logger.warning("Permission denied accessing %s: %s", path, e)
+    except OSError as e:
+        logger.warning("OS error accessing %s: %s", path, e)
+
+    return entries
+
+
+class DirectoryListView(LoginRequiredMixin, View):
+    """
+    API endpoint that returns directory contents as JSON.
+    """
+
+    def get(self, request):
+        rootdir = get_input_root_dir()
+
+        # Check if root directory exists
+        if not Path(rootdir).exists():
+            return JsonResponse(
+                {"directories": [], "error": f"Directory not found: {rootdir}"},
+                status=404,
+            )
+
+        # Build directory tree
+        directories = build_directory_tree(rootdir)
+
+        return JsonResponse({"directories": directories, "error": None})

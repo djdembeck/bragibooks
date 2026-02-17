@@ -25,7 +25,7 @@ word-wrap: break-word;
 .panel-block-container {
 overflow: auto;
 max-height: 500px;
-min-heigth: 350px;
+min-height: 350px;
 display: flex;
 flex-grow: 1;
 flex-direction: column;
@@ -86,7 +86,21 @@ to { transform: rotate(360deg); }
             <form action="{% url 'import' %}" method="POST">
                 {% csrf_token %}
                 <div class="panel-block-container">
-                    {% include "directory_contents.html" %}
+                    <!-- Loading message shown initially -->
+                    <div id="directory-loading" class="panel-block">
+                        <span class="panel-icon"><i class="fas fa-spinner fa-spin"></i></span>
+                        Loading directories...
+                    </div>
+
+                    <!-- Error container hidden initially -->
+                    <div id="directory-error" class="panel-block" style="display: none;">
+                        <span class="panel-icon"><i class="fas fa-exclamation-triangle"></i></span>
+                        <span id="directory-error-message">Failed to load directories</span>
+                        <button type="button" id="directory-retry-btn" class="button is-small is-link ml-2">Retry</button>
+                    </div>
+
+                    <!-- Directory tree container empty initially -->
+                    <div id="directory-tree"></div>
                 </div>
                 <div class="panel-block">
                     <button class="button is-link is-fullwidth">Next</button>

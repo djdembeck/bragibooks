@@ -32,7 +32,8 @@ function initArrowListeners() {
     arrows.forEach(arrow => {
         arrow.addEventListener("click", (event) => {
             event.preventDefault();
-            expandFolder(arrow.id);
+            const folderId = arrow.id.replace("_arrow", "");
+            expandFolder(folderId);
         });
     });
 }
@@ -139,21 +140,149 @@ function initSearch() {
  * @param {Document} doc - The document object (defaults to global document)
  */
 function hideLoadingOverlay(doc = document) {
-    const loadingOverlay = doc.getElementById('loading-overlay');
-    if (loadingOverlay && loadingOverlay.style) {
-        loadingOverlay.style.display = 'none';
+    const preLoader = doc.getElementById('pre-loader');
+    if (preLoader) {
+        preLoader.classList.add('hidden');
+        setTimeout(function() {
+            if (preLoader && preLoader.parentNode) {
+                preLoader.parentNode.removeChild(preLoader);
+            }
+        }, 300);
     }
 }
 
- // Initialize on DOMContentLoaded for browser usage
- if (typeof document !== 'undefined') {
-     document.addEventListener('DOMContentLoaded', () => {
-         initArrowListeners();
-         initSearch();
-     });
- }
+function generateId() {
+    return 'id_' + Math.random().toString(36).substring(2, 11);
+}
+
+async function fetchAndRenderDirectories() {
+    const loadingEl = document.getElementById('directory-loading');
+    const errorEl = document.getElementById('directory-error');
+    const treeContainer = document.getElementById('directory-tree');
+    const errorMessageEl = document.getElementById('directory-error-message');
+
+    if (loadingEl) loadingEl.style.display = '';
+    if (errorEl) errorEl.style.display = 'none';
+    if (treeContainer) treeContainer.innerHTML = '';
+
+    try {
+        const response = await fetch('/api/directories/');
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const data = await response.json();
+
+        if (data.error) {
+            throw new Error(data.error);
+        }
+
+        if (treeContainer && data.directories) {
+            buildDirectoryTree(data.directories, treeContainer, 0, '');
+        }
+
+        if (loadingEl) loadingEl.style.display = 'none';
+        initArrowListeners();
+        initSearch();
+        hideLoadingOverlay();
+    } catch (error) {
+        console.error('Failed to fetch directories:', error);
+        hideLoadingOverlay();
+        if (loadingEl) loadingEl.style.display = 'none';
+        if (errorEl) errorEl.style.display = '';
+        if (errorMessageEl) errorMessageEl.textContent = 'Failed to load directories: ' + error.message;
+    }
+}
+
+function buildDirectoryTree(items, container, depth, parentId) {
+    const indent = '\u00A0'.repeat(5).repeat(depth);
+
+    items.forEach(item => {
+        const id = generateId();
+        const isDirectory = item.is_directory;
+        const display = depth === 0 ? '' : 'none';
+
+        const label = document.createElement('label');
+        label.className = isDirectory ? 'panel-block folder' : 'panel-block file';
+        label.id = id;
+        label.setAttribute('folder-id', parentId);
+        label.style.display = display;
+
+        if (isDirectory) {
+            const contentDiv = document.createElement('div');
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.name = 'input_dir';
+            checkbox.value = item.path;
+            contentDiv.appendChild(checkbox);
+
+            if (indent) {
+                contentDiv.appendChild(document.createTextNode(indent));
+            }
+
+            const iconSpan = document.createElement('span');
+            iconSpan.className = 'panel-icon';
+            const iconI = document.createElement('i');
+            iconI.className = 'fas fa-folder';
+            iconI.setAttribute('aria-hidden', 'true');
+            iconSpan.appendChild(iconI);
+            contentDiv.appendChild(iconSpan);
+
+            contentDiv.appendChild(document.createTextNode(item.name));
+            label.appendChild(contentDiv);
+
+            const arrowSpan = document.createElement('span');
+            arrowSpan.className = 'arrow mr-2 is-medium';
+            const arrowI = document.createElement('i');
+            arrowI.className = 'fas fa-lg fa-angle-right';
+            arrowI.id = id + '_arrow';
+            arrowSpan.appendChild(arrowI);
+            label.appendChild(arrowSpan);
+        } else {
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.name = 'input_dir';
+            checkbox.value = item.path;
+            label.appendChild(checkbox);
+
+            if (indent) {
+                label.appendChild(document.createTextNode(indent));
+            }
+
+            const iconSpan = document.createElement('span');
+            iconSpan.className = 'panel-icon';
+            const iconI = document.createElement('i');
+            iconI.className = 'fas fa-file';
+            iconI.setAttribute('aria-hidden', 'true');
+            iconSpan.appendChild(iconI);
+            label.appendChild(iconSpan);
+
+            label.appendChild(document.createTextNode(item.name));
+        }
+
+        container.appendChild(label);
+
+        if (item.children && item.children.length > 0) {
+            buildDirectoryTree(item.children, container, depth + 1, id);
+        }
+    });
+}
+
+if (typeof document !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', () => {
+        fetchAndRenderDirectories();
+
+        const retryBtn = document.getElementById('directory-retry-btn');
+        if (retryBtn) {
+            retryBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                fetchAndRenderDirectories();
+            });
+        }
+    });
+}
 
  // Export for testing (works in Node.js module context)
  if (typeof module !== 'undefined' && module.exports) {
-     module.exports = { hideLoadingOverlay, expandFolder, initArrowListeners, initSearch, fuzzyMatch, resetPanel };
+     module.exports = { hideLoadingOverlay, expandFolder, initArrowListeners, initSearch, fuzzyMatch, resetPanel, generateId, fetchAndRenderDirectories, buildDirectoryTree };
  }
