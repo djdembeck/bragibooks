@@ -155,6 +155,21 @@ function generateId() {
     return 'id_' + Math.random().toString(36).substring(2, 11);
 }
 
+function findParentId(childPath, depth, parentMap) {
+    const normalizedPath = childPath.replace(/\\/g, '/');
+    const pathParts = normalizedPath.split('/');
+    if (pathParts.length <= 1) return '';
+
+    pathParts.pop();
+    const parentPath = pathParts.join('/');
+
+    if (parentMap.has(parentPath)) {
+        return parentMap.get(parentPath);
+    }
+
+    return depth === 0 ? '' : '';
+}
+
 function countDirectoryItems(items) {
     let count = 0;
     items.forEach(item => {
@@ -399,6 +414,7 @@ if (typeof module !== 'undefined' && module.exports) {
         countDirectoryItems,
         updateProgress,
         fetchAndRenderDirectories,
-        buildDirectoryTree
+        buildDirectoryTree,
+        findParentId
     };
 }

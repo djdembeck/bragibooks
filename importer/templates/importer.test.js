@@ -1,6 +1,6 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
-const { hideLoadingOverlay, expandFolder, initArrowListeners, initSearch, fuzzyMatch, resetPanel } = require('./importer.js');
+const { hideLoadingOverlay, expandFolder, initArrowListeners, initSearch, fuzzyMatch, resetPanel, findParentId } = require('./importer.js');
 
 // Save the original requestAnimationFrame before any reassignment
 // Note: requestAnimationFrame is undefined in Node.js by default
@@ -711,5 +711,59 @@ describe('initSearch', () => {
         } finally {
             global.document = originalDoc;
         }
+    });
+});
+
+describe('findParentId', () => {
+    it('should return empty string for root-level paths', () => {
+        const parentMap = new Map();
+        assert.strictEqual(findParentId('file.txt', 0, parentMap), '');
+        assert.strictEqual(findParentId('folder', 0, parentMap), '');
+    });
+
+    it('should return parent path for nested paths', () => {
+        const parentMap = new Map();
+        parentMap.set('parent', 'parent-id');
+        assert.strictEqual(findParentId('parent/child', 1, parentMap), 'parent-id');
+    });
+
+    it('should handle Unix-style paths correctly', () => {
+        const parentMap = new Map();
+        parentMap.set('dir1/dir2', 'dir2-id');
+        assert.strictEqual(findParentId('dir1/dir2/file.txt', 2, parentMap), 'dir2-id');
+    });
+
+    it('should handle Windows-style paths correctly', () => {
+        const parentMap = new Map();
+        parentMap.set('dir1/dir2', 'dir2-id');
+        // Windows paths with backslashes
+        assert.strictEqual(findParentId('dir1\\dir2\\file.txt', 2, parentMap), 'dir2-id');
+    });
+
+    it('should handle mixed path separators correctly', () => {
+        const parentMap = new Map();
+        parentMap.set('dir1/dir2', 'dir2-id');
+        // Mixed separators
+        assert.strictEqual(findParentId('dir1\\dir2/file.txt', 2, parentMap), 'dir2-id');
+    });
+
+    it('should return empty string when parent not in map', () => {
+        const parentMap = new Map();
+        assert.strictEqual(findParentId('nonexistent/child', 1, parentMap), '');
+    });
+
+    it('should handle empty parentMap', () => {
+        const parentMap = new Map();
+        assert.strictEqual(findParentId('path/to/file.txt', 2, parentMap), '');
+    });
+
+    it('should handle paths with only one segment', () => {
+        const parentMap = new Map();
+        assert.strictEqual(findParentId('single', 0, parentMap), '');
+    });
+
+    it('should handle Windows root-level paths', () => {
+        const parentMap = new Map();
+        assert.strictEqual(findParentId('C:\\folder\\file.txt', 0, parentMap), '');
     });
 });
