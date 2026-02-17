@@ -154,7 +154,7 @@
           }
 
           /* Small versions at bottom */
-          .pre-loader .versions {
+           .pre-loader .versions {
             position: absolute;
             bottom: 1rem;
             left: 50%;
@@ -166,6 +166,21 @@
 
           .pre-loader .versions span {
             margin: 0 0.5rem;
+          }
+
+          .pre-loader .current-file {
+            margin-top: 0.75rem;
+            font-size: 0.875rem;
+            color: #4a4a4a;
+            max-width: 300px;
+            text-align: center;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }
+
+          .pre-loader .current-file-label {
+            font-weight: 600;
           }
 
           .pre-loader h2 {
@@ -199,6 +214,10 @@
                 <div class="progress-text">
                     <span id="progress-status">Scanning directories...</span>
                     <span id="progress-count"></span>
+                </div>
+                <div class="current-file" id="current-file-container" style="display: none;">
+                    <span class="current-file-label">Current:</span>
+                    <span id="current-file-name"></span>
                 </div>
             </div>
         </div>

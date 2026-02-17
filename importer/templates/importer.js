@@ -166,12 +166,14 @@ function countDirectoryItems(items) {
     return count;
 }
 
-function updateProgress(current, total, status) {
+function updateProgress(current, total, status, currentFile) {
     const progressContainer = document.getElementById('progress-container');
     const progressBar = document.getElementById('progress-bar');
     const progressFill = document.getElementById('progress-fill');
     const progressStatus = document.getElementById('progress-status');
     const progressCount = document.getElementById('progress-count');
+    const currentFileContainer = document.getElementById('current-file-container');
+    const currentFileName = document.getElementById('current-file-name');
 
     if (progressContainer) {
         progressContainer.style.display = 'block';
@@ -203,6 +205,11 @@ function updateProgress(current, total, status) {
     if (progressStatus && status) {
         progressStatus.textContent = status;
     }
+
+    if (currentFileContainer && currentFileName && currentFile) {
+        currentFileContainer.style.display = 'block';
+        currentFileName.textContent = currentFile;
+    }
 }
 
 async function fetchAndRenderDirectories() {
@@ -231,11 +238,13 @@ async function fetchAndRenderDirectories() {
         if (treeContainer && data.directories) {
             const totalItems = countDirectoryItems(data.directories);
             let loadedItems = 0;
+            let currentItemName = '';
             const container = treeContainer;
             let lastProgressUpdate = 0;
 
             const processItems = async (items, depth, parentId) => {
                 for (const item of items) {
+                    currentItemName = item.name;
                     buildDirectoryTree([item], container, depth, parentId, () => {
                         loadedItems++;
                     });
@@ -253,7 +262,7 @@ async function fetchAndRenderDirectories() {
 
             const updateProgressLoop = () => {
                 if (loadedItems > lastProgressUpdate) {
-                    updateProgress(loadedItems, totalItems, 'Loading files and folders...');
+                    updateProgress(loadedItems, totalItems, 'Loading files and folders...', currentItemName);
                     lastProgressUpdate = loadedItems;
                 }
 
