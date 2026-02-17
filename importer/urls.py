@@ -8,4 +8,9 @@ urlpatterns = [
     path("books", views.BookListView.as_view(), name="books"),
     path("setting", views.SettingView.as_view(), name="setting"),
     path("api/directories/", views.DirectoryListView.as_view(), name="api-directories"),
+    path(
+        "api/directories/stream/",
+        views.StreamDirectoryListView.as_view(),
+        name="api-directories-stream",
+    ),
 ]

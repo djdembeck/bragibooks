@@ -1,4 +1,5 @@
 # System imports
+import json
 import logging
 import os
 from datetime import timedelta
@@ -11,6 +12,7 @@ from django.http import (
     HttpRequest,
     HttpResponseBadRequest,
     JsonResponse,
+    StreamingHttpResponse,
 )
 from django.shortcuts import redirect, render
 from django.views.generic import TemplateView, View
@@ -447,3 +449,103 @@ class DirectoryListView(View):
         directories = build_directory_tree(rootdir)
 
         return JsonResponse({"directories": directories, "error": None})
+
+
+def build_directory_tree_streaming(path, max_depth=50, current_depth=0, visited=None):
+    """
+    Generator that yields directory entries incrementally for streaming.
+
+    Yields entries as they're discovered rather than building complete tree first.
+    """
+    if current_depth >= max_depth:
+        logger.debug(
+            "Max depth (%s) reached, stopping recursion at: %s", max_depth, path
+        )
+        return
+
+    if visited is None:
+        visited = set()
+
+    try:
+        resolved_path = str(path.resolve()) if hasattr(path, "resolve") else str(path)
+    except (PermissionError, OSError) as e:
+        logger.debug("Could not resolve path %s: %s", path, e)
+        return
+
+    if resolved_path in visited:
+        logger.debug("Cycle detected, skipping: %s", resolved_path)
+        return
+
+    visited.add(resolved_path)
+
+    try:
+        contents = directory_contents(path)
+        for item in contents:
+            is_dir = item.is_dir()
+            if is_dir:
+                try:
+                    item_resolved = str(item.resolve())
+                    if item_resolved == resolved_path:
+                        logger.debug(
+                            "Self-reference detected, skipping: %s", item_resolved
+                        )
+                        continue
+                except (PermissionError, OSError):
+                    pass
+
+            entry = {
+                "name": item.name,
+                "path": str(item),
+                "is_directory": is_dir,
+                "depth": current_depth,
+            }
+
+            yield entry
+
+            # Recursively yield children if directory
+            if is_dir:
+                yield from build_directory_tree_streaming(
+                    item, max_depth, current_depth + 1, visited
+                )
+
+    except PermissionError as e:
+        logger.warning("Permission denied accessing %s: %s", path, e)
+    except OSError as e:
+        logger.warning("OS error accessing %s: %s", path, e)
+
+
+class StreamDirectoryListView(View):
+    """
+    API endpoint that streams directory contents as NDJSON.
+
+    Uses Server-Sent Events style streaming to send entries as they're discovered,
+    allowing the frontend to display files progressively without waiting
+    for the entire tree to be scanned.
+    """
+
+    def get(self, request):
+        rootdir = get_input_root_dir()
+
+        # Check if root directory exists
+        if not Path(rootdir).exists():
+            return JsonResponse(
+                {"error": f"Directory not found: {rootdir}"},
+                status=404,
+            )
+
+        def generate():
+            """Generator that yields NDJSON lines."""
+            item_count = 0
+            for entry in build_directory_tree_streaming(rootdir):
+                yield json.dumps(entry) + "\n"
+                item_count += 1
+
+            logger.debug(f"Streamed {item_count} directory entries")
+
+        response = StreamingHttpResponse(
+            generate(), content_type="application/x-ndjson"
+        )
+        # Disable caching and buffering for real-time streaming
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"  # Disable nginx buffering
+        return response
