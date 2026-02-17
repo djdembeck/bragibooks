@@ -168,6 +168,7 @@ function countDirectoryItems(items) {
 
 function updateProgress(current, total, status) {
     const progressContainer = document.getElementById('progress-container');
+    const progressBar = document.getElementById('progress-bar');
     const progressFill = document.getElementById('progress-fill');
     const progressStatus = document.getElementById('progress-status');
     const progressCount = document.getElementById('progress-count');
@@ -175,15 +176,29 @@ function updateProgress(current, total, status) {
     if (progressContainer) {
         progressContainer.style.display = 'block';
     }
-    if (progressFill) {
-        const percentage = total > 0 ? Math.min(100, Math.max(0, (current / total) * 100)) : 0;
-        progressFill.style.width = percentage + '%';
+
+    if (total > 0) {
+        if (progressBar) {
+            progressBar.classList.add('determinate');
+        }
+        if (progressFill) {
+            const percentage = Math.min(100, Math.max(0, (current / total) * 100));
+            progressFill.style.width = percentage + '%';
+        }
+        if (progressCount) {
+            progressCount.textContent = `${current} / ${total} items`;
+        }
+    } else {
+        if (progressBar) {
+            progressBar.classList.remove('determinate');
+        }
+        if (progressCount) {
+            progressCount.textContent = '';
+        }
     }
+
     if (progressStatus && status) {
         progressStatus.textContent = status;
-    }
-    if (progressCount) {
-        progressCount.textContent = `${current} / ${total} items`;
     }
 }
 

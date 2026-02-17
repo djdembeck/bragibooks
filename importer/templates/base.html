@@ -60,31 +60,81 @@
             gap: 0.75rem;
           }
 
+          /* Modern ripple spinner */
           .pre-loader .spinner {
+            position: relative;
             width: 3rem;
             height: 3rem;
-            border: 4px solid rgba(50, 115, 220, 0.2);
-            border-top-color: #3273dc;
+          }
+
+          .pre-loader .spinner::before,
+          .pre-loader .spinner::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
             border-radius: 50%;
-            animation: spin 0.8s linear infinite;
+            background-color: #3273dc;
+            opacity: 0.6;
+            animation: ripple 2s cubic-bezier(0, 0.2, 0.8, 1) infinite;
           }
 
-          @keyframes spin {
-            to { transform: rotate(360deg); }
+          .pre-loader .spinner::after {
+            animation-delay: -1s;
           }
 
+          @keyframes ripple {
+            0% {
+              transform: scale(0);
+              opacity: 1;
+            }
+            100% {
+              transform: scale(1);
+              opacity: 0;
+            }
+          }
+
+          /* Progress container */
           .pre-loader .progress-container {
             width: 100%;
             max-width: 300px;
             margin-top: 1rem;
-            display: none;
           }
 
+          /* Bulma indeterminate progress */
           .pre-loader .progress-bar {
             height: 0.5rem;
             background-color: #dbdbdb;
             border-radius: 0.25rem;
             overflow: hidden;
+            position: relative;
+          }
+
+          .pre-loader .progress-bar::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            background-color: #3273dc;
+            border-radius: 0.25rem;
+            width: 30%;
+            animation: indeterminate 1.5s ease-in-out infinite;
+          }
+
+          @keyframes indeterminate {
+            0% {
+              left: -30%;
+            }
+            100% {
+              left: 100%;
+            }
+          }
+
+          .pre-loader .progress-bar.determinate::after {
+            display: none;
           }
 
           .pre-loader .progress-fill {
@@ -101,6 +151,21 @@
             margin-top: 0.5rem;
             font-size: 0.875rem;
             color: #4a4a4a;
+          }
+
+          /* Small versions at bottom */
+          .pre-loader .versions {
+            position: absolute;
+            bottom: 1rem;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.75rem;
+            color: #4a4a4a;
+            text-align: center;
+          }
+
+          .pre-loader .versions span {
+            margin: 0 0.5rem;
           }
 
           .pre-loader h2 {
@@ -128,14 +193,19 @@
             <h2>Loading Bragi Books...</h2>
             <p>Please wait while we scan your library.</p>
             <div class="progress-container" id="progress-container">
-                <div class="progress-bar">
+                <div class="progress-bar" id="progress-bar">
                     <div class="progress-fill" id="progress-fill"></div>
                 </div>
                 <div class="progress-text">
                     <span id="progress-status">Scanning directories...</span>
-                    <span id="progress-count">0 / 0 items</span>
+                    <span id="progress-count"></span>
                 </div>
             </div>
+        </div>
+        <div class="versions">
+            <span>Bragibooks v{{ bragibooks_version }}</span>
+            <span>Django v{{ django_version }}</span>
+            <span>m4b-merge v{{ m4b_merge_version }}</span>
         </div>
     </div>
     <section class="hero is-small is-warning">
