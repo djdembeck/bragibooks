@@ -11,6 +11,15 @@ function openTab(tabId) {
 
     document.getElementById(tabId).style.display = "block";
     document.getElementById(`${tabId}-tab`).classList.add("is-active");
+
+    const tabAnchors = document.querySelectorAll('.tab a[role="tab"]');
+    tabAnchors.forEach(anchor => {
+        if (anchor.getAttribute('aria-controls') === tabId) {
+            anchor.setAttribute('aria-selected', 'true');
+        } else {
+            anchor.setAttribute('aria-selected', 'false');
+        }
+    });
 }
 
 window.addEventListener('load', function () {
