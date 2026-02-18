@@ -205,8 +205,11 @@
           }
 
           .book-description {
-            overflow-wrap: anywhere;
+            overflow-wrap: break-word;
+            word-wrap: break-word;
+            word-break: break-word;
             hyphens: auto;
+            max-height: none;
           }
 
           {% block style %}{% endblock %}
