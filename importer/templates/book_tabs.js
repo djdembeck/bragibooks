@@ -1,4 +1,6 @@
-function openTab(tabId) {
+function openTab(event, tabId) {
+    event.preventDefault();
+
     const tabLinks = document.querySelectorAll(".tab");
     tabLinks.forEach(tab => {
         tab.classList.remove("is-active");
@@ -27,5 +29,5 @@ function openTab(tabId) {
 
 window.addEventListener('load', function () {
     const defaultTab = document.querySelector(".tabs").dataset.default
-    openTab(defaultTab);
+    openTab({ preventDefault: () => {} }, defaultTab);
 });
