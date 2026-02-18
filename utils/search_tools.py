@@ -85,7 +85,10 @@ class SearchTool:
         )
         # Remove "read by" / "narrated by" patterns
         name = re.sub(
-            r"\b(read|narrated)\s+by\s+[^\[\]]+", "", name, flags=re.IGNORECASE
+            r"\b(read|narrated)\s+by\s+\w+(?:\s+\w+){1,2}",
+            "",
+            name,
+            flags=re.IGNORECASE,
         )
         # Remove part/volume/book/chapter indicators
         name = re.sub(
@@ -94,7 +97,7 @@ class SearchTool:
             name,
             flags=re.IGNORECASE,
         )
-        # Remove years: in parentheses/brackets OR standalone 4-digit (1900-2099)
+        # Remove years
         name = re.sub(r"[\(\[]\s*\d{4}\s*[\)\]]|\b(19|20)\d{2}\b", "", name)
         # Remove unwanted whitespaces
         name = re.sub(r"\s+", " ", name)

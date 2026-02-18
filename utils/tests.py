@@ -314,3 +314,36 @@ class TestSearchToolNormalizeName(TestCase):
         result = self.tool.normalize_name("The Great Gatsby")
         self.assertIn("great", result.lower())
         self.assertIn("gatsby", result.lower())
+
+    def test_normalize_name_removes_narrated_by(self):
+        """Verify 'narrated by' and narrator names are removed."""
+        result = self.tool.normalize_name("Great Book narrated by Jane Doe")
+        self.assertNotIn("narrated by", result.lower())
+        self.assertNotIn("jane doe", result.lower())
+        self.assertIn("great", result.lower())
+        self.assertIn("book", result.lower())
+
+    def test_normalize_name_removes_standalone_years(self):
+        """Verify standalone years are removed but other text preserved."""
+        result = self.tool.normalize_name("Book Title 2020 Edition")
+        self.assertNotIn("2020", result)
+        self.assertIn("book", result.lower())
+        self.assertIn("title", result.lower())
+        self.assertIn("edition", result.lower())
+
+    def test_normalize_name_removes_volume_indicators(self):
+        """Verify volume/chapter indicators are removed."""
+        result = self.tool.normalize_name("Epic Saga Volume 2")
+        self.assertNotIn("volume 2", result.lower())
+        self.assertNotIn("vol 2", result.lower())
+        self.assertIn("epic", result.lower())
+        self.assertIn("saga", result.lower())
+
+    def test_normalize_name_preserves_trailing_text_after_narrator(self):
+        """Verify trailing text after narrator is preserved."""
+        result = self.tool.normalize_name("Great Book read by John Smith The Sequel")
+        self.assertNotIn("read by", result.lower())
+        self.assertNotIn("john smith", result.lower())
+        self.assertIn("great", result.lower())
+        self.assertIn("book", result.lower())
+        self.assertIn("sequel", result.lower())
