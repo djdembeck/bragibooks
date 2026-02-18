@@ -16,8 +16,11 @@ function openTab(tabId) {
     tabAnchors.forEach(anchor => {
         if (anchor.getAttribute('aria-controls') === tabId) {
             anchor.setAttribute('aria-selected', 'true');
+            anchor.setAttribute('tabindex', '0');
+            anchor.focus();
         } else {
             anchor.setAttribute('aria-selected', 'false');
+            anchor.setAttribute('tabindex', '-1');
         }
     });
 }

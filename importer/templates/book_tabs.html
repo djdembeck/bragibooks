@@ -3,9 +3,9 @@
 <div class="box">
     <div class="tabs is-fullwidth is-toggle" style="background: white;" data-default={{ default_view }} role="tablist">
         <ul>
-            <li class="tab is-active" id="done-tab" onclick="openTab('done')"><a role="tab" aria-selected="true" aria-controls="done" aria-label="Done - {{ done_books|length }} book{{ done_books|length|pluralize }}">Done ({{ done_books|length }})</a></li>
-            <li class="tab" id="processing-tab" onclick="openTab('processing')"><a role="tab" aria-selected="false" aria-controls="processing" aria-label="Processing - {{ processing_books|length }} book{{ processing_books|length|pluralize }}">Processing ({{ processing_books|length }})</a></li>
-            <li class="tab" id="error-tab" onclick="openTab('error')"><a role="tab" aria-selected="false" aria-controls="error" aria-label="Error - {{ error_books|length }} book{{ error_books|length|pluralize }}">Error ({{ error_books|length }})</a></li>
+            <li class="tab is-active" id="done-tab" onclick="openTab('done')"><a role="tab" aria-selected="true" aria-controls="done" aria-label="Done - {{ done_books|length }} book{{ done_books|length|pluralize }}" href="#" tabindex="0">Done ({{ done_books|length }})</a></li>
+            <li class="tab" id="processing-tab" onclick="openTab('processing')"><a role="tab" aria-selected="false" aria-controls="processing" aria-label="Processing - {{ processing_books|length }} book{{ processing_books|length|pluralize }}" href="#" tabindex="-1">Processing ({{ processing_books|length }})</a></li>
+            <li class="tab" id="error-tab" onclick="openTab('error')"><a role="tab" aria-selected="false" aria-controls="error" aria-label="Error - {{ error_books|length }} book{{ error_books|length|pluralize }}" href="#" tabindex="-1">Error ({{ error_books|length }})</a></li>
         </ul>
     </div>
 

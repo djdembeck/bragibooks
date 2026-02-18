@@ -97,8 +97,11 @@ class SearchTool:
             name,
             flags=re.IGNORECASE,
         )
-        # Remove years
+        # Preserve original if year removal results in empty string
+        name_before_year_removal = name
         name = re.sub(r"[\(\[]\s*\d{4}\s*[\)\]]|\b(19|20)\d{2}\b", "", name)
+        if not name.strip():
+            name = name_before_year_removal
         # Remove unwanted whitespaces
         name = re.sub(r"\s+", " ", name)
         # Remove leading and trailing whitespaces
