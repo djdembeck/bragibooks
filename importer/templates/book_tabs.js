@@ -11,8 +11,18 @@ function openTab(event, tabId) {
         pane.style.display = "none";
     });
 
-    document.getElementById(tabId).style.display = "block";
-    document.getElementById(`${tabId}-tab`).classList.add("is-active");
+    const tabElem = document.getElementById(tabId);
+    const tabButton = document.getElementById(`${tabId}-tab`);
+    if (tabElem) {
+        tabElem.style.display = "block";
+    } else {
+        console.warn(`Tab element with id '${tabId}' not found`);
+    }
+    if (tabButton) {
+        tabButton.classList.add("is-active");
+    } else {
+        console.warn(`Tab button with id '${tabId}-tab' not found`);
+    }
 
     const tabAnchors = document.querySelectorAll('.tab a[role="tab"]');
     tabAnchors.forEach(anchor => {
@@ -28,6 +38,23 @@ function openTab(event, tabId) {
 }
 
 window.addEventListener('load', function () {
-    const defaultTab = document.querySelector(".tabs").dataset.default
+    const tabsContainer = document.querySelector(".tabs");
+    let defaultTab;
+
+    if (tabsContainer && tabsContainer.dataset.default) {
+        defaultTab = tabsContainer.dataset.default;
+    } else {
+        if (!tabsContainer) {
+            console.warn(".tabs container not found, using fallback tab");
+        } else {
+            console.warn("data-default attribute missing or empty, using fallback tab");
+        }
+        const firstTabButton = document.querySelector(".tab");
+        if (firstTabButton) {
+            defaultTab = firstTabButton.id.replace("-tab", "");
+        } else {
+            defaultTab = "done";
+        }
+    }
     openTab({ preventDefault: () => {} }, defaultTab);
 });
