@@ -37,6 +37,37 @@ function openTab(event, tabId) {
     });
 }
 
+function handleKeyDown(event) {
+    const tabAnchors = Array.from(document.querySelectorAll('.tab a[role="tab"]'));
+    const currentIndex = tabAnchors.indexOf(document.activeElement);
+
+    if (currentIndex === -1 || tabAnchors.length === 0) return;
+
+    let nextIndex = currentIndex;
+
+    switch (event.key) {
+        case 'ArrowLeft':
+            nextIndex = currentIndex > 0 ? currentIndex - 1 : tabAnchors.length - 1;
+            break;
+        case 'ArrowRight':
+            nextIndex = currentIndex < tabAnchors.length - 1 ? currentIndex + 1 : 0;
+            break;
+        case 'Home':
+            nextIndex = 0;
+            break;
+        case 'End':
+            nextIndex = tabAnchors.length - 1;
+            break;
+        default:
+            return;
+    }
+
+    event.preventDefault();
+    const nextTab = tabAnchors[nextIndex];
+    const tabId = nextTab.getAttribute('aria-controls');
+    openTab({ preventDefault: () => {} }, tabId);
+}
+
 window.addEventListener('load', function () {
     const tabsContainer = document.querySelector(".tabs");
     let defaultTab;
@@ -57,4 +88,9 @@ window.addEventListener('load', function () {
         }
     }
     openTab({ preventDefault: () => {} }, defaultTab);
+
+    const tabAnchors = document.querySelectorAll('.tab a[role="tab"]');
+    tabAnchors.forEach(anchor => {
+        anchor.addEventListener('keydown', handleKeyDown);
+    });
 });
