@@ -8,6 +8,7 @@ from django.test import TestCase, override_settings
 
 from importer.models import Book, Setting, Status, StatusChoices
 from utils.merge import run_m4b_merge
+from utils.search_tools import SearchTool
 
 
 class TestSubprocessMerge(TestCase):
@@ -276,3 +277,40 @@ class TestSubprocessMerge(TestCase):
 
         # Verify ValueError was raised with correct message
         self.assertIn("Could not parse output path", str(context.exception))
+
+
+class TestSearchToolNormalizeName(TestCase):
+    """Unit tests for SearchTool.normalize_name method."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.tool = SearchTool(filename="test")
+
+    def test_normalize_name_removes_read_by(self):
+        """Verify 'read by' and narrator names are removed."""
+        result = self.tool.normalize_name("Great Book read by John Smith")
+        self.assertNotIn("read by", result.lower())
+        self.assertNotIn("john smith", result.lower())
+        self.assertIn("great", result.lower())
+        self.assertIn("book", result.lower())
+
+    def test_normalize_name_removes_part_indicators(self):
+        """Verify part/volume indicators are removed."""
+        result = self.tool.normalize_name("Series Book Part 1 of 3")
+        self.assertNotIn("part 1", result.lower())
+        self.assertNotIn("of 3", result.lower())
+        self.assertIn("series", result.lower())
+        self.assertIn("book", result.lower())
+
+    def test_normalize_name_removes_years(self):
+        """Verify years in parentheses are removed."""
+        result = self.tool.normalize_name("Book Title (2020)")
+        self.assertNotIn("2020", result)
+        self.assertIn("book", result.lower())
+        self.assertIn("title", result.lower())
+
+    def test_normalize_name_keeps_title_words(self):
+        """Verify actual title words are preserved."""
+        result = self.tool.normalize_name("The Great Gatsby")
+        self.assertIn("great", result.lower())
+        self.assertIn("gatsby", result.lower())
