@@ -3,15 +3,18 @@ function openTab(event, tabId, userInitiated = false) {
         event.preventDefault();
     }
 
+    // Normalize tabId by stripping leading '#' characters
+    const normalizedId = tabId && tabId.toString().replace(/^#/, '');
+
     // Validate target tab elements before clearing/hiding other panes
-    const tabElem = document.getElementById(tabId);
-    const tabButton = document.getElementById(`${tabId}-tab`);
+    const tabElem = document.getElementById(normalizedId);
+    const tabButton = document.getElementById(`${normalizedId}-tab`);
     if (!tabElem) {
-        console.warn(`Tab element with id '${tabId}' not found`);
+        console.warn(`Tab element with id '${normalizedId}' not found`);
         return;
     }
     if (!tabButton) {
-        console.warn(`Tab button with id '${tabId}-tab' not found`);
+        console.warn(`Tab button with id '${normalizedId}-tab' not found`);
         return;
     }
 
@@ -30,7 +33,9 @@ function openTab(event, tabId, userInitiated = false) {
 
     const tabAnchors = document.querySelectorAll('.tab a[role="tab"]');
     tabAnchors.forEach(anchor => {
-        if (anchor.getAttribute('aria-controls') === tabId) {
+        const anchorControls = anchor.getAttribute('aria-controls');
+        const normalizedAnchorControls = anchorControls && anchorControls.replace(/^#/, '');
+        if (normalizedAnchorControls === normalizedId) {
             anchor.setAttribute('aria-selected', 'true');
             anchor.setAttribute('tabindex', '0');
             if (userInitiated) {
@@ -79,49 +84,55 @@ function handleKeyDown(event) {
     }
 }
 
+function initializeTabs(doc = document) {
+    const tabsContainer = doc.querySelector(".tabs");
+    let defaultTab;
+
+    if (tabsContainer && tabsContainer.dataset.default) {
+        defaultTab = tabsContainer.dataset.default.replace(/^#/, "");
+    } else {
+        if (!tabsContainer) {
+            console.warn(".tabs container not found, using fallback tab");
+        } else {
+            console.warn("data-default attribute missing or empty, using fallback tab");
+        }
+        const firstTabButton = doc.querySelector(".tab");
+        if (firstTabButton) {
+            let ariaControls = firstTabButton.getAttribute("aria-controls");
+            if (!ariaControls) {
+                const anchorWithControls = firstTabButton.querySelector('[aria-controls]');
+                if (anchorWithControls) {
+                    ariaControls = anchorWithControls.getAttribute("aria-controls");
+                }
+            }
+            if (ariaControls) {
+                defaultTab = ariaControls.replace(/^#/, "");
+            } else {
+                const parsed = firstTabButton.id.replace("-tab", "");
+                defaultTab = parsed || "done";
+            }
+        } else {
+            defaultTab = "done";
+        }
+    }
+    openTab({ preventDefault: () => {} }, defaultTab, false);
+
+    const tabAnchors = doc.querySelectorAll('.tab a[role="tab"]');
+    tabAnchors.forEach(anchor => {
+        anchor.addEventListener('keydown', handleKeyDown);
+    });
+
+    return defaultTab;
+}
+
 // Browser-only initialization (skipped during Node.js testing)
 if (typeof window !== 'undefined') {
     window.addEventListener('load', function () {
-        const tabsContainer = document.querySelector(".tabs");
-        let defaultTab;
-
-        if (tabsContainer && tabsContainer.dataset.default) {
-            defaultTab = tabsContainer.dataset.default.replace(/^#/, "");
-        } else {
-            if (!tabsContainer) {
-                console.warn(".tabs container not found, using fallback tab");
-            } else {
-                console.warn("data-default attribute missing or empty, using fallback tab");
-            }
-            const firstTabButton = document.querySelector(".tab");
-            if (firstTabButton) {
-                let ariaControls = firstTabButton.getAttribute("aria-controls");
-                if (!ariaControls) {
-                    const anchorWithControls = firstTabButton.querySelector('[aria-controls]');
-                    if (anchorWithControls) {
-                        ariaControls = anchorWithControls.getAttribute("aria-controls");
-                    }
-                }
-                if (ariaControls) {
-                    defaultTab = ariaControls.replace(/^#/, "");
-                } else {
-                    const parsed = firstTabButton.id.replace("-tab", "");
-                    defaultTab = parsed || "done";
-                }
-            } else {
-                defaultTab = "done";
-            }
-        }
-        openTab({ preventDefault: () => {} }, defaultTab, false);
-
-        const tabAnchors = document.querySelectorAll('.tab a[role="tab"]');
-        tabAnchors.forEach(anchor => {
-            anchor.addEventListener('keydown', handleKeyDown);
-        });
+        initializeTabs(document);
     });
 }
 
 // Export for testing
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { openTab, handleKeyDown };
+    module.exports = { openTab, handleKeyDown, initializeTabs };
 }

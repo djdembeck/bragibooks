@@ -1,6 +1,6 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
-const { openTab, handleKeyDown } = require('./book_tabs.js');
+const { openTab, handleKeyDown, initializeTabs } = require('./book_tabs.js');
 
 // Mock classes for DOM testing
 class MockClassList {
@@ -697,7 +697,15 @@ describe('handleKeyDown', () => {
 
     it('should not call openTab for unhandled keys', () => {
         const mockDoc = new MockDocument();
-        const openTabCalls = [];
+
+        const donePane = new MockElement('div');
+        donePane.classList.add('tab-pane');
+        donePane.style.display = 'none';
+        mockDoc.setElement('done', donePane);
+
+        const doneButton = new MockElement('li');
+        doneButton.classList.add('tab');
+        mockDoc.setElement('done-tab', doneButton);
 
         const tab1 = new MockElement('li');
         tab1.classList.add('tab');
@@ -713,17 +721,10 @@ describe('handleKeyDown', () => {
         try {
             global.document = mockDoc;
 
-            const originalOpenTab = global.openTab;
-            global.openTab = (event, tabId, userInitiated) => {
-                openTabCalls.push({ tabId, userInitiated });
-            };
-
             const event = { key: 'Enter', preventDefault: () => {} };
             handleKeyDown(event);
 
-            assert.strictEqual(openTabCalls.length, 0, 'openTab should not be called for unhandled keys');
-
-            global.openTab = originalOpenTab;
+            assert.strictEqual(donePane.style.display, 'none', 'Tab pane should remain hidden for unhandled keys');
         } finally {
             global.document = originalDoc;
         }
@@ -731,7 +732,15 @@ describe('handleKeyDown', () => {
 
     it('should return early when active element is not a tab anchor', () => {
         const mockDoc = new MockDocument();
-        const openTabCalls = [];
+
+        const donePane = new MockElement('div');
+        donePane.classList.add('tab-pane');
+        donePane.style.display = 'none';
+        mockDoc.setElement('done', donePane);
+
+        const doneButton = new MockElement('li');
+        doneButton.classList.add('tab');
+        mockDoc.setElement('done-tab', doneButton);
 
         const tab1 = new MockElement('li');
         tab1.classList.add('tab');
@@ -741,23 +750,16 @@ describe('handleKeyDown', () => {
         tab1.appendChild(anchor1);
 
         mockDoc.addMockElement(tab1);
-        mockDoc._activeElement = new MockElement('div'); // Not a tab anchor
+        mockDoc._activeElement = new MockElement('div');
 
         const originalDoc = global.document;
         try {
             global.document = mockDoc;
 
-            const originalOpenTab = global.openTab;
-            global.openTab = () => {
-                openTabCalls.push({});
-            };
-
             const event = { key: 'ArrowRight', preventDefault: () => {} };
             handleKeyDown(event);
 
-            assert.strictEqual(openTabCalls.length, 0, 'openTab should not be called when active element is not a tab anchor');
-
-            global.openTab = originalOpenTab;
+            assert.strictEqual(donePane.style.display, 'none', 'Tab pane should remain hidden when active element is not a tab anchor');
         } finally {
             global.document = originalDoc;
         }
@@ -773,7 +775,6 @@ describe('handleKeyDown', () => {
         tab1.classList.add('tab');
         const anchor1 = new MockElement('a');
         anchor1.setAttribute('role', 'tab');
-        // No aria-controls attribute!
         tab1.appendChild(anchor1);
 
         mockDoc.addMockElement(tab1);
@@ -788,10 +789,9 @@ describe('handleKeyDown', () => {
 
             assert.strictEqual(warnings.length, 1, 'Should log one warning');
             assert.ok(warnings[0].includes('missing aria-controls attribute'), 'Warning should mention missing aria-controls');
-
-            console.warn = originalWarn;
         } finally {
             global.document = originalDoc;
+            console.warn = originalWarn;
         }
     });
 
@@ -834,15 +834,12 @@ describe('handleKeyDown', () => {
 describe('window load initialization', () => {
     it('should use data-default attribute value when present', () => {
         const mockDoc = new MockDocument();
-        const openTabCalls = [];
 
-        // Create tabs container with data-default
         const tabsContainer = new MockElement('div');
         tabsContainer.classList.add('tabs');
         tabsContainer.dataset.default = '#processing';
         mockDoc.addMockElement(tabsContainer);
 
-        // Create tab panes and buttons
         const donePane = new MockElement('div');
         donePane.classList.add('tab-pane');
         mockDoc.setElement('done', donePane);
@@ -857,7 +854,6 @@ describe('window load initialization', () => {
         processingButton.classList.add('tab');
         mockDoc.setElement('processing-tab', processingButton);
 
-        // Create tab anchors
         const doneTab = new MockElement('li');
         doneTab.classList.add('tab');
         const doneAnchor = new MockElement('a');
@@ -876,25 +872,14 @@ describe('window load initialization', () => {
         mockDoc.addMockElement(processingTab);
 
         const originalDoc = global.document;
-        const originalOpenTab = global.openTab;
-
         try {
             global.document = mockDoc;
-            global.openTab = (event, tabId, userInitiated) => {
-                openTabCalls.push({ tabId, userInitiated });
-            };
 
-            // Simulate the window load handler
-            const tabsContainerFromDoc = document.querySelector(".tabs");
-            let defaultTab;
-
-            if (tabsContainerFromDoc && tabsContainerFromDoc.dataset.default) {
-                defaultTab = tabsContainerFromDoc.dataset.default.replace(/^#/, "");
-            }
+            const defaultTab = initializeTabs(mockDoc);
 
             assert.strictEqual(defaultTab, 'processing', 'Should extract tab id from data-default without hash');
-
-            global.openTab = originalOpenTab;
+            assert.strictEqual(processingPane.style.display, 'block', 'Processing pane should be visible');
+            assert.strictEqual(processingButton.classList.contains('is-active'), true, 'Processing button should be active');
         } finally {
             global.document = originalDoc;
         }
@@ -903,12 +888,17 @@ describe('window load initialization', () => {
     it('should fallback to first tab aria-controls when data-default is missing', () => {
         const mockDoc = new MockDocument();
 
-        // Create tabs container without data-default
         const tabsContainer = new MockElement('div');
         tabsContainer.classList.add('tabs');
         mockDoc.addMockElement(tabsContainer);
 
-        // Create first tab with aria-controls on the tab element itself
+        const errorPane = new MockElement('div');
+        errorPane.classList.add('tab-pane');
+        mockDoc.setElement('error', errorPane);
+        const errorButton = new MockElement('li');
+        errorButton.classList.add('tab');
+        mockDoc.setElement('error-tab', errorButton);
+
         const firstTab = new MockElement('li');
         firstTab.classList.add('tab');
         firstTab.setAttribute('aria-controls', '#error');
@@ -918,22 +908,11 @@ describe('window load initialization', () => {
         try {
             global.document = mockDoc;
 
-            const tabsContainerFromDoc = document.querySelector(".tabs");
-            let defaultTab;
-
-            if (tabsContainerFromDoc && tabsContainerFromDoc.dataset.default) {
-                defaultTab = tabsContainerFromDoc.dataset.default.replace(/^#/, "");
-            } else {
-                const firstTabButton = document.querySelector(".tab");
-                if (firstTabButton) {
-                    let ariaControls = firstTabButton.getAttribute("aria-controls");
-                    if (ariaControls) {
-                        defaultTab = ariaControls.replace(/^#/, "");
-                    }
-                }
-            }
+            const defaultTab = initializeTabs(mockDoc);
 
             assert.strictEqual(defaultTab, 'error', 'Should fallback to first tab aria-controls');
+            assert.strictEqual(errorPane.style.display, 'block', 'Error pane should be visible');
+            assert.strictEqual(errorButton.classList.contains('is-active'), true, 'Error button should be active');
         } finally {
             global.document = originalDoc;
         }
@@ -942,12 +921,17 @@ describe('window load initialization', () => {
     it('should fallback to id.replace("-tab", "") when no aria-controls', () => {
         const mockDoc = new MockDocument();
 
-        // Create tabs container without data-default
         const tabsContainer = new MockElement('div');
         tabsContainer.classList.add('tabs');
         mockDoc.addMockElement(tabsContainer);
 
-        // Create first tab without aria-controls but with id
+        const donePane = new MockElement('div');
+        donePane.classList.add('tab-pane');
+        mockDoc.setElement('done', donePane);
+        const doneButton = new MockElement('li');
+        doneButton.classList.add('tab');
+        mockDoc.setElement('done-tab', doneButton);
+
         const firstTab = new MockElement('li');
         firstTab.classList.add('tab');
         firstTab.id = 'done-tab';
@@ -957,31 +941,11 @@ describe('window load initialization', () => {
         try {
             global.document = mockDoc;
 
-            const tabsContainerFromDoc = document.querySelector(".tabs");
-            let defaultTab;
-
-            if (tabsContainerFromDoc && tabsContainerFromDoc.dataset.default) {
-                defaultTab = tabsContainerFromDoc.dataset.default.replace(/^#/, "");
-            } else {
-                const firstTabButton = document.querySelector(".tab");
-                if (firstTabButton) {
-                    let ariaControls = firstTabButton.getAttribute("aria-controls");
-                    if (!ariaControls) {
-                        const anchorWithControls = firstTabButton.querySelector('[aria-controls]');
-                        if (anchorWithControls) {
-                            ariaControls = anchorWithControls.getAttribute("aria-controls");
-                        }
-                    }
-                    if (ariaControls) {
-                        defaultTab = ariaControls.replace(/^#/, "");
-                    } else {
-                        const parsed = firstTabButton.id.replace("-tab", "");
-                        defaultTab = parsed || "done";
-                    }
-                }
-            }
+            const defaultTab = initializeTabs(mockDoc);
 
             assert.strictEqual(defaultTab, 'done', 'Should parse tab id from element id');
+            assert.strictEqual(donePane.style.display, 'block', 'Done pane should be visible');
+            assert.strictEqual(doneButton.classList.contains('is-active'), true, 'Done button should be active');
         } finally {
             global.document = originalDoc;
         }
@@ -989,42 +953,23 @@ describe('window load initialization', () => {
 
     it('should use "done" as final fallback when no tabs container exists', () => {
         const mockDoc = new MockDocument();
-        // No tabs container added
+
+        const donePane = new MockElement('div');
+        donePane.classList.add('tab-pane');
+        mockDoc.setElement('done', donePane);
+        const doneButton = new MockElement('li');
+        doneButton.classList.add('tab');
+        mockDoc.setElement('done-tab', doneButton);
 
         const originalDoc = global.document;
         try {
             global.document = mockDoc;
 
-            const tabsContainerFromDoc = document.querySelector(".tabs");
-            let defaultTab;
-
-            if (tabsContainerFromDoc && tabsContainerFromDoc.dataset.default) {
-                defaultTab = tabsContainerFromDoc.dataset.default.replace(/^#/, "");
-            } else {
-                if (!tabsContainerFromDoc) {
-                    // Would log warning here
-                }
-                const firstTabButton = document.querySelector(".tab");
-                if (firstTabButton) {
-                    let ariaControls = firstTabButton.getAttribute("aria-controls");
-                    if (!ariaControls) {
-                        const anchorWithControls = firstTabButton.querySelector('[aria-controls]');
-                        if (anchorWithControls) {
-                            ariaControls = anchorWithControls.getAttribute("aria-controls");
-                        }
-                    }
-                    if (ariaControls) {
-                        defaultTab = ariaControls.replace(/^#/, "");
-                    } else {
-                        const parsed = firstTabButton.id.replace("-tab", "");
-                        defaultTab = parsed || "done";
-                    }
-                } else {
-                    defaultTab = "done";
-                }
-            }
+            const defaultTab = initializeTabs(mockDoc);
 
             assert.strictEqual(defaultTab, 'done', 'Should use "done" as final fallback');
+            assert.strictEqual(donePane.style.display, 'block', 'Done pane should be visible');
+            assert.strictEqual(doneButton.classList.contains('is-active'), true, 'Done button should be active');
         } finally {
             global.document = originalDoc;
         }
@@ -1033,12 +978,17 @@ describe('window load initialization', () => {
     it('should extract aria-controls from nested anchor when tab lacks it', () => {
         const mockDoc = new MockDocument();
 
-        // Create tabs container
         const tabsContainer = new MockElement('div');
         tabsContainer.classList.add('tabs');
         mockDoc.addMockElement(tabsContainer);
 
-        // Create first tab without aria-controls on li, but anchor has it
+        const processingPane = new MockElement('div');
+        processingPane.classList.add('tab-pane');
+        mockDoc.setElement('processing', processingPane);
+        const processingButton = new MockElement('li');
+        processingButton.classList.add('tab');
+        mockDoc.setElement('processing-tab', processingButton);
+
         const firstTab = new MockElement('li');
         firstTab.classList.add('tab');
         const anchor = new MockElement('a');
@@ -1050,28 +1000,11 @@ describe('window load initialization', () => {
         try {
             global.document = mockDoc;
 
-            const tabsContainerFromDoc = document.querySelector(".tabs");
-            let defaultTab;
-
-            if (tabsContainerFromDoc && tabsContainerFromDoc.dataset.default) {
-                defaultTab = tabsContainerFromDoc.dataset.default.replace(/^#/, "");
-            } else {
-                const firstTabButton = document.querySelector(".tab");
-                if (firstTabButton) {
-                    let ariaControls = firstTabButton.getAttribute("aria-controls");
-                    if (!ariaControls) {
-                        const anchorWithControls = firstTabButton.querySelector('[aria-controls]');
-                        if (anchorWithControls) {
-                            ariaControls = anchorWithControls.getAttribute("aria-controls");
-                        }
-                    }
-                    if (ariaControls) {
-                        defaultTab = ariaControls.replace(/^#/, "");
-                    }
-                }
-            }
+            const defaultTab = initializeTabs(mockDoc);
 
             assert.strictEqual(defaultTab, 'processing', 'Should extract aria-controls from nested anchor');
+            assert.strictEqual(processingPane.style.display, 'block', 'Processing pane should be visible');
+            assert.strictEqual(processingButton.classList.contains('is-active'), true, 'Processing button should be active');
         } finally {
             global.document = originalDoc;
         }

@@ -267,9 +267,10 @@ describe('hideLoadingOverlay', () => {
         assert.doesNotThrow(() => hideLoadingOverlay(mockDoc));
     });
 
-    it('should not throw error when element has no style property', () => {
+    it('should not throw error when pre-loader element lacks parentNode', () => {
         const mockDoc = new MockDocument();
-        mockDoc.setElement('loading-overlay', {});
+        const preLoader = new MockElement();
+        mockDoc.setElement('pre-loader', preLoader);
         assert.doesNotThrow(() => hideLoadingOverlay(mockDoc));
     });
 });
