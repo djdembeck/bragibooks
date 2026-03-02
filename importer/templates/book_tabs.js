@@ -68,8 +68,9 @@ function handleKeyDown(event) {
 
     event.preventDefault();
     const nextTab = tabAnchors[nextIndex];
-    const tabId = nextTab.getAttribute('aria-controls');
-    if (tabId) {
+    const tabIdRaw = nextTab.getAttribute('aria-controls');
+    if (tabIdRaw) {
+        const tabId = tabIdRaw.replace(/^#/, "");
         openTab({ preventDefault: () => {} }, tabId, true);
     } else {
         console.warn(`Tab anchor at index ${nextIndex} missing aria-controls attribute`);
@@ -81,7 +82,7 @@ window.addEventListener('load', function () {
     let defaultTab;
 
     if (tabsContainer && tabsContainer.dataset.default) {
-        defaultTab = tabsContainer.dataset.default;
+        defaultTab = tabsContainer.dataset.default.replace(/^#/, "");
     } else {
         if (!tabsContainer) {
             console.warn(".tabs container not found, using fallback tab");
@@ -90,13 +91,16 @@ window.addEventListener('load', function () {
         }
         const firstTabButton = document.querySelector(".tab");
         if (firstTabButton) {
-            // Prefer aria-controls for pane name derivation
             let ariaControls = firstTabButton.getAttribute("aria-controls");
+            if (!ariaControls) {
+                const anchorWithControls = firstTabButton.querySelector('[aria-controls]');
+                if (anchorWithControls) {
+                    ariaControls = anchorWithControls.getAttribute("aria-controls");
+                }
+            }
             if (ariaControls) {
-                // Strip leading "#" if present
                 defaultTab = ariaControls.replace(/^#/, "");
             } else {
-                // Fall back to id parsing
                 const parsed = firstTabButton.id.replace("-tab", "");
                 defaultTab = parsed || "done";
             }
