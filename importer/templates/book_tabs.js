@@ -4,7 +4,13 @@ function openTab(event, tabId, userInitiated = false) {
     }
 
     // Normalize tabId by stripping leading '#' characters
-    const normalizedId = tabId && tabId.toString().replace(/^#/, '');
+    const normalizedId = tabId && tabId.toString().replace(/^#/, '').trim();
+
+    // Guard against blank or whitespace-only tab IDs
+    if (!normalizedId) {
+        console.warn(`Tab ID is blank or whitespace-only: '${tabId}'`);
+        return;
+    }
 
     // Validate target tab elements before clearing/hiding other panes
     const tabElem = document.getElementById(normalizedId);
@@ -119,7 +125,10 @@ function initializeTabs(doc = document) {
 
     const tabAnchors = doc.querySelectorAll('.tab a[role="tab"]');
     tabAnchors.forEach(anchor => {
-        anchor.addEventListener('keydown', handleKeyDown);
+        if (!anchor.dataset.keydownBound) {
+            anchor.addEventListener('keydown', handleKeyDown);
+            anchor.dataset.keydownBound = 'true';
+        }
     });
 
     return defaultTab;

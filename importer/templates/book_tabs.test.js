@@ -880,6 +880,8 @@ describe('window load initialization', () => {
             assert.strictEqual(defaultTab, 'processing', 'Should extract tab id from data-default without hash');
             assert.strictEqual(processingPane.style.display, 'block', 'Processing pane should be visible');
             assert.strictEqual(processingButton.classList.contains('is-active'), true, 'Processing button should be active');
+            assert.strictEqual(doneAnchor.eventListeners.has('keydown'), true, 'Keydown listener should be registered on tab anchors');
+            assert.strictEqual(processingAnchor.eventListeners.has('keydown'), true, 'Keydown listener should be registered on all tab anchors');
         } finally {
             global.document = originalDoc;
         }
