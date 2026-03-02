@@ -2,6 +2,39 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const { openTab, handleKeyDown, initializeTabs } = require('./book_tabs.js');
 
+function buildQuerySelectorAllResults(selector, rootChildren) {
+    const results = [];
+    if (selector === '.tab') {
+        for (const child of rootChildren) {
+            if (child.classList && child.classList.contains('tab')) results.push(child);
+        }
+        return results;
+    }
+    if (selector === '.tab-pane') {
+        for (const child of rootChildren) {
+            if (child.classList && child.classList.contains('tab-pane')) results.push(child);
+        }
+        return results;
+    }
+    if (selector === '.tab a[role="tab"]') {
+        for (const tab of rootChildren) {
+            if (tab.classList && tab.classList.contains('tab')) {
+                for (const child of tab.children) {
+                    if (child.getAttribute('role') === 'tab') results.push(child);
+                }
+            }
+        }
+        return results;
+    }
+    if (selector === '.tabs') {
+        for (const child of rootChildren) {
+            if (child.classList && child.classList.contains('tabs')) results.push(child);
+        }
+        return results;
+    }
+    return results;
+}
+
 // Mock classes for DOM testing
 class MockClassList {
     constructor(parent) {
@@ -75,36 +108,7 @@ class MockElement {
     }
 
     querySelectorAll(selector) {
-        const results = [];
-        if (selector === '.tab') {
-            for (const child of this.children) {
-                if (child.classList && child.classList.contains('tab')) results.push(child);
-            }
-            return results;
-        }
-        if (selector === '.tab-pane') {
-            for (const child of this.children) {
-                if (child.classList && child.classList.contains('tab-pane')) results.push(child);
-            }
-            return results;
-        }
-        if (selector === '.tab a[role="tab"]') {
-            for (const tab of this.children) {
-                if (tab.classList && tab.classList.contains('tab')) {
-                    for (const child of tab.children) {
-                        if (child.getAttribute('role') === 'tab') results.push(child);
-                    }
-                }
-            }
-            return results;
-        }
-        if (selector === '.tabs') {
-            for (const child of this.children) {
-                if (child.classList && child.classList.contains('tabs')) results.push(child);
-            }
-            return results;
-        }
-        return results;
+        return buildQuerySelectorAllResults(selector, this.children);
     }
 
     appendChild(child) {
@@ -163,36 +167,7 @@ class MockDocument {
     }
 
     querySelectorAll(selector) {
-        const results = [];
-        if (selector === '.tab') {
-            for (const el of this._mockElements) {
-                if (el.classList && el.classList.contains('tab')) results.push(el);
-            }
-            return results;
-        }
-        if (selector === '.tab-pane') {
-            for (const el of this._mockElements) {
-                if (el.classList && el.classList.contains('tab-pane')) results.push(el);
-            }
-            return results;
-        }
-        if (selector === '.tab a[role="tab"]') {
-            for (const el of this._mockElements) {
-                if (el.classList && el.classList.contains('tab')) {
-                    for (const child of el.children) {
-                        if (child.getAttribute('role') === 'tab') results.push(child);
-                    }
-                }
-            }
-            return results;
-        }
-        if (selector === '.tabs') {
-            for (const el of this._mockElements) {
-                if (el.classList && el.classList.contains('tabs')) results.push(el);
-            }
-            return results;
-        }
-        return results;
+        return buildQuerySelectorAllResults(selector, this._mockElements);
     }
 
     addMockElement(element) { this._mockElements.push(element); }

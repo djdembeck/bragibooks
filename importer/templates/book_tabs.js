@@ -1,20 +1,17 @@
-function openTab(event, tabId, userInitiated = false) {
+function openTab(event, tabId, userInitiated = false, doc = document) {
     if (event && typeof event.preventDefault === 'function') {
         event.preventDefault();
     }
 
-    // Normalize tabId by stripping leading '#' characters
     const normalizedId = tabId && tabId.toString().trim().replace(/^#/, '');
 
-    // Guard against blank or whitespace-only tab IDs
     if (!normalizedId) {
         console.warn(`Tab ID is blank or whitespace-only: '${tabId}'`);
         return;
     }
 
-    // Validate target tab elements before clearing/hiding other panes
-    const tabElem = document.getElementById(normalizedId);
-    const tabButton = document.getElementById(`${normalizedId}-tab`);
+    const tabElem = doc.getElementById(normalizedId);
+    const tabButton = doc.getElementById(`${normalizedId}-tab`);
     if (!tabElem) {
         console.warn(`Tab element with id '${normalizedId}' not found`);
         return;
@@ -24,12 +21,12 @@ function openTab(event, tabId, userInitiated = false) {
         return;
     }
 
-    const tabLinks = document.querySelectorAll(".tab");
+    const tabLinks = doc.querySelectorAll(".tab");
     tabLinks.forEach(tab => {
         tab.classList.remove("is-active");
     });
 
-    const tabPanes = document.querySelectorAll(".tab-pane");
+    const tabPanes = doc.querySelectorAll(".tab-pane");
     tabPanes.forEach(pane => {
         pane.style.display = "none";
     });
@@ -37,7 +34,7 @@ function openTab(event, tabId, userInitiated = false) {
     tabElem.style.display = "block";
     tabButton.classList.add("is-active");
 
-    const tabAnchors = document.querySelectorAll('.tab a[role="tab"]');
+    const tabAnchors = doc.querySelectorAll('.tab a[role="tab"]');
     tabAnchors.forEach(anchor => {
         const anchorControls = anchor.getAttribute('aria-controls');
         const normalizedAnchorControls = anchorControls && anchorControls.trim().replace(/^#/, '');
@@ -54,9 +51,9 @@ function openTab(event, tabId, userInitiated = false) {
     });
 }
 
-function handleKeyDown(event) {
-    const tabAnchors = Array.from(document.querySelectorAll('.tab a[role="tab"]'));
-    const currentIndex = tabAnchors.indexOf(document.activeElement);
+function handleKeyDown(event, doc = document) {
+    const tabAnchors = Array.from(doc.querySelectorAll('.tab a[role="tab"]'));
+    const currentIndex = tabAnchors.indexOf(doc.activeElement);
 
     if (currentIndex === -1 || tabAnchors.length === 0) return;
 
@@ -84,7 +81,7 @@ function handleKeyDown(event) {
     const tabIdRaw = nextTab.getAttribute('aria-controls');
     if (tabIdRaw) {
         const tabId = tabIdRaw.trim().replace(/^#/, "");
-        openTab({ preventDefault: () => {} }, tabId, true);
+        openTab({ preventDefault: () => {} }, tabId, true, doc);
     } else {
         console.warn(`Tab anchor at index ${nextIndex} missing aria-controls attribute`);
     }
@@ -96,7 +93,12 @@ function initializeTabs(doc = document) {
 
     if (tabsContainer && tabsContainer.dataset.default) {
         defaultTab = tabsContainer.dataset.default.trim().replace(/^#/, "");
-    } else {
+        // Guard against blank or whitespace-only values after normalization
+        if (!defaultTab) {
+            console.warn("data-default normalized to empty, using fallback tab");
+        }
+    }
+    if (!defaultTab) {
         if (!tabsContainer) {
             console.warn(".tabs container not found, using fallback tab");
         } else {
@@ -121,12 +123,12 @@ function initializeTabs(doc = document) {
             defaultTab = "done";
         }
     }
-    openTab({ preventDefault: () => {} }, defaultTab, false);
+    openTab({ preventDefault: () => {} }, defaultTab, false, doc);
 
     const tabAnchors = doc.querySelectorAll('.tab a[role="tab"]');
     tabAnchors.forEach(anchor => {
         if (!anchor.dataset.keydownBound) {
-            anchor.addEventListener('keydown', handleKeyDown);
+            anchor.addEventListener('keydown', (e) => handleKeyDown(e, doc));
             anchor.dataset.keydownBound = 'true';
         }
     });
