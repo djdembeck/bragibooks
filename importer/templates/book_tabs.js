@@ -87,40 +87,44 @@ function handleKeyDown(event, doc = document) {
     }
 }
 
+function resolveDefaultTab(tabsContainer, doc) {
+    const firstTabButton = doc.querySelector(".tab");
+    if (firstTabButton) {
+        let ariaControls = firstTabButton.getAttribute("aria-controls");
+        if (!ariaControls) {
+            const anchorWithControls = firstTabButton.querySelector('[aria-controls]');
+            if (anchorWithControls) {
+                ariaControls = anchorWithControls.getAttribute("aria-controls");
+            }
+        }
+        if (ariaControls) {
+            return ariaControls.trim().replace(/^#/, "");
+        } else {
+            const parsed = firstTabButton.id.replace("-tab", "");
+            return parsed || "done";
+        }
+    }
+    return "done";
+}
+
 function initializeTabs(doc = document) {
     const tabsContainer = doc.querySelector(".tabs");
     let defaultTab;
 
     if (tabsContainer && tabsContainer.dataset.default) {
         defaultTab = tabsContainer.dataset.default.trim().replace(/^#/, "");
-        // Guard against blank or whitespace-only values after normalization
+        // Guard against blank or whitespace-only values after normalization - treat same as missing
         if (!defaultTab) {
             console.warn("data-default normalized to empty, using fallback tab");
+            defaultTab = resolveDefaultTab(tabsContainer, doc);
         }
-    } else if (!defaultTab) {
+    } else {
         if (!tabsContainer) {
             console.warn(".tabs container not found, using fallback tab");
         } else {
             console.warn("data-default attribute missing or empty, using fallback tab");
         }
-        const firstTabButton = doc.querySelector(".tab");
-        if (firstTabButton) {
-            let ariaControls = firstTabButton.getAttribute("aria-controls");
-            if (!ariaControls) {
-                const anchorWithControls = firstTabButton.querySelector('[aria-controls]');
-                if (anchorWithControls) {
-                    ariaControls = anchorWithControls.getAttribute("aria-controls");
-                }
-            }
-            if (ariaControls) {
-                defaultTab = ariaControls.trim().replace(/^#/, "");
-            } else {
-                const parsed = firstTabButton.id.replace("-tab", "");
-                defaultTab = parsed || "done";
-            }
-        } else {
-            defaultTab = "done";
-        }
+        defaultTab = resolveDefaultTab(tabsContainer, doc);
     }
     openTab({ preventDefault: () => {} }, defaultTab, false, doc);
 
