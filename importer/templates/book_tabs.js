@@ -97,8 +97,7 @@ function initializeTabs(doc = document) {
         if (!defaultTab) {
             console.warn("data-default normalized to empty, using fallback tab");
         }
-    }
-    if (!defaultTab) {
+    } else if (!defaultTab) {
         if (!tabsContainer) {
             console.warn(".tabs container not found, using fallback tab");
         } else {
