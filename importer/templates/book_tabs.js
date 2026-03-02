@@ -4,7 +4,7 @@ function openTab(event, tabId, userInitiated = false) {
     }
 
     // Normalize tabId by stripping leading '#' characters
-    const normalizedId = tabId && tabId.toString().replace(/^#/, '').trim();
+    const normalizedId = tabId && tabId.toString().trim().replace(/^#/, '');
 
     // Guard against blank or whitespace-only tab IDs
     if (!normalizedId) {
@@ -40,7 +40,7 @@ function openTab(event, tabId, userInitiated = false) {
     const tabAnchors = document.querySelectorAll('.tab a[role="tab"]');
     tabAnchors.forEach(anchor => {
         const anchorControls = anchor.getAttribute('aria-controls');
-        const normalizedAnchorControls = anchorControls && anchorControls.replace(/^#/, '');
+        const normalizedAnchorControls = anchorControls && anchorControls.trim().replace(/^#/, '');
         if (normalizedAnchorControls === normalizedId) {
             anchor.setAttribute('aria-selected', 'true');
             anchor.setAttribute('tabindex', '0');
@@ -83,7 +83,7 @@ function handleKeyDown(event) {
     const nextTab = tabAnchors[nextIndex];
     const tabIdRaw = nextTab.getAttribute('aria-controls');
     if (tabIdRaw) {
-        const tabId = tabIdRaw.replace(/^#/, "");
+        const tabId = tabIdRaw.trim().replace(/^#/, "");
         openTab({ preventDefault: () => {} }, tabId, true);
     } else {
         console.warn(`Tab anchor at index ${nextIndex} missing aria-controls attribute`);
@@ -95,7 +95,7 @@ function initializeTabs(doc = document) {
     let defaultTab;
 
     if (tabsContainer && tabsContainer.dataset.default) {
-        defaultTab = tabsContainer.dataset.default.replace(/^#/, "");
+        defaultTab = tabsContainer.dataset.default.trim().replace(/^#/, "");
     } else {
         if (!tabsContainer) {
             console.warn(".tabs container not found, using fallback tab");
@@ -112,7 +112,7 @@ function initializeTabs(doc = document) {
                 }
             }
             if (ariaControls) {
-                defaultTab = ariaControls.replace(/^#/, "");
+                defaultTab = ariaControls.trim().replace(/^#/, "");
             } else {
                 const parsed = firstTabButton.id.replace("-tab", "");
                 defaultTab = parsed || "done";

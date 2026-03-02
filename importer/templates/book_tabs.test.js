@@ -137,6 +137,10 @@ class MockDocument {
     setElement(id, element) {
         this.elements.set(id, element);
         element.id = id;
+        // Also register in _mockElements so querySelectorAll('.tab') and querySelectorAll('.tab-pane') can find it
+        if (!this._mockElements.includes(element)) {
+            this._mockElements.push(element);
+        }
     }
 
     get activeElement() { return this._activeElement; }
