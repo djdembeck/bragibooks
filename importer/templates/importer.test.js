@@ -254,12 +254,12 @@ after(() => {
 });
 
 describe('hideLoadingOverlay', () => {
-    it('should set loading-overlay display to none when element exists', () => {
+    it('should add hidden class to pre-loader when element exists', () => {
         const mockDoc = new MockDocument();
-        const loadingOverlay = new MockElement();
-        mockDoc.setElement('loading-overlay', loadingOverlay);
+        const preLoader = new MockElement();
+        mockDoc.setElement('pre-loader', preLoader);
         hideLoadingOverlay(mockDoc);
-        assert.strictEqual(loadingOverlay.style.display, 'none');
+        assert.strictEqual(preLoader.classList.contains('hidden'), true);
     });
 
     it('should not throw error when loading-overlay element does not exist', () => {

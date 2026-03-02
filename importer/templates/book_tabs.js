@@ -3,6 +3,18 @@ function openTab(event, tabId, userInitiated = false) {
         event.preventDefault();
     }
 
+    // Validate target tab elements before clearing/hiding other panes
+    const tabElem = document.getElementById(tabId);
+    const tabButton = document.getElementById(`${tabId}-tab`);
+    if (!tabElem) {
+        console.warn(`Tab element with id '${tabId}' not found`);
+        return;
+    }
+    if (!tabButton) {
+        console.warn(`Tab button with id '${tabId}-tab' not found`);
+        return;
+    }
+
     const tabLinks = document.querySelectorAll(".tab");
     tabLinks.forEach(tab => {
         tab.classList.remove("is-active");
@@ -13,18 +25,8 @@ function openTab(event, tabId, userInitiated = false) {
         pane.style.display = "none";
     });
 
-    const tabElem = document.getElementById(tabId);
-    const tabButton = document.getElementById(`${tabId}-tab`);
-    if (tabElem) {
-        tabElem.style.display = "block";
-    } else {
-        console.warn(`Tab element with id '${tabId}' not found`);
-    }
-    if (tabButton) {
-        tabButton.classList.add("is-active");
-    } else {
-        console.warn(`Tab button with id '${tabId}-tab' not found`);
-    }
+    tabElem.style.display = "block";
+    tabButton.classList.add("is-active");
 
     const tabAnchors = document.querySelectorAll('.tab a[role="tab"]');
     tabAnchors.forEach(anchor => {
@@ -77,41 +79,49 @@ function handleKeyDown(event) {
     }
 }
 
-window.addEventListener('load', function () {
-    const tabsContainer = document.querySelector(".tabs");
-    let defaultTab;
+// Browser-only initialization (skipped during Node.js testing)
+if (typeof window !== 'undefined') {
+    window.addEventListener('load', function () {
+        const tabsContainer = document.querySelector(".tabs");
+        let defaultTab;
 
-    if (tabsContainer && tabsContainer.dataset.default) {
-        defaultTab = tabsContainer.dataset.default.replace(/^#/, "");
-    } else {
-        if (!tabsContainer) {
-            console.warn(".tabs container not found, using fallback tab");
+        if (tabsContainer && tabsContainer.dataset.default) {
+            defaultTab = tabsContainer.dataset.default.replace(/^#/, "");
         } else {
-            console.warn("data-default attribute missing or empty, using fallback tab");
-        }
-        const firstTabButton = document.querySelector(".tab");
-        if (firstTabButton) {
-            let ariaControls = firstTabButton.getAttribute("aria-controls");
-            if (!ariaControls) {
-                const anchorWithControls = firstTabButton.querySelector('[aria-controls]');
-                if (anchorWithControls) {
-                    ariaControls = anchorWithControls.getAttribute("aria-controls");
-                }
-            }
-            if (ariaControls) {
-                defaultTab = ariaControls.replace(/^#/, "");
+            if (!tabsContainer) {
+                console.warn(".tabs container not found, using fallback tab");
             } else {
-                const parsed = firstTabButton.id.replace("-tab", "");
-                defaultTab = parsed || "done";
+                console.warn("data-default attribute missing or empty, using fallback tab");
             }
-        } else {
-            defaultTab = "done";
+            const firstTabButton = document.querySelector(".tab");
+            if (firstTabButton) {
+                let ariaControls = firstTabButton.getAttribute("aria-controls");
+                if (!ariaControls) {
+                    const anchorWithControls = firstTabButton.querySelector('[aria-controls]');
+                    if (anchorWithControls) {
+                        ariaControls = anchorWithControls.getAttribute("aria-controls");
+                    }
+                }
+                if (ariaControls) {
+                    defaultTab = ariaControls.replace(/^#/, "");
+                } else {
+                    const parsed = firstTabButton.id.replace("-tab", "");
+                    defaultTab = parsed || "done";
+                }
+            } else {
+                defaultTab = "done";
+            }
         }
-    }
-    openTab({ preventDefault: () => {} }, defaultTab, false);
+        openTab({ preventDefault: () => {} }, defaultTab, false);
 
-    const tabAnchors = document.querySelectorAll('.tab a[role="tab"]');
-    tabAnchors.forEach(anchor => {
-        anchor.addEventListener('keydown', handleKeyDown);
+        const tabAnchors = document.querySelectorAll('.tab a[role="tab"]');
+        tabAnchors.forEach(anchor => {
+            anchor.addEventListener('keydown', handleKeyDown);
+        });
     });
-});
+}
+
+// Export for testing
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { openTab, handleKeyDown };
+}
