@@ -1,5 +1,7 @@
 function openTab(event, tabId, userInitiated = false) {
-    event.preventDefault();
+    if (event && typeof event.preventDefault === 'function') {
+        event.preventDefault();
+    }
 
     const tabLinks = document.querySelectorAll(".tab");
     tabLinks.forEach(tab => {
@@ -88,7 +90,16 @@ window.addEventListener('load', function () {
         }
         const firstTabButton = document.querySelector(".tab");
         if (firstTabButton) {
-            defaultTab = firstTabButton.id.replace("-tab", "");
+            // Prefer aria-controls for pane name derivation
+            let ariaControls = firstTabButton.getAttribute("aria-controls");
+            if (ariaControls) {
+                // Strip leading "#" if present
+                defaultTab = ariaControls.replace(/^#/, "");
+            } else {
+                // Fall back to id parsing
+                const parsed = firstTabButton.id.replace("-tab", "");
+                defaultTab = parsed || "done";
+            }
         } else {
             defaultTab = "done";
         }

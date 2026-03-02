@@ -279,6 +279,7 @@ class TestSubprocessMerge(TestCase):
         self.assertIn("Could not parse output path", str(context.exception))
 
 
+# ruff: noqa: PT009
 class TestSearchToolNormalizeName(TestCase):
     """Unit tests for SearchTool.normalize_name method."""
 
@@ -330,6 +331,12 @@ class TestSearchToolNormalizeName(TestCase):
         self.assertIn("book", result.lower())
         self.assertIn("title", result.lower())
         self.assertIn("edition", result.lower())
+
+    def test_normalize_name_preserves_year_only_title(self):
+        """Verify year-only titles are preserved when no other text exists."""
+        result = self.tool.normalize_name("1984")
+        self.assertTrue(result.strip(), "Result should not be blank")
+        self.assertIn("1984", result)
 
     def test_normalize_name_preserves_volume_indicators(self):
         """Verify volume/chapter indicators are preserved for series matching."""
