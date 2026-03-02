@@ -294,11 +294,11 @@ class TestSearchToolNormalizeName(TestCase):
         self.assertIn("great", result.lower())
         self.assertIn("book", result.lower())
 
-    def test_normalize_name_removes_part_indicators(self):
-        """Verify part/volume indicators are removed."""
+    def test_normalize_name_preserves_part_indicators(self):
+        """Verify part/volume indicators are preserved for series matching."""
         result = self.tool.normalize_name("Series Book Part 1 of 3")
-        self.assertNotIn("part 1", result.lower())
-        self.assertNotIn("of 3", result.lower())
+        self.assertIn("part 1", result.lower())
+        self.assertIn("of 3", result.lower())
         self.assertIn("series", result.lower())
         self.assertIn("book", result.lower())
 
@@ -331,11 +331,10 @@ class TestSearchToolNormalizeName(TestCase):
         self.assertIn("title", result.lower())
         self.assertIn("edition", result.lower())
 
-    def test_normalize_name_removes_volume_indicators(self):
-        """Verify volume/chapter indicators are removed."""
+    def test_normalize_name_preserves_volume_indicators(self):
+        """Verify volume/chapter indicators are preserved for series matching."""
         result = self.tool.normalize_name("Epic Saga Volume 2")
-        self.assertNotIn("volume 2", result.lower())
-        self.assertNotIn("vol 2", result.lower())
+        self.assertIn("volume 2", result.lower())
         self.assertIn("epic", result.lower())
         self.assertIn("saga", result.lower())
 
@@ -347,3 +346,45 @@ class TestSearchToolNormalizeName(TestCase):
         self.assertIn("great", result.lower())
         self.assertIn("book", result.lower())
         self.assertIn("sequel", result.lower())
+
+    def test_normalize_name_preserves_book_indicators(self):
+        """Verify book number indicators are preserved for series matching."""
+        result = self.tool.normalize_name("Harry Potter Book 1")
+        self.assertIn("book 1", result.lower())
+        self.assertIn("harry", result.lower())
+        self.assertIn("potter", result.lower())
+
+    def test_normalize_name_preserves_chapter_indicators(self):
+        """Verify chapter number indicators are preserved."""
+        result = self.tool.normalize_name("Epic Saga Chapter 12")
+        self.assertIn("chapter 12", result.lower())
+        self.assertIn("epic", result.lower())
+        self.assertIn("saga", result.lower())
+
+    def test_normalize_name_preserves_part_of_total(self):
+        """Verify part X of Y patterns are preserved."""
+        result = self.tool.normalize_name("Dune Part 1 of 3")
+        self.assertIn("part 1", result.lower())
+        self.assertIn("of 3", result.lower())
+        self.assertIn("dune", result.lower())
+
+    def test_normalize_name_preserves_vol_abbreviation(self):
+        """Verify vol abbreviation is preserved."""
+        result = self.tool.normalize_name("Series Vol 2")
+        self.assertIn("vol 2", result.lower())
+        self.assertIn("series", result.lower())
+
+    def test_normalize_name_preserves_large_numbers(self):
+        """Verify large book/part numbers are preserved."""
+        result = self.tool.normalize_name("Wheel of Time Book 14")
+        self.assertIn("book 14", result.lower())
+        self.assertIn("wheel", result.lower())
+        self.assertIn("time", result.lower())
+
+    def test_normalize_name_preserves_series_position_info(self):
+        """Verify series position info helps distinguish between books."""
+        result1 = self.tool.normalize_name("Dune Book 1")
+        result2 = self.tool.normalize_name("Dune Book 2")
+        self.assertIn("book 1", result1.lower())
+        self.assertIn("book 2", result2.lower())
+        self.assertNotEqual(result1, result2)

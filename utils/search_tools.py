@@ -90,13 +90,6 @@ class SearchTool:
             name,
             flags=re.IGNORECASE,
         )
-        # Remove part/volume/book/chapter indicators
-        name = re.sub(
-            r"\b(part|vol|volume|book|chapter)\s*\d+\s*(of\s*\d+)?\b",
-            "",
-            name,
-            flags=re.IGNORECASE,
-        )
         # Preserve original if year removal results in empty string
         name_before_year_removal = name
         name = re.sub(r"\b(19|20)\d{2}\b", "", name)

@@ -1,4 +1,4 @@
-function openTab(event, tabId) {
+function openTab(event, tabId, userInitiated = false) {
     event.preventDefault();
 
     const tabLinks = document.querySelectorAll(".tab");
@@ -29,7 +29,9 @@ function openTab(event, tabId) {
         if (anchor.getAttribute('aria-controls') === tabId) {
             anchor.setAttribute('aria-selected', 'true');
             anchor.setAttribute('tabindex', '0');
-            anchor.focus();
+            if (userInitiated) {
+                anchor.focus();
+            }
         } else {
             anchor.setAttribute('aria-selected', 'false');
             anchor.setAttribute('tabindex', '-1');
@@ -65,7 +67,11 @@ function handleKeyDown(event) {
     event.preventDefault();
     const nextTab = tabAnchors[nextIndex];
     const tabId = nextTab.getAttribute('aria-controls');
-    openTab({ preventDefault: () => {} }, tabId);
+    if (tabId) {
+        openTab({ preventDefault: () => {} }, tabId, true);
+    } else {
+        console.warn(`Tab anchor at index ${nextIndex} missing aria-controls attribute`);
+    }
 }
 
 window.addEventListener('load', function () {
@@ -87,7 +93,7 @@ window.addEventListener('load', function () {
             defaultTab = "done";
         }
     }
-    openTab({ preventDefault: () => {} }, defaultTab);
+    openTab({ preventDefault: () => {} }, defaultTab, false);
 
     const tabAnchors = document.querySelectorAll('.tab a[role="tab"]');
     tabAnchors.forEach(anchor => {
