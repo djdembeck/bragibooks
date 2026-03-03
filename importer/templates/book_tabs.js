@@ -76,7 +76,9 @@ function handleKeyDown(event, doc = document) {
             return;
     }
 
-    event.preventDefault();
+    if (event && typeof event.preventDefault === 'function') {
+        event.preventDefault();
+    }
     const nextTab = tabAnchors[nextIndex];
     const tabIdRaw = nextTab.getAttribute('aria-controls');
     if (tabIdRaw) {
