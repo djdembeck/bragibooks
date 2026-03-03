@@ -98,11 +98,13 @@ function resolveDefaultTab(tabsContainer, doc) {
             }
         }
         if (ariaControls) {
-            return ariaControls.trim().replace(/^#/, "");
-        } else {
-            const parsed = firstTabButton.id.replace("-tab", "");
-            return parsed || "done";
+            const normalized = ariaControls.trim().replace(/^#/, "");
+            if (normalized) {
+                return normalized;
+            }
         }
+        const parsed = firstTabButton.id.replace("-tab", "");
+        return parsed || "done";
     }
     return "done";
 }
@@ -126,6 +128,14 @@ function initializeTabs(doc = document) {
         }
         defaultTab = resolveDefaultTab(tabsContainer, doc);
     }
+
+    // Validate that defaultTab corresponds to an actual tab element before activation
+    const tabExists = doc.getElementById(defaultTab) && doc.getElementById(`${defaultTab}-tab`);
+    if (!tabExists) {
+        console.warn(`Tab '${defaultTab}' from data-default not found, using fallback tab`);
+        defaultTab = resolveDefaultTab(tabsContainer, doc);
+    }
+
     openTab({ preventDefault: () => {} }, defaultTab, false, doc);
 
     const tabAnchors = doc.querySelectorAll('.tab a[role="tab"]');
