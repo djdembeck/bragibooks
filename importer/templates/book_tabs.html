@@ -1,22 +1,22 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="box">
-    <div class="tabs is-fullwidth is-toggle" style="background: white;" data-default={{ default_view }}>
+    <div class="tabs is-fullwidth is-toggle" style="background: white;" data-default="{{ default_view }}" role="tablist">
         <ul>
-            <li class="tab is-active" id="done-tab" onclick="openTab('done')"><a aria-label="Done - {{ done_books|length }} book{{ done_books|length|pluralize }}">Done ({{ done_books|length }})</a></li>
-            <li class="tab" id="processing-tab" onclick="openTab('processing')"><a aria-label="Processing - {{ processing_books|length }} book{{ processing_books|length|pluralize }}">Processing ({{ processing_books|length }})</a></li>
-            <li class="tab" id="error-tab" onclick="openTab('error')"><a aria-label="Error - {{ error_books|length }} book{{ error_books|length|pluralize }}">Error ({{ error_books|length }})</a></li>
+            <li class="tab is-active" id="done-tab" onclick="openTab(event, 'done')"><a id="done-tab-anchor" role="tab" aria-selected="true" aria-controls="done" aria-label="Done - {{ done_books|length }} book{{ done_books|length|pluralize }}" href="#" tabindex="0">Done ({{ done_books|length }})</a></li>
+            <li class="tab" id="processing-tab" onclick="openTab(event, 'processing')"><a id="processing-tab-anchor" role="tab" aria-selected="false" aria-controls="processing" aria-label="Processing - {{ processing_books|length }} book{{ processing_books|length|pluralize }}" href="#" tabindex="-1">Processing ({{ processing_books|length }})</a></li>
+            <li class="tab" id="error-tab" onclick="openTab(event, 'error')"><a id="error-tab-anchor" role="tab" aria-selected="false" aria-controls="error" aria-label="Error - {{ error_books|length }} book{{ error_books|length|pluralize }}" href="#" tabindex="-1">Error ({{ error_books|length }})</a></li>
         </ul>
     </div>
 
     <div class="tab-content">
-        <div class="tab-pane" id="done">
+        <div class="tab-pane" id="done" role="tabpanel" aria-labelledby="done-tab-anchor">
             {% include "book_list.html" with books=done_books %}
         </div>
-        <div class="tab-pane" id="processing" style="display: none;">
+        <div class="tab-pane" id="processing" role="tabpanel" aria-labelledby="processing-tab-anchor" style="display: none;">
             {% include "book_list.html" with books=processing_books %}
         </div>
-        <div class="tab-pane" id="error" style="display: none;">
+        <div class="tab-pane" id="error" role="tabpanel" aria-labelledby="error-tab-anchor" style="display: none;">
             {% include "book_list.html" with books=error_books %}
         </div>
     </div>

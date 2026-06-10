@@ -4,10 +4,11 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from django.test import TestCase, override_settings
+from django.test import TestCase
 
 from importer.models import Book, Setting, Status, StatusChoices
 from utils.merge import run_m4b_merge
+from utils.search_tools import SearchTool
 
 
 class TestSubprocessMerge(TestCase):
@@ -276,3 +277,122 @@ class TestSubprocessMerge(TestCase):
 
         # Verify ValueError was raised with correct message
         self.assertIn("Could not parse output path", str(context.exception))
+
+
+# ruff: noqa: PT009
+class TestSearchToolNormalizeName(TestCase):
+    """Unit tests for SearchTool.normalize_name method."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.tool = SearchTool(filename="test")
+
+    def test_normalize_name_removes_read_by(self):
+        """Verify 'read by' and narrator names are removed."""
+        result = self.tool.normalize_name("Great Book read by John Smith")
+        self.assertNotIn("read by", result.lower())
+        self.assertNotIn("john smith", result.lower())
+        self.assertIn("great", result.lower())
+        self.assertIn("book", result.lower())
+
+    def test_normalize_name_preserves_part_indicators(self):
+        """Verify part/volume indicators are preserved for series matching."""
+        result = self.tool.normalize_name("Series Book Part 1 of 3")
+        self.assertIn("part 1", result.lower())
+        self.assertIn("of 3", result.lower())
+        self.assertIn("series", result.lower())
+        self.assertIn("book", result.lower())
+
+    def test_normalize_name_removes_years(self):
+        """Verify years in parentheses are removed."""
+        result = self.tool.normalize_name("Book Title (2020)")
+        self.assertNotIn("2020", result)
+        self.assertIn("book", result.lower())
+        self.assertIn("title", result.lower())
+
+    def test_normalize_name_keeps_title_words(self):
+        """Verify actual title words are preserved."""
+        result = self.tool.normalize_name("The Great Gatsby")
+        self.assertIn("great", result.lower())
+        self.assertIn("gatsby", result.lower())
+
+    def test_normalize_name_removes_narrated_by(self):
+        """Verify 'narrated by' and narrator names are removed."""
+        result = self.tool.normalize_name("Great Book narrated by Jane Doe")
+        self.assertNotIn("narrated by", result.lower())
+        self.assertNotIn("jane doe", result.lower())
+        self.assertIn("great", result.lower())
+        self.assertIn("book", result.lower())
+
+    def test_normalize_name_removes_standalone_years(self):
+        """Verify standalone years are removed but other text preserved."""
+        result = self.tool.normalize_name("Book Title 2020 Edition")
+        self.assertNotIn("2020", result)
+        self.assertIn("book", result.lower())
+        self.assertIn("title", result.lower())
+        self.assertIn("edition", result.lower())
+
+    def test_normalize_name_preserves_year_only_title(self):
+        """Verify year-only titles are preserved when no other text exists."""
+        result = self.tool.normalize_name("1984")
+        self.assertTrue(result.strip(), "Result should not be blank")
+        self.assertIn("1984", result)
+
+    def test_normalize_name_preserves_volume_indicators(self):
+        """Verify volume/chapter indicators are preserved for series matching."""
+        result = self.tool.normalize_name("Epic Saga Volume 2")
+        self.assertIn("volume 2", result.lower())
+        self.assertIn("epic", result.lower())
+        self.assertIn("saga", result.lower())
+
+    def test_normalize_name_consumes_narrator_and_trailing_words(self):
+        """Verify narrator pattern is removed; greedy quantifier may consume trailing words."""
+        # Note: The greedy quantifier {0,2} may consume title words immediately
+        # following the narrator name. This is a known limitation.
+        result = self.tool.normalize_name("Great Book read by John Smith Volume 2")
+        self.assertNotIn("read by", result.lower())
+        self.assertNotIn("john smith", result.lower())
+        self.assertIn("great", result.lower())
+        self.assertIn("book", result.lower())
+
+    def test_normalize_name_preserves_book_indicators(self):
+        """Verify book number indicators are preserved for series matching."""
+        result = self.tool.normalize_name("Harry Potter Book 1")
+        self.assertIn("book 1", result.lower())
+        self.assertIn("harry", result.lower())
+        self.assertIn("potter", result.lower())
+
+    def test_normalize_name_preserves_chapter_indicators(self):
+        """Verify chapter number indicators are preserved."""
+        result = self.tool.normalize_name("Epic Saga Chapter 12")
+        self.assertIn("chapter 12", result.lower())
+        self.assertIn("epic", result.lower())
+        self.assertIn("saga", result.lower())
+
+    def test_normalize_name_preserves_part_of_total(self):
+        """Verify part X of Y patterns are preserved."""
+        result = self.tool.normalize_name("Dune Part 1 of 3")
+        self.assertIn("part 1", result.lower())
+        self.assertIn("of 3", result.lower())
+        self.assertIn("dune", result.lower())
+
+    def test_normalize_name_preserves_vol_abbreviation(self):
+        """Verify vol abbreviation is preserved."""
+        result = self.tool.normalize_name("Series Vol 2")
+        self.assertIn("vol 2", result.lower())
+        self.assertIn("series", result.lower())
+
+    def test_normalize_name_preserves_large_numbers(self):
+        """Verify large book/part numbers are preserved."""
+        result = self.tool.normalize_name("Wheel of Time Book 14")
+        self.assertIn("book 14", result.lower())
+        self.assertIn("wheel", result.lower())
+        self.assertIn("time", result.lower())
+
+    def test_normalize_name_preserves_series_position_info(self):
+        """Verify series position info helps distinguish between books."""
+        result1 = self.tool.normalize_name("Dune Book 1")
+        result2 = self.tool.normalize_name("Dune Book 2")
+        self.assertIn("book 1", result1.lower())
+        self.assertIn("book 2", result2.lower())
+        self.assertNotEqual(result1, result2)

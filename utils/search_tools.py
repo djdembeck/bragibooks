@@ -83,6 +83,18 @@ class SearchTool:
             name,
             flags=re.IGNORECASE,
         )
+        # Remove "read by" / "narrated by" patterns
+        name = re.sub(
+            r"\b(read|narrated)\s+by\s+\w+(?:\s+\w+){0,2}",
+            "",
+            name,
+            flags=re.IGNORECASE,
+        )
+        # Preserve original if year removal results in empty string
+        name_before_year_removal = name
+        name = re.sub(r"\b(19|20)\d{2}\b", "", name)
+        if not name.strip():
+            name = name_before_year_removal
         # Remove unwanted whitespaces
         name = re.sub(r"\s+", " ", name)
         # Remove leading and trailing whitespaces
