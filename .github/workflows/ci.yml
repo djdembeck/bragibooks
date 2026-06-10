@@ -43,11 +43,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gpac php-cli php-xml php-mbstring
-          wget -q https://github.com/sandreas/m4b-tool/releases/latest/download/m4b-tool.tar.gz -O /tmp/m4b-tool.tar.gz
-          tar xzf /tmp/m4b-tool.tar.gz -C /tmp/
-          sudo mv /tmp/m4b-tool.phar /usr/local/bin/m4b-tool
-          sudo chmod +x /usr/local/bin/m4b-tool
+          sudo apt-get install -y gpac
 
       - name: Install Python dependencies
         run: |
