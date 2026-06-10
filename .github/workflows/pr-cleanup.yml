@@ -4,6 +4,10 @@ on:
   pull_request:
     types: [closed]
 
+concurrency:
+  group: pr-cleanup-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: true
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -20,67 +24,32 @@ jobs:
       - name: Delete PR Docker images
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PACKAGE_NAME: ${{ github.event.repository.name }}
+          ORG: ${{ github.event.repository.owner.login }}
         run: |
-          PR_NUMBER="${{ github.event.pull_request.number }}"
-          PACKAGE_NAME="${{ github.event.repository.name }}"
-          ORG="${{ github.event.repository.owner.login }}"
-
           echo "Looking for images with tag: pr-${PR_NUMBER}"
 
           # Get package versions - try orgs endpoint first, then users endpoint
           versions=""
           api_prefix="orgs"
-          org_http_code=""
-          users_http_code=""
-          # First: non-paginated check with --include to get status
-          if response=$(gh api --include \
+          if versions=$(gh api --paginate \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "/orgs/${ORG}/packages/container/${PACKAGE_NAME}/versions" 2>&1); then
-            org_http_code=$(echo "$response" | head -1 | awk '{print $2}')
-            body=$(echo "$response" | awk 'BEGIN{RS="\r\n\r\n|\n\n"; ORS="\r\n\r\n"} NR==2{print; exit}')
-
-            if [ "$org_http_code" = "200" ]; then
-              # Then: paginated call without --include
-              versions=$(gh api --paginate \
-                -H "Accept: application/vnd.github+json" \
-                -H "X-GitHub-Api-Version: 2022-11-28" \
-                "/orgs/${ORG}/packages/container/${PACKAGE_NAME}/versions")
-            fi
+            api_prefix="orgs"
           else
-            org_http_code=$(echo "$response" | head -1 | awk '{print $2}')
-            body=$(echo "$response" | awk 'BEGIN{RS="\r\n\r\n|\n\n"; ORS="\r\n\r\n"} NR==2{print; exit}')
-          fi
-
-          if [ "$org_http_code" != "200" ] || [ -z "$versions" ]; then
-            echo "Orgs endpoint not found or empty, trying users endpoint..."
-            api_prefix="users"
-            if response=$(gh api --include \
+            echo "Orgs endpoint not found, trying users endpoint..."
+            if versions=$(gh api --paginate \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "/users/${ORG}/packages/container/${PACKAGE_NAME}/versions" 2>&1); then
-              users_http_code=$(echo "$response" | head -1 | awk '{print $2}')
-              body=$(echo "$response" | awk 'BEGIN{RS="\r\n\r\n|\n\n"; ORS="\r\n\r\n"} NR==2{print; exit}')
-
-              if [ "$users_http_code" = "200" ]; then
-                versions=$(gh api --paginate \
-                  -H "Accept: application/vnd.github+json" \
-                  -H "X-GitHub-Api-Version: 2022-11-28" \
-                  "/users/${ORG}/packages/container/${PACKAGE_NAME}/versions")
-              fi
+              api_prefix="users"
             else
-              users_http_code=$(echo "$response" | head -1 | awk '{print $2}')
-              body=$(echo "$response" | awk 'BEGIN{RS="\r\n\r\n|\n\n"; ORS="\r\n\r\n"} NR==2{print; exit}')
+              echo "Error fetching package versions from both endpoints"
+              echo "$versions"
+              exit 1
             fi
-          fi
-
-          http_code="${users_http_code:-$org_http_code}"
-          if [ -z "$http_code" ] || ([ "$org_http_code" != "200" ] && [ "$users_http_code" != "200" ]); then
-            echo "Error fetching package versions from both endpoints"
-            if [ -n "$body" ]; then
-              echo "$body"
-            fi
-            exit 1
           fi
 
           # Find versions tagged with pr-N

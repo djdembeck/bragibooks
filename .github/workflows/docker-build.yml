@@ -15,9 +15,10 @@ on:
 
 concurrency:
   group: docker-build-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
+
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   PR_IS_SAME_REPO: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
@@ -45,7 +46,7 @@ jobs:
           elif [ -n "${GH_TOKEN}" ]; then
             PR_NUMBER=$(curl -sf -H "Authorization: token ${GH_TOKEN}" \
               "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY%/*}:${GITHUB_REF_NAME}&state=open" \
-              | grep -m1 '"number"' | grep -o '[0-9]*' || echo "")
+              | jq -r '.[0].number // empty' 2>/dev/null || echo "")
           fi
           if [ "${PR_NUMBER}" = "null" ] || [ -z "${PR_NUMBER}" ]; then
             PR_NUMBER=""
@@ -55,6 +56,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
 
@@ -100,7 +102,7 @@ jobs:
           file: docker/Dockerfile
           context: .
           platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: ${{ github.event_name != 'pull_request' || env.PR_IS_SAME_REPO == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
