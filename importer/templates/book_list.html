@@ -65,12 +65,13 @@
       </div>
     </div>
   </div>
-  <div class="column is-three-quarter">
+  <div class="column is-three-quarters">
     <div class="box">
       <div class="content">
         <span class="has-text-weight-semibold is-size-3">Description:</span>
         {% if book.status.status == 'Error' %}
         <p class="book-description">{{ book.status.message }}</p>
+        <button class="button is-small is-link mt-2 retry-book-btn" data-asin="{{ book.asin }}" type="button">Retry this book</button>
         {% else %}
         <p class="book-description">{{ book.long_desc|safe }}</p>
         {% endif %}
@@ -85,7 +86,8 @@
   <div class="column">
     <div class="box">
       <div class="content has-text-centered">
-        <h3>Nothing to see here.</h3>
+        <h3>No books in this list</h3>
+        <p>Import directories and match them to Audible metadata to populate this list.</p>
       </div>
     </div>
   </div>

@@ -59,6 +59,12 @@ vertical-align: middle;
 @keyframes folder-loading-spin {
 to { transform: rotate(360deg); }
 }
+@media (prefers-reduced-motion: reduce) {
+    .folder-loading {
+        animation: none;
+    }
+}
+
 {% endblock %}
 {% load directory_explorer_tags %}
  {% block content %}
@@ -103,10 +109,28 @@ to { transform: rotate(360deg); }
                     <div id="directory-tree"></div>
                 </div>
                 <div class="panel-block">
-                    <button class="button is-link is-fullwidth">Next</button>
+                    <button class="button is-link is-fullwidth" type="button" onclick="openImportConfirmation()">Next</button>
                 </div>
             </form>
         </nav>
+    </div>
+</div>
+
+<!-- Import confirmation modal -->
+<div class="modal" id="import-confirm-modal">
+    <div class="modal-background" onclick="closeImportConfirmation()"></div>
+    <div class="modal-card">
+        <header class="modal-card-head">
+            <p class="modal-card-title">Confirm import</p>
+            <button class="delete" aria-label="close" onclick="closeImportConfirmation()"></button>
+        </header>
+        <section class="modal-card-body">
+            <p id="import-confirm-text">You've selected 0 directories. Import will begin and files will be matched against Audible metadata.</p>
+        </section>
+        <footer class="modal-card-foot">
+            <button class="button" onclick="closeImportConfirmation()">Go back</button>
+            <button class="button is-link" id="import-confirm-btn" onclick="confirmImport()">Start import</button>
+        </footer>
     </div>
 </div>
 {% endblock %}

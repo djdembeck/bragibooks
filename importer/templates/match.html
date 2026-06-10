@@ -45,6 +45,7 @@
                         <p class="title">Submit ASINs</p>
                     </div>
                 </div>
+                <p class="help px-5 pt-3">An ASIN (Amazon Standard Identification Number) is a 10-character code that uniquely identifies each audiobook on Audible. Select the correct match from the dropdown, or use Custom Search to find it manually.</p>
                 <div class="card-content">
                     <div class="container">
                         {% for input in context %}
@@ -56,7 +57,7 @@
                             </div>
                             <div class="field is-flex is-flex-direction-column">
                                 <div class="control is-inline-flex is-align-items-center">
-                                    <i class="fa fa-times mr-2" onclick="openRemoveConfirmationModal('{{ input.src_path|escapejs }}', '{{ forloop.counter|add:'-1' }}')"></i>
+                                    <i class="fa fa-times mr-2" role="button" tabindex="0" aria-label="Remove {{ input.src_path|basename }}" onclick="openRemoveConfirmationModal('{{ input.src_path|escapejs }}', '{{ forloop.counter|add:'-1' }}')" onkeydown="if(event.key==='Enter')openRemoveConfirmationModal('{{ input.src_path|escapejs }}', '{{ forloop.counter|add:'-1' }}')"></i>
                                     <div class="select is-loading mr-3 is-fullwidth">
                                         <select class="asin-select" id="asin-select-{{ forloop.counter|add:'-1' }}" name="{{ input.src_path }}" onchange="updateImage('{{ forloop.counter|add:'-1' }}')">
                                             <option>{{ input.src_path }}</option>
@@ -73,6 +74,7 @@
                     <div class="card-footer-item">
                         <div class="control">
                             <button class="button is-link is-fullwidth" id="match-form-submit">Submit ASINs</button>
+                            <p class="help is-danger mt-2" id="match-submit-help" style="display: none;">Match all books to continue. Each book needs an ASIN selected from the dropdown or found via Custom Search.</p>
                         </div>
                     </div>
                 </footer>
@@ -116,9 +118,9 @@
                 No results found for this search...
             </div>
             <div style="padding-left: 10px;">
+                <button class="button" onclick="closeSearchPanel()">Cancel</button>
                 <button class="button is-link"
                     onclick="searchAsin(document.getElementById('title').value, document.getElementById('author').value, document.getElementById('keywords').value)">Search</button>
-                <button class="button" onclick="closeSearchPanel()">Cancel</button>
             </div>
         </footer>
     </div>
@@ -134,8 +136,8 @@
         </header>
         <section class="modal-card-body">
             <div class="buttons is-flex is-justify-content-center">
-                <button class="button is-danger" id="remove-column-button">Yes</button>
-                <button class="button" onclick="closeRemoveConfirmationModal()">No</button>
+                <button class="button" onclick="closeRemoveConfirmationModal()">Keep item</button>
+                <button class="button is-danger" id="remove-column-button">Remove item</button>
             </div>
         </section>
     </div>

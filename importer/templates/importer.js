@@ -474,6 +474,34 @@ function buildDirectoryTree(items, container, depth, parentId, onProgress = null
     });
 }
 
+// Import confirmation modal functions
+function openImportConfirmation() {
+    const checkboxes = document.querySelectorAll('input[name="input_dir"]:checked');
+    const count = checkboxes.length;
+
+    if (count === 0) return;
+
+    const text = document.getElementById('import-confirm-text');
+    if (text) {
+        text.textContent = 'You\'ve selected ' + count + ' director' + (count === 1 ? 'y' : 'ies') + '. Import will begin and files will be matched against Audible metadata.';
+    }
+
+    const modal = document.getElementById('import-confirm-modal');
+    if (modal) modal.classList.add('is-active');
+}
+
+function closeImportConfirmation() {
+    const modal = document.getElementById('import-confirm-modal');
+    if (modal) modal.classList.remove('is-active');
+}
+
+function confirmImport() {
+    closeImportConfirmation();
+    // Submit the form that contains the directory checkboxes
+    var form = document.querySelector('form[method="POST"]');
+    if (!form) form = document.querySelector('form');
+    if (form) form.submit();
+}
 if (typeof document !== 'undefined') {
     document.addEventListener('DOMContentLoaded', () => {
         fetchAndRenderDirectories();

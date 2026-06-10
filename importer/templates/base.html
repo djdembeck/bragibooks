@@ -217,6 +217,22 @@
           max-height: none;
         }
 
+        @media (prefers-reduced-motion: reduce) {
+            .pre-loader .spinner::before,
+            .pre-loader .spinner::after {
+                animation: none;
+            }
+            .pre-loader .progress-bar::after {
+                animation: none;
+            }
+            .pre-loader .progress-fill {
+                transition: none;
+            }
+            .pre-loader {
+                transition: none;
+            }
+        }
+
         {% block style %}{% endblock %}
     </style>
   </head>

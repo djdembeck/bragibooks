@@ -13,4 +13,6 @@ urlpatterns = [
         views.StreamDirectoryListView.as_view(),
         name="api-directories-stream",
     ),
+    path("api/retry-book/", views.RetryBookView.as_view(), name="api-retry-book"),
+
 ]

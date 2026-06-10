@@ -90,9 +90,9 @@ function createOption(value, text, image_link) {
 }
 
 function noOptionsFound(select) {
-    select.style.borderColor = "red";
+    select.style.borderColor = "#f14668";
     select.style.borderWidth = "2px";
-    let opt = createOption("", "No Audiobook results found, try a custom search...", "");
+    let opt = createOption("", "No automatic match found. Try Custom Search.", "");
     select.appendChild(opt);
 }
 
@@ -137,17 +137,21 @@ function updateImage(counter) {
 function checkAllSelectsHaveValue() {
     var hasValues = true;
 
-    document.querySelectorAll(".asin-select").forEach(select => {
+    document.querySelectorAll(".asin-select").forEach(function(select) {
         if (select.value.length != 10) {
             hasValues = false;
             return;
         }
     });
 
+    var submitBtn = document.getElementById("match-form-submit");
+    var helpEl = document.getElementById("match-submit-help");
     if (!hasValues) {
-        document.getElementById("match-form-submit").disabled = true;
+        submitBtn.disabled = true;
+        if (helpEl) helpEl.style.display = 'block';
     } else {
-        document.getElementById("match-form-submit").disabled = false;
+        submitBtn.disabled = false;
+        if (helpEl) helpEl.style.display = 'none';
     }
 }
 

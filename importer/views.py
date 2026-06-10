@@ -290,6 +290,28 @@ class BookListView(TemplateView):
         return length_arr
 
 
+
+class RetryBookView(View):
+    def post(self, request):
+        asin = request.POST.get("asin")
+        if not asin:
+            return JsonResponse({"error": "ASIN required"}, status=400)
+        try:
+            book = Book.objects.get(asin=asin)
+        except Book.DoesNotExist:
+            return JsonResponse({"error": "Book not found"}, status=404)
+
+        # Reset status to Processing
+        book.status.status = StatusChoices.PROCESSING
+        book.status.message = "Retrying..."
+        book.status.save()
+
+        # Re-queue the Celery task
+        m4b_merge_task.delay(asin)
+
+        return JsonResponse({"status": "success", "asin": asin})
+
+
 class SettingView(TemplateView):
     template_name = "setting.html"
 

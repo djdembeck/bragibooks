@@ -25,4 +25,45 @@
 
 {% block script %}
     {% include "book_tabs.js" %}
+    <script>
+    function getCSRFToken() {
+        const match = document.cookie.match(/csrftoken=([^;]+)/);
+        return match ? match[1] : '';
+    }
+
+    document.addEventListener('click', async function(e) {
+        const btn = e.target.closest('.retry-book-btn');
+        if (!btn) return;
+
+        const asin = btn.dataset.asin;
+        btn.classList.add('is-loading');
+        btn.disabled = true;
+
+        try {
+            const resp = await fetch('{% url "api-retry-book" %}', {
+                method: 'POST',
+                headers: {
+                    'X-CSRFToken': getCSRFToken(),
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: 'asin=' + encodeURIComponent(asin)
+            });
+
+            if (resp.ok) {
+                btn.textContent = 'Retrying...';
+                btn.classList.remove('is-loading');
+                btn.classList.add('is-success');
+                setTimeout(function() { location.reload(); }, 1500);
+            } else {
+                btn.textContent = 'Retry failed';
+                btn.classList.remove('is-loading');
+                btn.classList.add('is-danger');
+            }
+        } catch (err) {
+            btn.textContent = 'Retry failed';
+            btn.classList.remove('is-loading');
+            btn.classList.add('is-danger');
+        }
+    });
+    </script>
 {% endblock %}
