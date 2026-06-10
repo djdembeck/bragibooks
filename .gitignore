@@ -12,5 +12,6 @@ admin/
 .opencode
 .sisyphus
 .chunkhound
+.impeccable
 *.egg-info/
 egg-info/
