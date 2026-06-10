@@ -64,14 +64,14 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || env.PR_IS_SAME_REPO == 'true'
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Log in to the Container registry
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || env.PR_IS_SAME_REPO == 'true'
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
