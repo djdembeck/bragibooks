@@ -2,12 +2,10 @@ import logging
 import os
 import re
 import subprocess
-import traceback
 from datetime import datetime
 from pathlib import Path
 
 import requests
-from django.conf import settings
 
 from importer.models import Author, Book, Narrator, Setting, Status, StatusChoices
 
@@ -40,7 +38,7 @@ def fetch_audible_metadata(asin: str, api_url: str = "https://api.audnex.us") ->
         response = requests.get(f"{api_url}/books/{asin}", timeout=30)
         response.raise_for_status()
         return response.json()
-    except requests.RequestException as e:
+    except requests.RequestException:
         logger.exception("Failed to fetch metadata for ASIN %s", asin)
         raise
 

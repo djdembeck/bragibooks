@@ -8,6 +8,7 @@ from pathlib import Path
 import requests
 from django.conf import settings
 from django.contrib import messages
+from django.db import DatabaseError
 from django.http import (
     HttpRequest,
     HttpResponseBadRequest,
@@ -16,7 +17,6 @@ from django.http import (
 )
 from django.shortcuts import redirect, render
 from django.views.generic import TemplateView, View
-from django.db import DatabaseError
 
 # core merge logic:
 from m4b_merge import helpers
@@ -415,11 +415,11 @@ def build_directory_tree(path, max_depth=50, current_depth=0, visited=None):
                 "name": item.name,
                 "path": str(item),
                 "is_directory": is_dir,
-                "children": build_directory_tree(
-                    item, max_depth, current_depth + 1, visited
-                )
-                if is_dir
-                else [],
+                "children": (
+                    build_directory_tree(item, max_depth, current_depth + 1, visited)
+                    if is_dir
+                    else []
+                ),
             }
             entries.append(entry)
     except PermissionError as e:

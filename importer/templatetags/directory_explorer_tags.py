@@ -1,8 +1,9 @@
 import logging
-from pathlib import Path
-import uuid
-from django import template
 import os
+import uuid
+from pathlib import Path
+
+from django import template
 
 logger = logging.getLogger(__name__)
 register = template.Library()

@@ -7,73 +7,120 @@ class Migration(migrations.Migration):
 
     initial = True
 
-    dependencies = [
-    ]
+    dependencies = []
 
     operations = [
         migrations.CreateModel(
-            name='Author',
+            name="Author",
             fields=[
-                ('id', models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('first_name', models.CharField(max_length=45)),
-                ('last_name', models.CharField(max_length=45)),
-                ('asin', models.CharField(default='', max_length=10, null=True)),
-                ('short_desc', models.TextField(blank=True, default='')),
-                ('long_desc', models.TextField(blank=True, default='')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
+                (
+                    "id",
+                    models.AutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("first_name", models.CharField(max_length=45)),
+                ("last_name", models.CharField(max_length=45)),
+                ("asin", models.CharField(default="", max_length=10, null=True)),
+                ("short_desc", models.TextField(blank=True, default="")),
+                ("long_desc", models.TextField(blank=True, default="")),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
             ],
         ),
         migrations.CreateModel(
-            name='Book',
+            name="Book",
             fields=[
-                ('id', models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('title', models.CharField(max_length=255)),
-                ('asin', models.CharField(max_length=10)),
-                ('short_desc', models.TextField()),
-                ('long_desc', models.TextField()),
-                ('release_date', models.DateField()),
-                ('series', models.CharField(blank=True, default='', max_length=255)),
-                ('publisher', models.CharField(max_length=255)),
-                ('lang', models.CharField(max_length=25)),
-                ('runtime_length_minutes', models.IntegerField()),
-                ('format_type', models.CharField(max_length=25)),
-                ('converted', models.BooleanField()),
-                ('src_path', models.FilePathField()),
-                ('dest_path', models.FilePathField()),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
+                (
+                    "id",
+                    models.AutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("title", models.CharField(max_length=255)),
+                ("asin", models.CharField(max_length=10)),
+                ("short_desc", models.TextField()),
+                ("long_desc", models.TextField()),
+                ("release_date", models.DateField()),
+                ("series", models.CharField(blank=True, default="", max_length=255)),
+                ("publisher", models.CharField(max_length=255)),
+                ("lang", models.CharField(max_length=25)),
+                ("runtime_length_minutes", models.IntegerField()),
+                ("format_type", models.CharField(max_length=25)),
+                ("converted", models.BooleanField()),
+                ("src_path", models.FilePathField()),
+                ("dest_path", models.FilePathField()),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
             ],
         ),
         migrations.CreateModel(
-            name='Narrator',
+            name="Narrator",
             fields=[
-                ('id', models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('first_name', models.CharField(max_length=45)),
-                ('last_name', models.CharField(max_length=45)),
-                ('short_desc', models.TextField(blank=True, default='')),
-                ('long_desc', models.TextField(blank=True, default='')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('books', models.ManyToManyField(related_name='narrators', to='importer.Book')),
+                (
+                    "id",
+                    models.AutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("first_name", models.CharField(max_length=45)),
+                ("last_name", models.CharField(max_length=45)),
+                ("short_desc", models.TextField(blank=True, default="")),
+                ("long_desc", models.TextField(blank=True, default="")),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                (
+                    "books",
+                    models.ManyToManyField(
+                        related_name="narrators", to="importer.Book"
+                    ),
+                ),
             ],
         ),
         migrations.CreateModel(
-            name='Genre',
+            name="Genre",
             fields=[
-                ('id', models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('name', models.CharField(max_length=255)),
-                ('asin', models.CharField(max_length=10)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('authors', models.ManyToManyField(related_name='genres', to='importer.Author')),
-                ('books', models.ManyToManyField(related_name='genres', to='importer.Book')),
-                ('narrators', models.ManyToManyField(related_name='genres', to='importer.Narrator')),
+                (
+                    "id",
+                    models.AutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("name", models.CharField(max_length=255)),
+                ("asin", models.CharField(max_length=10)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                (
+                    "authors",
+                    models.ManyToManyField(related_name="genres", to="importer.Author"),
+                ),
+                (
+                    "books",
+                    models.ManyToManyField(related_name="genres", to="importer.Book"),
+                ),
+                (
+                    "narrators",
+                    models.ManyToManyField(
+                        related_name="genres", to="importer.Narrator"
+                    ),
+                ),
             ],
         ),
         migrations.AddField(
-            model_name='author',
-            name='books',
-            field=models.ManyToManyField(related_name='authors', to='importer.Book'),
+            model_name="author",
+            name="books",
+            field=models.ManyToManyField(related_name="authors", to="importer.Book"),
         ),
     ]

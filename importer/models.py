@@ -1,5 +1,6 @@
-from django.db import models
 from pathlib import Path
+
+from django.db import models
 
 
 class BookManager(models.Manager):
@@ -7,10 +8,10 @@ class BookManager(models.Manager):
         errors = {}
 
         if len(asin) != 10 and len(asin) != 0:
-            errors['invalid_asin'] = f"Invalid ASIN format for {asin}"
+            errors["invalid_asin"] = f"Invalid ASIN format for {asin}"
 
         if len(asin) == 0:
-            errors['blank_asin'] = "Must fill in all ASIN fields"
+            errors["blank_asin"] = "Must fill in all ASIN fields"
 
         return errors
 
@@ -23,9 +24,7 @@ class SettingManager(models.Manager):
             try:
                 Path(path).mkdir(parents=True, exist_ok=True)
             except OSError:
-                errors['invalid_path'] = (
-                    f"Invalid path: {path}"
-                )
+                errors["invalid_path"] = f"Invalid path: {path}"
         return errors
 
 
@@ -49,7 +48,7 @@ class Book(models.Model):
     short_desc = models.TextField()
     long_desc = models.TextField()
     release_date = models.DateField()
-    series = models.CharField(max_length=255, blank=True, default='')
+    series = models.CharField(max_length=255, blank=True, default="")
     publisher = models.CharField(max_length=255)
     lang = models.CharField(max_length=25)
     runtime_length_minutes = models.IntegerField()
@@ -70,10 +69,10 @@ class Book(models.Model):
 class Author(models.Model):
     first_name = models.CharField(max_length=45)
     last_name = models.CharField(max_length=45)
-    asin = models.CharField(max_length=10, null=True, default='')
+    asin = models.CharField(max_length=10, null=True, default="")
     books = models.ManyToManyField(Book, related_name="authors")
-    short_desc = models.TextField(blank=True, default='')
-    long_desc = models.TextField(blank=True, default='')
+    short_desc = models.TextField(blank=True, default="")
+    long_desc = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -85,8 +84,8 @@ class Narrator(models.Model):
     first_name = models.CharField(max_length=45)
     last_name = models.CharField(max_length=45)
     books = models.ManyToManyField(Book, related_name="narrators")
-    short_desc = models.TextField(blank=True, default='')
-    long_desc = models.TextField(blank=True, default='')
+    short_desc = models.TextField(blank=True, default="")
+    long_desc = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
