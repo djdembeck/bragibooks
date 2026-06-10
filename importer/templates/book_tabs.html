@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="box">
+<div class="book-tabs">
     <div class="tabs is-fullwidth is-toggle" style="background: white;" data-default="{{ default_view }}" role="tablist">
         <ul>
             <li class="tab is-active" id="done-tab" onclick="openTab(event, 'done')"><a id="done-tab-anchor" role="tab" aria-selected="true" aria-controls="done" aria-label="Done - {{ done_books|length }} book{{ done_books|length|pluralize }}" href="#" tabindex="0">Done ({{ done_books|length }})</a></li>

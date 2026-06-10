@@ -216,6 +216,171 @@
           hyphens: auto;
           max-height: none;
         }
+        /* Book tabs wrapper */
+        .book-tabs .tabs {
+          margin-bottom: var(--space-lg, 24px);
+        }
+
+
+        /* Book entry layout */
+        .book-entry {
+          --space-xs: 4px;
+          --space-sm: 8px;
+          --space-md: 16px;
+          --space-lg: 24px;
+          --space-xl: 32px;
+
+          display: grid;
+          grid-template-columns: auto 1fr;
+          gap: 0 var(--space-lg);
+          padding: var(--space-lg);
+          background: #ffffff;
+          border-radius: 4px;
+          margin-bottom: var(--space-lg);
+        }
+
+        .book-entry__cover {
+          grid-row: 1 / 3;
+          width: 160px;
+          flex-shrink: 0;
+        }
+
+        .book-entry__cover img {
+          width: 100%;
+          height: auto;
+          border-radius: 4px;
+          display: block;
+          aspect-ratio: 2 / 3;
+          object-fit: cover;
+          background: #f5f5f5;
+        }
+
+        .book-entry__cover--hidden {
+          display: none;
+        }
+
+        .book-entry__cover--hidden + .book-entry__meta {
+          grid-column: 1 / -1;
+        }
+
+        .book-entry__meta {
+          min-width: 0;
+        }
+
+        .book-entry__title {
+          font-size: 1.5rem;
+          font-weight: 600;
+          line-height: 1.25;
+          color: #0a0a0a;
+          margin: 0 0 var(--space-md);
+          text-wrap: balance;
+        }
+
+        .book-entry__desc {
+          grid-column: 1 / -1;
+          margin-top: var(--space-md);
+          padding-top: var(--space-md);
+          border-top: 1px solid #dbdbdb;
+        }
+
+        .book-entry__group {
+          padding-bottom: var(--space-md);
+        }
+
+        .book-entry__group + .book-entry__group {
+          padding-top: var(--space-md);
+          border-top: 1px solid #dbdbdb;
+        }
+
+        .book-entry__list {
+          display: flex;
+          flex-direction: column;
+          gap: var(--space-xs);
+          margin: 0;
+        }
+
+        .book-entry__row {
+          display: flex;
+          gap: var(--space-sm);
+          line-height: 1.5;
+          align-items: baseline;
+        }
+
+        .book-entry__row dt {
+          font-weight: 600;
+          font-size: 0.875rem;
+          color: #4a4a4a;
+          white-space: nowrap;
+          min-width: 5.5em;
+        }
+
+        .book-entry__row dd {
+          margin: 0;
+          font-size: 0.875rem;
+          color: #0a0a0a;
+          min-width: 0;
+        }
+
+        .book-entry__desc .book-description {
+          font-size: 0.9375rem;
+          line-height: 1.6;
+          color: #4a4a4a;
+          max-width: 75ch;
+        }
+
+        .book-entry__error p {
+          color: #4a4a4a;
+          margin-bottom: var(--space-sm);
+        }
+
+        .book-entry--empty {
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          padding: var(--space-xl) var(--space-lg);
+          text-align: center;
+        }
+
+        .book-entry--empty h3 {
+          font-size: 1.25rem;
+          font-weight: 600;
+          color: #0a0a0a;
+          margin: 0 0 var(--space-sm);
+        }
+
+        .book-entry--empty p {
+          color: #4a4a4a;
+          margin: 0;
+        }
+
+        @media (max-width: 768px) {
+          .book-entry {
+            grid-template-columns: auto 1fr;
+            gap: 0 var(--space-md);
+          }
+
+          .book-entry__cover {
+            grid-row: 1 / 2;
+            width: 100px;
+          }
+
+          .book-entry__meta {
+            grid-row: 1 / 2;
+          }
+
+          .book-entry__desc {
+            grid-column: 1 / -1;
+            grid-row: auto;
+          }
+
+          .book-entry__title {
+            font-size: 1.25rem;
+          }
+
+          .book-entry__row dt {
+            min-width: 4.5em;
+          }
+        }
 
         @media (prefers-reduced-motion: reduce) {
             .pre-loader .spinner::before,
