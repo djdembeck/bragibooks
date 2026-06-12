@@ -71,7 +71,7 @@ You can either install this project directly or run it prepackaged in Docker.
 - All prerequisites are included in the image.
 
 #### Direct (Gunicorn)
-- You'll need to install m4b-tool and it's dependants from [the project's readme](https://github.com/sandreas/m4b-tool#installation)
+- Install [m4b-merge](https://github.com/djdembeck/m4b-merge) and its dependencies
 - Run `pip install -r requirements.txt` from this project's directory.
 
 ### Installing
