@@ -1,3 +1,4 @@
+export { default as Logo } from './Logo.svelte';
 export { default as Nav } from './Nav.svelte';
 export { default as PageHeader } from './PageHeader.svelte';
 export { default as StatusBadge } from './StatusBadge.svelte';

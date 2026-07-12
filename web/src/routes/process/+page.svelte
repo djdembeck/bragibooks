@@ -3,6 +3,7 @@
 	import { streamEvents } from '$lib/api';
 	import type { BookWithPeople, BooksListResponse, ProcessingResponse, ProcessingJob } from '$lib/types';
 	import { PageHeader, Button, Alert, Skeleton, EmptyState, StatusBadge } from '$lib/components';
+	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
 	interface JobItem {
 		id: string;
@@ -14,26 +15,19 @@
 
 	let books: BookWithPeople[] = $state([]);
 	let selectedIds = $state<Set<number>>(new Set());
-	let loading = $state(true);
+	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 	let starting = $state(false);
-	let error = $state<string | null>(null);
 	let jobs = $state<JobItem[]>([]);
 	let cleanupFns: (() => void)[] = [];
 
 	async function loadBooks() {
-		loading = true;
-		error = null;
-		try {
+		await dl.run(async () => {
 			const [matched, pending] = await Promise.all([
 				get<BooksListResponse>('/books?status=matched&limit=200'),
 				get<BooksListResponse>('/books?status=pending&limit=200'),
 			]);
 			books = [...(matched.books || []), ...(pending.books || [])];
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load books';
-		} finally {
-			loading = false;
-		}
+		});
 	}
 
 	function toggleBook(id: number) {
@@ -56,7 +50,7 @@
 	async function start() {
 		if (selectedIds.size === 0) return;
 		starting = true;
-		error = null;
+		dl.setError(null);
 		try {
 			const selected = books.filter((b) => selectedIds.has(b.id));
 			const response = await post<ProcessingResponse>('/process', {
@@ -68,7 +62,7 @@
 			}
 			selectedIds = new Set();
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to start processing';
+			dl.setError(e instanceof Error ? e.message : 'Failed to start processing');
 		} finally {
 			starting = false;
 		}
@@ -121,13 +115,13 @@
 
 <PageHeader title="Processing" description="Queue matched books for m4b-merge and monitor progress." />
 
-{#if error}
+{#if dl.error}
 	<div class="mb-6">
-		<Alert variant="error" onretry={loadBooks}>{error}</Alert>
+		<Alert variant="error" onretry={loadBooks}>{dl.error}</Alert>
 	</div>
 {/if}
 
-{#if loading}
+{#if dl.showSkeleton}
 	<div class="space-y-2">
 		{#each Array(4) as _}
 			<Skeleton height="3rem" />

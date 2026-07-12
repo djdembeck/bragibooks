@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/stores';
+	import { Logo } from '$lib/components';
 
 	const links = [
 		{ href: '/', label: 'Dashboard' },
@@ -19,7 +20,9 @@
 <header class="sticky top-0 z-30 border-b border-[var(--border-subtle)] bg-[var(--surface)]/95 backdrop-blur">
 	<div class="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
 		<a href="/" class="flex items-center gap-2 text-lg font-semibold text-[var(--text)] no-underline hover:opacity-90">
-			<span class="flex h-8 w-8 items-center justify-center rounded-md bg-[var(--accent)] text-[var(--accent-text)]">B</span>
+			<span class="flex h-8 w-8 items-center justify-center rounded-md bg-[var(--accent)] text-[var(--accent-text)]">
+				<Logo class="h-5 w-5" />
+			</span>
 			Bragi Books
 		</a>
 

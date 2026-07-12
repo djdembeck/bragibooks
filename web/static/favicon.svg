@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <style>
+    :root {
+      --accent: oklch(0.72 0.16 75);
+      --accent-text: oklch(0.16 0.01 270);
+    }
+  </style>
+  <rect width="32" height="32" rx="8" fill="var(--accent)" />
+  <rect x="5" y="4" width="5" height="24" rx="2.5" fill="var(--accent-text)" />
+  <path d="M10 4h6a6 6 0 0 1 0 12h-6z" fill="var(--accent-text)" />
+  <path d="M10 16h6a6 6 0 0 1 0 12h-6z" fill="var(--accent-text)" />
+</svg>

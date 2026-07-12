@@ -3,16 +3,14 @@
 	import type { BookWithPeople, BooksListResponse } from '$lib/types';
 	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, Button } from '$lib/components';
 	import { formatRuntime } from '$lib/types';
+	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
 	let totals = $state({ all: 0, done: 0, processing: 0, error: 0 });
 	let recent: BookWithPeople[] = $state([]);
-	let loading = $state(true);
-	let error = $state<string | null>(null);
+	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 
 	async function load() {
-		loading = true;
-		error = null;
-		try {
+		await dl.run(async () => {
 			const [all, done, processing, err, recentResp] = await Promise.all([
 				get<BooksListResponse>('/books?limit=1'),
 				get<BooksListResponse>('/books?status=done&limit=1'),
@@ -27,11 +25,7 @@
 				error: err.total,
 			};
 			recent = recentResp.books || [];
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load dashboard';
-		} finally {
-			loading = false;
-		}
+		});
 	}
 
 	$effect(() => {
@@ -48,13 +42,13 @@
 
 <PageHeader title="Dashboard" description="Overview of your audiobook library and recent activity." />
 
-{#if error}
+{#if dl.error}
 	<div class="mb-6">
-		<Alert variant="error" onretry={load}>{error}</Alert>
+		<Alert variant="error" onretry={load}>{dl.error}</Alert>
 	</div>
 {/if}
 
-{#if loading}
+{#if dl.showSkeleton}
 	<div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
 		{#each Array(4) as _}
 			<div class="card">
@@ -84,7 +78,7 @@
 	</div>
 </div>
 
-{#if loading}
+{#if dl.showSkeleton}
 	<div class="mt-4 space-y-2">
 		{#each Array(3) as _}
 			<div class="card flex items-center gap-4">

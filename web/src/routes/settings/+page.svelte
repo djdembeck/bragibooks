@@ -1,24 +1,19 @@
 <script lang="ts">
 	import { get, put } from '$lib/api';
-	import type { Settings } from '$lib/types';
 	import { PageHeader, Button, Alert, Skeleton } from '$lib/components';
+	import type { Settings } from '$lib/types';
+	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
 	let settings = $state<Settings | null>(null);
-	let loading = $state(true);
+	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 	let saving = $state(false);
 	let saved = $state(false);
-	let error = $state<string | null>(null);
+	let saveError = $state<string | null>(null);
 
 	async function load() {
-		loading = true;
-		error = null;
-		try {
+		await dl.run(async () => {
 			settings = await get<Settings>('/settings', {});
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load settings';
-		} finally {
-			loading = false;
-		}
+		});
 	}
 
 	async function save(e: Event) {
@@ -26,13 +21,13 @@
 		if (!settings) return;
 		saving = true;
 		saved = false;
-		error = null;
+		saveError = null;
 		try {
 			await put<Settings>('/settings', settings);
 			saved = true;
 			setTimeout(() => (saved = false), 3000);
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to save settings';
+			saveError = e instanceof Error ? e.message : 'Failed to save settings';
 		} finally {
 			saving = false;
 		}
@@ -45,9 +40,15 @@
 
 <PageHeader title="Settings" description="Configure directories, processing, and API options." />
 
-{#if error}
+{#if dl.error}
 	<div class="mb-6">
-		<Alert variant="error" onretry={load}>{error}</Alert>
+		<Alert variant="error" onretry={load}>{dl.error}</Alert>
+	</div>
+{/if}
+
+{#if saveError}
+	<div class="mb-6">
+		<Alert variant="error">{saveError}</Alert>
 	</div>
 {/if}
 
@@ -57,7 +58,7 @@
 	</div>
 {/if}
 
-{#if loading || !settings}
+{#if dl.showSkeleton || !settings}
 	<div class="card space-y-4">
 		{#each Array(6) as _}
 			<Skeleton height="1rem" width="7rem" />

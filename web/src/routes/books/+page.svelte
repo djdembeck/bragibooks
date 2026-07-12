@@ -3,6 +3,7 @@
 	import type { BookWithPeople, BooksListResponse } from '$lib/types';
 	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, Button } from '$lib/components';
 	import { formatRuntime } from '$lib/types';
+	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
 	const limit = 20;
 	const filters: { value: string; label: string }[] = [
@@ -17,20 +18,13 @@
 	let filter = $state('all');
 	let page = $state(0);
 	let response = $state<BooksListResponse | null>(null);
-	let loading = $state(true);
-	let error = $state<string | null>(null);
+	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 
 	async function loadBooks() {
-		loading = true;
-		error = null;
-		try {
+		await dl.run(async () => {
 			const statusParam = filter === 'all' ? '' : `status=${filter}&`;
 			response = await get<BooksListResponse>(`/books?${statusParam}page=${page}&limit=${limit}`);
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load books';
-		} finally {
-			loading = false;
-		}
+		});
 	}
 
 	function setFilter(value: string) {
@@ -49,9 +43,9 @@
 
 <PageHeader title="Books" description="Browse, filter, and review all books in your library." />
 
-{#if error}
+{#if dl.error}
 	<div class="mb-6">
-		<Alert variant="error" onretry={loadBooks}>{error}</Alert>
+		<Alert variant="error" onretry={loadBooks}>{dl.error}</Alert>
 	</div>
 {/if}
 
@@ -72,7 +66,7 @@
 	{/each}
 </div>
 
-{#if loading}
+{#if dl.showSkeleton}
 	<div class="space-y-2">
 		{#each Array(5) as _}
 			<div class="card flex items-center gap-4">

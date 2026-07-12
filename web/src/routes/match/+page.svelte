@@ -17,6 +17,7 @@
 		formatRuntime
 	} from '$lib/types';
 	import { PageHeader, Button, Alert, Skeleton, EmptyState, Modal } from '$lib/components';
+	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
 	interface CandidateDetails {
 		book: AudiobookDBBook | null;
@@ -36,7 +37,7 @@
 	}
 
 	let candidates = $state<MatchCandidate[]>([]);
-	let loading = $state(true);
+	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 	let saving = $state(false);
 	let pageError = $state<string | null>(null);
 
@@ -47,29 +48,28 @@
 	let modalResults = $state<AudiobookDBBook[]>([]);
 
 	async function loadPending() {
-		loading = true;
-		pageError = null;
-		try {
-			const response = await get<BooksListResponse>('/books?status=pending&limit=200');
-			candidates = (response.books || []).map((book) => ({
-				bookId: book.id,
-				srcPath: book.src_path,
-				title: book.title,
-				searchResults: [],
-				selectedBookId: null,
-				selectedReleaseId: null,
-				details: { book: null, release: null },
-				loading: true,
-				error: null
-			}));
-			for (const candidate of candidates) {
-				autoMatch(candidate);
+		await dl.run(async () => {
+			pageError = null;
+			try {
+				const response = await get<BooksListResponse>('/books?status=pending&limit=200');
+				candidates = (response.books || []).map((book) => ({
+					bookId: book.id,
+					srcPath: book.src_path,
+					title: book.title,
+					searchResults: [],
+					selectedBookId: null,
+					selectedReleaseId: null,
+					details: { book: null, release: null },
+					loading: true,
+					error: null
+				}));
+				for (const candidate of candidates) {
+					autoMatch(candidate);
+				}
+			} catch (e) {
+				pageError = e instanceof Error ? e.message : 'Failed to load pending books';
 			}
-		} catch (e) {
-			pageError = e instanceof Error ? e.message : 'Failed to load pending books';
-		} finally {
-			loading = false;
-		}
+		});
 	}
 
 	async function autoMatch(candidate: MatchCandidate) {
@@ -253,7 +253,7 @@
 	</div>
 {/if}
 
-{#if loading}
+{#if dl.showSkeleton}
 	<div class="space-y-4">
 		{#each Array(3) as _}
 			<div class="card flex gap-4">
