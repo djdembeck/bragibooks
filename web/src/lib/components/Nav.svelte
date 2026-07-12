@@ -18,10 +18,10 @@
 </script>
 
 <header class="sticky top-0 z-30 border-b border-[var(--border-subtle)] bg-[var(--surface)]/95 backdrop-blur">
-	<div class="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
-		<a href="/" class="flex items-center gap-2 text-lg font-semibold text-[var(--text)] no-underline hover:opacity-90">
-			<span class="flex h-8 w-8 items-center justify-center rounded-md bg-[var(--accent)] text-[var(--text)]">
-				<Logo class="h-6 w-6" />
+	<div class="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
+		<a href="/" class="flex items-center gap-2.5 text-lg font-semibold text-[var(--text)] no-underline hover:opacity-90">
+			<span class="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--accent)] text-[var(--accent-text)] shadow-sm">
+				<Logo class="h-7 w-7" />
 			</span>
 			Bragi Books
 		</a>
@@ -34,8 +34,8 @@
 						<a
 							href={link.href}
 							class="rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors sm:px-3"
-							class:text-[var(--accent)]={active}
-							class:bg-[var(--surface-hover)]={active}
+							class:bg-[var(--accent)]={active}
+							class:text-[var(--accent-text)]={active}
 							class:text-[var(--text-secondary)]={!active}
 							class:hover:text-[var(--text)]={!active}
 							aria-current={active ? 'page' : undefined}
