@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/bragibooks/bragibooks/internal/models"
@@ -16,6 +17,28 @@ type ListBooksResponse struct {
 	Total int                    `json:"total"`
 	Page  int                    `json:"page"`
 	Limit int                    `json:"limit"`
+}
+
+// PersonUpdate is a single author or narrator supplied by the client.
+type PersonUpdate struct {
+	Name                string  `json:"name"`
+	AudiobookdbPersonID *string `json:"audiobookdb_person_id,omitempty"`
+}
+
+// CreateBookEntry is a single source path to turn into a pending book.
+type CreateBookEntry struct {
+	SrcPath string `json:"src_path"`
+	Title   string `json:"title,omitempty"`
+}
+
+// CreateBooksRequest is the JSON body accepted by POST /api/books.
+type CreateBooksRequest struct {
+	Books []CreateBookEntry `json:"books"`
+}
+
+// CreateBooksResponse is returned by POST /api/books.
+type CreateBooksResponse struct {
+	Books []models.BookWithPeople `json:"books"`
 }
 
 // UpdateBookRequest is the JSON body accepted by PUT /api/books/:id.
@@ -36,6 +59,8 @@ type UpdateBookRequest struct {
 	Status               *string         `json:"status"`
 	StatusMessage        *string         `json:"status_message"`
 	CoverImageURL        *string         `json:"cover_image_url"`
+	Authors              []PersonUpdate  `json:"authors,omitempty"`
+	Narrators            []PersonUpdate  `json:"narrators,omitempty"`
 }
 
 // ListBooks handles GET /api/books with optional status filter and pagination.
@@ -253,6 +278,13 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Authors != nil || req.Narrators != nil {
+		if err := replacePeople(h.svc.DB, bookID, req.Authors, req.Narrators); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("replace people: %v", err))
+			return
+		}
+	}
+
 	book, err := h.getBook(bookID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("get updated book: %v", err))
@@ -272,6 +304,108 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, bookWithPeople)
+}
+
+// CreateBooks handles POST /api/books, creating a batch of pending books from source paths.
+func (h *Handler) CreateBooks(w http.ResponseWriter, r *http.Request) {
+	var req CreateBooksRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(req.Books) == 0 {
+		writeError(w, http.StatusBadRequest, "at least one book is required")
+		return
+	}
+
+	created := make([]models.Book, 0, len(req.Books))
+	for _, entry := range req.Books {
+		title := entry.Title
+		if title == "" {
+			title = deriveTitle(entry.SrcPath)
+		}
+
+		res, err := h.svc.DB.Exec(
+			`INSERT INTO books (title, src_path, status, created_at, updated_at)
+			 VALUES (?, ?, 'pending', datetime('now'), datetime('now'))`,
+			title, entry.SrcPath,
+		)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("create book: %v", err))
+			return
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("last insert id: %v", err))
+			return
+		}
+		book, err := h.getBook(id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("get created book: %v", err))
+			return
+		}
+		created = append(created, *book)
+	}
+
+	enriched, err := h.enrichBooks(created)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("enrich books: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, CreateBooksResponse{Books: enriched})
+}
+
+func deriveTitle(path string) string {
+	base := filepath.Base(path)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	name = strings.TrimSpace(name)
+	name = strings.ReplaceAll(name, "_", " ")
+	name = strings.ReplaceAll(name, ".", " ")
+	name = strings.ReplaceAll(name, "-", " ")
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "Untitled"
+	}
+	return strings.Title(name)
+}
+
+func replacePeople(db *sql.DB, bookID int64, authors, narrators []PersonUpdate) error {
+	if _, err := db.Exec("DELETE FROM people WHERE book_id = ?", bookID); err != nil {
+		return fmt.Errorf("delete people: %w", err)
+	}
+
+	insert, err := db.Prepare(
+		"INSERT INTO people (book_id, name, role, audiobookdb_person_id, created_at) VALUES (?, ?, ?, ?, datetime('now'))",
+	)
+	if err != nil {
+		return fmt.Errorf("prepare people insert: %w", err)
+	}
+	defer insert.Close()
+
+	add := func(role string, list []PersonUpdate) error {
+		for _, p := range list {
+			if strings.TrimSpace(p.Name) == "" {
+				continue
+			}
+			var adbID sql.NullString
+			if p.AudiobookdbPersonID != nil {
+				adbID = sql.NullString{String: *p.AudiobookdbPersonID, Valid: true}
+			}
+			if _, err := insert.Exec(bookID, p.Name, role, adbID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := add("author", authors); err != nil {
+		return fmt.Errorf("insert authors: %w", err)
+	}
+	if err := add("narrator", narrators); err != nil {
+		return fmt.Errorf("insert narrators: %w", err)
+	}
+	return nil
 }
 
 // DeleteBook handles DELETE /api/books/:id, deleting the book and cascading people.

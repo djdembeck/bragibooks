@@ -43,6 +43,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 
 		// Books CRUD
 		r.Get("/books", h.ListBooks)
+		r.Post("/books", h.CreateBooks)
 		r.Get("/books/{id}", h.GetBook)
 		r.Put("/books/{id}", h.UpdateBook)
 		r.Delete("/books/{id}", h.DeleteBook)

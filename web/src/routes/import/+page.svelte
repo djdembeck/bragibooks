@@ -1,20 +1,35 @@
 <script lang="ts">
-	import { get } from '$lib/api';
-	import type { DirectoryEntry, DirectoriesResponse } from '$lib/types';
+	import { get, post } from '$lib/api';
+	import { goto } from '$app/navigation';
+	import type { DirectoryEntry, DirectoriesResponse, Settings, CreateBooksResponse } from '$lib/types';
+	import { PageHeader, Alert, Button, Skeleton, EmptyState } from '$lib/components';
 
 	let currentPath = $state('');
 	let entries: DirectoryEntry[] = $state([]);
-	let selectedPaths: string[] = $state([]);
+	let filtered: DirectoryEntry[] = $state([]);
+	let selectedPaths = $state<Set<string>>(new Set());
 	let loading = $state(false);
+	let creating = $state(false);
 	let error = $state<string | null>(null);
+	let search = $state('');
+
+	async function initPath() {
+		try {
+			const settings = await get<Settings>('/settings', {});
+			await loadDirectory(settings.input_dir || '/');
+		} catch {
+			await loadDirectory('/');
+		}
+	}
 
 	async function loadDirectory(path: string) {
+		loading = true;
+		error = null;
 		try {
-			loading = true;
-			error = null;
-			const response = await get<DirectoriesResponse>(`/directories?path=${encodeURIComponent(path)}`, {});
+			const response = await get<DirectoriesResponse>(`/directories?path=${encodeURIComponent(path)}`);
 			entries = response.entries || [];
-			currentPath = path;
+			currentPath = response.path || path;
+			filterEntries();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to list directory';
 			entries = [];
@@ -23,73 +38,143 @@
 		}
 	}
 
-	function toggleSelect(path: string) {
-		if (selectedPaths.includes(path)) {
-			selectedPaths = selectedPaths.filter(p => p !== path);
-		} else {
-			selectedPaths.push(path);
+	function filterEntries() {
+		const q = search.trim().toLowerCase();
+		if (!q) {
+			filtered = entries;
+			return;
+		}
+		filtered = entries.filter((e) => e.name.toLowerCase().includes(q));
+	}
+
+	function togglePath(path: string) {
+		const next = new Set(selectedPaths);
+		if (next.has(path)) next.delete(path);
+		else next.add(path);
+		selectedPaths = next;
+	}
+
+	function toggleSelectAll() {
+		const allSelected = filtered.length > 0 && filtered.every((e) => selectedPaths.has(e.path));
+		const next = new Set(selectedPaths);
+		filtered.forEach((e) => {
+			if (allSelected) next.delete(e.path);
+			else next.add(e.path);
+		});
+		selectedPaths = next;
+	}
+
+	function parentPath(path: string) {
+		if (!path) return '/';
+		const idx = path.lastIndexOf('/');
+		if (idx <= 0) return '/';
+		return path.slice(0, idx);
+	}
+
+	async function start() {
+		if (selectedPaths.size === 0) return;
+		creating = true;
+		error = null;
+		try {
+			const payload = { books: Array.from(selectedPaths).map((src_path) => ({ src_path })) };
+			await post<CreateBooksResponse>('/books', payload);
+			await goto('/match');
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Failed to create books';
+			creating = false;
 		}
 	}
 
 	$effect(() => {
-		// Load settings to get default input dir
-		get('/settings', {}).then((settings: any) => {
-			if (settings.inputDir) {
-				loadDirectory(settings.inputDir);
-			}
-		}).catch(() => {
-			loadDirectory('/');
-		});
+		initPath();
 	});
+
+	$effect(() => {
+		filterEntries();
+	});
+
+	const allSelected = $derived(filtered.length > 0 && filtered.every((e) => selectedPaths.has(e.path)));
 </script>
 
-<div class="p-6 max-w-6xl mx-auto">
-	<nav class="flex gap-4 mb-8">
-		<a href="/" class="text-[var(--text)] hover:text-[var(--accent)]">Dashboard</a>
-		<a href="/books" class="text-[var(--text)] hover:text-[var(--accent)]">Books</a>
-		<a href="/import" class="text-[var(--accent)] font-semibold">Import</a>
-		<a href="/process" class="text-[var(--text)] hover:text-[var(--accent)]">Processing</a>
-		<a href="/settings" class="text-[var(--text)] hover:text-[var(--accent)]">Settings</a>
-	</nav>
+<PageHeader title="Import" description="Choose source directories or files to match and process." />
 
-	<h1 class="text-3xl font-bold mb-2">Import</h1>
-	<p class="text-[var(--text-muted)] mb-6">Browse for audiobook source directories and match them with audiobookdb metadata.</p>
+{#if error}
+	<div class="mb-6">
+		<Alert variant="error" onretry={() => loadDirectory(currentPath)}>{error}</Alert>
+	</div>
+{/if}
 
-	<div class="mb-4">
-		<div class="flex items-center gap-2">
-			{#if currentPath}
-				<button class="text-[var(--text)] hover:text-[var(--accent)]" onclick={() => loadDirectory(currentPath.substring(0, currentPath.lastIndexOf('/')))}>
-					📁 Parent
+<div class="card">
+	<div class="mb-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+		<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+			{#if currentPath !== '/'}
+				<button type="button" class="hover:text-[var(--accent)]" onclick={() => loadDirectory(parentPath(currentPath))}>
+					← Parent
 				</button>
-				<span class="text-[var(--text-muted)]">›</span>
+				<span class="text-[var(--border)]">/</span>
 			{/if}
-			<span class="text-[var(--text-muted)]">{currentPath || '/'}</span>
+			<span class="truncate font-mono text-xs">{currentPath || '/'}</span>
+		</div>
+		<div class="relative">
+			<input bind:value={search} type="text" placeholder="Filter entries…" class="w-full sm:w-72" />
 		</div>
 	</div>
 
 	{#if loading}
-		<p class="text-[var(--text-muted)]">Loading...</p>
-	{:else if error}
-		<p class="text-red-400">{error}</p>
-	{:else}
-		<div class="space-y-1">
-			{#each entries as entry}
-				<div class="flex items-center gap-2 p-2 rounded hover:bg-[var(--surface)]">
-					{#if entry.type === 'dir'}
-						<button class="text-[var(--text)]" onclick={() => loadDirectory(entry.path)}>📁 {entry.name}/</button>
-						<input type="checkbox" checked={selectedPaths.includes(entry.path)} onchange={() => toggleSelect(entry.path)} />
-					{:else}
-						<span class="text-[var(--text-muted)]">📄 {entry.name}</span>
-					{/if}
-				</div>
+		<div class="space-y-2">
+			{#each Array(8) as _}
+				<Skeleton height="2.5rem" />
 			{/each}
+		</div>
+	{:else if entries.length === 0}
+		<EmptyState
+			title="Directory is empty"
+			description="This directory has no files or folders that Bragi Books can see."
+		/>
+	{:else}
+		<div class="rounded-lg border border-[var(--border-subtle)]">
+			<div class="flex items-center gap-3 border-b border-[var(--border-subtle)] bg-[var(--elevated)] px-4 py-2.5 text-sm">
+				<input type="checkbox" checked={allSelected} onchange={toggleSelectAll} aria-label="Select all" />
+				<span class="text-[var(--text-muted)]">Select all visible</span>
+			</div>
+			<div class="max-h-[55vh] overflow-auto">
+				{#each filtered as entry (entry.path)}
+					<div class="flex items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-2.5 last:border-b-0 hover:bg-[var(--surface-hover)]">
+						<input
+							type="checkbox"
+							checked={selectedPaths.has(entry.path)}
+							onchange={() => togglePath(entry.path)}
+							aria-label="Select {entry.name}"
+						/>
+						<div class="flex min-w-0 flex-1 items-center gap-2">
+							{#if entry.type === 'dir'}
+								<button
+									type="button"
+									class="truncate text-left text-sm font-medium text-[var(--text)] hover:text-[var(--accent)]"
+									onclick={() => loadDirectory(entry.path)}
+								>
+									<span class="mr-1 text-[var(--accent)]">▸</span> {entry.name}/
+								</button>
+							{:else}
+								<span class="truncate text-sm text-[var(--text-secondary)]">
+									<span class="mr-1 text-[var(--text-muted)]">·</span> {entry.name}
+								</span>
+							{/if}
+						</div>
+					</div>
+				{:else}
+					<div class="px-4 py-6 text-center text-sm text-[var(--text-muted)]">No entries match your filter.</div>
+				{/each}
+			</div>
 		</div>
 	{/if}
 
-	{#if selectedPaths.length > 0}
-		<div class="mt-6 p-4 bg-[var(--surface)] rounded">
-			<p class="font-semibold mb-2">Selected: {selectedPaths.length} directories</p>
-			<p class="text-[var(--text-muted)] text-sm">Next step: search audiobookdb for matching metadata.</p>
-		</div>
-	{/if}
+	<div class="mt-6 flex flex-col-reverse items-center justify-end gap-3 sm:flex-row">
+		<p class="text-sm text-[var(--text-muted)]">
+			{selectedPaths.size} selected
+		</p>
+		<Button variant="primary" disabled={selectedPaths.size === 0 || creating} loading={creating} onclick={start}>
+			Next: Match metadata
+		</Button>
+	</div>
 </div>
