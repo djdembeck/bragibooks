@@ -59,6 +59,7 @@ func main() {
 		cfg.Directories.CompletedDir,
 		cfg.Processing.NumCPUs,
 		cfg.Processing.PathFormat,
+		cfg.Processing.LogLevel,
 	)
 
 	audiobookDBClient := audiobookdb.NewClient(cfg.APIKey.APIKey)

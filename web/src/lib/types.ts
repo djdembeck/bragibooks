@@ -18,6 +18,7 @@ export interface Book {
 	cover_image_url: string;
 	created_at: string;
 	updated_at: string;
+	converted: boolean;
 }
 
 export interface Person {

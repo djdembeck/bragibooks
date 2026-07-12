@@ -65,6 +65,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		// Directory browsing
 		r.Get("/directories", h.ListDirectories)
 		r.Get("/directories/stream", h.StreamDirectories)
+		r.Get("/directories/tree", h.GetDirectoryTree)
 
 		// Migration
 		r.Post("/migrate", h.MigrateLegacyDB)

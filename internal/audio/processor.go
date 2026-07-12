@@ -5,8 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strconv"
+	"strings"
 )
+
+var jobBeginRe = regexp.MustCompile(`job begin:\s+(.+)$`)
 
 // Processor invokes the m4b-merge Rust CLI binary for audiobook processing.
 type Processor struct {
@@ -19,14 +23,14 @@ type Processor struct {
 }
 
 // NewProcessor creates a Processor with the given configuration.
-func NewProcessor(binary, outputDir, completedDir string, numCPUs int, pathFormat string) *Processor {
+func NewProcessor(binary, outputDir, completedDir string, numCPUs int, pathFormat string, logLevel string) *Processor {
 	return &Processor{
 		Binary:       binary,
 		OutputDir:    outputDir,
 		CompletedDir: completedDir,
 		NumCPUs:      numCPUs,
 		PathFormat:   pathFormat,
-		LogLevel:     "info",
+		LogLevel:     logLevel,
 	}
 }
 
@@ -39,7 +43,7 @@ type ProcessResult struct {
 
 // Run executes m4b-merge with the given input file paths.
 // Returns the output .m4b file path, or an error.
-func (p *Processor) Run(ctx context.Context, inputPaths []string) (*ProcessResult, error) {
+func (p *Processor) Run(ctx context.Context, inputPaths []string, asin string) (*ProcessResult, error) {
 	args := []string{
 		"-o", p.OutputDir,
 		"-p", p.PathFormat,
@@ -48,6 +52,9 @@ func (p *Processor) Run(ctx context.Context, inputPaths []string) (*ProcessResul
 	}
 	if p.CompletedDir != "" {
 		args = append(args, "--completed-directory", p.CompletedDir)
+	}
+	if asin != "" {
+		args = append(args, "-a", asin)
 	}
 	args = append(args, "-i")
 	args = append(args, inputPaths...)
@@ -71,8 +78,15 @@ func (p *Processor) Run(ctx context.Context, inputPaths []string) (*ProcessResul
 		}, fmt.Errorf("m4b-merge: %w: %s", err, stderrBytes)
 	}
 
-	return &ProcessResult{
+	result := &ProcessResult{
 		Stdout: string(stdoutBytes),
 		Stderr: string(stderrBytes),
-	}, nil
+	}
+
+	// Parse the output file path from stdout
+	if match := jobBeginRe.FindStringSubmatch(result.Stdout); len(match) == 2 {
+		result.OutputFile = strings.TrimSpace(match[1])
+	}
+
+	return result, nil
 }

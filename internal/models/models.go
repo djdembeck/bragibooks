@@ -23,6 +23,7 @@ type Book struct {
 	CoverImageURL        string         `db:"cover_image_url" json:"cover_image_url"`
 	CreatedAt            string         `db:"created_at" json:"created_at"`
 	UpdatedAt            string         `db:"updated_at" json:"updated_at"`
+	Converted            bool           `db:"converted" json:"converted"`
 }
 
 // Person represents an author or narrator linked to a book.

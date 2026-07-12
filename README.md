@@ -196,13 +196,12 @@ When `DEBUG=False`, Bragibooks automatically enables production security headers
 
 ## ⛏️ Built Using <a name = "built_using"></a>
 
-- [Django 5.2 LTS](https://www.djangoproject.com/) - Server/web framework
-- [Celery](https://docs.celeryq.dev/en/stable/getting-started/introduction.html) - Task queue and worker
-- [Bulma](https://bulma.io/) - Frontend CSS framework
-- [audnexus](https://github.com/laxamentumtech/audnexus) - API backend for metadata
+- [Go](https://go.dev/) - Backend runtime
+- [SvelteKit](https://svelte.dev/) - Frontend framework
+- [audiobookdb.org](https://audiobookdb.org/) - Community audiobook metadata database
 - [m4b-merge (Rust)](https://github.com/djdembeck/m4b-merge) - High-performance file merging and tagging
-- [Python 3.10+](https://www.python.org/) - Application runtime
-- [SQLite](https://www.sqlite.org/) - Database (default)
+- [SQLite](https://www.sqlite.org/) - Database
+
 
 ## ✍️ Authors <a name = "authors"></a>
   <img src="https://github.com/djdembeck.png?size=100"/>

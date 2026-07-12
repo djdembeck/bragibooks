@@ -93,6 +93,13 @@ CREATE INDEX IF NOT EXISTS idx_processing_jobs_status ON processing_jobs(status)
 CREATE INDEX IF NOT EXISTS idx_processing_jobs_book_id ON processing_jobs(book_id);
 `,
 	},
+	{
+		version: 2,
+		sql: `
+ALTER TABLE books ADD COLUMN converted BOOLEAN DEFAULT 0;
+
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

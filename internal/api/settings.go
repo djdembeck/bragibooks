@@ -16,13 +16,13 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	cfg := h.svc.Config.Config()
 
 	settings := map[string]any{
-		"m4b_merge_binary": cfg.M4bMerge.Binary,
-		"input_dir":        cfg.Directories.InputDir,
-		"output_dir":       cfg.Directories.OutputDir,
-		"completed_dir":    cfg.Directories.CompletedDir,
-		"num_cpus":         cfg.Processing.NumCPUs,
-		"output_scheme":    cfg.Processing.PathFormat,
-		"region":           "us",
+		"m4b_merge_binary":  cfg.M4bMerge.Binary,
+		"input_dir":         cfg.Directories.InputDir,
+		"output_dir":        cfg.Directories.OutputDir,
+		"completed_dir":     cfg.Directories.CompletedDir,
+		"num_cpus":          cfg.Processing.NumCPUs,
+		"output_scheme":     cfg.Processing.PathFormat,
+		"region":            cfg.Processing.Region,
 	}
 
 	writeJSON(w, http.StatusOK, settings)
@@ -77,7 +77,9 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.OutputScheme != nil {
 		cfg.Processing.PathFormat = *req.OutputScheme
 	}
-	// Region is not currently stored in config; we could add it if needed
+	if req.Region != nil {
+		cfg.Processing.Region = *req.Region
+	}
 
 	// Save the updated config
 	if err := h.svc.Config.Save(); err != nil {
@@ -96,13 +98,13 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// Return updated settings (without API key)
 	updatedCfg := h.svc.Config.Config()
 	settings := map[string]any{
-		"m4b_merge_binary": updatedCfg.M4bMerge.Binary,
-		"input_dir":        updatedCfg.Directories.InputDir,
-		"output_dir":       updatedCfg.Directories.OutputDir,
-		"completed_dir":    updatedCfg.Directories.CompletedDir,
-		"num_cpus":         updatedCfg.Processing.NumCPUs,
-		"output_scheme":    updatedCfg.Processing.PathFormat,
-		"region":           "us",
+		"m4b_merge_binary":  updatedCfg.M4bMerge.Binary,
+		"input_dir":         updatedCfg.Directories.InputDir,
+		"output_dir":        updatedCfg.Directories.OutputDir,
+		"completed_dir":     updatedCfg.Directories.CompletedDir,
+		"num_cpus":          updatedCfg.Processing.NumCPUs,
+		"output_scheme":     updatedCfg.Processing.PathFormat,
+		"region":            updatedCfg.Processing.Region,
 	}
 
 	writeJSON(w, http.StatusOK, settings)
@@ -127,7 +129,7 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 		expandedCompletedDir,
 		cfg.Processing.NumCPUs,
 		cfg.Processing.PathFormat,
-		"us",
+		cfg.Processing.Region,
 	)
 	return err
 }

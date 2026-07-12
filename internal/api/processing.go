@@ -120,6 +120,16 @@ func (s *ProcessingService) GetJob(jobID string) *jobState {
 }
 
 func (s *ProcessingService) processJob(ctx context.Context, job *models.ProcessingJob) {
+	// Apply a 4-hour per-job timeout
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Hour)
+	defer cancel()
+	if job.BookID.Valid {
+		s.db.Exec(
+			"UPDATE books SET status = 'processing', status_message = '' WHERE id = ?",
+			job.BookID.Int64,
+		)
+	}
+
 	// Update status to 'running'
 	s.db.Exec(
 		"UPDATE processing_jobs SET status = ?, started_at = datetime('now') WHERE id = ?",
@@ -134,6 +144,16 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		}
 	}
 
+	// Get ASIN from the matched book
+	var asin string
+	if job.BookID.Valid {
+		var bookAsin sql.NullString
+		row := s.db.QueryRow("SELECT asin FROM books WHERE id = ?", job.BookID.Int64)
+		if err := row.Scan(&bookAsin); err == nil && bookAsin.Valid {
+			asin = bookAsin.String
+		}
+	}
+
 	// Parse source paths from stored args
 	var args map[string]any
 	if err := json.Unmarshal([]byte(job.M4bMergeArgs), &args); err == nil {
@@ -145,8 +165,14 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 				}
 			}
 
-			result, err := s.proc.Run(ctx, srcPaths)
+			result, err := s.proc.Run(ctx, srcPaths, asin)
 			if err != nil {
+				if job.BookID.Valid {
+					s.db.Exec(
+						"UPDATE books SET status = 'error', status_message = ? WHERE id = ?",
+						err.Error(), job.BookID.Int64,
+					)
+				}
 				s.db.Exec(
 					"UPDATE processing_jobs SET status = ?, error = ?, output = ?, completed_at = datetime('now') WHERE id = ?",
 					"error", err.Error(), result.Stdout, job.ID,
@@ -162,6 +188,12 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 			}
 
 			outputFile := result.OutputFile
+			if job.BookID.Valid {
+				s.db.Exec(
+					"UPDATE books SET status = 'done', status_message = '', dest_path = ? WHERE id = ?",
+					outputFile, job.BookID.Int64,
+				)
+			}
 			s.db.Exec(
 				"UPDATE processing_jobs SET status = ?, output = ?, output_file = ?, completed_at = datetime('now') WHERE id = ?",
 				"done", result.Stdout, outputFile, job.ID,
@@ -174,6 +206,12 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 				state.done <- nil
 			}
 		} else {
+			if job.BookID.Valid {
+				s.db.Exec(
+					"UPDATE books SET status = 'error', status_message = ? WHERE id = ?",
+					"invalid args: no src_paths", job.BookID.Int64,
+				)
+			}
 			s.db.Exec(
 				"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE id = ?",
 				"error", "invalid args: no src_paths", job.ID,
@@ -183,6 +221,12 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 			}
 		}
 	} else {
+		if job.BookID.Valid {
+			s.db.Exec(
+				"UPDATE books SET status = 'error', status_message = ? WHERE id = ?",
+				"failed to parse args", job.BookID.Int64,
+			)
+		}
 		s.db.Exec(
 			"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE id = ?",
 			"error", "failed to parse args", job.ID,

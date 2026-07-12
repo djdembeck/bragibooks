@@ -118,6 +118,7 @@
 			</div>
 		</div>
 
+
 		<div>
 			<label for="audiobookdb_api_key" class="mb-1 block text-sm font-medium text-[var(--text-secondary)]">AudiobookDB API key</label>
 			<input id="audiobookdb_api_key" type="password" bind:value={settings.audiobookdb_api_key} placeholder="Optional" />
