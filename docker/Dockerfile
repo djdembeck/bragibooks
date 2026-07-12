@@ -6,14 +6,7 @@ RUN bun install --frozen-lockfile
 COPY web/ ./
 RUN bun run build
 
-# Stage 2: Build m4b-merge Rust binary from develop branch
-FROM rust:1.85-slim AS m4bmerge
-WORKDIR /m4b-merge
-COPY m4b-merge/Cargo.toml m4b-merge/Cargo.lock ./
-RUN cargo build --release 2>/dev/null || true  # download deps
-COPY m4b-merge/src ./src
-RUN cargo build --release
-
+# Stage 2: Build Go backend with embedded frontend
 FROM golang:1.25-alpine AS builder
 RUN apk add --no-cache git ffmpeg
 WORKDIR /build
