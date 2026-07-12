@@ -103,7 +103,7 @@ func (h *Handler) ListBooks(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("count books: %v", err))
 			return
 		}
-	case "done", "processing", "error", "pending":
+	case "done", "processing", "error", "pending", "matched":
 		rows, err := h.svc.DB.Query(
 			"SELECT id, title, asin, audiobookdb_book_id, audiobookdb_release_id, description, release_date, series, publisher, language, runtime_length_minutes, format_type, src_path, dest_path, status, status_message, cover_image_url, created_at, updated_at FROM books WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
 			status, limit, offset,

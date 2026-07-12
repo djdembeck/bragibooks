@@ -13,13 +13,14 @@ WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-COPY --from=frontend /app/web/build web/build/
+COPY --from=frontend /app/web/build webfs/build/
 RUN CGO_ENABLED=0 go build -tags webui -ldflags="-s -w" -o bragibooks ./cmd/bragibooks
 
 
 # Stage 4: Runtime
 FROM alpine:latest
 RUN apk add --no-cache ffmpeg
+WORKDIR /app
 COPY --from=builder /build/bragibooks /usr/local/bin/
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/bragibooks"]
