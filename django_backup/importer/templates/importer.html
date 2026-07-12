@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block style %}
+.panel {
+background: white;
+}
+
+.panel-block {
+display: flex;
+}
+
+.panel-block.folder {
+display: flex;
+justify-content: space-between;
+}
+
+.panel-block.folder div {
+display: flex;
+align-items: center;
+}
+
+.panel-block label {
+word-wrap: break-word;
+}
+
+.panel-block-container {
+overflow: auto;
+max-height: 500px;
+min-height: 350px;
+display: flex;
+flex-grow: 1;
+flex-direction: column;
+word-break: break-all;
+}
+
+.control.has-icons-right .icon {
+pointer-events: auto;
+}
+
+ .clear-search {
+    cursor: default;
+ }
+
+ .has-icons-right {
+    position: relative;
+ }
+
+.folder-loading {
+display: inline-block;
+width: 1em;
+height: 1em;
+border: 2px solid #dbdbdb;
+border-top-color: #3273dc;
+border-radius: 50%;
+animation: folder-loading-spin 0.75s linear infinite;
+margin-left: 0.5em;
+vertical-align: middle;
+}
+
+@keyframes folder-loading-spin {
+to { transform: rotate(360deg); }
+}
+{% endblock %}
+{% load directory_explorer_tags %}
+ {% block content %}
+<div class="columns">
+    <div class="column">
+        <nav class="panel">
+            <p class="panel-heading">
+                Choose Files or Directories to process
+            </p>
+            <div class="panel-block">
+                <p class="control has-icons-left has-icons-right">
+                    <input class="input" id="search-input" type="text" placeholder="Search">
+                    <span class="icon is-left">
+                        <i class="fas fa-search" aria-hidden="false"></i>
+                    </span>
+                    <span class="icon is-right clear-search">
+                        <i class="fas fa-times" aria-hidden="false"></i>
+                    </span>
+                </p>
+            </div>
+            <label class="panel-block">
+                <input type="checkbox" id="select-all-checkbox">
+                Select All
+            </label>
+            <form action="{% url 'import' %}" method="POST">
+                {% csrf_token %}
+                <div class="panel-block-container">
+                    <!-- Loading message shown initially -->
+                    <div id="directory-loading" class="panel-block">
+                        <span class="panel-icon"><i class="fas fa-spinner fa-spin"></i></span>
+                        Loading directories...
+                    </div>
+
+                    <!-- Error container hidden initially -->
+                    <div id="directory-error" class="panel-block" style="display: none;">
+                        <span class="panel-icon"><i class="fas fa-exclamation-triangle"></i></span>
+                        <span id="directory-error-message">Failed to load directories</span>
+                        <button type="button" id="directory-retry-btn" class="button is-small is-link ml-2">Retry</button>
+                    </div>
+
+                    <!-- Directory tree container empty initially -->
+                    <div id="directory-tree"></div>
+                </div>
+                <div class="panel-block">
+                    <button class="button is-link is-fullwidth">Next</button>
+                </div>
+            </form>
+        </nav>
+    </div>
+</div>
+{% endblock %}
+{% block script %}
+{% include "importer.js" %}
+{% endblock %}

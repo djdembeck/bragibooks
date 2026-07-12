@@ -1,67 +1,34 @@
-# =============================================================================
-# Runtime stage - Bragibooks with m4b-merge
-# =============================================================================
-# Base image
-FROM ghcr.io/djdembeck/m4b-merge:develop
+# Stage 1: Build SvelteKit frontend
+FROM oven/bun:1 AS frontend
+WORKDIR /app/web
+COPY web/package.json web/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY web/ ./
+RUN bun run build
 
-# Keeps Python from generating .pyc files in the container
-ENV PYTHONDONTWRITEBYTECODE=1
+# Stage 2: Build m4b-merge Rust binary from develop branch
+FROM rust:1.85-slim AS m4bmerge
+WORKDIR /m4b-merge
+COPY m4b-merge/Cargo.toml m4b-merge/Cargo.lock ./
+RUN cargo build --release 2>/dev/null || true  # download deps
+COPY m4b-merge/src ./src
+RUN cargo build --release
 
-# Turns off buffering for easier container logging
-ENV PYTHONUNBUFFERED=1
+# Stage 3: Build Go binary
+FROM golang:1.23-alpine AS builder
+RUN apk add --no-cache git ffmpeg
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+COPY --from=frontend /app/web/build web/build/
+COPY --from=m4bmerge /m4b-merge/target/release/m4b-merge /usr/local/bin/m4b-merge
+RUN CGO_ENABLED=0 go build -tags webui -ldflags="-s -w" -o bragibooks ./cmd/bragibooks
 
-# Setup environment variable
-ENV APP_HOME=/home/app/web
-
-# Where your code lives
-WORKDIR $APP_HOME
-
-# Install gosu for user switching in entrypoint
-# Note: This build step requires internet access to GitHub and keys.openpgp.org
-# Install gosu from GitHub releases (not available in Alpine repos)
-# Architectures supported by gosu: amd64, arm64, armel, armhf, i386, mips64le, ppc64le, riscv64, s390x
-ENV GOSU_VERSION=1.17
-RUN set -eux; \
-    apk add --no-cache --virtual .gosu-deps \
-        ca-certificates \
-        dpkg \
-        gnupg \
-        wget; \
-    dpkgArch="$(dpkg --print-architecture | awk -F- '{ print $NF }')"; \
-    wget -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${dpkgArch}"; \
-    wget -O /usr/local/bin/gosu.asc "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${dpkgArch}.asc"; \
-    export GNUPGHOME="$(mktemp -d)"; \
-    gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4; \
-    gpg --batch --verify /usr/local/bin/gosu.asc /usr/local/bin/gosu; \
-    gpgconf --kill gpg-agent; \
-    rm -rf "$GNUPGHOME" /usr/local/bin/gosu.asc; \
-    chmod +x /usr/local/bin/gosu; \
-    gosu --version; \
-    gosu nobody true; \
-    apk del --no-network .gosu-deps
-
-# Copy the necessary files to the container
-COPY requirements.txt .
-COPY pyproject.toml .
-COPY README.md .
-
-# Run this command to install all dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir -e .
-
-# Copy whole project to your docker home directory.
-COPY bragibooks_proj $APP_HOME/bragibooks_proj/
-COPY importer $APP_HOME/importer/
-COPY utils $APP_HOME/utils/
-COPY manage.py $APP_HOME
-
-# Copy entrypoint file
-COPY docker/entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
-# Port where the Django app runs
-EXPOSE 8000
-
-# Entrypoint for the container
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# Stage 4: Runtime
+FROM alpine:latest
+RUN apk add --no-cache ffmpeg
+COPY --from=builder /build/bragibooks /usr/local/bin/
+COPY --from=m4bmerge /m4b-merge/target/release/m4b-merge /usr/local/bin/m4b-merge
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/bragibooks"]

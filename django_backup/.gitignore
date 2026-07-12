@@ -1,0 +1,17 @@
+.python-version
+.vscode
+/static/
+__pycache__/
+config/
+env/
+venv/
+demo/
+.DS_Store
+admin/
+
+.opencode
+.sisyphus
+.chunkhound
+*.egg-info/
+egg-info/
+.impeccable/

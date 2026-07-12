@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  bragibooks:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    ports:
+      - '8080:8080'
+    volumes:
+      - .:/app
+      - config:/app/config
+    environment:
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8080
+      - DATABASE_PATH=config/bragibooks.db
+    restart: unless-stopped
+
+volumes:
+  config:

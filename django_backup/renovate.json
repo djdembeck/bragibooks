@@ -1,0 +1,29 @@
+{
+	"baseBranches": ["develop"],
+	"branchConcurrentLimit": 10,
+	"commitMessageAction": "Upgrade",
+	"commitMessagePrefix": "chore:",
+	"commitMessageTopic": "{{depName}}",
+	"extends": ["config:base"],
+	"labels": ["dependencies"],
+	"lockFileMaintenance": {
+		"enabled": true,
+		"automerge": true,
+		"automergeType": "pr",
+		"platformAutomerge": true
+	},
+	"packageRules": [
+		{
+			"description": "Automatically merge minor and patch-level updates",
+			"matchUpdateTypes": ["minor", "digest", "patch", "pin"],
+			"automerge": true,
+			"automergeType": "branch"
+		}
+	],
+	"rebaseWhen": "auto",
+	"stabilityDays": 5,
+	"timezone": "Etc/UTC",
+	"vulnerabilityAlerts": {
+		"labels": ["security"]
+	}
+}
