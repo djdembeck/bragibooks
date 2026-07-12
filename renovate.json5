@@ -1,0 +1,22 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:recommended"],
+  schedule: ["before 6am on Monday"],
+  commitMessagePrefix: "ci",
+  labels: ["dependencies", "ci", "renovate"],
+  packageRules: [
+    {
+      groupName: "github-actions",
+      matchManagers: ["github-actions"]
+    }
+  ],
+  "github-actions": {
+    enabled: true
+  },
+  dockerfile: {
+    enabled: true
+  },
+  "docker-compose": {
+    enabled: true
+  }
+}

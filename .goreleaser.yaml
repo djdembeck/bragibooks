@@ -1,0 +1,55 @@
+version: 2
+
+project_name: bragibooks
+
+before:
+  hooks:
+    - cd web && bun install --frozen-lockfile
+    - cd web && bun run build
+    - rm -rf webfs/build
+    - cp -r web/build webfs/build
+
+builds:
+  - id: bragibooks
+    main: ./cmd/bragibooks
+    binary: bragibooks
+    ldflags:
+      - -s -w
+    tags:
+      - webui
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "arm64" }}arm64
+      {{- end }}
+    format_overrides:
+      - goos: windows
+        format: zip
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+
+release:
+  github:
+    owner: djdembeck
+    name: bragibooks

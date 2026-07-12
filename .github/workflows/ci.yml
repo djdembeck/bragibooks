@@ -3,86 +3,200 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    tags:
+      - 'v*'
+    paths-ignore: ['*.md', 'docs/**', '.gitignore', 'LICENSE']
   pull_request:
     branches: [main, develop]
+  workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-  actions: read
+permissions: read-all
+
+env:
+  PR_IS_SAME_REPO: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
 
 jobs:
-  test-python:
-    name: Python tests
+  lint-format:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22'
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Svelte type check
+        run: cd web && bun run check
+
+      - name: Go vet
+        run: go vet ./...
+
+  build:
+    name: Build
+    needs: [lint-format]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22'
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Build
+        run: make build
+
+  test:
+    name: Test
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run Go tests
+        run: go test ./internal/...
+
+  docker-build:
+    name: Build and Push Docker Image
+    needs: [test]
+    if: success()
+    runs-on: ubuntu-latest
     permissions:
-      actions: write
-    runs-on: ubuntu-latest
+      contents: read
+      packages: write
+      pull-requests: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-
-      - name: Cache pip
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml', 'requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gpac
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          pip install m4b-merge
-
-      - name: Generate secret key for Django
-        run: |
-          mkdir -p config
-          python -c "from django.core.management.utils import get_random_secret_key; open('config/secret_key.txt', 'w').write(get_random_secret_key())"
-
-      - name: Run pytest
-        run: |
-          mkdir -p junit
-          pytest -v --tb=short --junitxml=junit/results.xml
+      - name: Resolve PR number
+        id: pr-number
+        if: github.event_name == 'workflow_dispatch'
         env:
-          DJANGO_SETTINGS_MODULE: bragibooks_proj.settings
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=""
+          if command -v gh >/dev/null 2>&1; then
+            PR_NUMBER=$(gh pr list --repo "${GITHUB_REPOSITORY}" --head "${GITHUB_REF_NAME}" --json number -q '.[0].number' 2>/dev/null || echo "")
+          elif [ -n "${GH_TOKEN}" ]; then
+            PR_NUMBER=$(curl -sf -H "Authorization: token ${GH_TOKEN}" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY%/*}:${GITHUB_REF_NAME}&state=open" \
+              | jq -r '.[0].number // empty' 2>/dev/null || echo "")
+          fi
+          if [ "${PR_NUMBER}" = "null" ] || [ -z "${PR_NUMBER}" ]; then
+            PR_NUMBER=""
+          fi
+          echo "number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: pytest-results
-          path: junit/*.xml
-
-  test-js:
-    name: JavaScript tests
-    runs-on: ubuntu-latest
-    steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
 
-      - name: Setup Node
-        uses: actions/setup-node@v5
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' || env.PR_IS_SAME_REPO == 'true'
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
-          node-version: "22"
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run JS tests
-        run: npm test
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,enable=${{ github.event_name != 'pull_request' }}
+
+      - name: Build and push Docker image
+        id: docker_build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          file: docker/Dockerfile
+          context: .
+          push: ${{ github.event_name != 'pull_request' || env.PR_IS_SAME_REPO == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Find existing PR comment
+        if: env.PR_IS_SAME_REPO == 'true' || (github.event_name == 'workflow_dispatch' && steps.pr-number.outputs.number != '')
+        uses: peter-evans/find-comment@b30e6a3c0ed37e7c023ccd3f1db5c6c0b0c23aad # v4.0.0
+        id: find-comment
+        with:
+          issue-number: ${{ github.event.pull_request.number || steps.pr-number.outputs.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: 'Docker Image Ready'
+
+      - name: Comment PR with image tags
+        if: env.PR_IS_SAME_REPO == 'true' || (github.event_name == 'workflow_dispatch' && steps.pr-number.outputs.number != '')
+        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
+        with:
+          comment-id: ${{ steps.find-comment.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number || steps.pr-number.outputs.number }}
+          body: |
+            ## 🐳 Docker Image Ready
+
+            The following image tag is available for testing this PR:
+
+            | Tag | Image |
+            |-----|-------|
+            | `pr-${{ github.event.pull_request.number || steps.pr-number.outputs.number }}` | `ghcr.io/${{ github.repository }}:pr-${{ github.event.pull_request.number || steps.pr-number.outputs.number }}` |
+
+            **Note:** This tag is stable for this PR. Each new commit will overwrite this tag with the latest build.
+
+            **To test:**
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:pr-${{ github.event.pull_request.number || steps.pr-number.outputs.number }}
+            docker run --rm -v /host/media:/media:rw ghcr.io/${{ github.repository }}:pr-${{ github.event.pull_request.number || steps.pr-number.outputs.number }}
+            ```
+
+            Images will be automatically deleted when this PR is merged or closed.
+          edit-mode: replace
