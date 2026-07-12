@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -50,8 +51,8 @@ func (h *Handler) MigrateLegacyDB(w http.ResponseWriter, r *http.Request) {
 	// Expand ~ in path
 	req.Path = expandTildePath(req.Path)
 
-	// Open legacy database
-	legacyDB, err := sql.Open("sqlite", req.Path)
+	// Open legacy database with proper DSN format for modernc.org/sqlite
+	legacyDB, err := sql.Open("sqlite", fmt.Sprintf("file:%s", req.Path))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("open legacy DB: %v", err))
 		return
@@ -208,6 +209,7 @@ func migratePeople(legacyDB, newDB *sql.DB) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	log.Printf("Migrated %d authors", authorCount)
 	count += authorCount
 
 	// Migrate narrators
@@ -215,6 +217,7 @@ func migratePeople(legacyDB, newDB *sql.DB) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	log.Printf("Migrated %d narrators", narratorCount)
 	count += narratorCount
 
 	return count, nil
