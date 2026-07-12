@@ -14,10 +14,10 @@
 		--text-muted: oklch(0.7 0.01 270);
 		--text-placeholder: oklch(0.62 0.01 270);
 
-		--accent: oklch(0.72 0.16 75);
-		--accent-hover: oklch(0.78 0.16 75);
-		--accent-pressed: oklch(0.66 0.16 75);
-		--accent-text: oklch(0.16 0.01 270);
+		--accent: oklch(0.82 0.14 80);
+		--accent-hover: oklch(0.85 0.14 80);
+		--accent-pressed: oklch(0.78 0.14 80);
+		--accent-text: oklch(0.13 0.02 80);
 
 		--success: oklch(0.65 0.14 145);
 		--success-bg: oklch(0.22 0.04 145);
@@ -28,7 +28,7 @@
 		--info: oklch(0.65 0.12 250);
 		--info-bg: oklch(0.22 0.04 250);
 
-		--focus-ring: oklch(0.72 0.16 75 / 0.5);
+		--focus-ring: oklch(0.82 0.14 80 / 0.5);
 
 		--radius-sm: 0.375rem;
 		--radius-md: 0.5rem;
