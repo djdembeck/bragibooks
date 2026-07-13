@@ -22,7 +22,8 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 		"completed_dir":     cfg.Directories.CompletedDir,
 		"num_cpus":          cfg.Processing.NumCPUs,
 		"output_scheme":     cfg.Processing.PathFormat,
-		"region":            cfg.Processing.Region,
+		"region":                 cfg.Processing.Region,
+		"audiobookdb_base_url":   cfg.APIKey.BaseURL,
 	}
 
 	writeJSON(w, http.StatusOK, settings)
@@ -30,14 +31,15 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 
 // UpdateSettingsRequest is the JSON body accepted by PUT /api/settings.
 type UpdateSettingsRequest struct {
-	AudiobookdbAPIKey *string `json:"audiobookdb_api_key"`
-	M4bMergeBinary    *string `json:"m4b_merge_binary"`
-	InputDir          *string `json:"input_dir"`
-	OutputDir         *string `json:"output_dir"`
-	CompletedDir      *string `json:"completed_dir"`
-	NumCPUs           *int    `json:"num_cpus"`
-	OutputScheme      *string `json:"output_scheme"`
-	Region            *string `json:"region"`
+	AudiobookdbAPIKey    *string `json:"audiobookdb_api_key"`
+	AudiobookdbBaseURL   *string `json:"audiobookdb_base_url"`
+	M4bMergeBinary       *string `json:"m4b_merge_binary"`
+	InputDir             *string `json:"input_dir"`
+	OutputDir            *string `json:"output_dir"`
+	CompletedDir         *string `json:"completed_dir"`
+	NumCPUs              *int    `json:"num_cpus"`
+	OutputScheme         *string `json:"output_scheme"`
+	Region               *string `json:"region"`
 }
 
 // UpdateSettings handles PUT /api/settings.
@@ -58,6 +60,9 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// Apply updates
 	if req.AudiobookdbAPIKey != nil {
 		cfg.APIKey.APIKey = *req.AudiobookdbAPIKey
+	}
+	if req.AudiobookdbBaseURL != nil {
+		cfg.APIKey.BaseURL = *req.AudiobookdbBaseURL
 	}
 	if req.M4bMergeBinary != nil {
 		cfg.M4bMerge.Binary = *req.M4bMergeBinary
@@ -103,8 +108,9 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		"output_dir":        updatedCfg.Directories.OutputDir,
 		"completed_dir":     updatedCfg.Directories.CompletedDir,
 		"num_cpus":          updatedCfg.Processing.NumCPUs,
-		"output_scheme":     updatedCfg.Processing.PathFormat,
-		"region":            updatedCfg.Processing.Region,
+		"output_scheme":        updatedCfg.Processing.PathFormat,
+		"region":               updatedCfg.Processing.Region,
+		"audiobookdb_base_url": updatedCfg.APIKey.BaseURL,
 	}
 
 	writeJSON(w, http.StatusOK, settings)
@@ -119,10 +125,11 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 	expandedCompletedDir := expandTilde(cfg.Directories.CompletedDir)
 
 	_, err := h.svc.DB.Exec(`
-		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 	`,
 		cfg.APIKey.APIKey,
+		cfg.APIKey.BaseURL,
 		cfg.M4bMerge.Binary,
 		expandedInputDir,
 		expandedOutputDir,

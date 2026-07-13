@@ -10,20 +10,19 @@ import (
 	"time"
 )
 
-const BaseURL = "https://audiobookdb.org/api"
-
 // Client wraps the audiobookdb.org REST API.
 type Client struct {
-	APIKey string
-	http   *http.Client
+	APIKey  string
+	baseURL string
+	http    *http.Client
 }
 
 // NewClient creates an audiobookdb client. An empty apiKey is valid for
-// read-only access; provide a key for rate-limit benefits.
-func NewClient(apiKey string) *Client {
+func NewClient(apiKey string, baseURL string) *Client {
 	return &Client{
-		APIKey: apiKey,
-		http:   &http.Client{Timeout: 30 * time.Second},
+		APIKey:  apiKey,
+		baseURL: baseURL,
+		http:    &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -68,7 +67,7 @@ func (c *Client) Search(ctx context.Context, query string, types []string, skip,
 		"skip":  skip,
 		"take":  take,
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, BaseURL+"/search", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/search", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build search request: %w", err)
 	}
@@ -84,7 +83,7 @@ func (c *Client) Search(ctx context.Context, query string, types []string, skip,
 // GetBook calls GET /books/{id} and returns the book. The include parameter
 // controls which relations are expanded (comma-separated).
 func (c *Client) GetBook(ctx context.Context, id string, include string) (*Book, error) {
-	url := fmt.Sprintf("%s/books/%s", BaseURL, id)
+	url := fmt.Sprintf("%s/books/%s", c.baseURL, id)
 	if include != "" {
 		url += "?include=" + include
 	}
@@ -104,7 +103,7 @@ func (c *Client) GetBook(ctx context.Context, id string, include string) (*Book,
 // GetRelease calls GET /releases/{id} and returns the release. The include
 // parameter controls which relations are expanded (comma-separated).
 func (c *Client) GetRelease(ctx context.Context, id string, include string) (*Release, error) {
-	url := fmt.Sprintf("%s/releases/%s", BaseURL, id)
+	url := fmt.Sprintf("%s/releases/%s", c.baseURL, id)
 	if include != "" {
 		url += "?include=" + include
 	}

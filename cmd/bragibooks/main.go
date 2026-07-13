@@ -62,7 +62,7 @@ func main() {
 		cfg.Processing.LogLevel,
 	)
 
-	audiobookDBClient := audiobookdb.NewClient(cfg.APIKey.APIKey)
+	audiobookDBClient := audiobookdb.NewClient(cfg.APIKey.APIKey, cfg.APIKey.BaseURL)
 
 	processingSvc := api.NewProcessingService(database, processor, cfg.Processing.NumCPUs)
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

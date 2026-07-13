@@ -59,14 +59,15 @@ type ProcessingJob struct {
 
 // Settings holds application configuration persisted in the database.
 type Settings struct {
-	AudiobookdbAPIKey string `db:"audiobookdb_api_key" json:"-"`
-	M4bMergeBinary    string `db:"m4b_merge_binary" json:"m4b_merge_binary"`
-	InputDir          string `db:"input_dir" json:"input_dir"`
-	OutputDir         string `db:"output_dir" json:"output_dir"`
-	CompletedDir      string `db:"completed_dir" json:"completed_dir"`
-	NumCPUs           int    `db:"num_cpus" json:"num_cpus"`
-	OutputScheme      string `db:"output_scheme" json:"output_scheme"`
-	Region            string `db:"region" json:"region"`
-	CreatedAt         string `db:"created_at" json:"created_at"`
-	UpdatedAt         string `db:"updated_at" json:"updated_at"`
+	AudiobookdbAPIKey   string `db:"audiobookdb_api_key" json:"-"`
+	AudiobookdbBaseURL  string `db:"audiobookdb_base_url" json:"audiobookdb_base_url"`
+	M4bMergeBinary      string `db:"m4b_merge_binary" json:"m4b_merge_binary"`
+	InputDir            string `db:"input_dir" json:"input_dir"`
+	OutputDir           string `db:"output_dir" json:"output_dir"`
+	CompletedDir        string `db:"completed_dir" json:"completed_dir"`
+	NumCPUs             int    `db:"num_cpus" json:"num_cpus"`
+	OutputScheme        string `db:"output_scheme" json:"output_scheme"`
+	Region              string `db:"region" json:"region"`
+	CreatedAt           string `db:"created_at" json:"created_at"`
+	UpdatedAt           string `db:"updated_at" json:"updated_at"`
 }

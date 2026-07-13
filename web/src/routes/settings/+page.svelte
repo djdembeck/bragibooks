@@ -126,6 +126,12 @@
 			<p class="mt-1 text-xs text-[var(--text-muted)]">Optional key for better rate limits on audiobookdb.org.</p>
 		</div>
 
+		<div>
+			<label for="audiobookdb_base_url" class="mb-1 block text-sm font-medium text-[var(--text-secondary)]">AudiobookDB API URL</label>
+			<input id="audiobookdb_base_url" type="text" bind:value={settings.audiobookdb_base_url} placeholder="https://audiobookdb.org/api" />
+			<p class="mt-1 text-xs text-[var(--text-muted)]">Base URL for the AudiobookDB API endpoint.</p>
+		</div>
+
 		<div class="flex justify-end pt-2">
 			<Button variant="primary" type="submit" loading={saving}>Save settings</Button>
 		</div>

@@ -100,6 +100,13 @@ ALTER TABLE books ADD COLUMN converted BOOLEAN DEFAULT 0;
 
 `,
 	},
+	{
+		version: 3,
+		sql: `
+ALTER TABLE settings ADD COLUMN audiobookdb_base_url TEXT DEFAULT 'https://audiobookdb.org/api';
+
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

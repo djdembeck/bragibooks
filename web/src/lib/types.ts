@@ -104,6 +104,7 @@ export interface ProcessingJob {
 
 export interface Settings {
 	audiobookdb_api_key?: string;
+	audiobookdb_base_url?: string;
 	m4b_merge_binary: string;
 	input_dir: string;
 	output_dir: string;
