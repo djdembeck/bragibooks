@@ -217,7 +217,7 @@ func migrateBooks(legacyDB, newDB *sql.DB) (int, error) {
 
 	// Read all books from legacy DB
 	bookRows, err := legacyDB.Query(`
-		SELECT id, title, asin, short_desc, long_desc, release_date, series, publisher, lang, runtime_length_minutes, format_type, src_path, dest_path, status_id, cover_image_link, created_at, updated_at
+		SELECT id, title, asin, short_desc, long_desc, release_date, series, publisher, lang, runtime_length_minutes, format_type, src_path, dest_path, status_id, cover_image_link, created_at, updated_at, converted
 		FROM importer_book
 	`)
 	if err != nil {
@@ -231,10 +231,11 @@ func migrateBooks(legacyDB, newDB *sql.DB) (int, error) {
 		var title, asinVal, shortDesc, longDesc, releaseDate, series, publisher, lang, formatType, srcPath, destPath, coverImageLink, createdAt, updatedAt string
 		var statusID int
 		var runtimeLen int
+		var convertedVal int64
 
 		err := bookRows.Scan(&legacyID, &title, &asinVal, &shortDesc, &longDesc, &releaseDate,
 			&series, &publisher, &lang, &runtimeLen, &formatType, &srcPath, &destPath,
-			&statusID, &coverImageLink, &createdAt, &updatedAt)
+			&statusID, &coverImageLink, &createdAt, &updatedAt, &convertedVal)
 		if err != nil {
 			return count, err
 		}
@@ -254,12 +255,11 @@ func migrateBooks(legacyDB, newDB *sql.DB) (int, error) {
 			asin = sql.NullString{String: asinVal, Valid: true}
 		}
 
-		// Insert into new books table
 		_, err = newDB.Exec(`
-			INSERT INTO books (title, asin, description, release_date, series, publisher, language, runtime_length_minutes, format_type, src_path, dest_path, status, cover_image_url, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO books (title, asin, description, release_date, series, publisher, language, runtime_length_minutes, format_type, src_path, dest_path, status, cover_image_url, created_at, updated_at, converted)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`, title, asin, desc, releaseDate, series, publisher, lang, runtimeLen, formatType,
-			srcPath, destPath, status, coverImageLink, createdAt, updatedAt)
+			srcPath, destPath, status, coverImageLink, createdAt, updatedAt, convertedVal != 0)
 		if err != nil {
 			return count, err
 		}

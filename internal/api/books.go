@@ -264,13 +264,9 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	setters = append(setters, "updated_at = datetime('now')")
 	args = append(args, bookID)
-
-	query := fmt.Sprintf("UPDATE books SET %s WHERE id = ?", setters[0])
-	for _, s := range setters[1:] {
-		query += ", " + s
-	}
+	settersStr := strings.Join(setters, ", ")
+	query := fmt.Sprintf("UPDATE books SET %s WHERE id = ?", settersStr)
 
 	_, err := h.svc.DB.Exec(query, args...)
 	if err != nil {
@@ -326,8 +322,8 @@ func (h *Handler) CreateBooks(w http.ResponseWriter, r *http.Request) {
 		}
 
 		res, err := h.svc.DB.Exec(
-			`INSERT INTO books (title, src_path, status, created_at, updated_at)
-			 VALUES (?, ?, 'pending', datetime('now'), datetime('now'))`,
+			`INSERT INTO books (title, src_path, release_date, status, created_at, updated_at)
+			 VALUES (?, ?, '', 'pending', datetime('now'), datetime('now'))`,
 			title, entry.SrcPath,
 		)
 		if err != nil {
