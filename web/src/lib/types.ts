@@ -120,6 +120,7 @@ export interface DirectoryEntry {
 	type: 'file' | 'dir';
 	path: string;
 	size: number;
+	mod_time: string;
 }
 
 export interface DirectoriesResponse {

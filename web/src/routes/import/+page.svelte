@@ -12,6 +12,46 @@
 	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 	let creating = $state(false);
 	let search = $state('');
+	let sortBy = $state<'name' | 'date' | 'size'>('name');
+	let sortDir = $state<'asc' | 'desc'>('asc');
+	let loading = $state(false);
+
+	const SUPPORTED_EXTENSIONS = new Set(['.mp3', '.m4a', '.m4b', '.mp4', '.aac', '.ogg', '.flac', '.wma']);
+
+	function isSupportedType(entry: DirectoryEntry): boolean {
+		if (entry.type === 'dir') return true;
+		const ext = entry.name.toLowerCase();
+		for (const supported of SUPPORTED_EXTENSIONS) {
+			if (ext.endsWith(supported)) return true;
+		}
+		return false;
+	}
+
+	function formatSize(bytes: number): string {
+		if (bytes === 0) return '0 B';
+		const units = ['B', 'KB', 'MB', 'GB'];
+		const i = Math.floor(Math.log(bytes) / Math.log(1024));
+		const value = bytes / Math.pow(1024, i);
+		return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+	}
+
+	function formatDate(iso: string): string {
+		if (!iso) return '—';
+		try {
+			const d = new Date(iso);
+			if (isNaN(d.getTime())) return '—';
+			const now = new Date();
+			const diff = now.getTime() - d.getTime();
+			const days = Math.floor(diff / 86400000);
+			if (days === 0) return 'today';
+			if (days === 1) return 'yesterday';
+			if (days < 7) return `${days}d ago`;
+			if (days < 30) return `${Math.floor(days / 7)}w ago`;
+			return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+		} catch {
+			return '—';
+		}
+	}
 
 	async function initPath() {
 		try {
@@ -27,24 +67,44 @@
 	}
 
 	async function loadDirectory(path: string) {
+		loading = true;
 		await dl.run(async () => {
-			entries = [];
-			filtered = [];
-			selectedPaths = new Set();
 			const response = await get<DirectoriesResponse>(`/directories?path=${encodeURIComponent(path)}`);
 			entries = validEntries(response.entries || []);
 			currentPath = response.path || path;
-			filterEntries();
+			selectedPaths = new Set();
+			filterAndSort();
 		});
+		loading = false;
 	}
 
-	function filterEntries() {
+	function filterAndSort() {
 		const q = search.trim().toLowerCase();
+		let result: DirectoryEntry[];
+
 		if (!q) {
-			filtered = entries;
-			return;
+			result = entries;
+		} else {
+			result = entries.filter((e) => e.name.toLowerCase().includes(q));
 		}
-		filtered = entries.filter((e) => e.name.toLowerCase().includes(q));
+
+		result = [...result].sort((a, b) => {
+			// Directories always first
+			if (a.type === 'dir' && b.type !== 'dir') return -1;
+			if (a.type !== 'dir' && b.type === 'dir') return 1;
+
+			let cmp = 0;
+			if (sortBy === 'name') {
+				cmp = a.name.localeCompare(b.name);
+			} else if (sortBy === 'date') {
+				cmp = (a.mod_time || '').localeCompare(b.mod_time || '');
+			} else {
+				cmp = (a.size || 0) - (b.size || 0);
+			}
+			return sortDir === 'desc' ? -cmp : cmp;
+		});
+
+		filtered = result;
 	}
 
 	function togglePath(path: string) {
@@ -62,6 +122,15 @@
 			else next.add(e.path);
 		});
 		selectedPaths = next;
+	}
+
+	function toggleSort(field: 'name' | 'date' | 'size') {
+		if (sortBy === field) {
+			sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+		} else {
+			sortBy = field;
+			sortDir = 'asc';
+		}
 	}
 
 	function parentPath(path: string) {
@@ -90,7 +159,7 @@
 	});
 
 	$effect(() => {
-		filterEntries();
+		filterAndSort();
 	});
 
 	const allSelected = $derived(filtered.length > 0 && filtered.every((e) => selectedPaths.has(e.path)));
@@ -106,7 +175,7 @@
 {/if}
 
 <div class="card">
-	<div class="mb-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+	<div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
 		<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
 			{#if currentPath !== '/'}
 				<button type="button" class="hover:text-[var(--accent)]" onclick={() => loadDirectory(parentPath(currentPath))}>
@@ -116,26 +185,48 @@
 			{/if}
 			<span class="truncate font-mono text-xs">{currentPath || '/'}</span>
 		</div>
-		<div class="relative">
-			<input bind:value={search} type="text" placeholder="Filter entries…" class="w-full sm:w-72" />
+		<div class="flex items-center gap-2">
+			<div class="flex items-center rounded-md border border-[var(--border-subtle)] text-xs">
+				{#each ['name', 'date', 'size'] as field}
+					<button
+						type="button"
+						class={["px-2 py-1.5 transition-colors", sortBy === field ? 'bg-[var(--accent-wash-strong)] text-[var(--accent)] font-medium' : 'text-[var(--text-muted)] hover:text-[var(--text)]'].join(' ')}
+						onclick={() => toggleSort(field as 'name' | 'date' | 'size')}
+					>
+						{field}
+						{#if sortBy === field}
+							<span class="ml-0.5">{sortDir === 'asc' ? '↑' : '↓'}</span>
+						{/if}
+					</button>
+				{/each}
+			</div>
+			<input bind:value={search} type="text" placeholder="Filter…" class="w-44" />
 		</div>
 	</div>
 
-	{#if dl.showSkeleton}
-		<div class="space-y-2">
-			{#each Array(8) as _}
-				<Skeleton height="2.5rem" />
-			{/each}
-		</div>
-	{:else if entries.length === 0}
-		<EmptyState
-			title="No source directories found"
-			description="The configured input directory is empty. Bragi Books imports whole folders, so place your audiobook directories there first."
-			actionLabel="Check input settings"
-			actionHref="/settings"
-		/>
+	{#if entries.length === 0 && !loading}
+		{#if dl.showSkeleton}
+			<div class="space-y-2">
+				{#each Array(8) as _}
+					<Skeleton height="2.5rem" />
+				{/each}
+			</div>
+		{:else}
+			<EmptyState
+				title="No source directories found"
+				description="The configured input directory is empty. Bragi Books imports whole folders, so place your audiobook directories there first."
+				actionLabel="Check input settings"
+				actionHref="/settings"
+			/>
+		{/if}
 	{:else}
-		<div class="rounded-lg border border-[var(--border-subtle)]">
+		<div class="relative rounded-lg border border-[var(--border-subtle)]">
+			{#if loading}
+				<div class="absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-[var(--surface)]/60 backdrop-blur-[1px]">
+					<div class="text-sm text-[var(--text-muted)]">Loading…</div>
+				</div>
+			{/if}
+
 			<div class="flex items-center gap-3 border-b border-[var(--border-subtle)] bg-[var(--elevated)] px-4 py-2.5 text-sm">
 				<input
 					type="checkbox"
@@ -147,30 +238,53 @@
 				/>
 				<span class="text-[var(--text-muted)]">Select all visible</span>
 			</div>
+
 			<div class="max-h-[55vh] overflow-auto">
+				<div class="flex items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-1.5 text-xs text-[var(--text-muted)]">
+					<div class="w-4"></div>
+					<div class="flex-1">Name</div>
+					<div class="w-24 text-right">Date</div>
+					<div class="w-20 text-right">Size</div>
+				</div>
+
 				{#each filtered as entry (entry.path)}
-					<div class="flex items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-2.5 last:border-b-0 hover:bg-[var(--surface-hover)]">
-						<input
-							type="checkbox"
-							class="h-4 w-4 flex-shrink-0"
-							checked={selectedPaths.has(entry.path)}
-							onchange={() => togglePath(entry.path)}
-							aria-label="Select {entry.name}"
-						/>
-						{#if entry.type === 'dir'}
+					{#if entry.type === 'dir'}
+						<div class="flex items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-2.5 last:border-b-0 hover:bg-[var(--surface-hover)]">
+							<input
+								type="checkbox"
+								class="h-4 w-4 flex-shrink-0"
+								checked={selectedPaths.has(entry.path)}
+								onchange={() => togglePath(entry.path)}
+								aria-label="Select {entry.name}"
+							/>
 							<button
 								type="button"
-								class="w-full truncate text-left text-sm font-medium text-[var(--text)] hover:text-[var(--accent)]"
+								class="flex min-w-0 flex-1 items-center truncate text-left text-sm font-medium text-[var(--text)] hover:text-[var(--accent)]"
 								onclick={() => loadDirectory(entry.path)}
 							>
-								<span class="mr-1 text-[var(--accent)]">▸</span> {entry.name}/
+								<span class="mr-1 flex-shrink-0 text-[var(--accent)]">▸</span> {entry.name}/
 							</button>
-						{:else}
-							<span class="w-full truncate text-sm text-[var(--text-secondary)]">
-								<span class="mr-1 text-[var(--text-muted)]">·</span> {entry.name}
+							<div class="w-24 text-right text-xs text-[var(--text-muted)]">{formatDate(entry.mod_time)}</div>
+							<div class="w-20 text-right text-xs text-[var(--text-muted)]">—</div>
+						</div>
+					{:else}
+						{@const supported = isSupportedType(entry)}
+						<div class={["flex items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-2.5 last:border-b-0", supported ? 'hover:bg-[var(--surface-hover)]' : 'opacity-40'].join(' ')}>
+							<input
+								type="checkbox"
+								class="h-4 w-4 flex-shrink-0"
+								checked={selectedPaths.has(entry.path)}
+								disabled={!supported}
+								onchange={() => supported && togglePath(entry.path)}
+								aria-label="Select {entry.name}"
+							/>
+							<span class={["flex min-w-0 flex-1 items-center truncate text-sm", supported ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)] line-through'].join(' ')}>
+								<span class="mr-1 flex-shrink-0 text-[var(--text-muted)]">·</span> {entry.name}
 							</span>
-						{/if}
-					</div>
+							<div class="w-24 text-right text-xs text-[var(--text-muted)]">{formatDate(entry.mod_time)}</div>
+							<div class="w-20 text-right text-xs text-[var(--text-muted)]">{formatSize(entry.size)}</div>
+						</div>
+					{/if}
 				{:else}
 					<div class="px-4 py-6 text-center text-sm text-[var(--text-muted)]">
 						No entries match your filter.

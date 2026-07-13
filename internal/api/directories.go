@@ -12,10 +12,11 @@ import (
 
 // DirectoryEntry represents a single file or directory in the listing.
 type DirectoryEntry struct {
-	Name string `json:"name"`
-	Type string `json:"type"` // "file" or "dir"
-	Path string `json:"path"`
-	Size int64  `json:"size"`
+	Name    string `json:"name"`
+	Type    string `json:"type"` // "file" or "dir"
+	Path    string `json:"path"`
+	Size    int64  `json:"size"`
+	ModTime string `json:"mod_time"` // RFC 3339 timestamp
 }
 
 // DirectoryTreeEntry extends DirectoryEntry with recursive children.
@@ -208,10 +209,10 @@ func readDirectory(path string) ([]DirectoryEntry, error) {
 			Name: e.Name(),
 			Path: filepath.Join(path, e.Name()),
 		}
-
 		info, err := e.Info()
 		if err == nil {
 			entry.Size = info.Size()
+			entry.ModTime = info.ModTime().UTC().Format("2006-01-02T15:04:05Z")
 		}
 
 		if e.IsDir() {
