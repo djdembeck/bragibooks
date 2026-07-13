@@ -5,6 +5,7 @@
     "": {
       "name": "web",
       "dependencies": {
+        "@lucide/svelte": "^1.24.0",
         "@sveltejs/adapter-static": "^3.0.10",
         "@tailwindcss/vite": "^4.3.2",
         "bits-ui": "^2.18.1",
@@ -47,6 +48,8 @@
     "@jridgewell/sourcemap-codec": ["@jridgewell/sourcemap-codec@1.5.5", "", {}, "sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og=="],
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
+
+    "@lucide/svelte": ["@lucide/svelte@1.24.0", "", { "peerDependencies": { "svelte": "^5" } }, "sha512-yXwewA7ANQ5hfaSDrvsecosWjZn5RglzeXUZRSnxeANBskpNwblOkEJTqD0ujDdNKIKL8E9eVc2U/P3ziJr7OA=="],
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.1.6", "", { "dependencies": { "@tybys/wasm-util": "^0.10.3" }, "peerDependencies": { "@emnapi/core": "^1.7.1", "@emnapi/runtime": "^1.7.1" } }, "sha512-ZLv/JdUfkvOy9eCnnBaGfiO+XimbjebAeO+MRQqD/B+FR1tnRN0tpKSJHRbE8sFfS6aqsXZ67TQjfwfsxULVbg=="],
 

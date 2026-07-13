@@ -22,6 +22,7 @@
 		"vite": "^8.0.16"
 	},
 	"dependencies": {
+		"@lucide/svelte": "^1.24.0",
 		"@sveltejs/adapter-static": "^3.0.10",
 		"@tailwindcss/vite": "^4.3.2",
 		"bits-ui": "^2.18.1",

@@ -9,7 +9,7 @@
 
 <div class="flex min-h-screen flex-col bg-[var(--bg)] text-[var(--text)]">
 	<Nav />
-	<main class="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:py-8">
+	<main class="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:py-10">
 		<slot />
 	</main>
 </div>
