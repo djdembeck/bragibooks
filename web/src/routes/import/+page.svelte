@@ -155,21 +155,19 @@
 							onchange={() => togglePath(entry.path)}
 							aria-label="Select {entry.name}"
 						/>
-						<div class="flex min-w-0 flex-1 items-center gap-2">
-							{#if entry.type === 'dir'}
-								<button
-									type="button"
-									class="truncate text-left text-sm font-medium text-[var(--text)] hover:text-[var(--accent)]"
-									onclick={() => loadDirectory(entry.path)}
-								>
-									<span class="mr-1 text-[var(--accent)]">▸</span> {entry.name}/
-								</button>
-							{:else}
-								<span class="truncate text-sm text-[var(--text-secondary)]">
-									<span class="mr-1 text-[var(--text-muted)]">·</span> {entry.name}
-								</span>
-							{/if}
-						</div>
+						{#if entry.type === 'dir'}
+							<button
+								type="button"
+								class="w-full truncate text-left text-sm font-medium text-[var(--text)] hover:text-[var(--accent)]"
+								onclick={() => loadDirectory(entry.path)}
+							>
+								<span class="mr-1 text-[var(--accent)]">▸</span> {entry.name}/
+							</button>
+						{:else}
+							<span class="w-full truncate text-sm text-[var(--text-secondary)]">
+								<span class="mr-1 text-[var(--text-muted)]">·</span> {entry.name}
+							</span>
+						{/if}
 					</div>
 				{:else}
 					<div class="px-4 py-6 text-center text-sm text-[var(--text-muted)]">
