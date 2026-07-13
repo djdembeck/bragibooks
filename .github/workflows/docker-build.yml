@@ -121,7 +121,7 @@ jobs:
 
       - name: Comment PR with image tags
         if: env.PR_IS_SAME_REPO == 'true' || (github.event_name == 'workflow_dispatch' && steps.pr-number.outputs.number != '')
-        uses: peter-evans/create-or-update-comment@v4
+        uses: peter-evans/create-or-update-comment@v5
         with:
           comment-id: ${{ steps.find-comment.outputs.comment-id }}
           issue-number: ${{ github.event.pull_request.number || steps.pr-number.outputs.number }}
