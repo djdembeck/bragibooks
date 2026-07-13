@@ -21,7 +21,7 @@
 	<div class="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
 		<a href="/" class="flex items-center gap-2.5 text-lg font-semibold text-[var(--text)] no-underline hover:opacity-90">
 			<span class="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--accent)] text-[var(--accent-text)] shadow-sm">
-				<Logo class="h-7 w-7" />
+				<Logo class="h-8 w-8" />
 			</span>
 			Bragi Books
 		</a>

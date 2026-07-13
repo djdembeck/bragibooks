@@ -14,9 +14,9 @@
 		--text-muted: oklch(0.76 0.015 285);
 		--text-placeholder: oklch(0.72 0.012 285);
 
-		--accent: oklch(0.74 0.17 75);
-		--accent-hover: oklch(0.80 0.17 75);
-		--accent-pressed: oklch(0.68 0.17 75);
+		--accent: oklch(0.72 0.16 75);
+		--accent-hover: oklch(0.78 0.16 75);
+		--accent-pressed: oklch(0.66 0.16 75);
 		--accent-text: oklch(0.16 0.01 285);
 
 		--success: oklch(0.72 0.14 145);
