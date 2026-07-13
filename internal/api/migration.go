@@ -27,6 +27,19 @@ type MigrateLegacyDBResult struct {
 	Backup string `json:"backup"`
 }
 
+// MigratePeopleRequest is the JSON body for POST /api/migrate/people.
+type MigratePeopleRequest struct {
+	Path string `json:"path"`
+}
+
+// MigratePeopleResult is the JSON response from POST /api/migrate/people.
+type MigratePeopleResult struct {
+	Migrated struct {
+		Authors   int `json:"authors"`
+		Narrators int `json:"narrators"`
+	} `json:"migrated"`
+}
+
 // migrateStatusMap maps legacy Django status strings to new status values.
 var migrateStatusMap = map[string]string{
 	"Done":       "done",
@@ -101,6 +114,64 @@ func (h *Handler) MigrateLegacyDB(w http.ResponseWriter, r *http.Request) {
 			People: peopleMigrated,
 		},
 		Backup: backupPath,
+	})
+}
+
+// RecoverPeople handles POST /api/migrate/people.
+// Recovery endpoint: migrates people (authors + narrators) from a legacy DB
+// into an already-populated new DB (books already exist).
+func (h *Handler) RecoverPeople(w http.ResponseWriter, r *http.Request) {
+	var req MigratePeopleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	req.Path = expandTildePath(req.Path)
+
+	legacyDB, err := sql.Open("sqlite", fmt.Sprintf("file:%s", req.Path))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("open legacy DB: %v", err))
+		return
+	}
+	defer legacyDB.Close()
+
+	if err := checkLegacyTables(legacyDB); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("not a valid legacy Bragi Books database: %v", err))
+		return
+	}
+
+	mapping, err := buildBookMapping(h.svc.DB)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("build book mapping: %v", err))
+		return
+	}
+
+	authorCount, err := migratePeopleType(legacyDB, h.svc.DB, "author", mapping)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("migrate authors: %v", err))
+		return
+	}
+
+	narratorCount, err := migratePeopleType(legacyDB, h.svc.DB, "narrator", mapping)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("migrate narrators: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, MigratePeopleResult{
+		Migrated: struct {
+			Authors   int `json:"authors"`
+			Narrators int `json:"narrators"`
+		}{
+			Authors:   authorCount,
+			Narrators: narratorCount,
+		},
 	})
 }
 
@@ -200,20 +271,61 @@ func migrateBooks(legacyDB, newDB *sql.DB) (int, error) {
 	return count, nil
 }
 
+// bookMapping holds pre-built lookups from legacy ASIN/title to new book ID.
+type bookMapping struct {
+	byASIN  map[string]int64
+	byTitle map[string]int64
+}
+
+// buildBookMapping queries the new DB for books and returns maps to look up
+// a new book ID by ASIN or title.
+func buildBookMapping(newDB *sql.DB) (*bookMapping, error) {
+	rows, err := newDB.Query("SELECT id, asin, title FROM books")
+	if err != nil {
+		return nil, fmt.Errorf("query new books for mapping: %w", err)
+	}
+	defer rows.Close()
+
+	m := &bookMapping{
+		byASIN:  make(map[string]int64),
+		byTitle: make(map[string]int64),
+	}
+
+	for rows.Next() {
+		var id int64
+		var asin, title string
+		if err := rows.Scan(&id, &asin, &title); err != nil {
+			return nil, err
+		}
+		if asin != "" {
+			m.byASIN[asin] = id
+		}
+		m.byTitle[title] = id
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 // migratePeople reads legacy author/narrator tables and inserts them into the new people table.
 func migratePeople(legacyDB, newDB *sql.DB) (int, error) {
+	// Build the book mapping once, shared by both author and narrator passes
+	mapping, err := buildBookMapping(newDB)
+	if err != nil {
+		return 0, fmt.Errorf("build book mapping: %w", err)
+	}
+
 	count := 0
 
-	// Migrate authors
-	authorCount, err := migratePeopleType(legacyDB, newDB, "author")
+	authorCount, err := migratePeopleType(legacyDB, newDB, "author", mapping)
 	if err != nil {
 		return 0, err
 	}
 	log.Printf("Migrated %d authors", authorCount)
 	count += authorCount
 
-	// Migrate narrators
-	narratorCount, err := migratePeopleType(legacyDB, newDB, "narrator")
+	narratorCount, err := migratePeopleType(legacyDB, newDB, "narrator", mapping)
 	if err != nil {
 		return 0, err
 	}
@@ -223,91 +335,126 @@ func migratePeople(legacyDB, newDB *sql.DB) (int, error) {
 	return count, nil
 }
 
-// migratePeopleType migrates a specific type of person (author or narrator) from the legacy DB.
-// Returns the number of people migrated, or a negative count on error.
-func migratePeopleType(legacyDB, newDB *sql.DB, role string) (int, error) {
-	count := 0
-
+// migratePeopleType migrates a specific type of person (author or narrator)
+// from the legacy DB using pre-built book mappings.
+func migratePeopleType(legacyDB, newDB *sql.DB, role string, mapping *bookMapping) (int, error) {
 	personTable := "importer_author"
 	m2mTable := "importer_author_books"
+	m2mFK := "author"
 	if role == "narrator" {
 		personTable = "importer_narrator"
 		m2mTable = "importer_narrator_books"
+		m2mFK = "narrator"
 	}
 
-	// Read people from legacy table
+	// 1. Pre-load legacy book IDs -> {asin, title}
+	legacyBooks, err := loadLegacyBooks(legacyDB)
+	if err != nil {
+		return 0, fmt.Errorf("load legacy books: %w", err)
+	}
+
+	// 2. Read all person-book M2M rows into memory
 	rows, err := legacyDB.Query(fmt.Sprintf(
 		"SELECT %s.id, %s.first_name, %s.last_name, %s.book_id FROM %s INNER JOIN %s ON %s.id = %s.%s_id",
 		personTable, personTable, personTable, m2mTable,
 		personTable, m2mTable,
-		personTable, m2mTable, role,
+		personTable, m2mTable, m2mFK,
 	))
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
 
-	// We need the new book IDs to insert people. First, collect all (legacyBookID -> newBookID) mappings.
-	// We'll read the legacy book ID from the M2M table and map to the new books table.
-	// Since book IDs may have changed, we need to match on ASIN or title.
-	bookIDCache := make(map[int]int64)
+	// Collect all rows in memory first
+	type personRow struct {
+		id        int
+		firstName string
+		lastName  string
+		bookID    int
+	}
+	var allRows []personRow
 
 	for rows.Next() {
-		var legacyPersonID, legacyBookID int
-		var firstName, lastName string
-		err := rows.Scan(&legacyPersonID, &firstName, &lastName, &legacyBookID)
-		if err != nil {
-			return count, err
+		var r personRow
+		if err := rows.Scan(&r.id, &r.firstName, &r.lastName, &r.bookID); err != nil {
+			return 0, err
 		}
+		allRows = append(allRows, r)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 
-		name := strings.TrimSpace(firstName + " " + lastName)
+	// 3. Match and insert
+	count := 0
+	for _, r := range allRows {
+		name := strings.TrimSpace(r.firstName + " " + r.lastName)
 		if name == "" {
 			continue
 		}
 
-		// Find the new book ID by matching legacy book
-		var newBookID int64
-		if cached, ok := bookIDCache[legacyBookID]; ok {
-			newBookID = cached
-		} else {
-			// Try to match by looking up the legacy book's ASIN or title
-			var asin, title string
-			err := legacyDB.QueryRow("SELECT asin, title FROM importer_book WHERE id = ?", legacyBookID).Scan(&asin, &title)
-			if err != nil {
-				continue // skip this person if we can't find the legacy book
-			}
+		// Look up legacy book
+		lb, ok := legacyBooks[r.bookID]
+		if !ok {
+			continue
+		}
 
-			// Try to match by ASIN first
-			var foundBookID sql.NullInt64
-			if asin != "" {
-				err = newDB.QueryRow("SELECT id FROM books WHERE asin = ? LIMIT 1", asin).Scan(&foundBookID)
+		// Match to new book ID via ASIN first, then title
+		var newBookID int64
+		if lb.asin != "" {
+			if id, ok := mapping.byASIN[lb.asin]; ok {
+				newBookID = id
 			}
-			// Fallback to title match
-			if err != nil || !foundBookID.Valid {
-				err = newDB.QueryRow("SELECT id FROM books WHERE title = ? LIMIT 1", title).Scan(&foundBookID)
+		}
+		if newBookID == 0 {
+			if id, ok := mapping.byTitle[lb.title]; ok {
+				newBookID = id
 			}
-			if err == nil && foundBookID.Valid {
-				newBookID = foundBookID.Int64
-				bookIDCache[legacyBookID] = newBookID
-			} else {
-				// Couldn't find matching book, skip
-				continue
-			}
+		}
+		if newBookID == 0 {
+			continue
 		}
 
 		// Insert into new people table
-		_, err = newDB.Exec(`
-			INSERT INTO people (book_id, name, role) VALUES (?, ?, ?)
-		`, newBookID, name, role)
+		_, err = newDB.Exec(
+			"INSERT INTO people (book_id, name, role) VALUES (?, ?, ?)",
+			newBookID, name, role,
+		)
 		if err != nil {
 			return count, err
 		}
 		count++
 	}
-	if err := rows.Err(); err != nil {
-		return count, err
-	}
 	return count, nil
+}
+
+// legacyBookInfo holds ASIN and title for a legacy book.
+type legacyBookInfo struct {
+	asin  string
+	title string
+}
+
+// loadLegacyBooks reads all books from the legacy DB into a map keyed by legacy ID.
+func loadLegacyBooks(db *sql.DB) (map[int]legacyBookInfo, error) {
+	rows, err := db.Query("SELECT id, asin, title FROM importer_book")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	m := make(map[int]legacyBookInfo)
+	for rows.Next() {
+		var id int
+		var asin, title string
+		if err := rows.Scan(&id, &asin, &title); err != nil {
+			return nil, err
+		}
+		m[id] = legacyBookInfo{asin: asin, title: title}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // migrateSettings reads the legacy importer_setting row and inserts it into the new settings table.

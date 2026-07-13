@@ -69,6 +69,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 
 		// Migration
 		r.Post("/migrate", h.MigrateLegacyDB)
+		r.Post("/migrate/people", h.RecoverPeople)
 	})
 }
 
