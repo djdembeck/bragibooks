@@ -139,6 +139,7 @@
 			<div class="flex items-center gap-3 border-b border-[var(--border-subtle)] bg-[var(--elevated)] px-4 py-2.5 text-sm">
 				<input
 					type="checkbox"
+					class="h-4 w-4 flex-shrink-0"
 					checked={allSelected}
 					disabled={!canSelect}
 					onchange={toggleSelectAll}
@@ -151,6 +152,7 @@
 					<div class="flex items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-2.5 last:border-b-0 hover:bg-[var(--surface-hover)]">
 						<input
 							type="checkbox"
+							class="h-4 w-4 flex-shrink-0"
 							checked={selectedPaths.has(entry.path)}
 							onchange={() => togglePath(entry.path)}
 							aria-label="Select {entry.name}"
