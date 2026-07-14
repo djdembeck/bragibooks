@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"fmt"
 	"io"
 	"net/http"
@@ -58,14 +59,14 @@ func (c *Client) do(ctx context.Context, req *http.Request, v interface{}) error
 	return nil
 }
 
-// Search calls POST /search and returns matching results across the given
-// entity types (e.g. "books", "releases").
+// Search calls POST /search and returns matching results.
+// The upstream API accepts {"q": "..."} and returns a bare array of
+// search documents with a "collection" field indicating the entity type.
+// The "type" parameter is optional and causes 500s on some deployments,
+// so we omit it and filter client-side instead.
 func (c *Client) Search(ctx context.Context, query string, types []string, skip, take int) (*SearchResponse, error) {
 	body, _ := json.Marshal(map[string]any{
-		"query": query,
-		"types": types,
-		"skip":  skip,
-		"take":  take,
+		"q": query,
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/search", bytes.NewReader(body))
 	if err != nil {
@@ -73,11 +74,37 @@ func (c *Client) Search(ctx context.Context, query string, types []string, skip,
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	var res SearchResponse
-	if err := c.do(ctx, req, &res); err != nil {
+	// API returns a bare array of search documents
+	var docs []map[string]json.RawMessage
+	if err := c.do(ctx, req, &docs); err != nil {
 		return nil, err
 	}
-	return &res, nil
+
+	// Wrap into SearchHit{ID, Type, Data}
+	wantTypes := make(map[string]bool, len(types))
+	for _, t := range types {
+		wantTypes[strings.TrimSpace(t)] = true
+	}
+	hits := make([]SearchHit, 0, len(docs))
+	for _, doc := range docs {
+		hit := SearchHit{Data: json.RawMessage("{}")}
+		if rawID, ok := doc["id"]; ok {
+			_ = json.Unmarshal(rawID, &hit.ID)
+		}
+		if rawCol, ok := doc["collection"]; ok {
+			_ = json.Unmarshal(rawCol, &hit.Type)
+		}
+		// Client-side type filter (replaces server-side "type" param)
+		if len(wantTypes) > 0 && !wantTypes[hit.Type] {
+			continue
+		}
+		// Re-marshal the full doc as Data
+		if full, err := json.Marshal(doc); err == nil {
+			hit.Data = full
+		}
+		hits = append(hits, hit)
+	}
+	return &SearchResponse{Results: hits}, nil
 }
 
 // GetBook calls GET /books/{id} and returns the book. The include parameter
