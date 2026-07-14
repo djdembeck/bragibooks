@@ -148,14 +148,14 @@
 	}
 
 	function selectedAuthors(candidate: MatchCandidate): string {
-		const people = candidate.details.release?.people || candidate.details.book?.people || [];
+		const people = [...(candidate.details.book?.people || []), ...(candidate.details.release?.people || [])];
 		return peopleByRole(people, 'author')
 			.map((p) => p.name)
 			.join(', ') || 'Unknown author';
 	}
 
 	function selectedNarrators(candidate: MatchCandidate): string {
-		const people = candidate.details.release?.people || candidate.details.book?.people || [];
+		const people = [...(candidate.details.book?.people || []), ...(candidate.details.release?.people || [])];
 		return peopleByRole(people, 'narrator')
 			.map((p) => p.name)
 			.join(', ') || '';
@@ -214,7 +214,7 @@
 	function buildUpdate(candidate: MatchCandidate): UpdateBookRequest {
 		const book = candidate.details.book;
 		const release = candidate.details.release;
-		const people = release?.people || book?.people || [];
+		const people = [...(candidate.details.book?.people || []), ...(candidate.details.release?.people || [])];
 		const releaseDate = release?.releaseDate || book?.originallyPublishedAt || '';
 		const runtime = release?.runtimeLengthMs ? Math.round(release.runtimeLengthMs / 60000) : 0;
 		const series = (book?.series || [])

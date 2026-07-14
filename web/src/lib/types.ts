@@ -214,9 +214,14 @@ export function formatRuntime(minutes: number): string {
 export function pickCover(images: AudiobookDBImage[] | undefined): string {
 	if (!images || images.length === 0) return '';
 	// Prefer the largest image that isn't absurdly huge.
-	return [...images]
+	const img = [...images]
 		.sort((a, b) => (b.width || 0) - (a.width || 0))
-		.find((img) => (img.width || 0) <= 1200)?.url || images[0].url;
+		.find((img) => (img.width || 0) <= 1200) || images[0];
+	// Image URLs from audiobookdb need a size suffix to resolve.
+	if (img.url && !img.url.match(/\/\d+x\d+$|^.*\/original$/)) {
+		return img.url + '/750x750';
+	}
+	return img.url;
 }
 
 export function extractAsin(external: AudiobookDBExternal[] | undefined): string | null {

@@ -1,7 +1,6 @@
 package audiobookdb
 
 import (
-	"database/sql"
 	"encoding/json"
 )
 
@@ -9,8 +8,8 @@ import (
 type Book struct {
 	ID                    string               `json:"id"`
 	Title                 string               `json:"title"`
-	Description           sql.NullString       `json:"description"`
-	Disambiguation        sql.NullString       `json:"disambiguation"`
+	Description           *string              `json:"description"`
+	Disambiguation        *string              `json:"disambiguation"`
 	Type                  *string              `json:"type"`
 	OriginallyPublishedAt *string              `json:"originallyPublishedAt"`
 	Images                []Image              `json:"images"`
@@ -29,8 +28,8 @@ type Release struct {
 	Duration         string               `json:"duration"`
 	RuntimeLengthMs  int                  `json:"runtimeLengthMs"`
 	RuntimeLengthSec int                  `json:"runtimeLengthSec"`
-	ISBN             sql.NullString       `json:"isbn"`
-	ReleaseDate      sql.NullString       `json:"releaseDate"`
+	ISBN             *string              `json:"isbn"`
+	ReleaseDate      *string              `json:"releaseDate"`
 	ChapterDetail    *ChapterDetail       `json:"chapterDetail"`
 	People           []PersonRoleRelation `json:"people"`
 	Publisher        IdName               `json:"publisher"`
