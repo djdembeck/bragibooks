@@ -50,10 +50,10 @@ type ProcessingJob struct {
 	M4bMergeArgs string         `db:"m4b_merge_args" json:"-"` // serialized CLI args
 	Status       string         `db:"status" json:"status"`
 	Output       string         `db:"output" json:"output"`
-	Error        sql.NullString `db:"error" json:"error"`
-	OutputFile   sql.NullString `db:"output_file" json:"output_file"`
-	StartedAt    sql.NullString `db:"started_at" json:"started_at"`
-	CompletedAt  sql.NullString `db:"completed_at" json:"completed_at"`
+	Error        *string        `db:"error" json:"error"`
+	OutputFile   *string        `db:"output_file" json:"output_file"`
+	StartedAt    *string        `db:"started_at" json:"started_at"`
+	CompletedAt  *string        `db:"completed_at" json:"completed_at"`
 	CreatedAt    string         `db:"created_at" json:"created_at"`
 }
 

@@ -85,10 +85,10 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 		BookID:       sql.NullInt64{Int64: bookID, Valid: true},
 		M4bMergeArgs: string(argsJSON),
 		Status:       "queued",
-		Error:        sql.NullString{},
-		OutputFile:   sql.NullString{},
-		StartedAt:    sql.NullString{},
-		CompletedAt:  sql.NullString{},
+		Error:        nil,
+		OutputFile:   nil,
+		StartedAt:    nil,
+		CompletedAt:  nil,
 	}
 
 	// Insert into DB
@@ -332,7 +332,36 @@ func (h *Handler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, job)
+	// Build clean JSON response (sql.NullXxx fields serialize as objects, not scalars)
+	resp := map[string]any{
+		"id":         job.ID,
+		"status":     job.Status,
+		"output":     job.Output,
+		"error":      nil,
+		"output_file": nil,
+		"started_at": nil,
+		"completed_at": nil,
+		"created_at": job.CreatedAt,
+	}
+	if job.BookID.Valid {
+		resp["book_id"] = job.BookID.Int64
+	} else {
+		resp["book_id"] = nil
+	}
+	if job.Error != nil {
+		resp["error"] = *job.Error
+	}
+	if job.OutputFile != nil {
+		resp["output_file"] = *job.OutputFile
+	}
+	if job.StartedAt != nil {
+		resp["started_at"] = *job.StartedAt
+	}
+	if job.CompletedAt != nil {
+		resp["completed_at"] = *job.CompletedAt
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // StreamJob handles GET /api/jobs/:id/stream (SSE endpoint).
