@@ -173,9 +173,13 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 						err.Error(), job.BookID.Int64,
 					)
 				}
+				stdout := ""
+				if result != nil {
+					stdout = result.Stdout
+				}
 				s.db.Exec(
 					"UPDATE processing_jobs SET status = ?, error = ?, output = ?, completed_at = datetime('now') WHERE id = ?",
-					"error", err.Error(), result.Stdout, job.ID,
+					"error", err.Error(), stdout, job.ID,
 				)
 				if state != nil {
 					select {
