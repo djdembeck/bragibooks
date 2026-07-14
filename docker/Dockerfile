@@ -24,8 +24,8 @@ RUN CGO_ENABLED=0 go build -tags webui -ldflags="-s -w" -o bragibooks ./cmd/brag
 
 
 # Stage 3: Runtime
-FROM alpine:latest
-RUN apk add --no-cache ffmpeg
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /build/bragibooks /usr/local/bin/
 COPY --from=m4b-merge-builder /app/target/release/m4b-merge /usr/local/bin/
