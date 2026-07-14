@@ -28,7 +28,7 @@ func (h *Handler) SearchAudiobookdb(w http.ResponseWriter, r *http.Request) {
 	skip := parseIntQueryParam(r, "skip", 0)
 	take := parseIntQueryParam(r, "take", 20)
 
-	resp, err := h.svc.AudiobookDB.Search(r.Context(), query, types, skip, take)
+	resp, err := h.getAudiobookDB().Search(r.Context(), query, types, skip, take)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("audiobookdb search: %v", err))
 		return
@@ -51,7 +51,7 @@ func (h *Handler) GetBookFromDB(w http.ResponseWriter, r *http.Request) {
 		include = "external,genres,people,releases,series,tags,images"
 	}
 
-	book, err := h.svc.AudiobookDB.GetBook(r.Context(), id, include)
+	book, err := h.getAudiobookDB().GetBook(r.Context(), id, include)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("audiobookdb get book: %v", err))
 		return
@@ -74,7 +74,7 @@ func (h *Handler) GetReleaseFromDB(w http.ResponseWriter, r *http.Request) {
 		include = "book,chapterDetail,external,images,language,people,publisher"
 	}
 
-	release, err := h.svc.AudiobookDB.GetRelease(r.Context(), id, include)
+	release, err := h.getAudiobookDB().GetRelease(r.Context(), id, include)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("audiobookdb get release: %v", err))
 		return

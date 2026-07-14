@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
 
@@ -21,7 +22,7 @@ type Services struct {
 	DB            *sql.DB
 	Config        *config.ConfigManager
 	Processor     *audio.Processor
-	AudiobookDB   *audiobookdb.Client
+	AudiobookDB   *atomic.Value
 	ProcessingSvc *ProcessingService
 }
 
@@ -33,6 +34,11 @@ type Handler struct {
 // NewHandler creates a new Handler with the given services.
 func NewHandler(svc Services) *Handler {
 	return &Handler{svc: svc}
+}
+
+// getAudiobookDB returns the current audiobookdb.Client from the atomic value.
+func (h *Handler) getAudiobookDB() *audiobookdb.Client {
+	return h.svc.AudiobookDB.Load().(*audiobookdb.Client)
 }
 
 // RegisterRoutes mounts all API routes on the given chi router.

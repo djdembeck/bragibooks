@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/bragibooks/bragibooks/internal/audiobookdb"
 	"github.com/bragibooks/bragibooks/internal/config"
 )
 
@@ -93,12 +94,15 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("save config: %v", err))
 		return
 	}
-
 	// Also persist settings in the database
 	if err := h.saveSettingsToDB(cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("persist settings to DB: %v", err))
 		return
 	}
+
+	// Rebuild audiobookdb client with updated credentials
+	newClient := audiobookdb.NewClient(cfg.APIKey.APIKey, cfg.APIKey.BaseURL)
+	h.svc.AudiobookDB.Store(newClient)
 
 	// Return updated settings (without API key)
 	updatedCfg := h.svc.Config.Config()

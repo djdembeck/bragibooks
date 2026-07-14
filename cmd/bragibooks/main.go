@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"sync/atomic"
 	"log"
 	"net"
 	"net/http"
@@ -63,6 +64,8 @@ func main() {
 	)
 
 	audiobookDBClient := audiobookdb.NewClient(cfg.APIKey.APIKey, cfg.APIKey.BaseURL)
+	audiobookDBVal := &atomic.Value{}
+	audiobookDBVal.Store(audiobookDBClient)
 
 	processingSvc := api.NewProcessingService(database, processor, cfg.Processing.NumCPUs)
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -73,7 +76,7 @@ func main() {
 		DB:            database,
 		Config:        cfgMgr,
 		Processor:     processor,
-		AudiobookDB:   audiobookDBClient,
+		AudiobookDB:   audiobookDBVal,
 		ProcessingSvc: processingSvc,
 	})
 
