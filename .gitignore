@@ -6,11 +6,6 @@
 .impeccable/
 /bragibooks
 /webfs/build/
-# Python build artifacts
-__pycache__/
-*.egg-info/
-# Django runtime artifacts
-/static/
 # Go runtime artifacts (databases, secrets)
 config/*.db
 config/*.db-wal
