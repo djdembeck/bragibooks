@@ -83,10 +83,67 @@ func (p *Processor) Run(ctx context.Context, inputPaths []string, asin string) (
 		Stderr: string(stderrBytes),
 	}
 
-	// Parse the output file path from stdout
-	if match := jobBeginRe.FindStringSubmatch(result.Stdout); len(match) == 2 {
-		result.OutputFile = strings.TrimSpace(match[1])
+	return result, nil
+}
+
+// MinimumM4bMergeVersion is the minimum required m4b-merge version.
+const MinimumM4bMergeVersion = "1.0.0"
+
+// CheckVersion runs the m4b-merge binary with --version and ensures it is
+// at least MinimumM4bMergeVersion. Returns an error if the binary cannot
+// be found, fails to report a version, or is too old.
+func (p *Processor) CheckVersion() error {
+	cmd := exec.Command(p.Binary, "--version")
+	out, err := cmd.Output()
+	if err != nil {
+		if ex, ok := err.(*exec.Error); ok {
+			return fmt.Errorf("m4b-merge binary not found (%s): %w", ex.Name, ex.Err)
+		}
+		return fmt.Errorf("m4b-merge --version failed: %w", err)
 	}
 
-	return result, nil
+	version := strings.Fields(strings.TrimSpace(string(out)))
+	if len(version) == 0 {
+		return fmt.Errorf("m4b-merge --version produced empty output")
+	}
+	reported := version[len(version)-1] // last token is the version string
+
+	if err := checkSemver(reported, MinimumM4bMergeVersion); err != nil {
+		return fmt.Errorf("m4b-merge version %s is too old, need >= %s", reported, MinimumM4bMergeVersion)
+	}
+	return nil
+}
+
+// checkSemver returns nil if got >= want. Both are "MAJOR.MINOR.PATCH" strings.
+func checkSemver(got, want string) error {
+	parse := func(v string) (int, int, int) {
+		parts := strings.Split(v, ".")
+		major, _ := strconv.Atoi(parts[0])
+		minor, _ := strconv.Atoi(parts[1])
+		var patch int
+		if len(parts) > 2 {
+			patch, _ = strconv.Atoi(parts[2])
+		}
+		return major, minor, patch
+	}
+
+	gMaj, gMin, gPat := parse(got)
+	wMaj, wMin, wPat := parse(want)
+
+	if gMaj > wMaj {
+		return nil
+	}
+	if gMaj < wMaj {
+		return fmt.Errorf("%s < %s", got, want)
+	}
+	if gMin > wMin {
+		return nil
+	}
+	if gMin < wMin {
+		return fmt.Errorf("%s < %s", got, want)
+	}
+	if gPat < wPat {
+		return fmt.Errorf("%s < %s", got, want)
+	}
+	return nil
 }

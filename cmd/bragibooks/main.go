@@ -63,6 +63,11 @@ func main() {
 		cfg.Processing.LogLevel,
 	)
 
+	// Verify m4b-merge version meets minimum requirement
+	if err := processor.CheckVersion(); err != nil {
+		log.Fatalf("m4b-merge version check failed: %v", err)
+	}
+
 	audiobookDBClient := audiobookdb.NewClient(cfg.APIKey.APIKey, cfg.APIKey.BaseURL)
 	audiobookDBVal := &atomic.Value{}
 	audiobookDBVal.Store(audiobookDBClient)
