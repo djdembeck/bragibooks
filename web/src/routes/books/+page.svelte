@@ -41,7 +41,10 @@
 	const endIndex = $derived(response ? Math.min((page + 1) * limit, response.total) : 0);
 </script>
 
-<PageHeader title="Books" description="Browse, filter, and review all books in your library." />
+<PageHeader
+	title="Library Catalog"
+	description="Station #04 — paginated manifest of all library entries with status filters."
+/>
 
 {#if dl.error}
 	<div class="mb-6">
@@ -49,25 +52,39 @@
 	</div>
 {/if}
 
-<div class="mb-6 flex flex-wrap gap-2">
+<!-- ── Station Identity ──────────────────────────────────────── -->
+<div class="mb-4 flex items-center gap-3">
+	<span class="font-mono text-xs tracking-widest text-[var(--text-muted)]">#04 FINISH</span>
+	<div class="h-px flex-1 bg-[var(--border-subtle)]" aria-hidden="true"></div>
+	{#if response}
+		<span class="font-mono text-xs text-[var(--text-muted)]">{response.total} entries</span>
+	{/if}
+</div>
+
+<!-- ── Status Filters — route bay selectors ──────────────────── -->
+<div class="mb-6 flex flex-wrap gap-2" role="group" aria-label="Filter by status">
 	{#each filters as f}
 		<button
 			type="button"
-			class="rounded-md px-3 py-1.5 text-sm font-medium transition-colors"
+			class="rounded-sm border border-[var(--border)] px-2.5 py-1 text-xs font-mono font-semibold tracking-wide transition-colors sm:text-sm"
 			class:bg-[var(--accent)]={filter === f.value}
 			class:text-[var(--accent-text)]={filter === f.value}
+			class:border-transparent={filter === f.value}
 			class:bg-[var(--surface)]={filter !== f.value}
-			class:text-[var(--text-secondary)]={filter !== f.value}
+			class:text-[var(--text-muted)]={filter !== f.value}
 			class:hover:bg-[var(--surface-hover)]={filter !== f.value}
+			class:hover:border-[var(--border-subtle)]={filter !== f.value}
 			onclick={() => setFilter(f.value)}
+			aria-pressed={filter === f.value ? 'true' : 'false'}
 		>
-			{f.label}
+			{f.label.toUpperCase()}
 		</button>
 	{/each}
 </div>
 
+<!-- ── Manifest List ─────────────────────────────────────────── -->
 {#if dl.showSkeleton}
-	<div class="space-y-2">
+	<div class="space-y-2" aria-label="Catalog loading">
 		{#each Array(5) as _}
 			<div class="card flex items-center gap-4">
 				<Skeleton variant="rect" width="48px" height="64px" />
@@ -86,14 +103,24 @@
 		actionHref="/import"
 	/>
 {:else}
-	<div class="space-y-2">
+	<!-- Dense catalog manifest — book rows with explicit status -->
+	<div class="space-y-2" role="list" aria-label="Book catalog manifest">
 		{#each response.books as book (book.id)}
-			<div class="card flex items-center gap-4">
+			<div class="card flex items-center gap-4" role="listitem">
+				<!-- Cover thumbnail or placeholder -->
 				{#if book.cover_image_url}
-					<img src={book.cover_image_url} alt="" class="h-16 w-12 flex-shrink-0 rounded object-cover" />
+					<img
+						src={book.cover_image_url}
+						alt=""
+						class="h-16 w-12 flex-shrink-0 rounded-sm object-cover"
+					/>
 				{:else}
-					<div class="flex h-16 w-12 flex-shrink-0 items-center justify-center rounded bg-[var(--elevated)] text-xs text-[var(--text-muted)]">—</div>
+					<div class="flex h-16 w-12 flex-shrink-0 items-center justify-center rounded-sm bg-[var(--elevated)] text-xs text-[var(--text-muted)]">
+						—
+					</div>
 				{/if}
+
+				<!-- Book identity block -->
 				<div class="min-w-0 flex-1">
 					<h3 class="truncate font-medium">{book.title}</h3>
 					<p class="truncate text-sm text-[var(--text-muted)]">
@@ -109,17 +136,30 @@
 						<p class="mt-0.5 truncate text-xs text-[var(--text-muted)]">{book.status_message}</p>
 					{/if}
 				</div>
+
+				<!-- Status badge — text + shape + color -->
 				<StatusBadge status={book.status} />
 			</div>
 		{/each}
 	</div>
 
+	<!-- ── Pagination — page bay controls ────────────────────── -->
 	{#if totalPages > 1}
-		<div class="mt-6 flex items-center justify-between">
-			<p class="text-sm text-[var(--text-muted)]">Showing {startIndex}–{endIndex} of {response.total}</p>
+		<div class="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+			<p class="text-sm text-[var(--text-muted)]">
+				Showing <span class="font-mono">{startIndex}–{endIndex}</span> of
+				<span class="font-mono">{response.total}</span>
+			</p>
 			<div class="flex items-center gap-2">
-				<Button variant="secondary" disabled={page === 0} onclick={() => page--}>Previous</Button>
-				<Button variant="secondary" disabled={page >= totalPages - 1} onclick={() => page++}>Next</Button>
+				<Button variant="secondary" disabled={page === 0} onclick={() => page--}>
+					← Previous
+				</Button>
+				<span class="font-mono text-xs text-[var(--text-muted)]">
+					Page {page + 1} of {totalPages}
+				</span>
+				<Button variant="secondary" disabled={page >= totalPages - 1} onclick={() => page++}>
+					Next →
+				</Button>
 			</div>
 		</div>
 	{/if}

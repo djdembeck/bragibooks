@@ -9,21 +9,36 @@
 		onretry?: () => void;
 	} = $props();
 
-	const styles = {
-		info: 'bg-[var(--info-bg)] text-[var(--text)] border-[var(--info)]/20',
-		success: 'bg-[var(--success-bg)] text-[var(--text)] border-[var(--success)]/20',
-		warning: 'bg-[var(--warning-bg)] text-[var(--text)] border-[var(--warning)]/20',
-		error: 'bg-[var(--error-bg)] text-[var(--text)] border-[var(--error)]/20'
-	};
+	const styles = $derived.by(() => {
+		switch (variant) {
+			case 'success':
+				return 'bg-[var(--state-green-bg)] text-[var(--text)] border-[var(--state-green-border)]';
+			case 'warning':
+				return 'bg-[var(--state-amber-bg)] text-[var(--text)] border-[var(--state-amber-border)]';
+			case 'error':
+				return 'bg-[var(--state-red-bg)] text-[var(--text)] border-[var(--state-red-border)]';
+			default:
+				return 'bg-[var(--surface)] text-[var(--text)] border-[var(--border)]';
+		}
+	});
+
+	const iconLabel = $derived.by(() => {
+		switch (variant) {
+			case 'success': return 'ok';
+			case 'warning': return 'warn';
+			case 'error': return 'err';
+			default: return 'info';
+		}
+	});
 </script>
 
-<div class="rounded-lg border p-4 {styles[variant]}" role="alert">
+<div class="rounded-sm border border-2 p-3.5 {styles}" role="alert" aria-label={iconLabel}>
 	<div class="flex items-start justify-between gap-4">
 		<div class="text-sm leading-relaxed">{@render children()}</div>
 		{#if onretry}
 			<button
 				type="button"
-				class="shrink-0 text-sm font-medium text-[var(--accent)] hover:underline"
+				class="shrink-0 text-sm font-bold text-[var(--accent)] hover:underline focus-visible:outline-[var(--accent)]"
 				onclick={onretry}
 			>
 				Retry

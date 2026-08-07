@@ -11,6 +11,6 @@
 	});
 </script>
 
-<span class="badge status-{kind}">
+<span class="badge status-{kind}" aria-label="Status: {status}">
 	{status}
 </span>

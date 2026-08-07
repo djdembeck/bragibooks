@@ -8,8 +8,10 @@ export default defineConfig({
 	plugins: [tailwindcss(), sveltekit()],
 	server: isDev
 		? {
+				port: 15175,
+				strictPort: true,
 				proxy: {
-					'/api': 'http://localhost:8080',
+					'/api': 'http://localhost:18080',
 				},
 			}
 		: undefined,

@@ -19,10 +19,10 @@
 	} = $props();
 </script>
 
-<div class="flex flex-col items-center justify-center rounded-lg border border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-12 text-center">
-	<p class="text-base font-medium text-[var(--text)]">{title}</p>
+<div class="flex flex-col items-center justify-center rounded-sm border border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-10 text-center">
+	<p class="text-base font-semibold text-[var(--text)]">{title}</p>
 	{#if description}
-		<p class="mt-1 max-w-xs text-sm text-[var(--text-muted)]">{description}</p>
+		<p class="mt-1 max-w-xs text-sm text-[var(--text-secondary)]">{description}</p>
 	{/if}
 	{#if children}
 		<div class="mt-4">{@render children()}</div>

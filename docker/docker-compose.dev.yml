@@ -1,0 +1,15 @@
+services:
+  bragibooks-dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+    ports:
+      - '18080:8080'
+    volumes:
+      - ..:/app
+      - ./config:/app/config
+      - /home/djdembeck:/home/djdembeck
+    environment:
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8080
+      - DATABASE_PATH=config/bragibooks.db

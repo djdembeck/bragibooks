@@ -31,7 +31,7 @@
 			case 'ghost':
 				return 'btn btn-ghost';
 			case 'danger':
-				return 'btn bg-[var(--error-bg)] text-[var(--error)] border border-[var(--error)]/30 hover:brightness-125';
+				return 'btn bg-[var(--state-red-bg)] text-[var(--state-red)] border-2 border-[var(--state-red-border)]';
 			default:
 				return 'btn btn-primary';
 		}
