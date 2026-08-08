@@ -163,6 +163,7 @@ func Load() (Config, string, error) {
 	v.AddConfigPath("config")
 	v.AddConfigPath(".")
 	v.AddConfigPath("/app/data")
+	v.AddConfigPath("/config")
 
 	// Enable environment variable support.
 	v.AutomaticEnv()

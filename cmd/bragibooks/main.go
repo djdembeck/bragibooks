@@ -49,7 +49,7 @@ func main() {
 	}
 
 	// Auto-migrate from legacy Django DB if present and new DB is empty
-	autoMigrateLegacy(database, cfg.Database.Path)
+	autoMigrateLegacy(database, cfgMgr)
 
 	// Ensure default settings row exists
 	if err := ensureDefaultSettings(database); err != nil {
@@ -126,18 +126,7 @@ func main() {
 	}
 }
 
-func autoMigrateLegacy(newDB *sql.DB, configDir string) {
-	// Default legacy DB path: config/db.sqlite3
-	legacyPath := filepath.Join(filepath.Dir(configDir), "db.sqlite3")
-	// Also check env var override
-	if p := os.Getenv("LEGACY_DB_PATH"); p != "" {
-		legacyPath = p
-	}
-
-	if _, err := os.Stat(legacyPath); err != nil {
-		return // no legacy DB found, skip
-	}
-
+func autoMigrateLegacy(newDB *sql.DB, cfgMgr *config.ConfigManager) {
 	// Check if new DB already has books (skip if non-empty)
 	var bookCount int
 	if err := newDB.QueryRow("SELECT COUNT(*) FROM books").Scan(&bookCount); err != nil {
@@ -145,8 +134,34 @@ func autoMigrateLegacy(newDB *sql.DB, configDir string) {
 		return
 	}
 	if bookCount > 0 {
-		log.Printf("Legacy DB found at %s but new DB already has %d books, skipping auto-migration", legacyPath, bookCount)
-		return
+		return // new DB already populated, no migration needed
+	}
+
+	// Search for legacy Django DB in candidate locations
+	candidates := []string{
+		os.Getenv("LEGACY_DB_PATH"), // explicit override
+	}
+	if cp := cfgMgr.ConfigPath(); cp != "" {
+		candidates = append(candidates, filepath.Join(filepath.Dir(cp), "db.sqlite3"))
+	}
+	candidates = append(candidates,
+		filepath.Join(filepath.Dir(cfgMgr.Config().Database.Path), "db.sqlite3"),
+		"config/db.sqlite3",
+		"/config/db.sqlite3",
+	)
+
+	var legacyPath string
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		if _, err := os.Stat(c); err == nil {
+			legacyPath = c
+			break
+		}
+	}
+	if legacyPath == "" {
+		return // no legacy DB found
 	}
 
 	log.Printf("Legacy Django DB found at %s, starting auto-migration...", legacyPath)
