@@ -3,8 +3,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.dev
-    ports:
-      - '18080:8080'
+    expose:
+      - '8080'
     volumes:
       - ..:/app
       - ./config:/app/config
@@ -13,3 +13,23 @@ services:
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8080
       - DATABASE_PATH=config/bragibooks.db
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO /dev/null http://localhost:8080/api/health || exit 1']
+      interval: 10s
+      start_period: 90s
+
+  bragibooks-vite:
+    image: oven/bun:1-alpine
+    working_dir: /app/web
+    ports:
+      - '5175:5175'
+    volumes:
+      - ..:/app
+    environment:
+      - NODE_ENV=development
+      - VITE_PORT=5175
+      - VITE_PROXY_TARGET=http://bragibooks-dev:8080
+    command: ['bun', 'run', 'dev']
+    depends_on:
+      bragibooks-dev:
+        condition: service_healthy

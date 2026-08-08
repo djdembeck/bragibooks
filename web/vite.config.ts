@@ -1,18 +1,24 @@
 import { sveltekit } from '@sveltejs/kit/vite';
 import tailwindcss from '@tailwindcss/vite';
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 
-const isDev = process.env.NODE_ENV === 'development';
+export default defineConfig(({ mode }) => {
+	const env = loadEnv(mode, process.cwd(), '');
+	const isDev = mode === 'development';
+	const port = Number(env.VITE_PORT) || 5175;
+	const proxyTarget = env.VITE_PROXY_TARGET || 'http://localhost:8080';
 
-export default defineConfig({
-	plugins: [tailwindcss(), sveltekit()],
-	server: isDev
-		? {
-				port: 15175,
-				strictPort: true,
-				proxy: {
-					'/api': 'http://localhost:18080',
-				},
-			}
-		: undefined,
+	return {
+		plugins: [tailwindcss(), sveltekit()],
+		server: isDev
+			? {
+					port,
+					strictPort: true,
+					host: '0.0.0.0',
+					proxy: {
+						'/api': proxyTarget,
+					},
+				}
+			: undefined,
+	};
 });
