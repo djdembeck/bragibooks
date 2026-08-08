@@ -1,45 +1,186 @@
+# Generate-first release via annalist (GitHub Actions).
+#
+# Gitflow flow: releases are cut on each `develop -> main` merge.
+# `develop` pushes do NOT release.
+#
+# How it works:
+#   1. On every push to the trigger branch, the next version is auto-bumped
+#      from commits since the last tag (conventional commits:
+#      BREAKING CHANGE/feat! -> major, feat -> minor, else patch). Dispatch
+#      with a `version` or `bump` input to override.
+#   2. The tag is created and pushed (skipped if it already exists).
+#   3. A version-tagged Docker image is built and pushed to GHCR.
+#   4. The release is created via the gh CLI (fill_after mode — no notes).
+#
+# Re-runs are idempotent: a partial failure can be re-dispatched and the same
+# (already-existing) tag/release guards no-op or complete the work.
+#
+# No external services required: only git, gh, and docker are used.
+# GITHUB_TOKEN is provided automatically (permissions: contents: write, packages: write).
+
 name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    # Release only on code changes — CI/docs-only merges must not bump or cut.
+    paths-ignore: ['*.md', 'docs/**', '.github/**']
+  workflow_dispatch:
+    inputs:
+      version:                       # manual override
+        description: "Explicit version (vX.Y.Z). Empty = auto-bump from commits."
+        required: false
+        default: ""
+      bump:
+        description: "Bump level when version is empty: auto|patch|minor|major"
+        required: false
+        default: auto
 
 permissions:
   contents: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: release
+  cancel-in-progress: false
 
 jobs:
   release:
-    name: Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
+          # Full history so version resolution can inspect all refs.
           fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version-file: go.mod
+      - name: Configure Git
+        ## Annotated tags need a git identity; the runner ships none.
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Set up Node
-        uses: actions/setup-node@48b55a011bda9f5d6a7c2d9c7362e8dae4041e # v6.4.0
-        with:
-          node-version: '22'
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
-        with:
-          distribution: goreleaser
-          version: ~> v2
-          args: release --clean
+      - name: Determine next version
+        id: version
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION_INPUT: ${{ inputs.version }}
+          BUMP_INPUT: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          LATEST_TAG=$(git tag -l "v*.*.*" --sort=-version:refname | head -n 1 || true)
+
+          if [ -n "$VERSION_INPUT" ]; then
+            # Manual override
+            NEW_VERSION="${VERSION_INPUT#v}"
+            if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Invalid version input: ${VERSION_INPUT} (expected vX.Y.Z)"
+              exit 1
+            fi
+            NEW_VERSION="v${NEW_VERSION}"
+          elif [ -z "$LATEST_TAG" ]; then
+            NEW_VERSION="v0.1.0"
+          else
+            MAJOR="${LATEST_TAG#v}"; MAJOR="${MAJOR%%.*}"
+            REST="${LATEST_TAG#v*.}"; MINOR="${REST%%.*}"; PATCH="${REST#*.}"
+
+            case "$BUMP_INPUT" in
+              auto|"")
+                if [ -z "$(git log --format=%H "${LATEST_TAG}..HEAD" 2>/dev/null)" ]; then
+                  # Re-run after a partial failure: the tag sits at HEAD. Reuse
+                  # it as the target so the release step completes it (or
+                  # no-ops if it already exists).
+                  PREV_TAG=$(git tag -l "v*.*.*" --sort=-version:refname | sed -n 2p || true)
+                  echo "new_version=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+                  echo "previous_tag=${PREV_TAG:-}" >> "$GITHUB_OUTPUT"
+                  echo "No commits since ${LATEST_TAG} — reusing it"
+                  exit 0
+                fi
+                LOG=$(git log --format=%B "${LATEST_TAG}..HEAD" 2>/dev/null || true)
+                if echo "$LOG" | grep -qE 'BREAKING CHANGE:|^[a-z]+(\([^)]*\))?!: '; then LEVEL=major
+                elif echo "$LOG" | grep -qE '^feat(\([^)]*\))?: '; then LEVEL=minor
+                else LEVEL=patch; fi
+                ;;
+              patch|minor|major) LEVEL="$BUMP_INPUT" ;;
+              *) echo "Invalid bump input: ${BUMP_INPUT} (auto|patch|minor|major)"; exit 1 ;;
+            esac
+
+            case "$LEVEL" in
+              major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR+1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH+1)) ;;
+            esac
+            NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          fi
+
+          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=${LATEST_TAG:-}" >> "$GITHUB_OUTPUT"
+          echo "New version: ${NEW_VERSION} (previous: ${LATEST_TAG:-none})"
+
+      - name: Create and push tag
+        id: tag
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.new_version }}"
+          if git rev-parse "refs/tags/${VERSION}" >/dev/null 2>&1; then
+            echo "Tag ${VERSION} already exists, skipping"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git tag -a "${VERSION}" -m "Release ${VERSION}"
+          git push origin "${VERSION}"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push version Docker image
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.new_version }}"
+          REGISTRY_IMAGE="ghcr.io/djdembeck/bragibooks"
+
+          # Idempotency guard: skip when the image already exists (e.g. rerun of a
+          # completed release). `if:` cannot evaluate shell commands, so the
+          # manifest check lives here. Builds when the tag was created this run
+          # (image missing) OR when a previous run failed before the push.
+          if docker manifest inspect "${REGISTRY_IMAGE}:${VERSION}" >/dev/null 2>&1; then
+            echo "Image ${REGISTRY_IMAGE}:${VERSION} already exists - skipping"
+            exit 0
+          fi
+
+          # Login to GHCR (GITHUB_TOKEN has packages: write via job permissions)
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+          # Build and push the version-tagged image.
+          # The Dockerfile should define `ARG VERSION=devel` and stamp the binary
+          # with `-ldflags "-w -s -X github.com/bragibooks/bragibooks/internal/version.Version=${VERSION}"`
+          # so the binary reports its release version at runtime.
+          # See the milmus pattern for reference:
+          #   - Dockerfile: `ARG MILMUS_VERSION=devel` + `-ldflags` with -X flag
+          #   - internal/version/version.go: `var Version = "devel"`
+          # No version package exists yet in this repo; add one following that pattern
+          # before version stamping will take effect.
+          docker build \
+            -f docker/Dockerfile \
+            --build-arg VERSION="${VERSION}" \
+            -t "${REGISTRY_IMAGE}:${VERSION}" \
+            .
+          docker push "${REGISTRY_IMAGE}:${VERSION}"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.new_version }}"
+
+          # Already released? (the tag may pre-exist from an earlier partial run)
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            echo "Release ${VERSION} already exists — nothing to do"
+            exit 0
+          fi
+
+          # fill_after mode: create the release without notes.
+          gh release create "${VERSION}" \
+            --title "Release ${VERSION}"
+          echo "Release ${VERSION} created"
