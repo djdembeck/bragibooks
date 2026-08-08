@@ -66,6 +66,7 @@ type ConfigManager struct {
 	mu         *sync.Mutex
 	configPath string
 	cfg        *Config
+	yamlKeys   map[string]bool
 }
 
 // NewConfigManager creates a ConfigManager with default configuration.
@@ -77,10 +78,24 @@ func NewConfigManager() *ConfigManager {
 		setDefaultsOnConfig(&cfg)
 	}
 
+	// Compute yamlKeys from the config file.
+	yamlKeys := make(map[string]bool)
+	if configPath != "" {
+		if raw, readErr := os.ReadFile(configPath); readErr == nil {
+			var rawMap map[string]any
+			if yaml.Unmarshal(raw, &rawMap) == nil {
+				for _, k := range flattenYAMLKeys(rawMap, "") {
+					yamlKeys[k] = true
+				}
+			}
+		}
+	}
+
 	return &ConfigManager{
 		mu:         &sync.Mutex{},
 		cfg:        &cfg,
 		configPath: configPath,
+		yamlKeys:   yamlKeys,
 	}
 }
 
@@ -130,8 +145,14 @@ func (cm *ConfigManager) ConfigPath() string {
 	return cm.configPath
 }
 
+// YAMLKeys returns the set of dotted keys present in the loaded YAML config file.
+// Returns an empty map if no YAML file was loaded.
+func (cm *ConfigManager) YAMLKeys() map[string]bool {
+	return cm.yamlKeys
+}
+
 // Load loads configuration: YAML file takes precedence over environment variables.
-// If a key exists in config/config.yaml, it overrides any BRAGIBOOKS_* env var for that key.
+// If a key exists in config/config.yaml, it overrides any env var for that key.
 // Returns the loaded Config and the path to the config file (or "" if no file found).
 func Load() (Config, string, error) {
 	v := viper.New()
@@ -145,8 +166,10 @@ func Load() (Config, string, error) {
 
 	// Enable environment variable support.
 	v.AutomaticEnv()
-	v.SetEnvPrefix("BRAGIBOOKS")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
+
+	// Backward compat: old Python users may have REGION=us
+	v.BindEnv("processing.region", "REGION", "PROCESSING_REGION")
 
 	// Set default values.
 	setDefaults(v)
@@ -241,6 +264,7 @@ func overrideKey(target, yamlOnly *Config, key string) {
 		target.M4bMerge.Binary = yamlOnly.M4bMerge.Binary
 	// APIKey
 	case "api_key.api_key":
+		target.APIKey.APIKey = yamlOnly.APIKey.APIKey
 	case "api_key.base_url":
 		target.APIKey.BaseURL = yamlOnly.APIKey.BaseURL
 	// Directories

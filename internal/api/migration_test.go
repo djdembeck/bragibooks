@@ -2,6 +2,8 @@ package api
 
 import (
 	"database/sql"
+	"os"
+	"path/filepath"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -465,4 +467,254 @@ func TestCheckLegacyTables(t *testing.T) {
 			t.Errorf("checkLegacyTables with importer_book only: unexpected error: %v", err)
 		}
 	})
+}
+
+// --- TestRunLegacyMigration ---
+
+// writeLegacyDB creates a temp file with the legacy Django schema and the
+// given seed data, returning the file path.
+func writeLegacyDB(t *testing.T, seed func(db *sql.DB)) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "db.sqlite3")
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setupLegacySchema(db); err != nil {
+		t.Fatal(err)
+	}
+	if seed != nil {
+		seed(db)
+	}
+	db.Close()
+	return path
+}
+
+// newFileDB creates a new SQLite DB at a temp path with the new schema.
+func newFileDB(t *testing.T) (*sql.DB, string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bragibooks.db")
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setupNewSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	return db, path
+}
+
+func TestRunLegacyMigration(t *testing.T) {
+	legacyPath := writeLegacyDB(t, func(db *sql.DB) {
+		// Statuses
+		_, _ = db.Exec(`INSERT INTO importer_status (id, status) VALUES (1, 'Done'), (2, 'Error')`)
+
+		// Books
+		_, _ = db.Exec(`INSERT INTO importer_book (id, title, asin, short_desc, long_desc,
+			release_date, series, publisher, lang, runtime_length_minutes, format_type,
+			src_path, dest_path, cover_image_link, created_at, updated_at, status_id, converted)
+			VALUES
+			(1, 'Book One', 'B001', 'short1', 'long1', '2024-01-01', 'Series A', 'PubA', 'en', 120, 'm4b', '/in/1', '/out/1', 'http://cover/1', '2024-01-01', '2024-01-02', 1, 1),
+			(2, 'Book Two', 'B002', 'short2', '', '2024-02-01', '', 'PubB', 'en', 90, 'm4b', '/in/2', '/out/2', '', '2024-02-01', '2024-02-02', 2, 0)`)
+
+		// Authors
+		_, _ = db.Exec(`INSERT INTO importer_author (id, first_name, last_name) VALUES (1, 'Jane', 'Doe'), (2, 'John', 'Smith')`)
+
+		// Narrators
+		_, _ = db.Exec(`INSERT INTO importer_narrator (id, first_name, last_name) VALUES (1, 'Alice', 'Wonder')`)
+
+		// M2M
+		_, _ = db.Exec(`INSERT INTO importer_author_books (id, book_id, author_id) VALUES (1, 1, 1), (2, 2, 2)`)
+		_, _ = db.Exec(`INSERT INTO importer_narrator_books (id, book_id, narrator_id) VALUES (1, 1, 1)`)
+
+		// Settings
+		_, _ = db.Exec(`INSERT INTO importer_setting (id, input_directory, output_directory, completed_directory, num_cpus, output_scheme)
+			VALUES (1, '/input', '/output', '/done', 4, '{author}/{title}')`)
+	})
+
+	newDB, _ := newFileDB(t)
+	t.Cleanup(func() { newDB.Close() })
+
+	result, err := RunLegacyMigration(legacyPath, newDB)
+	if err != nil {
+		t.Fatalf("RunLegacyMigration error: %v", err)
+	}
+	if result.Books != 2 {
+		t.Errorf("books = %d, want 2", result.Books)
+	}
+	if result.People != 3 {
+		t.Errorf("people = %d, want 3 (2 authors + 1 narrator)", result.People)
+	}
+
+	// Verify books
+	var bookCount int
+	if err := newDB.QueryRow("SELECT COUNT(*) FROM books").Scan(&bookCount); err != nil {
+		t.Fatal(err)
+	}
+	if bookCount != 2 {
+		t.Errorf("book count in DB = %d, want 2", bookCount)
+	}
+
+	// Verify a specific book's fields
+	var title, status, srcPath string
+	var converted bool
+	err = newDB.QueryRow("SELECT title, status, src_path, converted FROM books WHERE asin = 'B001'").Scan(&title, &status, &srcPath, &converted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if title != "Book One" {
+		t.Errorf("title = %q, want %q", title, "Book One")
+	}
+	if status != "done" {
+		t.Errorf("status = %q, want %q", status, "done")
+	}
+	if srcPath != "/in/1" {
+		t.Errorf("src_path = %q, want %q", srcPath, "/in/1")
+	}
+	if !converted {
+		t.Error("converted = false, want true")
+	}
+
+	// Verify people
+	var peopleCount int
+	if err := newDB.QueryRow("SELECT COUNT(*) FROM people").Scan(&peopleCount); err != nil {
+		t.Fatal(err)
+	}
+	if peopleCount != 3 {
+		t.Errorf("people count in DB = %d, want 3", peopleCount)
+	}
+
+	// Verify settings
+	var inputDir, outputDir, completedDir, outputScheme string
+	var numCPUs int
+	err = newDB.QueryRow("SELECT input_dir, output_dir, completed_dir, num_cpus, output_scheme FROM settings WHERE id = 1").
+		Scan(&inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inputDir != "/input" {
+		t.Errorf("input_dir = %q, want %q", inputDir, "/input")
+	}
+	if outputDir != "/output" {
+		t.Errorf("output_dir = %q, want %q", outputDir, "/output")
+	}
+	if completedDir != "/done" {
+		t.Errorf("completed_dir = %q, want %q", completedDir, "/done")
+	}
+	if numCPUs != 4 {
+		t.Errorf("num_cpus = %d, want 4", numCPUs)
+	}
+	if outputScheme != "{author}/{title}" {
+		t.Errorf("output_scheme = %q, want %q", outputScheme, "{author}/{title}")
+	}
+
+	// Verify legacy DB file is untouched (still has data)
+	legacyDB, err := sql.Open("sqlite", legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacyDB.Close()
+	var legacyBookCount int
+	if err := legacyDB.QueryRow("SELECT COUNT(*) FROM importer_book").Scan(&legacyBookCount); err != nil {
+		t.Fatal(err)
+	}
+	if legacyBookCount != 2 {
+		t.Errorf("legacy DB book count = %d, want 2 (legacy DB should be untouched)", legacyBookCount)
+	}
+}
+
+func TestRunLegacyMigration_EmptyLegacy(t *testing.T) {
+	// Legacy DB with schema but no rows
+	legacyPath := writeLegacyDB(t, nil)
+
+	newDB, _ := newFileDB(t)
+	t.Cleanup(func() { newDB.Close() })
+
+	result, err := RunLegacyMigration(legacyPath, newDB)
+	if err != nil {
+		t.Fatalf("RunLegacyMigration on empty legacy: %v", err)
+	}
+	if result.Books != 0 {
+		t.Errorf("books = %d, want 0", result.Books)
+	}
+	if result.People != 0 {
+		t.Errorf("people = %d, want 0", result.People)
+	}
+
+	// Settings should still have no row (migrateSettings returns nil for no rows)
+	var count int
+	if err := newDB.QueryRow("SELECT COUNT(*) FROM settings").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("settings count = %d, want 0", count)
+	}
+}
+
+func TestRunLegacyMigration_InvalidLegacyPath(t *testing.T) {
+	newDB, _ := newFileDB(t)
+	t.Cleanup(func() { newDB.Close() })
+
+	// Non-existent file — sql.Open succeeds but checkLegacyTables should fail
+	_, err := RunLegacyMigration("/nonexistent/path/db.sqlite3", newDB)
+	if err == nil {
+		t.Fatal("expected error for non-existent legacy DB path, got nil")
+	}
+}
+
+func TestRunLegacyMigration_NotALegacyDB(t *testing.T) {
+	// Create a DB without legacy tables
+	dir := t.TempDir()
+	path := filepath.Join(dir, "notlegacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec("CREATE TABLE random_table (id INTEGER PRIMARY KEY)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	newDB, _ := newFileDB(t)
+	t.Cleanup(func() { newDB.Close() })
+
+	_, err = RunLegacyMigration(path, newDB)
+	if err == nil {
+		t.Fatal("expected error for non-legacy DB, got nil")
+	}
+}
+
+func TestRunLegacyMigration_LegacyDBUntouched(t *testing.T) {
+	legacyPath := writeLegacyDB(t, func(db *sql.DB) {
+		_, _ = db.Exec(`INSERT INTO importer_status (id, status) VALUES (1, 'Done')`)
+		_, _ = db.Exec(`INSERT INTO importer_book (id, title, asin, short_desc, long_desc, release_date, series, publisher, lang, runtime_length_minutes, format_type, src_path, dest_path, cover_image_link, created_at, updated_at, status_id, converted) VALUES (1, 'Test', 'B001', '', '', '', '', '', '', 0, '', '', '', '', '', '', 1, 0)`)
+	})
+
+	// Get file size before migration
+	infoBefore, err := os.Stat(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newDB, _ := newFileDB(t)
+	t.Cleanup(func() { newDB.Close() })
+
+	_, err = RunLegacyMigration(legacyPath, newDB)
+	if err != nil {
+		t.Fatalf("RunLegacyMigration error: %v", err)
+	}
+
+	// File size should be unchanged (read-only, no modifications)
+	infoAfter, err := os.Stat(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if infoBefore.Size() != infoAfter.Size() {
+		t.Errorf("legacy DB file size changed: before=%d, after=%d (should be untouched)", infoBefore.Size(), infoAfter.Size())
+	}
 }

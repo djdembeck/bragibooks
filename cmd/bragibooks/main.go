@@ -48,10 +48,18 @@ func main() {
 		log.Fatalf("Failed to run migrations: %v", err)
 	}
 
+	// Auto-migrate from legacy Django DB if present and new DB is empty
+	autoMigrateLegacy(database, cfg.Database.Path)
+
 	// Ensure default settings row exists
 	if err := ensureDefaultSettings(database); err != nil {
 		log.Fatalf("Failed to ensure default settings: %v", err)
 	}
+
+	// Load settings from DB into config struct (DB values fill in gaps not covered by YAML/env)
+	loadSettingsFromDB(database, cfgMgr)
+	// Refresh cfg after potential DB-loaded overrides
+	cfg = cfgMgr.Config()
 
 	// Services
 	processor := audio.NewProcessor(
@@ -115,6 +123,86 @@ func main() {
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("HTTP server error: %v", err)
+	}
+}
+
+func autoMigrateLegacy(newDB *sql.DB, configDir string) {
+	// Default legacy DB path: config/db.sqlite3
+	legacyPath := filepath.Join(filepath.Dir(configDir), "db.sqlite3")
+	// Also check env var override
+	if p := os.Getenv("LEGACY_DB_PATH"); p != "" {
+		legacyPath = p
+	}
+
+	if _, err := os.Stat(legacyPath); err != nil {
+		return // no legacy DB found, skip
+	}
+
+	// Check if new DB already has books (skip if non-empty)
+	var bookCount int
+	if err := newDB.QueryRow("SELECT COUNT(*) FROM books").Scan(&bookCount); err != nil {
+		log.Printf("Warning: could not check book count for auto-migration: %v", err)
+		return
+	}
+	if bookCount > 0 {
+		log.Printf("Legacy DB found at %s but new DB already has %d books, skipping auto-migration", legacyPath, bookCount)
+		return
+	}
+
+	log.Printf("Legacy Django DB found at %s, starting auto-migration...", legacyPath)
+	result, err := api.RunLegacyMigration(legacyPath, newDB)
+	if err != nil {
+		log.Printf("Warning: auto-migration failed: %v (you can manually migrate via POST /api/migrate)", err)
+		return
+	}
+	log.Printf("Auto-migration complete: %d books, %d people migrated", result.Books, result.People)
+}
+
+func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {
+	cfg := cfgMgr.Config()
+	yamlKeys := cfgMgr.YAMLKeys()
+
+	var m4bBinary, inputDir, outputDir, completedDir, outputScheme, region, apiKey, baseURL string
+	var numCPUs int
+
+	err := database.QueryRow(`
+		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url
+		FROM settings WHERE id = 1
+	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL)
+	if err != nil {
+		log.Printf("Warning: could not load settings from DB: %v", err)
+		return
+	}
+
+	// For each field: use DB value unless YAML explicitly set it or env var is set
+	// (YAML takes precedence, then env vars, then DB, then defaults)
+	if !yamlKeys["directories.input_dir"] && os.Getenv("DIRECTORIES_INPUT_DIR") == "" {
+		cfg.Directories.InputDir = inputDir
+	}
+	if !yamlKeys["directories.output_dir"] && os.Getenv("DIRECTORIES_OUTPUT_DIR") == "" {
+		cfg.Directories.OutputDir = outputDir
+	}
+	if !yamlKeys["directories.completed_dir"] && os.Getenv("DIRECTORIES_COMPLETED_DIR") == "" {
+		cfg.Directories.CompletedDir = completedDir
+	}
+	if !yamlKeys["processing.num_cpus"] && os.Getenv("PROCESSING_NUM_CPUS") == "" {
+		cfg.Processing.NumCPUs = numCPUs
+	}
+	if !yamlKeys["processing.path_format"] && os.Getenv("PROCESSING_PATH_FORMAT") == "" {
+		cfg.Processing.PathFormat = outputScheme
+	}
+	// REGION is backward compat from the Python version
+	if !yamlKeys["processing.region"] && os.Getenv("PROCESSING_REGION") == "" && os.Getenv("REGION") == "" {
+		cfg.Processing.Region = region
+	}
+	if !yamlKeys["m4b_merge.binary"] && os.Getenv("M4B_MERGE_BINARY") == "" {
+		cfg.M4bMerge.Binary = m4bBinary
+	}
+	if !yamlKeys["api_key.api_key"] && os.Getenv("API_KEY_API_KEY") == "" {
+		cfg.APIKey.APIKey = apiKey
+	}
+	if !yamlKeys["api_key.base_url"] && os.Getenv("API_KEY_BASE_URL") == "" {
+		cfg.APIKey.BaseURL = baseURL
 	}
 }
 

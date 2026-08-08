@@ -47,6 +47,66 @@ var migrateStatusMap = map[string]string{
 	"Error":      "error",
 }
 
+// LegacyMigrationResult holds the result of a legacy DB migration.
+type LegacyMigrationResult struct {
+	Books  int
+	People int
+}
+
+// sqlExecer is implemented by both *sql.DB and *sql.Tx, allowing migration
+// helpers to work within a transaction or against a bare connection.
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// RunLegacyMigration migrates data from a legacy Django DB into the new schema.
+// It does NOT modify or rename the legacy DB file — reads it in place.
+// All writes are wrapped in a single transaction for performance and atomicity.
+func RunLegacyMigration(legacyDBPath string, newDB *sql.DB) (*LegacyMigrationResult, error) {
+	expandedPath := expandTildePath(legacyDBPath)
+
+	legacyDB, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro", expandedPath))
+	if err != nil {
+		return nil, fmt.Errorf("open legacy DB: %w", err)
+	}
+	defer legacyDB.Close()
+
+	if err := checkLegacyTables(legacyDB); err != nil {
+		return nil, fmt.Errorf("not a valid legacy Bragi Books database: %w", err)
+	}
+
+	tx, err := newDB.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin migration transaction: %w", err)
+	}
+	defer tx.Rollback() // safe to call after Commit
+
+	booksMigrated, err := migrateBooks(legacyDB, tx)
+	if err != nil {
+		return nil, fmt.Errorf("migrate books: %w", err)
+	}
+
+	peopleMigrated, err := migratePeople(legacyDB, tx)
+	if err != nil {
+		return nil, fmt.Errorf("migrate people: %w", err)
+	}
+
+	if err := migrateSettings(legacyDB, tx); err != nil {
+		return nil, fmt.Errorf("migrate settings: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit migration transaction: %w", err)
+	}
+
+	return &LegacyMigrationResult{
+		Books:  booksMigrated,
+		People: peopleMigrated,
+	}, nil
+}
+
 // MigrateLegacyDB handles POST /api/migrate.
 // Reads the legacy Django db.sqlite3 and migrates data to the new schema.
 func (h *Handler) MigrateLegacyDB(w http.ResponseWriter, r *http.Request) {
@@ -64,44 +124,19 @@ func (h *Handler) MigrateLegacyDB(w http.ResponseWriter, r *http.Request) {
 	// Expand ~ in path
 	req.Path = expandTildePath(req.Path)
 
-	// Open legacy database with proper DSN format for modernc.org/sqlite
-	legacyDB, err := sql.Open("sqlite", fmt.Sprintf("file:%s", req.Path))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("open legacy DB: %v", err))
-		return
-	}
-	defer legacyDB.Close()
-
-	// Verify the legacy DB has the expected tables
-	if err := checkLegacyTables(legacyDB); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("not a valid legacy Bragi Books database: %v", err))
-		return
-	}
-
-	// Create backup
+	// Create a backup COPY (best-effort — warn if it fails)
 	backupPath := req.Path + ".bak"
-	if err := os.Rename(req.Path, backupPath); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("create backup: %v", err))
-		return
+	if bData, readErr := os.ReadFile(req.Path); readErr == nil {
+		if writeErr := os.WriteFile(backupPath, bData, 0644); writeErr != nil {
+			log.Printf("Warning: failed to create backup of legacy DB: %v", writeErr)
+		}
+	} else {
+		log.Printf("Warning: failed to read legacy DB for backup: %v", readErr)
 	}
 
-	// Migrate books
-	booksMigrated, err := migrateBooks(legacyDB, h.svc.DB)
+	result, err := RunLegacyMigration(req.Path, h.svc.DB)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("migrate books: %v", err))
-		return
-	}
-
-	// Migrate people (authors + narrators)
-	peopleMigrated, err := migratePeople(legacyDB, h.svc.DB)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("migrate people: %v", err))
-		return
-	}
-
-	// Migrate settings
-	if err := migrateSettings(legacyDB, h.svc.DB); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("migrate settings: %v", err))
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -110,8 +145,8 @@ func (h *Handler) MigrateLegacyDB(w http.ResponseWriter, r *http.Request) {
 			Books  int `json:"books"`
 			People int `json:"people"`
 		}{
-			Books:  booksMigrated,
-			People: peopleMigrated,
+			Books:  result.Books,
+			People: result.People,
 		},
 		Backup: backupPath,
 	})
@@ -200,7 +235,7 @@ func checkLegacyTables(db *sql.DB) error {
 }
 
 // migrateBooks reads importer_book rows and inserts them into the new books table.
-func migrateBooks(legacyDB, newDB *sql.DB) (int, error) {
+func migrateBooks(legacyDB *sql.DB, newDB sqlExecer) (int, error) {
 	// Get status mapping from importer_status table
 	statusMap := make(map[int]string)
 	statusRows, _ := legacyDB.Query("SELECT id, status FROM importer_status")
@@ -279,7 +314,7 @@ type bookMapping struct {
 
 // buildBookMapping queries the new DB for books and returns maps to look up
 // a new book ID by ASIN or title.
-func buildBookMapping(newDB *sql.DB) (*bookMapping, error) {
+func buildBookMapping(newDB sqlExecer) (*bookMapping, error) {
 	rows, err := newDB.Query("SELECT id, asin, title FROM books")
 	if err != nil {
 		return nil, fmt.Errorf("query new books for mapping: %w", err)
@@ -309,7 +344,7 @@ func buildBookMapping(newDB *sql.DB) (*bookMapping, error) {
 }
 
 // migratePeople reads legacy author/narrator tables and inserts them into the new people table.
-func migratePeople(legacyDB, newDB *sql.DB) (int, error) {
+func migratePeople(legacyDB *sql.DB, newDB sqlExecer) (int, error) {
 	// Build the book mapping once, shared by both author and narrator passes
 	mapping, err := buildBookMapping(newDB)
 	if err != nil {
@@ -337,7 +372,7 @@ func migratePeople(legacyDB, newDB *sql.DB) (int, error) {
 
 // migratePeopleType migrates a specific type of person (author or narrator)
 // from the legacy DB using pre-built book mappings.
-func migratePeopleType(legacyDB, newDB *sql.DB, role string, mapping *bookMapping) (int, error) {
+func migratePeopleType(legacyDB *sql.DB, newDB sqlExecer, role string, mapping *bookMapping) (int, error) {
 	personTable := "importer_author"
 	m2mTable := "importer_author_books"
 	m2mFK := "author"
@@ -458,7 +493,7 @@ func loadLegacyBooks(db *sql.DB) (map[int]legacyBookInfo, error) {
 }
 
 // migrateSettings reads the legacy importer_setting row and inserts it into the new settings table.
-func migrateSettings(legacyDB, newDB *sql.DB) error {
+func migrateSettings(legacyDB *sql.DB, newDB sqlExecer) error {
 	// Read the legacy setting row (there should be exactly one)
 	row := legacyDB.QueryRow(`
 		SELECT input_directory, output_directory, completed_directory, num_cpus, output_scheme

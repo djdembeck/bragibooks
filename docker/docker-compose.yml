@@ -10,4 +10,8 @@ services:
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8080
       - DATABASE_PATH=config/bragibooks.db
+      - DIRECTORIES_INPUT_DIR=/input
+      - DIRECTORIES_OUTPUT_DIR=/output
+      - DIRECTORIES_COMPLETED_DIR=/input/done
+      - PROCESSING_REGION=us
     restart: unless-stopped
