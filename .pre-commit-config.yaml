@@ -2,12 +2,18 @@
 repos:
   - repo: local
     hooks:
-      - id: svelte-check
-        name: Svelte check
-        entry: cd web && bun run check
+      - id: go-fmt
+        name: Go fmt
+        entry: bash -c 'out=$(gofmt -l .) && if [ -n "$out" ]; then echo "Unformatted files:$out" && exit 1; fi'
         language: system
-        types: [file]
-        files: ^web/
+        types: [go]
+        pass_filenames: false
+
+      - id: go-mod-tidy
+        name: Go mod tidy
+        entry: bash -c 'go mod tidy && git diff --exit-code -- go.mod go.sum'
+        language: system
+        types: [go]
         pass_filenames: false
 
       - id: go-vet
@@ -15,6 +21,14 @@ repos:
         entry: go vet ./...
         language: system
         types: [go]
+        pass_filenames: false
+
+      - id: svelte-check
+        name: Svelte check
+        entry: bash -c 'cd web && bun run check'
+        language: system
+        types: [file]
+        files: ^web/
         pass_filenames: false
 
       - id: build

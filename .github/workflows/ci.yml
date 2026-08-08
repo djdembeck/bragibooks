@@ -10,14 +10,15 @@ on:
     branches: [main, develop]
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: true
-
-permissions: read-all
+permissions:
+  contents: read
 
 env:
   PR_IS_SAME_REPO: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
 
 jobs:
   lint-format:
@@ -34,19 +35,21 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '22'
-
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
-      - name: Svelte type check
-        run: cd web && bun run check
+      - name: Go format check
+        run: |
+          out=$(gofmt -l .) && if [ -n "$out" ]; then echo "Unformatted files:$out" && exit 1; fi
+
+      - name: Go mod tidy check
+        run: go mod tidy && git diff --exit-code -- go.mod go.sum
 
       - name: Go vet
         run: go vet ./...
+
+      - name: Svelte type check
+        run: cd web && bun run check
 
   build:
     name: Build
@@ -62,11 +65,6 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '22'
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -173,30 +171,27 @@ jobs:
         with:
           issue-number: ${{ github.event.pull_request.number || steps.pr-number.outputs.number }}
           comment-author: 'github-actions[bot]'
-          body-includes: 'Docker Image Ready'
+          body-includes: 'Docker image ready'
 
       - name: Comment PR with image tags
-        if: env.PR_IS_SAME_REPO == 'true' || (github.event_name == 'workflow_dispatch' && steps.pr-number.outputs.number != '')
+        if: |
+          (env.PR_IS_SAME_REPO == 'true' || (github.event_name == 'workflow_dispatch' && steps.pr-number.outputs.number != ''))
+          && steps.find-comment.outputs.comment-id == ''
         uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
         with:
-          comment-id: ${{ steps.find-comment.outputs.comment-id }}
           issue-number: ${{ github.event.pull_request.number || steps.pr-number.outputs.number }}
           body: |
-            ## 🐳 Docker Image Ready
+            ## 🐳 Docker image ready
 
-            The following image tag is available for testing this PR:
+            A test image for this PR is available:
 
-            | Tag | Image |
-            |-----|-------|
-            | `pr-${{ github.event.pull_request.number || steps.pr-number.outputs.number }}` | `ghcr.io/${{ github.repository }}:pr-${{ github.event.pull_request.number || steps.pr-number.outputs.number }}` |
+            ```bash
+            docker pull ghcr.io/djdembeck/bragibooks:pr-${{ github.event.pull_request.number || steps.pr-number.outputs.number }}
+            ```
 
-            **Note:** This tag is stable for this PR. Each new commit will overwrite this tag with the latest build.
+            The `pr-${{ github.event.pull_request.number || steps.pr-number.outputs.number }}` tag is stable — new commits on this PR overwrite it with the latest build. The image is deleted automatically when the PR closes.
 
             **To test:**
             ```bash
-            docker pull ghcr.io/${{ github.repository }}:pr-${{ github.event.pull_request.number || steps.pr-number.outputs.number }}
-            docker run --rm -v /host/media:/media:rw ghcr.io/${{ github.repository }}:pr-${{ github.event.pull_request.number || steps.pr-number.outputs.number }}
+            docker run --rm -v /host/media:/media:rw -p 8080:8080 ghcr.io/djdembeck/bragibooks:pr-${{ github.event.pull_request.number || steps.pr-number.outputs.number }}
             ```
-
-            Images will be automatically deleted when this PR is merged or closed.
-          edit-mode: replace
