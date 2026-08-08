@@ -35,7 +35,7 @@
 		 * Neutral graphite = pending / idle
 		 * Only used for status; never decorative.                */
 
-		--state-red: oklch(0.62 0.18 25);
+		--state-red: oklch(0.69 0.18 25);
 		--state-red-bg: oklch(0.30 0.04 25);
 		--state-red-border: oklch(0.44 0.08 25);
 
@@ -43,7 +43,7 @@
 		--state-amber-bg: oklch(0.32 0.04 85);
 		--state-amber-border: oklch(0.44 0.08 85);
 
-		--state-green: oklch(0.65 0.14 145);
+		--state-green: oklch(0.67 0.14 145);
 		--state-green-bg: oklch(0.30 0.04 145);
 		--state-green-border: oklch(0.44 0.08 145);
 
@@ -307,10 +307,73 @@
 }
 
 @layer components {
+	/* ── Skip Link ────────────────────────────────────────────── */
+	.skip-link {
+		position: absolute;
+		top: -100%;
+		left: 0.5rem;
+		z-index: 50;
+		padding: 0.75rem 1rem;
+		background: var(--accent);
+		color: var(--accent-text);
+		font-weight: 600;
+		font-size: 0.875rem;
+		border-radius: var(--radius-sm);
+		text-decoration: none;
+		transition: top var(--duration-fast) var(--ease-out);
+	}
+
+	.skip-link:focus-visible {
+		top: 0.5rem;
+		outline: 2px solid var(--text);
+		outline-offset: 2px;
+	}
+
+	/* ── Page header — one hierarchy for every station ─────────── */
+	.page-header {
+		margin-bottom: 1.75rem;
+		padding-bottom: 1rem;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.page-header__row {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 0.75rem;
+	}
+
+	.page-header__title {
+		font-size: clamp(1.5rem, 1.35rem + 0.6vw, 2rem);
+		font-weight: 700;
+		letter-spacing: -0.02em;
+		color: var(--enamel);
+	}
+
+	.page-header__station {
+		align-self: center;
+	}
+
+	.page-header__description {
+		max-width: 65ch;
+		margin-top: 0.35rem;
+		color: var(--text-secondary);
+		font-size: 0.9375rem;
+	}
+
+	/* Shared panel — quiet containment for route-level work surfaces */
+	.panel {
+		background: var(--surface);
+		border: 1.5px solid var(--border);
+		border-radius: var(--radius-md);
+		overflow: hidden;
+	}
+
 	/* ── Buttons ───────────────────────────────────────────────── */
 	.btn {
 		@apply inline-flex items-center justify-center gap-2 font-semibold text-sm;
 		padding: 0.5rem 1rem;
+		min-height: 2.75rem;
 		border-radius: var(--radius-sm);
 		transition: background-color var(--duration-fast) var(--ease-out),
 					border-color var(--duration-fast) var(--ease-out);
@@ -365,6 +428,22 @@
 	.btn-ghost:hover {
 		background: var(--surface-hover);
 		color: var(--text);
+	}
+
+	/* ── Touch-friendly interactive minimums ─────────────────────
+	 * 44px touch target for mobile. Inputs, selects, and buttons
+	 * meet the threshold. Nav links use padding to reach height.   */
+
+	input,
+	select,
+	textarea {
+		min-height: 2.75rem;
+	}
+
+	input[type="checkbox"],
+	input[type="radio"] {
+		min-width: 1.5rem;
+		min-height: 1.5rem;
 	}
 
 	/* ── Card / Panel — compact, bordered, orthogonal ─────────── */
@@ -512,6 +591,10 @@
 	.rail-station {
 		@apply flex flex-col items-center gap-1;
 		text-decoration: none;
+		/* Touch-friendly: clickable area wraps dot + label */
+		min-height: 2.75rem;
+		min-width: 2.75rem;
+		padding: 0.25rem 0;
 	}
 
 	.rail-station:hover {
@@ -563,19 +646,70 @@
 		min-width: 0.5rem;
 	}
 
-	/* ── Station identity badge (page header tag) ────────────── */
-	.station-id {
-		@apply inline-flex items-center gap-1.5 rounded-sm px-2 py-0.5 text-xs font-bold;
-		background: var(--surface);
-		border: 1.5px solid var(--border);
-		color: var(--text-secondary);
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
+	/* ── Rail responsive — narrow screens ─────────────────────── */
+	@media (max-width: 480px) {
+		.utility-link__label {
+			display: none;
+		}
+
+		.utility-link {
+			justify-content: center;
+			min-width: 2.75rem;
+			padding-inline: 0.5rem;
+		}
+
+		.rail-station-label {
+			font-size: 0.625rem;
+			letter-spacing: 0.02em;
+		}
+
+		.rail-segment {
+			min-width: 0.25rem;
+		}
+
+		.rail > div {
+			padding: 0.375rem 0.5rem;
+		}
 	}
 
-	/* ── Nav link states ──────────────────────────────────────── */
+	/* ── Utility links (Dashboard / Settings) ─────────────────── */
+	.utility-link {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+		min-height: 2.75rem;
+		padding: 0.375rem 0.75rem;
+		border-radius: var(--radius-sm);
+		font-size: 0.875rem;
+		font-weight: 600;
+		color: var(--text-secondary);
+		text-decoration: none;
+		transition: background-color var(--duration-fast) var(--ease-out),
+					color var(--duration-fast) var(--ease-out);
+		border: 1.5px solid transparent;
+		white-space: nowrap;
+	}
+
+	.utility-link:hover {
+		background: var(--surface-hover);
+		color: var(--text);
+		text-decoration: none;
+	}
+
+	.utility-link-active {
+		background: var(--accent);
+		color: var(--accent-text);
+		border-color: var(--accent);
+	}
+
+	.utility-link__label {
+		display: inline;
+	}
+
+	/* ── Legacy nav-link (preserved for any route-level usage) ─── */
 	.nav-link {
 		@apply flex items-center gap-2 rounded-sm px-2.5 py-1.5 text-sm font-semibold;
+		min-height: 2.75rem;
 		color: var(--text-secondary);
 		transition: background-color var(--duration-fast) var(--ease-out),
 					color var(--duration-fast) var(--ease-out);
@@ -592,5 +726,27 @@
 		background: var(--accent);
 		color: var(--accent-text);
 		border: 1.5px solid var(--accent);
+	}
+
+	/* ── Station identity badge (page header tag) ────────────── */
+	.station-id {
+		@apply inline-flex items-center gap-1.5 rounded-sm px-2 py-0.5 text-xs font-bold;
+		background: var(--surface);
+		border: 1.5px solid var(--border);
+		color: var(--text-secondary);
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+	}
+
+	@media (max-width: 480px) {
+		.utility-link__label {
+			display: none;
+		}
+
+		.utility-link {
+			justify-content: center;
+			min-width: 2.75rem;
+			padding-inline: 0.5rem;
+		}
 	}
 }

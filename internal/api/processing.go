@@ -108,6 +108,17 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	}
 	s.mu.Unlock()
 
+	// Mark the book before enqueueing so a fast worker cannot finish before
+	// the request handler records the transitional state.
+	if bookID > 0 {
+		if _, err := s.db.Exec(
+			"UPDATE books SET status = 'processing', status_message = '' WHERE id = ?",
+			bookID,
+		); err != nil {
+			return "", fmt.Errorf("mark book processing: %w", err)
+		}
+	}
+
 	s.workerCh <- job
 	return id, nil
 }
@@ -243,7 +254,7 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 
 // StartProcessingRequest is the JSON body for POST /api/process.
 type StartProcessingRequest struct {
-	BookIDs []int64 `json:"book_ids"`
+	BookIDs []int64  `json:"book_ids"`
 	SrcDirs []string `json:"src_dirs"`
 }
 
@@ -312,6 +323,74 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string][]ProcessingJobCreated{"jobs": jobs})
 }
 
+// ListJobsResponse is the JSON shape returned by GET /api/jobs.
+type ListJobsResponse struct {
+	Jobs []map[string]any `json:"jobs"`
+}
+
+// ListJobs handles GET /api/jobs?limit=N.
+// Returns recent jobs newest-first with clean JSON matching the single-job contract.
+func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
+	limit := parseIntQueryParam(r, "limit", 20)
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	rows, err := h.svc.DB.Query(
+		"SELECT id, book_id, status, output, error, output_file, started_at, completed_at, created_at FROM processing_jobs ORDER BY created_at DESC LIMIT ?",
+		limit,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("query jobs: %v", err))
+		return
+	}
+	defer rows.Close()
+
+	jobs := make([]map[string]any, 0)
+	for rows.Next() {
+		var job models.ProcessingJob
+		err := rows.Scan(&job.ID, &job.BookID, &job.Status, &job.Output,
+			&job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt)
+		if err != nil {
+			continue
+		}
+
+		resp := map[string]any{
+			"id":           job.ID,
+			"book_id":      nil,
+			"status":       job.Status,
+			"output":       job.Output,
+			"error":        nil,
+			"output_file":  nil,
+			"started_at":   nil,
+			"completed_at": nil,
+			"created_at":   job.CreatedAt,
+		}
+		if job.BookID.Valid {
+			resp["book_id"] = job.BookID.Int64
+		}
+		if job.Error != nil {
+			resp["error"] = *job.Error
+		}
+		if job.OutputFile != nil {
+			resp["output_file"] = *job.OutputFile
+		}
+		if job.StartedAt != nil {
+			resp["started_at"] = *job.StartedAt
+		}
+		if job.CompletedAt != nil {
+			resp["completed_at"] = *job.CompletedAt
+		}
+
+		jobs = append(jobs, resp)
+	}
+
+	writeJSON(w, http.StatusOK, ListJobsResponse{Jobs: jobs})
+}
+
 // GetJobStatus handles GET /api/jobs/:id.
 func (h *Handler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chiURLParam(r, "id")
@@ -334,14 +413,14 @@ func (h *Handler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Build clean JSON response (sql.NullXxx fields serialize as objects, not scalars)
 	resp := map[string]any{
-		"id":         job.ID,
-		"status":     job.Status,
-		"output":     job.Output,
-		"error":      nil,
-		"output_file": nil,
-		"started_at": nil,
+		"id":           job.ID,
+		"status":       job.Status,
+		"output":       job.Output,
+		"error":        nil,
+		"output_file":  nil,
+		"started_at":   nil,
 		"completed_at": nil,
-		"created_at": job.CreatedAt,
+		"created_at":   job.CreatedAt,
 	}
 	if job.BookID.Valid {
 		resp["book_id"] = job.BookID.Int64

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { get, put } from '$lib/api';
-	import { Button, Alert, Skeleton } from '$lib/components';
+	import { PageHeader, Button, Alert, Skeleton } from '$lib/components';
 	import type { Settings } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 	import { CheckCircle, AlertTriangle, Save } from '@lucide/svelte';
@@ -17,9 +17,64 @@
 		});
 	}
 
+	$effect(() => {
+		load();
+	});
+
+	// Client-side validation helpers
+	function validateUrl(value: string): string | null {
+		if (!value) return null; // optional field
+		try {
+			new URL(value);
+			return null;
+		} catch {
+			return 'Must be a valid URL (e.g. https://audiobookdb.org/api)';
+		}
+	}
+
+	function validateNonNegativeInt(value: number): string | null {
+		if (value < 0) return 'Must be zero or greater';
+		return null;
+	}
+
+	function validateRequiredPath(value: string): string | null {
+		if (!value || !value.trim()) return 'This path is required';
+		return null;
+	}
+
+	let fieldErrors = $state<Record<string, string | null>>({});
+
+	// Derived aria-describedby IDs (Svelte 5 does not allow {#if} inside attributes)
+	const inputDirDescId = $derived(fieldErrors.input_dir ? 'input_dir_desc_err' : 'input_dir_desc');
+	const outputDirDescId = $derived(fieldErrors.output_dir ? 'output_dir_desc_err' : 'output_dir_desc');
+	const numCpusDescId = $derived(fieldErrors.num_cpus ? 'num_cpus_desc_err' : 'num_cpus_desc');
+	const apiBaseDescId = $derived(fieldErrors.audiobookdb_base_url ? 'audiobookdb_base_url_desc_err' : 'audiobookdb_base_url_desc');
+
+	function runValidation(): boolean {
+		if (!settings) return false;
+		fieldErrors = {};
+		let valid = true;
+
+		const inputDirErr = validateRequiredPath(settings.input_dir);
+		if (inputDirErr) { fieldErrors.input_dir = inputDirErr; valid = false; }
+
+		const outputDirErr = validateRequiredPath(settings.output_dir);
+		if (outputDirErr) { fieldErrors.output_dir = outputDirErr; valid = false; }
+
+		const cpusErr = validateNonNegativeInt(settings.num_cpus);
+		if (cpusErr) { fieldErrors.num_cpus = cpusErr; valid = false; }
+
+		const urlErr = validateUrl(settings.audiobookdb_base_url ?? '');
+		if (urlErr) { fieldErrors.audiobookdb_base_url = urlErr; valid = false; }
+
+		return valid;
+	}
+
 	async function save(e: Event) {
 		e.preventDefault();
 		if (!settings) return;
+		if (!runValidation()) return;
+
 		saving = true;
 		saved = false;
 		saveError = null;
@@ -33,18 +88,13 @@
 			saving = false;
 		}
 	}
-
-	$effect(() => {
-		load();
-	});
 </script>
 
-<div class="station-header">
-	<div class="station-header__badge">
-		<span class="station-header__name">CONTROL CABINET</span>
-	</div>
-	<p class="station-header__desc">Configure directories, processing, and API options.</p>
-</div>
+<PageHeader
+	title="Settings"
+	station="CONTROL CABINET"
+	description="Configure directories, processing, and API options."
+/>
 
 {#if dl.error && !settings}
 	<div class="mb-6 card p-6">
@@ -96,14 +146,33 @@
 			</div>
 			<div class="cabinet__grid">
 				<div class="cabinet__field">
-					<label for="input_dir" class="cabinet__label">Input directory</label>
-					<input id="input_dir" type="text" bind:value={settings.input_dir} />
-					<p class="cabinet__help">Where Bragi Books looks for source audiobook files and folders.</p>
+					<label for="input_dir" class="cabinet__label">Input directory <span class="text-[var(--error)]">*</span></label>
+					<input
+						id="input_dir"
+						type="text"
+						bind:value={settings.input_dir}
+						aria-invalid={!!fieldErrors.input_dir}
+						aria-describedby={inputDirDescId}
+					/>
+					<p id="input_dir_desc" class="cabinet__help">Where Bragi Books looks for source audiobook files and folders.</p>
+					{#if fieldErrors.input_dir}
+						<p id="input_dir_desc_err" class="cabinet__field-error" role="alert">{fieldErrors.input_dir}</p>
+					{/if}
 				</div>
 
 				<div class="cabinet__field">
-					<label for="output_dir" class="cabinet__label">Output directory</label>
-					<input id="output_dir" type="text" bind:value={settings.output_dir} />
+					<label for="output_dir" class="cabinet__label">Output directory <span class="text-[var(--error)]">*</span></label>
+					<input
+						id="output_dir"
+						type="text"
+						bind:value={settings.output_dir}
+						aria-invalid={!!fieldErrors.output_dir}
+						aria-describedby={outputDirDescId}
+					/>
+					<p id="output_dir_desc" class="cabinet__help">Where Bragi Books will place finished audiobook files.</p>
+					{#if fieldErrors.output_dir}
+						<p id="output_dir_desc_err" class="cabinet__field-error" role="alert">{fieldErrors.output_dir}</p>
+					{/if}
 				</div>
 
 				<div class="cabinet__field">
@@ -138,8 +207,19 @@
 
 				<div class="cabinet__field">
 					<label for="num_cpus" class="cabinet__label">CPUs to use</label>
-					<input id="num_cpus" type="number" min="0" bind:value={settings.num_cpus} />
-					<p class="cabinet__help">0 uses all available cores.</p>
+					<input
+						id="num_cpus"
+						type="number"
+						min="0"
+						step="1"
+						bind:value={settings.num_cpus}
+						aria-invalid={!!fieldErrors.num_cpus}
+						aria-describedby={numCpusDescId}
+					/>
+					<p id="num_cpus_desc" class="cabinet__help">Number of parallel processing threads. Use 0 to use all available cores.</p>
+					{#if fieldErrors.num_cpus}
+						<p id="num_cpus_desc_err" class="cabinet__field-error" role="alert">{fieldErrors.num_cpus}</p>
+					{/if}
 				</div>
 			</div>
 		</div>
@@ -169,8 +249,18 @@
 
 				<div class="cabinet__field cabinet__field--wide">
 					<label for="audiobookdb_base_url" class="cabinet__label">AudiobookDB API URL</label>
-					<input id="audiobookdb_base_url" type="text" bind:value={settings.audiobookdb_base_url} placeholder="https://audiobookdb.org/api" />
-					<p class="cabinet__help">Base URL for the AudiobookDB API endpoint.</p>
+					<input
+						id="audiobookdb_base_url"
+						type="url"
+						bind:value={settings.audiobookdb_base_url}
+						placeholder="https://audiobookdb.org/api"
+						aria-invalid={!!fieldErrors.audiobookdb_base_url}
+						aria-describedby={apiBaseDescId}
+					/>
+					<p id="audiobookdb_base_url_desc" class="cabinet__help">Base URL for the AudiobookDB API endpoint.</p>
+					{#if fieldErrors.audiobookdb_base_url}
+						<p id="audiobookdb_base_url_desc_err" class="cabinet__field-error" role="alert">{fieldErrors.audiobookdb_base_url}</p>
+					{/if}
 				</div>
 			</div>
 		</div>
@@ -206,38 +296,10 @@
 </svelte:head>
 
 <style>
-	/* Station header */
-	.station-header {
-		margin-bottom: 1.5rem;
-		padding-bottom: 1rem;
-		border-bottom: 2px solid var(--border);
-	}
-
-	.station-header__badge {
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-	}
-
-	.station-header__name {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 1.1rem;
-		font-weight: 700;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: var(--text);
-	}
-
-	.station-header__desc {
-		margin-top: 0.25rem;
-		font-size: 0.875rem;
-		color: var(--text-muted);
-	}
-
 	/* Cabinet — the settings form container */
 	.cabinet {
 		border: 1px solid var(--border);
-		border-radius: var(--radius-lg);
+		border-radius: var(--radius-md);
 		overflow: hidden;
 		background: var(--surface);
 	}
@@ -320,6 +382,13 @@
 		color: var(--text-secondary);
 	}
 
+	.cabinet__field-error {
+		margin-top: 0.35rem;
+		font-size: 0.72rem;
+		color: var(--error);
+		font-weight: 500;
+	}
+
 	.cabinet__help {
 		margin-top: 0.35rem;
 		font-size: 0.72rem;
@@ -370,7 +439,7 @@
 		justify-content: space-between;
 		gap: 0.75rem;
 		padding: 0.75rem 1rem;
-		background: oklch(0.28 0.015 75 / 0.5);
+		background: var(--surface);
 		border-top: 1px dashed var(--border-subtle);
 		flex-wrap: wrap;
 	}

@@ -102,6 +102,10 @@ export interface ProcessingJob {
 	created_at: string;
 }
 
+export interface JobsListResponse {
+	jobs: ProcessingJob[];
+}
+
 export interface Settings {
 	audiobookdb_api_key?: string;
 	audiobookdb_base_url?: string;

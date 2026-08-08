@@ -5,23 +5,25 @@
 	import { formatRuntime } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
-	let totals = $state({ all: 0, done: 0, processing: 0, error: 0 });
+	let totals = $state({ pending: 0, matched: 0, processing: 0, done: 0, error: 0 });
 	let recent: BookWithPeople[] = $state([]);
 	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 
 	async function load() {
 		await dl.run(async () => {
-			const [all, done, processing, err, recentResp] = await Promise.all([
-				get<BooksListResponse>('/books?limit=1'),
-				get<BooksListResponse>('/books?status=done&limit=1'),
+			const [pending, matched, processing, done, err, recentResp] = await Promise.all([
+				get<BooksListResponse>('/books?status=pending&limit=1'),
+				get<BooksListResponse>('/books?status=matched&limit=1'),
 				get<BooksListResponse>('/books?status=processing&limit=1'),
+				get<BooksListResponse>('/books?status=done&limit=1'),
 				get<BooksListResponse>('/books?status=error&limit=1'),
 				get<BooksListResponse>('/books?limit=5'),
 			]);
 			totals = {
-				all: all.total,
-				done: done.total,
+				pending: pending.total,
+				matched: matched.total,
 				processing: processing.total,
+				done: done.total,
 				error: err.total,
 			};
 			recent = recentResp.books || [];
@@ -34,28 +36,29 @@
 
 	// ── Workflow rail stations with live counts ──
 	// Safe numeric defaults — never display NaN if API data is missing
-	const safeAll = $derived(typeof totals.all === 'number' ? totals.all : 0);
-	const safeDone = $derived(typeof totals.done === 'number' ? totals.done : 0);
+	const safePending = $derived(typeof totals.pending === 'number' ? totals.pending : 0);
+	const safeMatched = $derived(typeof totals.matched === 'number' ? totals.matched : 0);
 	const safeProcessing = $derived(typeof totals.processing === 'number' ? totals.processing : 0);
+	const safeDone = $derived(typeof totals.done === 'number' ? totals.done : 0);
 	const safeErrors = $derived(typeof totals.error === 'number' ? totals.error : 0);
-	const intakeCount = $derived(Math.max(0, safeAll - safeDone - safeProcessing));
 
 	const stations = $derived([
 		{
 			id: 'intake',
 			label: 'INTAKE',
 			station: '#01',
-			count: intakeCount,
+			count: safePending,
 			href: '/import',
-			description: 'File system scan & selection',
+			description: 'Pending import',
 		},
 		{
 			id: 'match',
 			label: 'MATCH',
 			station: '#02',
-			count: 0,
+			count: safeMatched,
 			href: '/match',
 			description: 'Metadata review & pairing',
+			active: safeMatched > 0,
 		},
 		{
 			id: 'queue',
@@ -186,15 +189,23 @@
 {/if}
 
 <!-- ── Continuation Actions ──────────────────────────────────── -->
-<div class="mb-4 flex items-center gap-2">
+<div class="mb-4 flex flex-wrap items-center gap-2">
 	<Button variant="secondary" href="/import">Import</Button>
 	<Button variant="primary" href="/match">Match</Button>
-	{#if recent.length > 0}
+	{#if safeErrors > 0}
+		<a href="/books?status=error" class="ml-auto inline-flex items-center gap-1.5 rounded-md px-3 py-2.5 text-sm font-medium text-[var(--error)] no-underline hover:opacity-80 min-h-[44px] whitespace-nowrap">
+			<span>{safeErrors} error{#if safeErrors !== 1}s{/if} — view errors</span>
+			<span class="shrink-0" aria-hidden="true">→</span>
+		</a>
+	{:else if recent.length > 0}
 		<Button variant="ghost" href="/books" class="ml-auto">View all →</Button>
 	{/if}
 </div>
 
 <!-- ── Recent Manifest ───────────────────────────────────────── -->
+<div class="mb-3">
+	<h2 class="text-lg font-semibold text-[var(--enamel)]">Recent books</h2>
+</div>
 {#if dl.showSkeleton}
 	<div class="space-y-2" aria-label="Recent books loading">
 		{#each Array(3) as _}
@@ -225,6 +236,8 @@
 					<img
 						src={book.cover_image_url}
 						alt=""
+						loading="lazy"
+						decoding="async"
 						class="h-12 w-9 flex-shrink-0 rounded-sm object-cover sm:h-16 sm:w-12"
 					/>
 				{:else}

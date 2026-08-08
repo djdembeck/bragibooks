@@ -16,9 +16,9 @@
   warm cream, no hidden state.
 
   OWN-WORLD
-  Light cool work surface. Graphite text on near-white panels. Enamel-black
-  structural lines. Orthogonal radii. Red/amber/green reserved for semantic
-  states only. Technical sans-serif body, monospace for paths and job IDs.
+  Dark warm work surface. Light warm text on layered brown-charcoal panels.
+  Graphite structural lines. Gold action accent, semantic status colors.
+  Orthogonal radii. Technical sans-serif body, monospace for paths and job IDs.
   WCAG 2.2 AA, visible focus, keyboard navigation, reduced motion.
 
   STORY
@@ -42,7 +42,7 @@
 
 <div class="flex min-h-screen flex-col bg-[var(--bg)] text-[var(--text)]">
 	<Nav />
-	<main class="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:py-8">
+	<main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:py-8">
 		<slot />
 	</main>
 </div>

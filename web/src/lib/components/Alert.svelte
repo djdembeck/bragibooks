@@ -22,23 +22,15 @@
 		}
 	});
 
-	const iconLabel = $derived.by(() => {
-		switch (variant) {
-			case 'success': return 'ok';
-			case 'warning': return 'warn';
-			case 'error': return 'err';
-			default: return 'info';
-		}
-	});
 </script>
 
-<div class="rounded-sm border border-2 p-3.5 {styles}" role="alert" aria-label={iconLabel}>
+<div class="rounded-sm border border-2 p-3.5 {styles}" role="alert">
 	<div class="flex items-start justify-between gap-4">
 		<div class="text-sm leading-relaxed">{@render children()}</div>
 		{#if onretry}
 			<button
 				type="button"
-				class="shrink-0 text-sm font-bold text-[var(--accent)] hover:underline focus-visible:outline-[var(--accent)]"
+				class="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center px-2 text-sm font-bold text-[var(--accent)] hover:underline focus-visible:outline-[var(--accent)]"
 				onclick={onretry}
 			>
 				Retry

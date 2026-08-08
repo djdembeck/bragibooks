@@ -36,6 +36,9 @@
 		error: string | null;
 		// Track how the selection was made
 		manualPick: boolean;
+		// Remove confirmation/undo state
+		removing: boolean;
+		_removeSnapshot?: { bookId: number; srcPath: string; title: string };
 	}
 
 	let candidates = $state<MatchCandidate[]>([]);
@@ -48,6 +51,8 @@
 	let modalQuery = $state('');
 	let modalSearching = $state(false);
 	let modalResults = $state<AudiobookDBBook[]>([]);
+	let modalError = $state<string | null>(null);
+	let modalSearched = $state(false);
 
 	async function loadPending() {
 		await dl.run(async () => {
@@ -64,7 +69,8 @@
 					details: { book: null, release: null },
 					loading: true,
 					error: null,
-					manualPick: false
+					manualPick: false,
+					removing: false
 				}));
 				for (const candidate of candidates) {
 					autoMatch(candidate);
@@ -135,13 +141,28 @@
 		}
 	}
 
-	async function removeCandidate(id: number) {
+	async function removeCandidate(id: number, candidate: MatchCandidate) {
+		// Keep the candidate in place until the operator explicitly confirms.
+		candidate.removing = true;
+		candidate._removeSnapshot = { bookId: id, srcPath: candidate.srcPath, title: candidate.title };
+	}
+
+	async function confirmRemoveCandidate(candidate: MatchCandidate) {
+		if (!candidate._removeSnapshot) return;
+		const id = candidate._removeSnapshot.bookId;
 		try {
 			await del(`/books/${id}`);
 			candidates = candidates.filter((c) => c.bookId !== id);
 		} catch (e) {
 			pageError = e instanceof Error ? e.message : 'Failed to remove book';
+			candidate.removing = false;
+			candidate._removeSnapshot = undefined;
 		}
+	}
+
+	function undoRemoveCandidate(candidate: MatchCandidate) {
+		candidate.removing = false;
+		candidate._removeSnapshot = undefined;
 	}
 
 	function stripExtension(name: string): string {
@@ -173,7 +194,7 @@
 	// Returns a provenance label for how the current selection was made
 	function matchLabel(candidate: MatchCandidate): string {
 		if (candidate.loading && !candidate.details.book) return 'Loading…';
-		if (candidate.error) return 'Unknown';
+		if (candidate.error) return 'Search failed';
 		if (candidate.details.book) {
 			return candidate.manualPick ? 'Manually selected' : 'Auto-selected';
 		}
@@ -194,16 +215,23 @@
 		modalCandidateId = candidate.bookId;
 		modalQuery = stripExtension(candidate.title);
 		modalResults = [];
+		modalError = null;
+		modalSearched = false;
 		modalOpen = true;
 	}
 
 	async function runCustomSearch() {
 		if (!modalQuery.trim()) return;
 		modalSearching = true;
+		modalError = null;
+		modalResults = [];
+		modalSearched = false;
 		try {
 			modalResults = await searchBooks(modalQuery);
-		} catch {
-			modalResults = [];
+			modalSearched = true;
+		} catch (e) {
+			modalError = e instanceof Error ? e.message : 'Search failed. Check your connection and try again.';
+			modalSearched = true;
 		} finally {
 			modalSearching = false;
 		}
@@ -270,21 +298,15 @@
 	});
 </script>
 
-<!-- Station header: MATCH -->
-<div class="mb-6">
-	<div class="flex items-start gap-3">
-		<div class="flex flex-col items-center" aria-hidden="true">
-			<div class="flex h-10 w-10 items-center justify-center rounded-full border-2 border-[var(--accent)] bg-[var(--accent-wash-strong)] text-xs font-bold text-[var(--accent)]">
-				2
-			</div>
-			<div class="mt-1 h-4 w-px bg-[var(--border)]"></div>
-		</div>
-		<div>
-			<h1 class="text-xl font-semibold tracking-tight">Station 2 — Match</h1>
-			<p class="mt-0.5 text-sm text-[var(--text-muted)]">Confirm or change the audiobookdb metadata for each source routed from intake.</p>
-		</div>
-	</div>
-</div>
+<svelte:head>
+	<title>Match — Bragi Books</title>
+</svelte:head>
+
+<PageHeader
+	title="Match"
+	station="#02 · MATCH"
+	description="Confirm or change the AudiobookDB metadata for each source routed from intake."
+/>
 
 {#if pageError}
 	<div class="mb-6">
@@ -296,7 +318,7 @@
 	<!-- Skeleton loading state -->
 	<div class="space-y-4">
 		{#each Array(3) as _}
-			<div class="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4">
+			<div class="panel p-4">
 				<div class="flex gap-4">
 					<Skeleton variant="rect" width="120px" height="160px" />
 					<div class="flex-1 space-y-2">
@@ -320,14 +342,14 @@
 	<!-- Match bay: list of candidates with metadata panels -->
 	<div class="space-y-3">
 		{#each candidates as candidate (candidate.bookId)}
-			<div class="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4">
+			<div class="panel p-4">
 				<div class="flex flex-col gap-4 sm:flex-row">
 					<!-- Cover panel -->
 					<div class="flex-shrink-0">
 						{#if selectedCover(candidate)}
-							<img src={selectedCover(candidate)} alt="" class="h-40 w-28 rounded-md object-cover border border-[var(--border-subtle)]" />
+							<img src={selectedCover(candidate)} alt="" class="h-40 w-28 rounded-sm object-cover border border-[var(--border-subtle)]" />
 						{:else}
-							<div class="flex h-40 w-28 items-center justify-center rounded-md border border-[var(--border-subtle)] bg-[var(--elevated)] text-xs text-[var(--text-muted)]">
+							<div class="flex h-40 w-28 items-center justify-center rounded-sm border border-[var(--border-subtle)] bg-[var(--elevated)] text-xs text-[var(--text-muted)]">
 								No cover
 							</div>
 						{/if}
@@ -344,13 +366,34 @@
 								</p>
 								<h3 class="mt-0.5 text-lg font-semibold">{candidate.title}</h3>
 							</div>
-							<Button
-								variant="ghost"
-								class="self-start text-[var(--error)] hover:bg-[var(--error-bg)]"
-								onclick={() => removeCandidate(candidate.bookId)}
-							>
-								Remove
-							</Button>
+							{#if candidate.removing}
+								<!-- Branded confirmation/undo for destructive remove -->
+								<div class="flex items-center gap-2 self-start">
+									<span class="text-sm text-[var(--text-muted)]">Remove "{candidate.title}"?</span>
+									<button
+										type="button"
+										class="text-sm font-medium text-[var(--error)] hover:underline"
+										onclick={() => confirmRemoveCandidate(candidate)}
+									>
+										Yes, remove
+									</button>
+									<button
+										type="button"
+										class="text-sm text-[var(--accent)] hover:underline"
+										onclick={() => undoRemoveCandidate(candidate)}
+									>
+										Cancel
+									</button>
+								</div>
+							{:else}
+								<Button
+									variant="ghost"
+									class="self-start text-[var(--error)] hover:bg-[var(--error-bg)]"
+									onclick={() => removeCandidate(candidate.bookId, candidate)}
+								>
+									Remove
+								</Button>
+							{/if}
 						</div>
 
 						<!-- Match result display -->
@@ -360,13 +403,20 @@
 								<Skeleton height="1.5rem" width="60%" />
 							</div>
 						{:else if candidate.error}
-							<!-- Per-candidate error -->
+							<!-- Per-candidate search failure (distinguishable from no match) -->
 							<div class="mt-3">
 								<div class="flex items-center gap-2 text-sm">
 									<span class="flex h-2 w-2 flex-shrink-0 rounded-full bg-[var(--error)]" aria-hidden="true"></span>
-									<span class="font-medium text-[var(--error)]">Unknown</span>
+									<span class="font-medium text-[var(--error)]">Search failed</span>
 									<span class="text-[var(--text-muted)]">—</span>
 									<span class="text-[var(--text-muted)]">{candidate.error}</span>
+									<button
+										type="button"
+										class="ml-1 text-sm font-medium text-[var(--accent)] hover:underline"
+										onclick={() => autoMatch(candidate)}
+									>
+										Retry
+									</button>
 								</div>
 							</div>
 						{:else if candidate.details.book}
@@ -400,13 +450,13 @@
 								{/if}
 							</div>
 						{:else}
-							<!-- No match found -->
+							<!-- No matches found for this title -->
 							<div class="mt-3">
 								<div class="flex items-center gap-2 text-sm">
 									<span class="flex h-2 w-2 flex-shrink-0 rounded-full bg-[var(--border)]" aria-hidden="true"></span>
-									<span class="font-medium text-[var(--text-muted)]">No match</span>
+									<span class="font-medium text-[var(--text-muted)]">No matches found</span>
 									<span class="text-[var(--text-muted)]">—</span>
-									<span class="text-[var(--text-muted)]">Try a custom search below.</span>
+									<span class="text-[var(--text-muted)]">Search below to find metadata for this book.</span>
 								</div>
 							</div>
 						{/if}
@@ -482,18 +532,38 @@
 				{#each modalResults as result (result.id)}
 					<button
 						type="button"
-						class="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3 text-left transition-colors hover:bg-[var(--surface-hover)]"
+						class="w-full rounded-sm border border-[var(--border)] bg-[var(--bg)] p-3 text-left transition-colors hover:bg-[var(--surface-hover)]"
 						onclick={() => pickModalResult(result)}
 					>
 						<p class="font-medium text-[var(--text)]">{result.title}</p>
 						<p class="text-sm text-[var(--text-muted)]">
 							{peopleByRole(result.people, 'author').map((p) => p.name).join(', ') || 'Unknown author'}
+							{#if result.people && peopleByRole(result.people, 'narrator').length > 0}
+								<span class="text-[var(--text-muted)]"> · Narrated by {peopleByRole(result.people, 'narrator').map((p) => p.name).join(', ')}</span>
+							{/if}
 						</p>
+						{#if result.originallyPublishedAt}
+							<p class="text-xs text-[var(--text-muted)] mt-0.5">Published {new Date(result.originallyPublishedAt).toLocaleDateString()}</p>
+						{/if}
 					</button>
 				{/each}
 			</div>
-		{:else if modalResults.length === 0 && !modalSearching && modalQuery}
-			<p class="text-sm text-[var(--text-muted)]">No results. Try different keywords.</p>
+		{:else if modalError}
+			<!-- Search failed — distinguish from zero results -->
+			<div class="rounded-sm border border-[var(--state-red-border)] bg-[var(--state-red-bg)] p-3 text-sm text-[var(--text)]">
+				<p class="font-medium">Search failed</p>
+				<p class="mt-1 text-[var(--text-muted)]">{modalError}</p>
+				<button
+					type="button"
+					class="mt-2 text-sm font-medium text-[var(--accent)] hover:underline"
+					onclick={runCustomSearch}
+				>
+					Retry
+				</button>
+			</div>
+		{:else if modalResults.length === 0 && modalSearched}
+			<!-- Zero results — query was executed successfully -->
+			<p class="text-sm text-[var(--text-muted)]">No matches found for "{modalQuery}". Try different keywords.</p>
 		{/if}
 	</div>
 </Modal>

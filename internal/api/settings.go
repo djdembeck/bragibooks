@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -17,14 +18,14 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	cfg := h.svc.Config.Config()
 
 	settings := map[string]any{
-		"m4b_merge_binary":  cfg.M4bMerge.Binary,
-		"input_dir":         cfg.Directories.InputDir,
-		"output_dir":        cfg.Directories.OutputDir,
-		"completed_dir":     cfg.Directories.CompletedDir,
-		"num_cpus":          cfg.Processing.NumCPUs,
-		"output_scheme":     cfg.Processing.PathFormat,
-		"region":                 cfg.Processing.Region,
-		"audiobookdb_base_url":   cfg.APIKey.BaseURL,
+		"m4b_merge_binary":     cfg.M4bMerge.Binary,
+		"input_dir":            cfg.Directories.InputDir,
+		"output_dir":           cfg.Directories.OutputDir,
+		"completed_dir":        cfg.Directories.CompletedDir,
+		"num_cpus":             cfg.Processing.NumCPUs,
+		"output_scheme":        cfg.Processing.PathFormat,
+		"region":               cfg.Processing.Region,
+		"audiobookdb_base_url": cfg.APIKey.BaseURL,
 	}
 
 	writeJSON(w, http.StatusOK, settings)
@@ -32,15 +33,15 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 
 // UpdateSettingsRequest is the JSON body accepted by PUT /api/settings.
 type UpdateSettingsRequest struct {
-	AudiobookdbAPIKey    *string `json:"audiobookdb_api_key"`
-	AudiobookdbBaseURL   *string `json:"audiobookdb_base_url"`
-	M4bMergeBinary       *string `json:"m4b_merge_binary"`
-	InputDir             *string `json:"input_dir"`
-	OutputDir            *string `json:"output_dir"`
-	CompletedDir         *string `json:"completed_dir"`
-	NumCPUs              *int    `json:"num_cpus"`
-	OutputScheme         *string `json:"output_scheme"`
-	Region               *string `json:"region"`
+	AudiobookdbAPIKey  *string `json:"audiobookdb_api_key"`
+	AudiobookdbBaseURL *string `json:"audiobookdb_base_url"`
+	M4bMergeBinary     *string `json:"m4b_merge_binary"`
+	InputDir           *string `json:"input_dir"`
+	OutputDir          *string `json:"output_dir"`
+	CompletedDir       *string `json:"completed_dir"`
+	NumCPUs            *int    `json:"num_cpus"`
+	OutputScheme       *string `json:"output_scheme"`
+	Region             *string `json:"region"`
 }
 
 // UpdateSettings handles PUT /api/settings.
@@ -49,6 +50,26 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+
+	// Validate required fields before applying
+	if req.InputDir != nil && strings.TrimSpace(*req.InputDir) == "" {
+		writeError(w, http.StatusBadRequest, "input directory must not be empty")
+		return
+	}
+	if req.OutputDir != nil && strings.TrimSpace(*req.OutputDir) == "" {
+		writeError(w, http.StatusBadRequest, "output directory must not be empty")
+		return
+	}
+	if req.NumCPUs != nil && *req.NumCPUs < 0 {
+		writeError(w, http.StatusBadRequest, "CPU count must be zero or greater")
+		return
+	}
+	if req.AudiobookdbBaseURL != nil && *req.AudiobookdbBaseURL != "" {
+		if _, err := parseURL(*req.AudiobookdbBaseURL); err != nil {
+			writeError(w, http.StatusBadRequest, "audiobookdb base URL must be a valid URL (e.g. https://audiobookdb.org/api)")
+			return
+		}
 	}
 
 	// Lock the config manager for atomic update
@@ -107,11 +128,11 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// Return updated settings (without API key)
 	updatedCfg := h.svc.Config.Config()
 	settings := map[string]any{
-		"m4b_merge_binary":  updatedCfg.M4bMerge.Binary,
-		"input_dir":         updatedCfg.Directories.InputDir,
-		"output_dir":        updatedCfg.Directories.OutputDir,
-		"completed_dir":     updatedCfg.Directories.CompletedDir,
-		"num_cpus":          updatedCfg.Processing.NumCPUs,
+		"m4b_merge_binary":     updatedCfg.M4bMerge.Binary,
+		"input_dir":            updatedCfg.Directories.InputDir,
+		"output_dir":           updatedCfg.Directories.OutputDir,
+		"completed_dir":        updatedCfg.Directories.CompletedDir,
+		"num_cpus":             updatedCfg.Processing.NumCPUs,
 		"output_scheme":        updatedCfg.Processing.PathFormat,
 		"region":               updatedCfg.Processing.Region,
 		"audiobookdb_base_url": updatedCfg.APIKey.BaseURL,
@@ -143,6 +164,18 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 		cfg.Processing.Region,
 	)
 	return err
+}
+
+// parseURL validates an absolute HTTP(S) URL string.
+func parseURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, err
+	}
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return nil, fmt.Errorf("URL must be an absolute HTTP(S) URL")
+	}
+	return parsed, nil
 }
 
 // expandTilde expands ~ in a path to the user's home directory.

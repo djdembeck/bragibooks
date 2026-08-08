@@ -15,6 +15,7 @@
 	let sortBy = $state<'name' | 'date' | 'size'>('name');
 	let sortDir = $state<'asc' | 'desc'>('asc');
 	let loading = $state(false);
+	let settingsError = $state<string | null>(null);
 
 	const SUPPORTED_EXTENSIONS = new Set(['.mp3', '.m4a', '.m4b', '.mp4', '.aac', '.ogg', '.flac', '.wma']);
 
@@ -56,9 +57,13 @@
 	async function initPath() {
 		try {
 			const settings = await get<Settings>('/settings', {});
-			await loadDirectory(settings.input_dir || '/');
-		} catch {
-			await loadDirectory('/');
+			if (!settings?.input_dir) {
+				settingsError = 'Source directory is not configured.';
+				return;
+			}
+			await loadDirectory(settings.input_dir);
+		} catch (e) {
+			settingsError = e instanceof Error ? e.message : 'Could not load settings';
 		}
 	}
 
@@ -72,7 +77,7 @@
 			const response = await get<DirectoriesResponse>(`/directories?path=${encodeURIComponent(path)}`);
 			entries = validEntries(response.entries || []);
 			currentPath = response.path || path;
-			selectedPaths = new Set();
+			// Keep selectedPaths alive across directory navigation so user selections are not lost
 			filterAndSort();
 		});
 		loading = false;
@@ -140,12 +145,23 @@
 		return path.slice(0, idx);
 	}
 
+	function selectedSourcePaths(): string[] {
+		const paths = Array.from(selectedPaths).sort((a, b) => a.length - b.length || a.localeCompare(b));
+		const kept: string[] = [];
+		for (const path of paths) {
+			const covered = kept.some((parent) => path === parent || path.startsWith(`${parent.replace(/\/$/, '')}/`));
+			if (!covered) kept.push(path);
+		}
+		return kept;
+	}
+
 	async function start() {
-		if (selectedPaths.size === 0) return;
+		const sourcePaths = selectedSourcePaths();
+		if (sourcePaths.length === 0) return;
 		creating = true;
 		dl.setError(null);
 		try {
-			const payload = { books: Array.from(selectedPaths).map((src_path) => ({ src_path })) };
+			const payload = { books: sourcePaths.map((src_path) => ({ src_path })) };
 			await post<CreateBooksResponse>('/books', payload);
 			await goto('/match');
 		} catch (e) {
@@ -163,33 +179,38 @@
 	});
 
 	const allSelected = $derived(filtered.length > 0 && filtered.every((e) => selectedPaths.has(e.path)));
+	const selectedCount = $derived(selectedSourcePaths().length);
 	const canSelect = $derived(filtered.length > 0);
 </script>
 
-<!-- Station header: INTAKE -->
-<div class="mb-6">
-	<div class="flex items-start gap-3">
-		<div class="flex flex-col items-center" aria-hidden="true">
-			<div class="flex h-10 w-10 items-center justify-center rounded-full border-2 border-[var(--accent)] bg-[var(--accent-wash-strong)] text-xs font-bold text-[var(--accent)]">
-				1
-			</div>
-			<div class="mt-1 h-4 w-px bg-[var(--border)]"></div>
-		</div>
-		<div>
-			<h1 class="text-xl font-semibold tracking-tight">Station 1 — Intake</h1>
-			<p class="mt-0.5 text-sm text-[var(--text-muted)]">Select source directories or files to route into the match bay.</p>
-		</div>
-	</div>
-</div>
+<svelte:head>
+	<title>Intake — Bragi Books</title>
+</svelte:head>
 
-{#if dl.error}
+<PageHeader
+	title="Intake"
+	station="#01 · INTAKE"
+	description="Select source directories or files to route into the match bay."
+/>
+
+{#if settingsError}
 	<div class="mb-6">
-		<Alert variant="error" onretry={() => loadDirectory(currentPath)}>{dl.error}</Alert>
+		<Alert variant="error" onretry={() => (settingsError = null, initPath())}>
+			<div class="flex flex-col gap-1">
+				<span>{settingsError}</span>
+				<span class="text-xs opacity-80">Open <a href="/settings" class="inline-flex min-h-11 items-center underline font-medium">Settings</a> to configure the source directory.</span>
+			</div>
+		</Alert>
+	</div>
+{:else if dl.error}
+	<div class="mb-6">
+		<Alert variant="error" onretry={initPath}>{dl.error}</Alert>
 	</div>
 {/if}
 
 <!-- Manifest panel -->
-<div class="rounded-lg border border-[var(--border)] bg-[var(--surface)]">
+{#if !settingsError}
+<div class="panel">
 	<!-- Toolbar: path navigation + controls -->
 	<div class="border-b border-[var(--border)] p-3 sm:p-4">
 		<!-- Breadcrumb / path bar -->
@@ -197,7 +218,7 @@
 			{#if currentPath !== '/'}
 				<button
 					type="button"
-					class="rounded-md px-2 py-1 text-sm text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
+					class="min-h-[44px] rounded-md px-3 py-2.5 text-sm text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
 					onclick={() => loadDirectory(parentPath(currentPath))}
 					aria-label="Go to parent directory"
 				>
@@ -214,7 +235,7 @@
 				{#each ['name', 'date', 'size'] as field}
 					<button
 						type="button"
-						class={["rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors", sortBy === field ? 'bg-[var(--accent-wash-strong)] text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text)]'].join(' ')}
+						class={["min-h-[44px] rounded-md px-3 py-2.5 text-xs font-medium transition-colors", sortBy === field ? 'bg-[var(--accent-wash-strong)] text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text)]'].join(' ')}
 						onclick={() => toggleSort(field as 'name' | 'date' | 'size')}
 						aria-label="Sort by {field}{sortBy === field ? (sortDir === 'asc' ? ', ascending' : ', descending') : ''}"
 					>
@@ -229,7 +250,7 @@
 				bind:value={search}
 				type="search"
 				placeholder="Filter entries…"
-				class="w-full sm:w-52"
+				class="w-full sm:w-52 min-h-[44px]"
 				aria-label="Filter entries"
 			/>
 		</div>
@@ -246,7 +267,7 @@
 		{:else}
 			<EmptyState
 				title="No source directories found"
-				description="The configured input directory is empty. Bragi Books imports whole folders, so place your audiobook directories there first."
+				description="The configured input directory is empty. Bragi Books imports whole audiobook folders, so place your source directories there first."
 				actionLabel="Check input settings"
 				actionHref="/settings"
 			/>
@@ -254,7 +275,7 @@
 	{:else}
 		<!-- Loading overlay -->
 		{#if loading}
-			<div class="absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-[var(--surface)]/60 backdrop-blur-[1px]">
+			<div class="absolute inset-0 z-10 flex items-center justify-center rounded-sm bg-[var(--surface)]/60 backdrop-blur-[1px]">
 				<div class="text-sm text-[var(--text-muted)]">Loading…</div>
 			</div>
 		{/if}
@@ -353,12 +374,12 @@
 	{#if entries.length > 0}
 		<div class="border-t border-[var(--border)] flex flex-col-reverse items-center justify-end gap-3 px-4 py-3 sm:flex-row">
 			<p class="text-sm text-[var(--text-muted)]">
-				<span class="font-mono text-[var(--text-secondary)]">{selectedPaths.size}</span>
-				<span class="ml-1">route{selectedPaths.size === 1 ? ' is' : 's are'} queued for match</span>
+				<span class="font-mono text-[var(--text-secondary)]">{selectedCount}</span>
+				<span class="ml-1">route{selectedCount === 1 ? ' is' : 's are'} queued for match</span>
 			</p>
 			<Button
 				variant="primary"
-				disabled={selectedPaths.size === 0 || creating}
+				disabled={selectedCount === 0 || creating}
 				loading={creating}
 				onclick={start}
 			>
@@ -367,3 +388,4 @@
 		</div>
 	{/if}
 </div>
+{/if}

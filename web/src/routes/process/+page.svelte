@@ -1,14 +1,13 @@
 <script lang="ts">
-	import { get, post } from '$lib/api';
-	import { streamEvents } from '$lib/api';
-	import type { BookWithPeople, BooksListResponse, ProcessingResponse, ProcessingJob } from '$lib/types';
-	import { Button, Alert, Skeleton, EmptyState, StatusBadge } from '$lib/components';
+	import { get, post, streamEvents } from '$lib/api';
+	import type { BookWithPeople, BooksListResponse, ProcessingResponse, ProcessingJob, JobsListResponse } from '$lib/types';
+	import { PageHeader, Button, Alert, Skeleton, EmptyState, StatusBadge } from '$lib/components';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 	import { CheckCircle, Clock, AlertTriangle } from '@lucide/svelte';
 
 	interface JobItem {
 		id: string;
-		bookId: number;
+		bookId: number | null;
 		status: string;
 		output: string;
 		error: string | null;
@@ -19,16 +18,160 @@
 	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 	let starting = $state(false);
 	let jobs = $state<JobItem[]>([]);
-	let cleanupFns: (() => void)[] = [];
+
+	// SSE stream cleanup map — keyed by job id
+	const cleanupMap = $state(new Map<string, () => void>());
+	// Polling interval handles for active jobs
+	const pollTimers = $state(new Map<string, ReturnType<typeof setInterval>>());
+
+	$effect(() => {
+		load();
+		return () => {
+			// Clean up all SSE streams
+			cleanupMap.forEach((fn) => fn());
+			// Clear all polling timers
+			pollTimers.forEach((timer) => clearInterval(timer));
+		};
+	});
+
+	async function load() {
+		await dl.run(async () => {
+			const [matched, pending, jobsResp] = await Promise.all([
+				get<BooksListResponse>('/books?status=matched&limit=200'),
+				get<BooksListResponse>('/books?status=pending&limit=200'),
+				get<JobsListResponse>('/jobs?limit=20'),
+			]);
+			books = [...(matched.books || []), ...(pending.books || [])];
+			restoreJobs(jobsResp.jobs);
+		});
+	}
 
 	async function loadBooks() {
-		await dl.run(async () => {
+		try {
 			const [matched, pending] = await Promise.all([
 				get<BooksListResponse>('/books?status=matched&limit=200'),
 				get<BooksListResponse>('/books?status=pending&limit=200'),
 			]);
 			books = [...(matched.books || []), ...(pending.books || [])];
-		});
+		} catch {
+			// Ignore — don't disrupt existing jobs
+		}
+	}
+
+	function restoreJobs(jobList: ProcessingJob[]) {
+		// Clear old state
+		cleanupMap.forEach((fn) => fn());
+		pollTimers.forEach((timer) => clearInterval(timer));
+		cleanupMap.clear();
+		pollTimers.clear();
+
+		const items: JobItem[] = [];
+		for (const j of jobList) {
+			const item: JobItem = {
+				id: j.id,
+				bookId: j.book_id,
+				status: j.status,
+				output: j.output || '',
+				error: j.error || null,
+			};
+			items.push(item);
+
+			// Reconnect SSE for active (queued/running) jobs
+			if (j.status === 'queued' || j.status === 'running') {
+				connectSSE(item);
+			} else {
+				// Terminal jobs: poll for state sync
+				startPolling(item);
+			}
+		}
+		jobs = items;
+	}
+
+	function connectSSE(item: JobItem) {
+		const stop = streamEvents(
+			`/api/jobs/${item.id}/stream`,
+			(raw) => {
+				try {
+					const parsed = JSON.parse(raw);
+					if (parsed.status) {
+						item.status = parsed.status;
+					}
+					if (parsed.output) {
+						item.output = parsed.output;
+					}
+					if (parsed.message && !parsed.output) {
+						item.output += parsed.message + '\n';
+					}
+					if (parsed.error) {
+						item.error = parsed.error;
+					}
+					if (parsed.status === 'done' || parsed.status === 'error') {
+						// Terminal transition — stop SSE, start polling, refresh books
+						stop();
+						cleanupMap.delete(item.id);
+						startPolling(item);
+						refreshAfterTerminal(item.id);
+					}
+					jobs = jobs;
+				} catch {
+					// Not JSON — treat as raw output line
+					item.output += raw + '\n';
+					jobs = jobs;
+				}
+			},
+			() => {
+				// SSE connection lost — fall back to polling
+				stop();
+				cleanupMap.delete(item.id);
+				pollJob(item);
+				startPolling(item);
+			}
+		);
+		cleanupMap.set(item.id, stop);
+	}
+
+	function startPolling(item: JobItem) {
+		stopPolling(item.id);
+		const timer = setInterval(() => pollJob(item), 5000);
+		pollTimers.set(item.id, timer);
+	}
+
+	async function pollJob(item: JobItem) {
+		try {
+			const job = await get<ProcessingJob>(`/jobs/${item.id}`);
+			if (job.status !== item.status || job.error !== item.error || (job.output && job.output !== item.output)) {
+				item.status = job.status;
+				item.error = job.error;
+				if (job.output) item.output = job.output;
+				jobs = jobs;
+			}
+			// If job moved to terminal, stop polling and refresh
+			if (job.status === 'done' || job.status === 'error') {
+				stopPolling(item.id);
+				refreshAfterTerminal(item.id);
+			}
+		} catch {
+			/* ignore polling errors */
+		}
+	}
+
+	function stopPolling(id: string) {
+		const timer = pollTimers.get(id);
+		if (timer) clearInterval(timer);
+		pollTimers.delete(id);
+	}
+
+	async function refreshAfterTerminal(jobId: string) {
+		const item = jobs.find((j) => j.id === jobId);
+		if (item) {
+			// Stop any existing SSE for this job
+			const existing = cleanupMap.get(jobId);
+			if (existing) {
+				existing();
+				cleanupMap.delete(jobId);
+			}
+		}
+		await loadBooks();
 	}
 
 	function toggleBook(id: number) {
@@ -49,59 +192,25 @@
 				src_dirs: selected.map((b) => b.src_path)
 			});
 			for (const job of response.jobs) {
-				addJob(job.id, job.book_id);
+				const item: JobItem = {
+					id: job.id,
+					bookId: job.book_id,
+					status: 'queued',
+					output: '',
+					error: null,
+				};
+				jobs = [item, ...jobs];
+				connectSSE(item);
 			}
 			selectedIds = new Set();
+			// Refresh books to pick up status=processing books removed from matched list
+			await loadBooks();
 		} catch (e) {
 			dl.setError(e instanceof Error ? e.message : 'Failed to start processing');
 		} finally {
 			starting = false;
 		}
 	}
-
-	function addJob(id: string, bookId: number) {
-		const item: JobItem = { id, bookId, status: 'queued', output: '', error: null };
-		jobs = [item, ...jobs];
-		const stop = streamEvents(
-			`/api/jobs/${id}/stream`,
-			(msg) => {
-				item.output += msg + '\n';
-				jobs = jobs;
-			},
-			(err) => {
-				pollJob(id);
-				if (err) {
-					item.error = err.message;
-					jobs = jobs;
-				}
-			}
-		);
-		cleanupFns.push(stop);
-	}
-
-	async function pollJob(id: string) {
-		try {
-			const job = await get<ProcessingJob>(`/jobs/${id}`);
-			const item = jobs.find((j) => j.id === id);
-			if (item) {
-				item.status = job.status;
-				item.error = job.error;
-				if (job.output) item.output = job.output;
-				jobs = jobs;
-			}
-		} catch {
-			/* ignore polling errors */
-		}
-	}
-
-	$effect(() => {
-		loadBooks();
-		return () => {
-			cleanupFns.forEach((fn) => fn());
-		};
-	});
-
-	const allSelected = $derived(books.length > 0 && books.every((b) => selectedIds.has(b.id)));
 
 	const matchedBooks = $derived(books.filter((b) => b.status === 'matched'));
 	const pendingBooks = $derived(books.filter((b) => b.status === 'pending'));
@@ -117,25 +226,17 @@
 			default: return status;
 		}
 	}
-
-	function bookReadyLabel(status: string): string {
-		if (status === 'matched') return 'ready — metadata confirmed';
-		if (status === 'pending') return 'awaiting match — not yet ready';
-		return status;
-	}
 </script>
 
-<div class="station-header">
-	<div class="station-header__badge">
-		<span class="station-header__number" aria-hidden="true">03</span>
-		<span class="station-header__name">QUEUE</span>
-	</div>
-	<p class="station-header__desc">Queue matched books for m4b-merge and monitor job progress.</p>
-</div>
+<PageHeader
+	title="Queue"
+	station="#03 · QUEUE"
+	description="Queue matched books for m4b-merge and monitor job progress."
+/>
 
 {#if dl.error}
 	<div class="mb-6">
-		<Alert variant="error" onretry={loadBooks}>{dl.error}</Alert>
+		<Alert variant="error" onretry={load}>{dl.error}</Alert>
 	</div>
 {/if}
 
@@ -145,141 +246,142 @@
 			<Skeleton height="3rem" />
 		{/each}
 	</div>
-{:else if books.length === 0}
+{:else if matchedBooks.length > 0}
+	<!-- Intake Bay: matched (ready) books -->
+	<div class="bay mb-6">
+		<div class="bay__header">
+			<div class="bay__title">
+				<span class="bay__indicator bay__indicator--ready" aria-hidden="true"></span>
+				<span>Intake Bay — Ready</span>
+				<span class="bay__count">{matchedBooks.length}</span>
+			</div>
+			<p class="bay__hint">Metadata confirmed. Select and queue for processing.</p>
+		</div>
+
+		<div class="bay__controls">
+			<div class="flex items-center gap-3">
+				<input
+					type="checkbox"
+					checked={matchedBooks.every((b) => selectedIds.has(b.id)) && matchedBooks.length > 0}
+					onchange={() => {
+						const next = new Set(selectedIds);
+						matchedBooks.forEach((b) => {
+							if (next.has(b.id)) next.delete(b.id);
+							else next.add(b.id);
+						});
+						selectedIds = next;
+					}}
+					aria-label="Select all matched books"
+				/>
+				<span class="text-sm text-[var(--text-secondary)] font-mono">
+					{selectedIds.size} selected of {matchedBooks.length}
+				</span>
+			</div>
+			<Button
+				variant="primary"
+				loading={starting}
+				disabled={selectedIds.size === 0}
+				onclick={start}
+			>
+				{#if starting}
+					<SpinnerIcon />
+				{/if}
+				Start processing
+			</Button>
+		</div>
+
+		<div class="bay__manifest">
+			{#each matchedBooks as book (book.id)}
+				<div class="manifest-row manifest-row--ready">
+					<div class="manifest-row__select">
+						<input
+							type="checkbox"
+							checked={selectedIds.has(book.id)}
+							onchange={() => toggleBook(book.id)}
+							aria-label="Select {book.title} for processing"
+						/>
+					</div>
+					<div class="manifest-row__cover">
+						{#if book.cover_image_url}
+							<img src={book.cover_image_url} alt="" class="manifest-row__cover-img" />
+						{:else}
+							<div class="manifest-row__cover-placeholder" aria-hidden="true">—</div>
+						{/if}
+					</div>
+					<div class="manifest-row__info">
+						<p class="manifest-row__title">{book.title}</p>
+						<p class="manifest-row__meta">
+							{book.authors.map((a) => a.name).join(', ') || 'Unknown author'}
+						</p>
+					</div>
+					<div class="manifest-row__status">
+						<StatusBadge status={book.status} />
+						<span class="manifest-row__status-text" aria-label="Ready — metadata confirmed">
+							<CheckCircle class="h-3.5 w-3.5" aria-hidden="true" />
+							ready
+						</span>
+					</div>
+				</div>
+			{/each}
+		</div>
+	</div>
+{/if}
+
+<!-- Pending Bay: unmatched books (not selectable) -->
+{#if pendingBooks.length > 0}
+	<div class="bay bay--dim mb-6">
+		<div class="bay__header">
+			<div class="bay__title">
+				<span class="bay__indicator bay__indicator--pending" aria-hidden="true"></span>
+				<span>Awaiting Match — Not Ready</span>
+				<span class="bay__count">{pendingBooks.length}</span>
+			</div>
+			<p class="bay__hint">These books need metadata matched before they can enter the queue.</p>
+		</div>
+
+		<div class="bay__manifest">
+			{#each pendingBooks as book (book.id)}
+				<div class="manifest-row manifest-row--pending">
+					<div class="manifest-row__select manifest-row__select--locked" aria-hidden="true">
+						<LockPlaceholder />
+					</div>
+					<div class="manifest-row__cover">
+						{#if book.cover_image_url}
+							<img src={book.cover_image_url} alt="" class="manifest-row__cover-img" />
+						{:else}
+							<div class="manifest-row__cover-placeholder" aria-hidden="true">—</div>
+						{/if}
+					</div>
+					<div class="manifest-row__info">
+						<p class="manifest-row__title">{book.title}</p>
+						<p class="manifest-row__meta">
+							{book.authors.map((a) => a.name).join(', ') || 'Unknown author'}
+						</p>
+					</div>
+					<div class="manifest-row__status">
+						<StatusBadge status={book.status} />
+						<span class="manifest-row__status-text manifest-row__status-text--pending" aria-label="Awaiting match — not yet ready">
+							<Clock class="h-3.5 w-3.5" aria-hidden="true" />
+							awaiting match
+						</span>
+					</div>
+				</div>
+			{/each}
+		</div>
+	</div>
+{/if}
+
+<!-- Empty state: no books AND no jobs -->
+{#if matchedBooks.length === 0 && pendingBooks.length === 0 && jobs.length === 0}
 	<EmptyState
 		title="Nothing in the queue bay"
 		description="Match pending books to metadata first, then they appear here for processing."
 		actionLabel="Go to Match"
 		actionHref="/match"
 	/>
-{:else}
-	<!-- Intake Bay: matched (ready) books -->
-	{#if matchedBooks.length > 0}
-		<div class="bay mb-6">
-			<div class="bay__header">
-				<div class="bay__title">
-					<span class="bay__indicator bay__indicator--ready" aria-hidden="true"></span>
-					<span>Intake Bay — Ready</span>
-					<span class="bay__count">{matchedBooks.length}</span>
-				</div>
-				<p class="bay__hint">Metadata confirmed. Select and queue for processing.</p>
-			</div>
-
-			<div class="bay__controls">
-				<div class="flex items-center gap-3">
-					<input
-						type="checkbox"
-						checked={matchedBooks.every((b) => selectedIds.has(b.id)) && matchedBooks.length > 0}
-						onchange={() => {
-							const next = new Set(selectedIds);
-							matchedBooks.forEach((b) => {
-								if (next.has(b.id)) next.delete(b.id);
-								else next.add(b.id);
-							});
-							selectedIds = next;
-						}}
-						aria-label="Select all matched books"
-					/>
-					<span class="text-sm text-[var(--text-secondary)] font-mono">
-						{selectedIds.size} selected of {matchedBooks.length}
-					</span>
-				</div>
-				<Button
-					variant="primary"
-					loading={starting}
-					disabled={selectedIds.size === 0}
-					onclick={start}
-				>
-					{#if starting}
-						<SpinnerIcon />
-					{/if}
-					Start processing
-				</Button>
-			</div>
-
-			<div class="bay__manifest">
-				{#each matchedBooks as book (book.id)}
-					<div class="manifest-row manifest-row--ready">
-						<div class="manifest-row__select">
-							<input
-								type="checkbox"
-								checked={selectedIds.has(book.id)}
-								onchange={() => toggleBook(book.id)}
-								aria-label="Select {book.title} for processing"
-							/>
-						</div>
-						<div class="manifest-row__cover">
-							{#if book.cover_image_url}
-								<img src={book.cover_image_url} alt="" class="manifest-row__cover-img" />
-							{:else}
-								<div class="manifest-row__cover-placeholder" aria-hidden="true">—</div>
-							{/if}
-						</div>
-						<div class="manifest-row__info">
-							<p class="manifest-row__title">{book.title}</p>
-							<p class="manifest-row__meta">
-								{book.authors.map((a) => a.name).join(', ') || 'Unknown author'}
-							</p>
-						</div>
-						<div class="manifest-row__status">
-							<StatusBadge status={book.status} />
-							<span class="manifest-row__status-text" aria-label="Ready — metadata confirmed">
-								<CheckCircle class="h-3.5 w-3.5" aria-hidden="true" />
-								ready
-							</span>
-						</div>
-					</div>
-				{/each}
-			</div>
-		</div>
-	{/if}
-
-	<!-- Pending Bay: unmatched books (not selectable) -->
-	{#if pendingBooks.length > 0}
-		<div class="bay bay--dim">
-			<div class="bay__header">
-				<div class="bay__title">
-					<span class="bay__indicator bay__indicator--pending" aria-hidden="true"></span>
-					<span>Awaiting Match — Not Ready</span>
-					<span class="bay__count">{pendingBooks.length}</span>
-				</div>
-				<p class="bay__hint">These books need metadata matched before they can enter the queue.</p>
-			</div>
-
-			<div class="bay__manifest">
-				{#each pendingBooks as book (book.id)}
-					<div class="manifest-row manifest-row--pending">
-						<div class="manifest-row__select manifest-row__select--locked" aria-hidden="true">
-							<LockPlaceholder />
-						</div>
-						<div class="manifest-row__cover">
-							{#if book.cover_image_url}
-								<img src={book.cover_image_url} alt="" class="manifest-row__cover-img" />
-							{:else}
-								<div class="manifest-row__cover-placeholder" aria-hidden="true">—</div>
-							{/if}
-						</div>
-						<div class="manifest-row__info">
-							<p class="manifest-row__title">{book.title}</p>
-							<p class="manifest-row__meta">
-								{book.authors.map((a) => a.name).join(', ') || 'Unknown author'}
-							</p>
-						</div>
-						<div class="manifest-row__status">
-							<StatusBadge status={book.status} />
-							<span class="manifest-row__status-text manifest-row__status-text--pending" aria-label="Awaiting match — not yet ready">
-								<Clock class="h-3.5 w-3.5" aria-hidden="true" />
-								awaiting match
-							</span>
-						</div>
-					</div>
-				{/each}
-			</div>
-		</div>
-	{/if}
 {/if}
 
-<!-- Job Bay: active and recent jobs -->
+<!-- Job Bay: active and recent jobs — shown independently of book count -->
 {#if jobs.length > 0}
 	<div class="bay bay--jobs mt-6">
 		<div class="bay__header">
@@ -297,7 +399,7 @@
 					<div class="job-cell__header">
 						<div class="job-cell__identity">
 							<span class="job-cell__id" title={job.id}>{job.id.slice(0, 8)}</span>
-							<span class="job-cell__bookid">book #{job.bookId}</span>
+							<span class="job-cell__bookid">book #{job.bookId ?? '?'}</span>
 						</div>
 						<div class="job-cell__status">
 							<StatusBadge status={job.status} />
@@ -336,63 +438,15 @@
 	</div>
 {/if}
 
-{#if matchedBooks.length === 0 && pendingBooks.length === 0 && jobs.length === 0 && !dl.showSkeleton && !dl.error}
-	<!-- This branch is unreachable due to the books.length === 0 check above, but kept for structural completeness -->
-{/if}
-
 <svelte:head>
 	<title>Queue — Bragi Books</title>
 </svelte:head>
 
 <style>
-	/* Station header — the interlocking panel header for this rail stop */
-	.station-header {
-		margin-bottom: 1.5rem;
-		padding-bottom: 1rem;
-		border-bottom: 2px solid var(--border);
-	}
-
-	.station-header__badge {
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-	}
-
-	.station-header__number {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 2rem;
-		height: 2rem;
-		border: 2px solid var(--accent);
-		border-radius: var(--radius-sm);
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.8rem;
-		font-weight: 700;
-		color: var(--accent);
-		background: var(--accent-wash);
-		letter-spacing: 0.05em;
-	}
-
-	.station-header__name {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 1.1rem;
-		font-weight: 700;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: var(--text);
-	}
-
-	.station-header__desc {
-		margin-top: 0.25rem;
-		font-size: 0.875rem;
-		color: var(--text-muted);
-	}
-
 	/* Bay — a containment area (intake, pending, jobs) */
 	.bay {
 		border: 1px solid var(--border);
-		border-radius: var(--radius-lg);
+		border-radius: var(--radius-md);
 		overflow: hidden;
 		background: var(--surface);
 	}
@@ -459,13 +513,13 @@
 	}
 
 	/* Bay controls — select all + action button */
-	.bay__controls {
+.bay__controls {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		padding: 0.75rem 1rem;
 		border-bottom: 1px dashed var(--border-subtle);
-		background: oklch(0.28 0.015 75 / 0.5);
+		background: var(--surface);
 		flex-wrap: wrap;
 		gap: 0.5rem;
 	}
@@ -493,7 +547,7 @@
 	}
 
 	.manifest-row--pending {
-		background: oklch(0.26 0.012 75 / 0.6);
+		background: var(--surface);
 	}
 
 	.manifest-row__select {

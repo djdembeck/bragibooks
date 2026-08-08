@@ -56,6 +56,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 
 		// Processing
 		r.Post("/process", h.StartProcessing)
+		r.Get("/jobs", h.ListJobs)
 		r.Get("/jobs/{id}", h.GetJobStatus)
 		r.Get("/jobs/{id}/stream", h.StreamJob)
 

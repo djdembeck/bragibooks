@@ -32,18 +32,19 @@
 
 <dialog
 	bind:this={dialog}
+	aria-labelledby={title ? 'dialog-title' : undefined}
 	class="relative w-full max-w-lg rounded-sm border border-[var(--border-strong)] bg-[var(--bg-panel)] p-0 text-[var(--text)] shadow-2xl backdrop:bg-[var(--enamel)]/50"
 	onclose={onClose}
 >
 	<div class="flex flex-col max-h-[80vh]">
 		{#if title}
 			<div class="flex items-center justify-between border-b border-[var(--border-subtle)] px-4 py-3">
-				<h2 class="text-base font-bold text-[var(--enamel)]">{title}</h2>
+				<h2 id="dialog-title" class="text-base font-bold text-[var(--enamel)]">{title}</h2>
 				<button
 					type="button"
-					class="rounded-sm p-1.5 text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
+					class="min-h-11 min-w-11 rounded-sm p-1.5 text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
 					onclick={() => dialog?.close()}
-					aria-label="Close"
+					aria-label="Close dialog"
 				>
 					<X class="h-4 w-4" />
 				</button>
