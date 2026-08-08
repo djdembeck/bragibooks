@@ -22,6 +22,8 @@
 
 </div>
 
+> **Metadata powered by [AudiobookDB](https://audiobookdb.org)** — a community-maintained audiobook metadata database with proper book/release separation, moderated community contributions, and fast search.
+
 ---
 
 <p align="center"> An audiobook library cleanup & management app, written as a frontend for web use of <a href="https://github.com/djdembeck/m4b-merge">m4b-merge</a>.
