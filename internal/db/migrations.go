@@ -107,6 +107,13 @@ ALTER TABLE settings ADD COLUMN audiobookdb_base_url TEXT DEFAULT 'https://audio
 
 `,
 	},
+	{
+		version: 4,
+		sql: `
+ALTER TABLE people ADD COLUMN asin TEXT DEFAULT '';
+
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

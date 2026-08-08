@@ -40,7 +40,8 @@ func setupLegacySchema(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS importer_author (
 			id INTEGER PRIMARY KEY,
 			first_name TEXT,
-			last_name TEXT
+			last_name TEXT,
+			asin TEXT
 		);
 		CREATE TABLE IF NOT EXISTS importer_narrator (
 			id INTEGER PRIMARY KEY,
@@ -99,6 +100,7 @@ func setupNewSchema(db *sql.DB) error {
 			name TEXT NOT NULL,
 			role TEXT NOT NULL CHECK(role IN ('author', 'narrator')),
 			audiobookdb_person_id TEXT,
+			asin TEXT DEFAULT '',
 			created_at TEXT DEFAULT (datetime('now'))
 		);
 		CREATE TABLE IF NOT EXISTS settings (
@@ -260,9 +262,9 @@ func TestMigratePeople(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Insert 2 authors
-	_, err = legacy.Exec(`INSERT INTO importer_author (id, first_name, last_name)
-		VALUES (1, 'Jane', 'Doe'), (2, 'John', 'Smith')`)
+	// Insert 2 authors (one with ASIN, one without)
+	_, err = legacy.Exec(`INSERT INTO importer_author (id, first_name, last_name, asin)
+		VALUES (1, 'Jane', 'Doe', 'B08T7RLZJ4'), (2, 'John', 'Smith', '')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,15 +311,16 @@ func TestMigratePeople(t *testing.T) {
 		bookID int64
 		name   string
 		role   string
+		asin   string
 	}
 	wants := []personWant{
-		{bookID: 1, name: "Jane Doe", role: "author"},
-		{bookID: 2, name: "John Smith", role: "author"},
-		{bookID: 1, name: "Alice Wonder", role: "narrator"},
-		{bookID: 3, name: "Bob Builder", role: "narrator"},
+		{bookID: 1, name: "Jane Doe", role: "author", asin: "B08T7RLZJ4"},
+		{bookID: 2, name: "John Smith", role: "author", asin: ""},
+		{bookID: 1, name: "Alice Wonder", role: "narrator", asin: ""},
+		{bookID: 3, name: "Bob Builder", role: "narrator", asin: ""},
 	}
 
-	rows, err := newDB.Query("SELECT book_id, name, role FROM people ORDER BY id")
+	rows, err := newDB.Query("SELECT book_id, name, role, asin FROM people ORDER BY id")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,8 +334,8 @@ func TestMigratePeople(t *testing.T) {
 		}
 		w := wants[i]
 		var bookID int64
-		var name, role string
-		if err := rows.Scan(&bookID, &name, &role); err != nil {
+		var name, role, asin string
+		if err := rows.Scan(&bookID, &name, &role, &asin); err != nil {
 			t.Fatal(err)
 		}
 		if bookID != w.bookID {
@@ -343,6 +346,9 @@ func TestMigratePeople(t *testing.T) {
 		}
 		if role != w.role {
 			t.Errorf("person %d role = %q, want %q", i+1, role, w.role)
+		}
+		if asin != w.asin {
+			t.Errorf("person %d asin = %q, want %q", i+1, asin, w.asin)
 		}
 		i++
 	}
@@ -521,8 +527,8 @@ func TestRunLegacyMigration(t *testing.T) {
 			(1, 'Book One', 'B001', 'short1', 'long1', '2024-01-01', 'Series A', 'PubA', 'en', 120, 'm4b', '/in/1', '/out/1', 'http://cover/1', '2024-01-01', '2024-01-02', 1, 1),
 			(2, 'Book Two', 'B002', 'short2', '', '2024-02-01', '', 'PubB', 'en', 90, 'm4b', '/in/2', '/out/2', '', '2024-02-01', '2024-02-02', 2, 0)`)
 
-		// Authors
-		_, _ = db.Exec(`INSERT INTO importer_author (id, first_name, last_name) VALUES (1, 'Jane', 'Doe'), (2, 'John', 'Smith')`)
+		// Authors (with ASINs)
+		_, _ = db.Exec(`INSERT INTO importer_author (id, first_name, last_name, asin) VALUES (1, 'Jane', 'Doe', 'B08T7RLZJ4'), (2, 'John', 'Smith', 'B01AY7PSG4')`)
 
 		// Narrators
 		_, _ = db.Exec(`INSERT INTO importer_narrator (id, first_name, last_name) VALUES (1, 'Alice', 'Wonder')`)
@@ -586,6 +592,25 @@ func TestRunLegacyMigration(t *testing.T) {
 	}
 	if peopleCount != 3 {
 		t.Errorf("people count in DB = %d, want 3", peopleCount)
+	}
+
+	// Verify author ASINs were migrated
+	var authorASINCount int
+	if err := newDB.QueryRow("SELECT COUNT(*) FROM people WHERE role = 'author' AND asin != ''").Scan(&authorASINCount); err != nil {
+		t.Fatal(err)
+	}
+	if authorASINCount != 2 {
+		t.Errorf("authors with ASIN = %d, want 2", authorASINCount)
+	}
+
+	// Verify specific author ASIN
+	var janeASIN string
+	err = newDB.QueryRow("SELECT asin FROM people WHERE name = 'Jane Doe' AND role = 'author'").Scan(&janeASIN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if janeASIN != "B08T7RLZJ4" {
+		t.Errorf("Jane Doe asin = %q, want %q", janeASIN, "B08T7RLZJ4")
 	}
 
 	// Verify settings

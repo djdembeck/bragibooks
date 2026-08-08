@@ -389,12 +389,23 @@ func migratePeopleType(legacyDB *sql.DB, newDB sqlExecer, role string, mapping *
 	}
 
 	// 2. Read all person-book M2M rows into memory
-	rows, err := legacyDB.Query(fmt.Sprintf(
-		"SELECT %s.id, %s.first_name, %s.last_name, %s.book_id FROM %s INNER JOIN %s ON %s.id = %s.%s_id",
-		personTable, personTable, personTable, m2mTable,
-		personTable, m2mTable,
-		personTable, m2mTable, m2mFK,
-	))
+	// Authors have an ASIN column in legacy; narrators don't.
+	var rows *sql.Rows
+	if role == "author" {
+		rows, err = legacyDB.Query(fmt.Sprintf(
+			"SELECT %s.id, %s.first_name, %s.last_name, %s.asin, %s.book_id FROM %s INNER JOIN %s ON %s.id = %s.%s_id",
+			personTable, personTable, personTable, personTable, m2mTable,
+			personTable, m2mTable,
+			personTable, m2mTable, m2mFK,
+		))
+	} else {
+		rows, err = legacyDB.Query(fmt.Sprintf(
+			"SELECT %s.id, %s.first_name, %s.last_name, NULL, %s.book_id FROM %s INNER JOIN %s ON %s.id = %s.%s_id",
+			personTable, personTable, personTable, m2mTable,
+			personTable, m2mTable,
+			personTable, m2mTable, m2mFK,
+		))
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -405,13 +416,14 @@ func migratePeopleType(legacyDB *sql.DB, newDB sqlExecer, role string, mapping *
 		id        int
 		firstName string
 		lastName  string
+		asin      sql.NullString
 		bookID    int
 	}
 	var allRows []personRow
 
 	for rows.Next() {
 		var r personRow
-		if err := rows.Scan(&r.id, &r.firstName, &r.lastName, &r.bookID); err != nil {
+		if err := rows.Scan(&r.id, &r.firstName, &r.lastName, &r.asin, &r.bookID); err != nil {
 			return 0, err
 		}
 		allRows = append(allRows, r)
@@ -451,9 +463,15 @@ func migratePeopleType(legacyDB *sql.DB, newDB sqlExecer, role string, mapping *
 		}
 
 		// Insert into new people table
+		var asinVal any
+		if r.asin.Valid {
+			asinVal = r.asin.String
+		} else {
+			asinVal = ""
+		}
 		_, err = newDB.Exec(
-			"INSERT INTO people (book_id, name, role) VALUES (?, ?, ?)",
-			newBookID, name, role,
+			"INSERT INTO people (book_id, name, role, asin) VALUES (?, ?, ?, ?)",
+			newBookID, name, role, asinVal,
 		)
 		if err != nil {
 			return count, err
