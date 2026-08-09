@@ -1,0 +1,569 @@
+<script lang="ts">
+	import { get, put, del } from '$lib/api';
+	import { goto } from '$app/navigation';
+	import type {
+		BookWithPeople,
+		BooksListResponse,
+		SearchHit,
+		SearchResponse,
+		AudiobookDBBook,
+		AudiobookDBRelease,
+		UpdateBookRequest
+	} from '$lib/types';
+	import {
+		extractAsin,
+		peopleByRole,
+		pickCover,
+		formatRuntime
+	} from '$lib/types';
+	import { PageHeader, Button, Alert, Skeleton, EmptyState, Modal } from '$lib/components';
+	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
+
+	interface CandidateDetails {
+		book: AudiobookDBBook | null;
+		release: AudiobookDBRelease | null;
+	}
+
+	interface MatchCandidate {
+		bookId: number;
+		srcPath: string;
+		title: string;
+		searchResults: AudiobookDBBook[];
+		selectedBookId: string | null;
+		selectedReleaseId: string | null;
+		details: CandidateDetails;
+		loading: boolean;
+		error: string | null;
+		// Track how the selection was made
+		manualPick: boolean;
+		// Remove confirmation/undo state
+		removing: boolean;
+		_removeSnapshot?: { bookId: number; srcPath: string; title: string };
+	}
+
+	let candidates = $state<MatchCandidate[]>([]);
+	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
+	let saving = $state(false);
+	let pageError = $state<string | null>(null);
+
+	let modalOpen = $state(false);
+	let modalCandidateId = $state<number | null>(null);
+	let modalQuery = $state('');
+	let modalSearching = $state(false);
+	let modalResults = $state<AudiobookDBBook[]>([]);
+	let modalError = $state<string | null>(null);
+	let modalSearched = $state(false);
+
+	async function loadPending() {
+		await dl.run(async () => {
+			pageError = null;
+			try {
+				const response = await get<BooksListResponse>('/books?status=pending&limit=200');
+				candidates = (response.books || []).map((book) => ({
+					bookId: book.id,
+					srcPath: book.src_path,
+					title: book.title,
+					searchResults: [],
+					selectedBookId: null,
+					selectedReleaseId: null,
+					details: { book: null, release: null },
+					loading: true,
+					error: null,
+					manualPick: false,
+					removing: false
+				}));
+				for (const candidate of candidates) {
+					autoMatch(candidate);
+				}
+			} catch (e) {
+				pageError = e instanceof Error ? e.message : 'Failed to load pending books';
+			}
+		});
+	}
+
+	async function autoMatch(candidate: MatchCandidate) {
+		try {
+			const hits = await searchBooks(stripExtension(candidate.title));
+			candidate.searchResults = hits;
+			if (hits.length > 0) {
+				candidate.selectedBookId = hits[0].id;
+				candidate.details = await fetchDetails(hits[0].id);
+				candidate.selectedReleaseId = candidate.details.release?.id ?? null;
+				candidate.manualPick = false;
+			}
+		} catch (e) {
+			candidate.error = e instanceof Error ? e.message : 'Search failed';
+		} finally {
+			candidate.loading = false;
+		}
+	}
+
+	async function searchBooks(query: string): Promise<AudiobookDBBook[]> {
+		if (!query.trim()) return [];
+		const response = await get<SearchResponse>(
+			`/search?query=${encodeURIComponent(query.trim())}&types=books&take=10`
+		);
+		return (response.results || [])
+			.filter((hit: SearchHit) => hit.type === 'books' || hit.type === 'book')
+			.map((hit: SearchHit) => hit.data as AudiobookDBBook);
+	}
+
+	async function fetchDetails(bookId: string): Promise<CandidateDetails> {
+		const book = await get<AudiobookDBBook>(
+			`/search/books/${bookId}?include=releases,people,series,images,external`
+		);
+		const releaseId = book.releases?.[0]?.id;
+		if (!releaseId) return { book, release: null };
+		const release = await get<AudiobookDBRelease>(
+			`/search/releases/${releaseId}?include=book,chapterDetail,external,images,language,people,publisher`
+		);
+		return { book, release };
+	}
+
+	async function fetchRelease(releaseId: string): Promise<AudiobookDBRelease> {
+		return get<AudiobookDBRelease>(
+			`/search/releases/${releaseId}?include=book,chapterDetail,external,images,language,people,publisher`
+		);
+	}
+
+	async function selectResult(candidate: MatchCandidate, book: AudiobookDBBook) {
+		candidate.loading = true;
+		candidate.error = null;
+		try {
+			candidate.selectedBookId = book.id;
+			candidate.details = await fetchDetails(book.id);
+			candidate.selectedReleaseId = candidate.details.release?.id ?? null;
+			candidate.manualPick = true;
+		} catch (e) {
+			candidate.error = e instanceof Error ? e.message : 'Could not load details';
+		} finally {
+			candidate.loading = false;
+		}
+	}
+
+	async function removeCandidate(id: number, candidate: MatchCandidate) {
+		// Keep the candidate in place until the operator explicitly confirms.
+		candidate.removing = true;
+		candidate._removeSnapshot = { bookId: id, srcPath: candidate.srcPath, title: candidate.title };
+	}
+
+	async function confirmRemoveCandidate(candidate: MatchCandidate) {
+		if (!candidate._removeSnapshot) return;
+		const id = candidate._removeSnapshot.bookId;
+		try {
+			await del(`/books/${id}`);
+			candidates = candidates.filter((c) => c.bookId !== id);
+		} catch (e) {
+			pageError = e instanceof Error ? e.message : 'Failed to remove book';
+			candidate.removing = false;
+			candidate._removeSnapshot = undefined;
+		}
+	}
+
+	function undoRemoveCandidate(candidate: MatchCandidate) {
+		candidate.removing = false;
+		candidate._removeSnapshot = undefined;
+	}
+
+	function stripExtension(name: string): string {
+		return name.replace(/\.[^/.]+$/, '');
+	}
+
+	function selectedTitle(candidate: MatchCandidate): string {
+		return candidate.details.release?.title || candidate.details.book?.title || candidate.title;
+	}
+
+	function selectedAuthors(candidate: MatchCandidate): string {
+		const people = [...(candidate.details.book?.people || []), ...(candidate.details.release?.people || [])];
+		return peopleByRole(people, 'author')
+			.map((p) => p.name)
+			.join(', ') || 'Unknown author';
+	}
+
+	function selectedNarrators(candidate: MatchCandidate): string {
+		const people = [...(candidate.details.book?.people || []), ...(candidate.details.release?.people || [])];
+		return peopleByRole(people, 'narrator')
+			.map((p) => p.name)
+			.join(', ') || '';
+	}
+
+	function selectedCover(candidate: MatchCandidate): string {
+		return pickCover(candidate.details.release?.images) || pickCover(candidate.details.book?.images) || '';
+	}
+
+	// Returns a provenance label for how the current selection was made
+	function matchLabel(candidate: MatchCandidate): string {
+		if (candidate.loading && !candidate.details.book) return 'Loading…';
+		if (candidate.error) return 'Search failed';
+		if (candidate.details.book) {
+			return candidate.manualPick ? 'Manually selected' : 'Auto-selected';
+		}
+		return 'No match';
+	}
+
+	// Returns a visual kind for the match label (used for color coding)
+	function matchKind(candidate: MatchCandidate): 'auto' | 'manual' | 'none' | 'loading' | 'error' {
+		if (candidate.loading && !candidate.details.book) return 'loading';
+		if (candidate.error) return 'error';
+		if (candidate.details.book) {
+			return candidate.manualPick ? 'manual' : 'auto';
+		}
+		return 'none';
+	}
+
+	function openCustomSearch(candidate: MatchCandidate) {
+		modalCandidateId = candidate.bookId;
+		modalQuery = stripExtension(candidate.title);
+		modalResults = [];
+		modalError = null;
+		modalSearched = false;
+		modalOpen = true;
+	}
+
+	async function runCustomSearch() {
+		if (!modalQuery.trim()) return;
+		modalSearching = true;
+		modalError = null;
+		modalResults = [];
+		modalSearched = false;
+		try {
+			modalResults = await searchBooks(modalQuery);
+			modalSearched = true;
+		} catch (e) {
+			modalError = e instanceof Error ? e.message : 'Search failed. Check your connection and try again.';
+			modalSearched = true;
+		} finally {
+			modalSearching = false;
+		}
+	}
+
+	async function pickModalResult(book: AudiobookDBBook) {
+		const candidate = candidates.find((c) => c.bookId === modalCandidateId);
+		if (!candidate) return;
+		await selectResult(candidate, book);
+		modalOpen = false;
+	}
+
+	async function saveMatches() {
+		saving = true;
+		pageError = null;
+		try {
+			const matched = candidates.filter((c) => c.selectedBookId && c.details.book);
+			await Promise.all(
+				matched.map(async (candidate) => {
+					const body = buildUpdate(candidate);
+					await put<BookWithPeople>(`/books/${candidate.bookId}`, body);
+				})
+			);
+			await goto('/process');
+		} catch (e) {
+			pageError = e instanceof Error ? e.message : 'Failed to save matches';
+			throw e;
+		} finally {
+			saving = false;
+		}
+	}
+
+	function buildUpdate(candidate: MatchCandidate): UpdateBookRequest {
+		const book = candidate.details.book;
+		const release = candidate.details.release;
+		const people = [...(candidate.details.book?.people || []), ...(candidate.details.release?.people || [])];
+		const releaseDate = release?.releaseDate || book?.originallyPublishedAt || '';
+		const runtime = release?.runtimeLengthMs ? Math.round(release.runtimeLengthMs / 60000) : 0;
+		const series = (book?.series || [])
+			.map((s) => `${s.seriesId || 'Series'} #${s.position}`)
+			.join(', ');
+		const external = book?.external || [];
+		const asin = extractAsin(external);
+		return {
+			title: release?.title || book?.title || candidate.title,
+			asin: asin || undefined,
+			audiobookdb_book_id: book?.id,
+			audiobookdb_release_id: release?.id,
+			description: book?.description || undefined,
+			release_date: releaseDate,
+			series: series || undefined,
+			publisher: release?.publisher?.name || undefined,
+			language: release?.language?.title || undefined,
+			runtime_length_minutes: runtime || undefined,
+			cover_image_url: selectedCover(candidate),
+			status: 'matched',
+			authors: peopleByRole(people, 'author'),
+			narrators: peopleByRole(people, 'narrator')
+		};
+	}
+
+	$effect(() => {
+		loadPending();
+	});
+</script>
+
+<svelte:head>
+	<title>Match — Bragi Books</title>
+</svelte:head>
+
+<PageHeader
+	title="Match"
+	station="#02 · MATCH"
+	description="Confirm or change the AudiobookDB metadata for each source routed from intake."
+/>
+
+{#if pageError}
+	<div class="mb-6">
+		<Alert variant="error" onretry={loadPending}>{pageError}</Alert>
+	</div>
+{/if}
+
+{#if dl.showSkeleton}
+	<!-- Skeleton loading state -->
+	<div class="space-y-4">
+		{#each Array(3) as _}
+			<div class="panel p-4">
+				<div class="flex gap-4">
+					<Skeleton variant="rect" width="120px" height="160px" />
+					<div class="flex-1 space-y-2">
+						<Skeleton height="1.25rem" width="40%" />
+						<Skeleton height="1rem" width="60%" />
+						<Skeleton height="2.5rem" width="100%" />
+					</div>
+				</div>
+			</div>
+		{/each}
+	</div>
+{:else if candidates.length === 0}
+	<!-- Empty state -->
+	<EmptyState
+		title="Nothing to match"
+		description="Import source directories first, then come back here to choose metadata."
+		actionLabel="Import books"
+		actionHref="/import"
+	/>
+{:else}
+	<!-- Match bay: list of candidates with metadata panels -->
+	<div class="space-y-3">
+		{#each candidates as candidate (candidate.bookId)}
+			<div class="panel p-4">
+				<div class="flex flex-col gap-4 sm:flex-row">
+					<!-- Cover panel -->
+					<div class="flex-shrink-0">
+						{#if selectedCover(candidate)}
+							<img src={selectedCover(candidate)} alt="" class="h-40 w-28 rounded-sm object-cover border border-[var(--border-subtle)]" />
+						{:else}
+							<div class="flex h-40 w-28 items-center justify-center rounded-sm border border-[var(--border-subtle)] bg-[var(--elevated)] text-xs text-[var(--text-muted)]">
+								No cover
+							</div>
+						{/if}
+					</div>
+
+					<!-- Metadata panel -->
+					<div class="min-w-0 flex-1">
+						<!-- Source path + title row -->
+						<div class="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+							<div>
+								<!-- Source provenance -->
+								<p class="truncate text-xs font-mono text-[var(--text-muted)]" title={candidate.srcPath}>
+									<span aria-hidden="true">src:</span> {candidate.srcPath}
+								</p>
+								<h3 class="mt-0.5 text-lg font-semibold">{candidate.title}</h3>
+							</div>
+							{#if candidate.removing}
+								<!-- Branded confirmation/undo for destructive remove -->
+								<div class="flex items-center gap-2 self-start">
+									<span class="text-sm text-[var(--text-muted)]">Remove "{candidate.title}"?</span>
+									<button
+										type="button"
+										class="text-sm font-medium text-[var(--error)] hover:underline"
+										onclick={() => confirmRemoveCandidate(candidate)}
+									>
+										Yes, remove
+									</button>
+									<button
+										type="button"
+										class="text-sm text-[var(--accent)] hover:underline"
+										onclick={() => undoRemoveCandidate(candidate)}
+									>
+										Cancel
+									</button>
+								</div>
+							{:else}
+								<Button
+									variant="ghost"
+									class="self-start text-[var(--error)] hover:bg-[var(--error-bg)]"
+									onclick={() => removeCandidate(candidate.bookId, candidate)}
+								>
+									Remove
+								</Button>
+							{/if}
+						</div>
+
+						<!-- Match result display -->
+						{#if candidate.loading && !candidate.details.book}
+							<!-- Still searching -->
+							<div class="mt-3">
+								<Skeleton height="1.5rem" width="60%" />
+							</div>
+						{:else if candidate.error}
+							<!-- Per-candidate search failure (distinguishable from no match) -->
+							<div class="mt-3">
+								<div class="flex items-center gap-2 text-sm">
+									<span class="flex h-2 w-2 flex-shrink-0 rounded-full bg-[var(--error)]" aria-hidden="true"></span>
+									<span class="font-medium text-[var(--error)]">Search failed</span>
+									<span class="text-[var(--text-muted)]">—</span>
+									<span class="text-[var(--text-muted)]">{candidate.error}</span>
+									<button
+										type="button"
+										class="ml-1 text-sm font-medium text-[var(--accent)] hover:underline"
+										onclick={() => autoMatch(candidate)}
+									>
+										Retry
+									</button>
+								</div>
+							</div>
+						{:else if candidate.details.book}
+							<!-- Match found — show details -->
+							<div class="mt-3 space-y-1.5">
+								<!-- Provenance label with signal indicator -->
+								<div class="mb-2 flex items-center gap-2">
+									{#if matchKind(candidate) === 'auto'}
+										<span class="flex items-center gap-1.5 rounded-full border border-[var(--accent)]/20 bg-[var(--accent-wash)] px-2 py-0.5 text-xs font-medium text-[var(--accent)]">
+											<span class="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" aria-hidden="true"></span>
+											Auto-selected
+										</span>
+									{:else if matchKind(candidate) === 'manual'}
+										<span class="flex items-center gap-1.5 rounded-full border border-[var(--success)]/20 bg-[var(--success-bg)] px-2 py-0.5 text-xs font-medium text-[var(--success)]">
+											<span class="h-1.5 w-1.5 rounded-full bg-[var(--success)]" aria-hidden="true"></span>
+											Manually selected
+										</span>
+									{/if}
+								</div>
+								<p class="font-medium text-[var(--text)]">{selectedTitle(candidate)}</p>
+								<p class="text-sm text-[var(--text-muted)]">
+									{selectedAuthors(candidate)}
+									{#if selectedNarrators(candidate)}
+										<span class="text-[var(--text-muted)]"> · Narrated by {selectedNarrators(candidate)}</span>
+									{/if}
+								</p>
+								{#if candidate.details.release?.runtimeLengthMs}
+									<p class="text-xs text-[var(--text-muted)]">
+										{formatRuntime(Math.round(candidate.details.release.runtimeLengthMs / 60000))}
+									</p>
+								{/if}
+							</div>
+						{:else}
+							<!-- No matches found for this title -->
+							<div class="mt-3">
+								<div class="flex items-center gap-2 text-sm">
+									<span class="flex h-2 w-2 flex-shrink-0 rounded-full bg-[var(--border)]" aria-hidden="true"></span>
+									<span class="font-medium text-[var(--text-muted)]">No matches found</span>
+									<span class="text-[var(--text-muted)]">—</span>
+									<span class="text-[var(--text-muted)]">Search below to find metadata for this book.</span>
+								</div>
+							</div>
+						{/if}
+
+						<!-- Selection controls: dropdown + custom search -->
+						<div class="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+							<select
+								class="sm:w-96"
+								value={candidate.selectedBookId ?? ''}
+								onchange={(e) => {
+									const book = candidate.searchResults.find((b) => b.id === e.currentTarget.value);
+									if (book) selectResult(candidate, book);
+								}}
+								disabled={candidate.loading}
+								aria-label="Select metadata match for {candidate.title}"
+							>
+								<option value="" disabled>No match selected</option>
+								{#each candidate.searchResults as result (result.id)}
+									<option value={result.id}>{result.title}</option>
+								{/each}
+							</select>
+							<Button
+								variant="secondary"
+								disabled={candidate.loading}
+								onclick={() => openCustomSearch(candidate)}
+							>
+								Custom search
+							</Button>
+						</div>
+					</div>
+				</div>
+			</div>
+		{/each}
+	</div>
+
+	<!-- Batch save action -->
+	<div class="mt-6 flex justify-end">
+		<Button
+			variant="primary"
+			loading={saving}
+			disabled={candidates.every((c) => !c.selectedBookId)}
+			onclick={saveMatches}
+		>
+			{saving ? 'Saving…' : 'Save matches → Process'}
+		</Button>
+	</div>
+{/if}
+
+<!-- Custom search dialog (uses native HTML dialog via shared Modal) -->
+<Modal bind:open={modalOpen} title="Custom search">
+	<div class="space-y-4">
+		<div class="flex gap-2">
+			<input
+				type="text"
+				bind:value={modalQuery}
+				placeholder="Title, author, or keywords"
+				onkeydown={(e) => e.key === 'Enter' && runCustomSearch()}
+				aria-label="Search query"
+			/>
+			<Button variant="primary" loading={modalSearching} onclick={runCustomSearch}>
+				Search
+			</Button>
+		</div>
+
+		{#if modalSearching}
+			<div class="space-y-2">
+				{#each Array(3) as _}
+					<Skeleton height="3rem" />
+				{/each}
+			</div>
+		{:else if modalResults.length > 0}
+			<div class="max-h-72 space-y-2 overflow-auto">
+				{#each modalResults as result (result.id)}
+					<button
+						type="button"
+						class="w-full rounded-sm border border-[var(--border)] bg-[var(--bg)] p-3 text-left transition-colors hover:bg-[var(--surface-hover)]"
+						onclick={() => pickModalResult(result)}
+					>
+						<p class="font-medium text-[var(--text)]">{result.title}</p>
+						<p class="text-sm text-[var(--text-muted)]">
+							{peopleByRole(result.people, 'author').map((p) => p.name).join(', ') || 'Unknown author'}
+							{#if result.people && peopleByRole(result.people, 'narrator').length > 0}
+								<span class="text-[var(--text-muted)]"> · Narrated by {peopleByRole(result.people, 'narrator').map((p) => p.name).join(', ')}</span>
+							{/if}
+						</p>
+						{#if result.originallyPublishedAt}
+							<p class="text-xs text-[var(--text-muted)] mt-0.5">Published {new Date(result.originallyPublishedAt).toLocaleDateString()}</p>
+						{/if}
+					</button>
+				{/each}
+			</div>
+		{:else if modalError}
+			<!-- Search failed — distinguish from zero results -->
+			<div class="rounded-sm border border-[var(--state-red-border)] bg-[var(--state-red-bg)] p-3 text-sm text-[var(--text)]">
+				<p class="font-medium">Search failed</p>
+				<p class="mt-1 text-[var(--text-muted)]">{modalError}</p>
+				<button
+					type="button"
+					class="mt-2 text-sm font-medium text-[var(--accent)] hover:underline"
+					onclick={runCustomSearch}
+				>
+					Retry
+				</button>
+			</div>
+		{:else if modalResults.length === 0 && modalSearched}
+			<!-- Zero results — query was executed successfully -->
+			<p class="text-sm text-[var(--text-muted)]">No matches found for "{modalQuery}". Try different keywords.</p>
+		{/if}
+	</div>
+</Modal>

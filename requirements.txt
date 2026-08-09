@@ -1,4 +1,0 @@
-# Install using: pip install -e .
-# Or for development: pip install -e ".[dev]"
-# See pyproject.toml for all dependencies
-gunicorn>=20.1.0

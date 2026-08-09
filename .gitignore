@@ -1,17 +1,22 @@
-.python-version
 .vscode
-/static/
-__pycache__/
-config/
-env/
-venv/
-demo/
 .DS_Store
-admin/
 
 .opencode
 .sisyphus
-.chunkhound
-*.egg-info/
-egg-info/
 .impeccable/
+/bragibooks
+/webfs/build/
+# Go runtime artifacts (databases, secrets)
+config/*.db
+config/*.db-wal
+config/*.db-shm
+config/*.sqlite3*
+config/secret_key.txt
+# Playwright CLI debug artifacts
+/.playwright-cli/
+# Scratch build output
+/tmp/
+# Runtime databases under docker config
+docker/config/*.db
+docker/config/*.db-wal
+docker/config/*.db-shm

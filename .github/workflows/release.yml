@@ -1,0 +1,192 @@
+# Generate-first release via annalist (GitHub Actions).
+#
+# Gitflow flow: releases are cut on each `develop → main` merge.
+# `develop` pushes do NOT release.
+#
+# How it works:
+#   1. On every push to the trigger branch, the next version is auto-bumped
+#      from commits since the last tag (conventional commits:
+#      BREAKING CHANGE/feat! -> major, feat -> minor, else patch). Dispatch
+#      with a `version` or `bump` input to override.
+#   2. The tag is created and pushed (skipped if it already exists).
+#   3. A version-tagged Docker image is built and pushed to GHCR.
+#   4. The version bump is synced back to develop.
+#   5. The release is created via the gh CLI (fill_after mode — no notes).
+#
+# Re-runs are idempotent: a partial failure can be re-dispatched and the same
+# (already-existing) tag/release guards no-op or complete the work.
+#
+# No external services required: only git, gh, and docker are used.
+# GITHUB_TOKEN is provided automatically (permissions: contents: write, packages: write).
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['*.md', 'docs/**', '.github/**']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Explicit version (vX.Y.Z). Empty = auto-bump from commits."
+        required: false
+        default: ""
+      bump:
+        description: "Bump level when version is empty: auto|patch|minor|major"
+        required: false
+        default: auto
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so version resolution can inspect all refs.
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine next version
+        id: version
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+          BUMP_INPUT: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          LATEST_TAG=$(git tag -l "v*.*.*" --sort=-version:refname | head -n 1 || true)
+
+          if [ -n "$VERSION_INPUT" ]; then
+            # Manual override
+            NEW_VERSION="${VERSION_INPUT#v}"
+            if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Invalid version input: ${VERSION_INPUT} (expected vX.Y.Z)"
+              exit 1
+            fi
+            NEW_VERSION="v${NEW_VERSION}"
+          elif [ -z "$LATEST_TAG" ]; then
+            NEW_VERSION="v0.1.0"
+          else
+            MAJOR="${LATEST_TAG#v}"; MAJOR="${MAJOR%%.*}"
+            REST="${LATEST_TAG#v*.}"; MINOR="${REST%%.*}"; PATCH="${REST#*.}"
+
+            case "$BUMP_INPUT" in
+              auto|"")
+                if [ -z "$(git log --format=%H "${LATEST_TAG}..HEAD" 2>/dev/null)" ]; then
+                  PREV_TAG=$(git tag -l "v*.*.*" --sort=-version:refname | sed -n 2p || true)
+                  echo "new_version=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+                  echo "previous_tag=${PREV_TAG:-}" >> "$GITHUB_OUTPUT"
+                  echo "No commits since ${LATEST_TAG} — reusing it"
+                  exit 0
+                fi
+                LOG=$(git log --format=%B "${LATEST_TAG}..HEAD" 2>/dev/null || true)
+                if echo "$LOG" | grep -qE 'BREAKING CHANGE:|^[a-z]+(\([^)]*\))?!: '; then LEVEL=major
+                elif echo "$LOG" | grep -qE '^feat(\([^)]*\))?: '; then LEVEL=minor
+                else LEVEL=patch; fi
+                ;;
+              patch|minor|major) LEVEL="$BUMP_INPUT" ;;
+              *) echo "Invalid bump input: ${BUMP_INPUT} (auto|patch|minor|major)"; exit 1 ;;
+            esac
+
+            case "$LEVEL" in
+              major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR+1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH+1)) ;;
+            esac
+            NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          fi
+
+          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=${LATEST_TAG:-}" >> "$GITHUB_OUTPUT"
+          echo "New version: ${NEW_VERSION} (previous: ${LATEST_TAG:-none})"
+
+      - name: Create and push tag
+        id: tag
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.new_version }}"
+          if git rev-parse "refs/tags/${VERSION}" >/dev/null 2>&1; then
+            echo "Tag ${VERSION} already exists, skipping"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git tag -a "${VERSION}" -m "Release ${VERSION}"
+          git push origin "${VERSION}"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      # Go: version is tag-only; binary is stamped via -ldflags at docker build (see docker step below).
+
+      - name: Build and push version Docker image
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.new_version }}"
+          REGISTRY_IMAGE="ghcr.io/djdembeck/bragibooks"
+
+          # Idempotency guard: skip when the image already exists (e.g. rerun
+          # of a completed release).
+          if docker manifest inspect "${REGISTRY_IMAGE}:${VERSION}" >/dev/null 2>&1; then
+            echo "Image ${REGISTRY_IMAGE}:${VERSION} already exists - skipping"
+            exit 0
+          fi
+
+          # Login to GHCR
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+          # Build and push the version-tagged image.
+          # The Dockerfile should define `ARG VERSION=devel` and stamp the binary
+          # with `-ldflags "-w -s -X github.com/bragibooks/bragibooks/internal/version.Version=${VERSION}"`.
+          # No version package exists yet; add one following the milmus pattern
+          # before version stamping will take effect.
+          docker build \
+            -f docker/Dockerfile \
+            --build-arg VERSION="${VERSION}" \
+            -t "${REGISTRY_IMAGE}:${VERSION}" \
+            .
+          docker push "${REGISTRY_IMAGE}:${VERSION}"
+
+      - name: Sync version bump back to develop
+        if: steps.tag.outputs.created == 'true'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.new_version }}"
+          git fetch origin develop:develop
+          if git merge-base --is-ancestor origin/main develop; then
+            echo "main already merged into develop — skipping sync"
+            exit 0
+          fi
+          git checkout develop
+          git merge --no-ff main -m "chore(release): sync ${VERSION} back to develop [skip ci]"
+          git push origin develop
+          # if develop is protected, replace with a peter-evans/create-pull-request sync PR
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.new_version }}"
+
+          # Already released?
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            echo "Release ${VERSION} already exists — nothing to do"
+            exit 0
+          fi
+
+          # fill_after mode: create the release without notes.
+          gh release create "${VERSION}" --title "Release ${VERSION}"
+          echo "Release ${VERSION} created"
