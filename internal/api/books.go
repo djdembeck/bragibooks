@@ -14,9 +14,9 @@ import (
 // ListBooksResponse is the JSON shape returned by GET /api/books.
 type ListBooksResponse struct {
 	Books []models.BookWithPeople `json:"books"`
-	Total int                    `json:"total"`
-	Page  int                    `json:"page"`
-	Limit int                    `json:"limit"`
+	Total int                     `json:"total"`
+	Page  int                     `json:"page"`
+	Limit int                     `json:"limit"`
 }
 
 // PersonUpdate is a single author or narrator supplied by the client.
@@ -43,24 +43,24 @@ type CreateBooksResponse struct {
 
 // UpdateBookRequest is the JSON body accepted by PUT /api/books/:id.
 type UpdateBookRequest struct {
-	Title                *string         `json:"title"`
-	ASIN                 *string         `json:"asin"`
-	AudiobookdbBookID    *string         `json:"audiobookdb_book_id"`
-	AudiobookdbReleaseID *string         `json:"audiobookdb_release_id"`
-	Description          *string         `json:"description"`
-	ReleaseDate          *string         `json:"release_date"`
-	Series               *string         `json:"series"`
-	Publisher            *string         `json:"publisher"`
-	Language             *string         `json:"language"`
-	RuntimeLengthMinutes *int            `json:"runtime_length_minutes"`
-	FormatType           *string         `json:"format_type"`
-	SrcPath              *string         `json:"src_path"`
-	DestPath             *string         `json:"dest_path"`
-	Status               *string         `json:"status"`
-	StatusMessage        *string         `json:"status_message"`
-	CoverImageURL        *string         `json:"cover_image_url"`
-	Authors              []PersonUpdate  `json:"authors,omitempty"`
-	Narrators            []PersonUpdate  `json:"narrators,omitempty"`
+	Title                *string        `json:"title"`
+	ASIN                 *string        `json:"asin"`
+	AudiobookdbBookID    *string        `json:"audiobookdb_book_id"`
+	AudiobookdbReleaseID *string        `json:"audiobookdb_release_id"`
+	Description          *string        `json:"description"`
+	ReleaseDate          *string        `json:"release_date"`
+	Series               *string        `json:"series"`
+	Publisher            *string        `json:"publisher"`
+	Language             *string        `json:"language"`
+	RuntimeLengthMinutes *int           `json:"runtime_length_minutes"`
+	FormatType           *string        `json:"format_type"`
+	SrcPath              *string        `json:"src_path"`
+	DestPath             *string        `json:"dest_path"`
+	Status               *string        `json:"status"`
+	StatusMessage        *string        `json:"status_message"`
+	CoverImageURL        *string        `json:"cover_image_url"`
+	Authors              []PersonUpdate `json:"authors,omitempty"`
+	Narrators            []PersonUpdate `json:"narrators,omitempty"`
 }
 
 // ListBooks handles GET /api/books with optional status filter and pagination.

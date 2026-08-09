@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"sync/atomic"
 	"log"
 	"net"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -19,8 +19,8 @@ import (
 	"github.com/go-chi/cors"
 
 	"github.com/bragibooks/bragibooks/internal/api"
-	"github.com/bragibooks/bragibooks/internal/audiobookdb"
 	"github.com/bragibooks/bragibooks/internal/audio"
+	"github.com/bragibooks/bragibooks/internal/audiobookdb"
 	"github.com/bragibooks/bragibooks/internal/config"
 	"github.com/bragibooks/bragibooks/internal/db"
 	"github.com/bragibooks/bragibooks/webfs"

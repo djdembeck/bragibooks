@@ -45,29 +45,29 @@ type BookWithPeople struct {
 
 // ProcessingJob tracks an m4b-merge processing job.
 type ProcessingJob struct {
-	ID           string         `db:"id" json:"id"`
-	BookID       sql.NullInt64  `db:"book_id" json:"book_id"`
-	M4bMergeArgs string         `db:"m4b_merge_args" json:"-"` // serialized CLI args
-	Status       string         `db:"status" json:"status"`
-	Output       string         `db:"output" json:"output"`
-	Error        *string        `db:"error" json:"error"`
-	OutputFile   *string        `db:"output_file" json:"output_file"`
-	StartedAt    *string        `db:"started_at" json:"started_at"`
-	CompletedAt  *string        `db:"completed_at" json:"completed_at"`
-	CreatedAt    string         `db:"created_at" json:"created_at"`
+	ID           string        `db:"id" json:"id"`
+	BookID       sql.NullInt64 `db:"book_id" json:"book_id"`
+	M4bMergeArgs string        `db:"m4b_merge_args" json:"-"` // serialized CLI args
+	Status       string        `db:"status" json:"status"`
+	Output       string        `db:"output" json:"output"`
+	Error        *string       `db:"error" json:"error"`
+	OutputFile   *string       `db:"output_file" json:"output_file"`
+	StartedAt    *string       `db:"started_at" json:"started_at"`
+	CompletedAt  *string       `db:"completed_at" json:"completed_at"`
+	CreatedAt    string        `db:"created_at" json:"created_at"`
 }
 
 // Settings holds application configuration persisted in the database.
 type Settings struct {
-	AudiobookdbAPIKey   string `db:"audiobookdb_api_key" json:"-"`
-	AudiobookdbBaseURL  string `db:"audiobookdb_base_url" json:"audiobookdb_base_url"`
-	M4bMergeBinary      string `db:"m4b_merge_binary" json:"m4b_merge_binary"`
-	InputDir            string `db:"input_dir" json:"input_dir"`
-	OutputDir           string `db:"output_dir" json:"output_dir"`
-	CompletedDir        string `db:"completed_dir" json:"completed_dir"`
-	NumCPUs             int    `db:"num_cpus" json:"num_cpus"`
-	OutputScheme        string `db:"output_scheme" json:"output_scheme"`
-	Region              string `db:"region" json:"region"`
-	CreatedAt           string `db:"created_at" json:"created_at"`
-	UpdatedAt           string `db:"updated_at" json:"updated_at"`
+	AudiobookdbAPIKey  string `db:"audiobookdb_api_key" json:"-"`
+	AudiobookdbBaseURL string `db:"audiobookdb_base_url" json:"audiobookdb_base_url"`
+	M4bMergeBinary     string `db:"m4b_merge_binary" json:"m4b_merge_binary"`
+	InputDir           string `db:"input_dir" json:"input_dir"`
+	OutputDir          string `db:"output_dir" json:"output_dir"`
+	CompletedDir       string `db:"completed_dir" json:"completed_dir"`
+	NumCPUs            int    `db:"num_cpus" json:"num_cpus"`
+	OutputScheme       string `db:"output_scheme" json:"output_scheme"`
+	Region             string `db:"region" json:"region"`
+	CreatedAt          string `db:"created_at" json:"created_at"`
+	UpdatedAt          string `db:"updated_at" json:"updated_at"`
 }

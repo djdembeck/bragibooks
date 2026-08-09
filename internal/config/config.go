@@ -11,7 +11,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-
 // Config holds the application configuration.
 type Config struct {
 	Server      ServerConfig      `mapstructure:"server" yaml:"server" json:"server"`

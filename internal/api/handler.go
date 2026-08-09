@@ -11,8 +11,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/bragibooks/bragibooks/internal/audiobookdb"
 	"github.com/bragibooks/bragibooks/internal/audio"
+	"github.com/bragibooks/bragibooks/internal/audiobookdb"
 	"github.com/bragibooks/bragibooks/internal/config"
 	"github.com/bragibooks/bragibooks/internal/server"
 )
@@ -79,7 +79,6 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		r.Post("/migrate/people", h.RecoverPeople)
 	})
 }
-
 
 // writeJSON encodes v as JSON and writes it to w with the given status code.
 func writeJSON(w http.ResponseWriter, status int, v any) {
