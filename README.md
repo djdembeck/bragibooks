@@ -1,234 +1,279 @@
-<p align="center">
-  <a href="" rel="noopener">
- <img width=200px height=200px src="../assets/logos/logo.png?raw=true" alt="Project logo"></a>
-</p>
+# Bragibooks
 
-<h3 align="center">Bragibooks</h3>
+[![CI](https://img.shields.io/github/actions/workflow/status/djdembeck/bragibooks/ci.yml?branch=develop&label=CI)](https://github.com/djdembeck/bragibooks/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/djdembeck/bragibooks.svg)](LICENSE)
+[![Docker pulls](https://img.shields.io/docker/pulls/djdembeck/bragibooks.svg)](https://hub.docker.com/r/djdembeck/bragibooks)
+[![Docker image version](https://img.shields.io/docker/v/djdembeck/bragibooks.svg)](https://hub.docker.com/r/djdembeck/bragibooks)
+[![Contributors](https://img.shields.io/github/contributors/djdembeck/bragibooks.svg)](https://github.com/djdembeck/bragibooks/graphs/contributors)
 
-<div align="center">
+> The only known web GUI for `m4b-merge`: batch audiobook processing with AudiobookDB metadata, running on your server.
 
-[![Status](https://img.shields.io/badge/status-active-success.svg)]()
-[![GitHub Issues](https://img.shields.io/github/issues/djdembeck/bragibooks.svg)](https://github.com/djdembeck/bragibooks/issues)
-[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/djdembeck/bragibooks.svg)](https://github.com/djdembeck/bragibooks/pulls)
-[![License](https://img.shields.io/github/license/djdembeck/bragibooks)](https://github.com/djdembeck/bragibooks/blob/develop/LICENSE)
-[![Docker](https://github.com/djdembeck/bragibooks/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/djdembeck/bragibooks/actions/workflows/docker-publish.yml)
-[![Docker Pulls](https://img.shields.io/docker/pulls/djdembeck/bragibooks)](https://hub.docker.com/r/djdembeck/bragibooks)
-[![Docker Image Size (latest by date)](https://img.shields.io/docker/image-size/djdembeck/bragibooks)](https://hub.docker.com/r/djdembeck/bragibooks)
-[![Docker Image Version (latest by date)](https://img.shields.io/docker/v/djdembeck/bragibooks)](https://hub.docker.com/r/djdembeck/bragibooks)
-[![CodeFactor Grade](https://img.shields.io/codefactor/grade/github/djdembeck/bragibooks)](https://www.codefactor.io/repository/github/djdembeck/bragibooks)
-<!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg?style=flat-square)](#contributors-)
-<!-- ALL-CONTRIBUTORS-BADGE:END -->
+## Long Description
 
-</div>
+Bragibooks is a self-hosted web application for cleaning up and organizing audiobook files. It merges split `mp3`, `m4a`, and `m4b` chapters, converts formats such as `mp3` to `m4b`, cleans existing metadata, and writes correctly tagged output through [`m4b-merge`](https://github.com/djdembeck/m4b-merge). Match books against the community-maintained [AudiobookDB](https://audiobookdb.org/) database for title, author, narrator, and release information.
 
-> **Metadata powered by [AudiobookDB](https://audiobookdb.org)** — a community-maintained audiobook metadata database with proper book/release separation, moderated community contributions, and fast search.
+It is an operations board for a personal audiobook pipeline, not a cloud library, SaaS dashboard, or media player. Run it locally or on a home server, select a batch, match it, queue it, and watch the work finish. Bragibooks is single-user, local-first, and has no cloud account or telemetry requirement.
 
----
+## Table of Contents
 
-<p align="center"> An audiobook library cleanup & management app, written as a frontend for web use of <a href="https://github.com/djdembeck/m4b-merge">m4b-merge</a>.
-    <br> 
-</p>
-
-## 📝 Table of Contents
-
-- [About](#about)
-- [Getting Started](#getting_started)
+- [Security](#security)
+- [Background](#background)
+- [Install/Running](#installrunning)
+  - [Docker](#docker)
+  - [Existing binary](#existing-binary)
 - [Usage](#usage)
-- [Environment Variables](#env_vars)
-- [Built Using](#built_using)
-- [Changelog](CHANGELOG.md)
-- [Contributing](../CONTRIBUTING.md)
-- [Authors](#authors)
-- [Contributors](#contributors)
+- [Configuration](#configuration)
+- [API](#api)
+- [Contributing](#contributing)
+- [Building](#building)
+  - [Make](#make)
+  - [Explicit build steps](#explicit-build-steps)
+  - [Build a Docker image](#build-a-docker-image)
+  - [Development](#development)
+- [Maintainers](#maintainers)
+- [License](#license)
 
-## 🧐 About <a name = "about"></a>
+## Security
 
-**Bragi - (god of poetry in [Norse mythology](https://en.wikipedia.org/wiki/Bragi)):**
-Bragibooks provides a minimal and straightforward webserver that you can run remotely or locally on your server. Since Bragibooks runs in a docker, you no longer need to install dependencies on whichever OS you are on. You can
+Bragibooks is designed for one operator on a private network. The application does not provide authentication, so do not expose it directly to the public internet; put it behind a trusted network boundary and, when needed, an authenticated reverse proxy.
 
-Some basics of what Bragi does:
-- Merge multiple files
-- Convert mp3(s)
-- Cleanup existing data on an m4b file
-- More features on [m4b-merge's help page](https://github.com/djdembeck/m4b-merge)
+## Background
 
-### Screens
+**Bragi - god of poetry in [Norse mythology](https://en.wikipedia.org/wiki/Bragi).** The name fits an application concerned with spoken books and music.
 
-Folder/file selection             |  ASIN input
-:-------------------------:|:-------------------------:
-![file-selection](../assets/screens/file_picker.png)  |  ![asin-auto-search](../assets/screens/auto_search_panel.png)
+The interface follows a **Signal Interlocking Panel**: a calm, dense work surface modeled after a railway control board. Its four stations are **Intake**, **Match**, **Queue**, and **Finish**. The person who runs the server, owns the books, and needs to see state should be able to tell what is happening without decoration or guesswork.
 
-Folder/file selection             |  Post-proccess overview
-:-------------------------:|:-------------------------:
-![asin-custom-search](../assets/screens/custom_search.png)  |  ![post-process](../assets/screens/processing_panel.png)
+## Install/Running
 
-## 🏁 Getting Started <a name = "getting_started"></a>
+Docker is the fastest way to run Bragibooks. The image includes the Go server, embedded SvelteKit frontend, `ffmpeg`, and `m4b-merge`; no host toolchain is required.
 
-You can either install this project directly or run it prepackaged in Docker.
+### Docker
 
-### Prerequisites
+Create or choose host directories for the database/configuration, input books, output books, and completed source files. Then start the pre-built image:
 
-#### Docker
-- All prerequisites are included in the image.
-
-#### Direct (Gunicorn)
-- Install [m4b-merge](https://github.com/djdembeck/m4b-merge) and its dependencies
-- Run `pip install -r requirements.txt` from this project's directory.
-
-### Installing
-
-#### Docker
-To run Bragibooks as a container, you need to pass some paramaters in the run command:
-
-| Parameter | Function | Default |
-| :----: | --- | --- |
-| `-v /path/to/input:/input` | Input folder | - |
-| `-v /path/to/output:/output` | Output folder | - |
-| `-v /appdata/bragibooks/config:/config` | Persistent config storage | - |
-| `-p 8000:8000/tcp` | Port for your browser to use | - |
-| `-e LOG_LEVEL=INFO` | Choose any [logging level](https://www.loggly.com/ultimate-guide/python-logging-basics/) | INFO |
-| `-e DEBUG=False` | Turn django debug on or off (default False) | False |
-| `-e UID=99` | User ID to run the container as | 99 |
-| `-e GID=100` | Group ID to run the container as | 100 |
-| `-e CELERY_WORKERS=1` | The number of celery workers for processing books | 1 |
-| `-e CSRF_TRUSTED_ORIGINS=https://bragibooks.mydomain.com` | Domains to trust if bragibooks is hosted behind a reverse proxy (comma-separated) | None |
-| `-e ALLOWED_HOSTS=localhost,127.0.0.1` | Comma-separated list of allowed hostnames for Django (comma-separated) | localhost,127.0.0.1 |
-| `-e BROKER_URL=sqlite:////config/db.sqlite3` | Celery broker URL for task queue | sqlite:///db.sqlite3 |
-| `-e REGION=us` | Audible API region for metadata lookup (e.g., "us", "uk", "de") | us |
-
-
-Which all together should look like:
-
-	docker run --rm -d --name bragibooks -v /path/to/input:/input -v /path/to/output:/output -v /appdata/bragibooks/config:/config -p 8000:8000/tcp -e LOG_LEVEL=WARNING ghcr.io/djdembeck/bragibooks:main
-
-## Docker Compose
-```
-version: '3'
-
-services:
-  bragi:
-    image: ghcr.io/djdembeck/bragibooks:main
-    container_name: bragibooks
-    environment:
-      - CSRF_TRUSTED_ORIGINS=https://bragibooks.mydomain.com
-      - LOG_LEVEL=INFO
-      - DEBUG=False
-      - UID=1000
-      - GID=1000
-      - ALLOWED_HOSTS=localhost,127.0.0.1,bragibooks.mydomain.com
-      - REGION=us
-      - CELERY_WORKERS=1
-    volumes:
-      - path/to/config:/config
-      - path/to/input:/input
-      # Optional: Mount separate volume for completed files
-      # - path/to/done:/input/done
-      - path/to/output:/output
-    ports:
-      - 8000:8000
-    restart: unless-stopped
+```sh
+docker run --rm -d --name bragibooks \
+  --publish 8888:8080 \
+  --volume "$PWD/config:/app/config" \
+  --volume /path/to/input:/input \
+  --volume /path/to/output:/output \
+  --volume /path/to/completed:/input/done \
+  --env SERVER_HOST=0.0.0.0 \
+  --env SERVER_PORT=8080 \
+  --env DIRECTORIES_INPUT_DIR=/input \
+  --env DIRECTORIES_OUTPUT_DIR=/output \
+  --env DIRECTORIES_COMPLETED_DIR=/input/done \
+  --env PROCESSING_REGION=us \
+  ghcr.io/djdembeck/bragibooks:main
 ```
 
+The container listens on port `8080`; the command above publishes it as `http://localhost:8888`. The mounted `/app/config` directory stores `config/config.yaml` and the SQLite database. `API_KEY_API_KEY` is optional, but setting it enables AudiobookDB requests that require an API key.
 
-#### Direct Build (Gunicorn)
-  - Copy static assets to  project folder:
-    ```
-    python manage.py collectstatic
-    ```
-  - Create the database:
-    ```
-    python manage.py migrate
-    ```
-  - Run the celery worker for processing books:
-    ```
-    celery -A bragibooks_proj worker \
-    --loglevel=info \ 
-    --concurrency 1 \
-    -E
-    ```
-  - Run the web server:
-    ```
-    gunicorn bragibooks_proj.wsgi \
-    --bind 0.0.0.0:8000 \
-    --timeout 1200 \
-    --worker-tmp-dir /dev/shm \
-    --workers=2 \
-    --threads=4 \
-    --worker-class=gthread \
-    --reload \
-    --enable-stdio-inheritance
-    ```
+A Docker Compose deployment can use the same image and mounts. The repository's [production compose file](docker/docker-compose.yml) is the reference for the container port and persistent config mount; replace its local image name with `ghcr.io/djdembeck/bragibooks:main` when running the pre-built image.
 
-## 🎈 Usage <a name="usage"></a>
+### Existing binary
 
-The Bragibooks process is a linear, 3 step process:
-1. __Select input__ - Use the file multi-select box to choose which books to process this session, and click next.
-2. __Submit ASINs__ - Bragi will auto search for the audiobook data on [Audible.com](https://www.audible.com) (US only). If the data found is incorrect you can do a custom search to find the correct title and then submit for processing.
-3. Wait for books to finish processing. This can take anywhere from 10 seconds to a few hours, depending on the number and type of files submitted. This will be done in the background.
-4. __Books page__ - Page where you can see the data assigned to each book after it has finished processing. You can also check the status of the books still being processed.
+If you already have a `bragibooks` binary, put `ffmpeg` and [`m4b-merge`](https://github.com/djdembeck/m4b-merge) on `PATH`, provide the input/output directories, and run it from the directory containing `config/config.yaml`:
 
-## 📋 Environment Variables <a name="env_vars"></a>
+```sh
+DIRECTORIES_INPUT_DIR=/path/to/input \
+DIRECTORIES_OUTPUT_DIR=/path/to/output \
+DIRECTORIES_COMPLETED_DIR=/path/to/completed \
+./bragibooks
+```
 
-All environment variables can be set in Docker with the `-e` flag or in docker-compose.
+The binary serves the web UI on `SERVER_HOST:SERVER_PORT` (port `8080` by default). See [Building](#building) for the source-build commands.
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LOG_LEVEL` | Python logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) | INFO |
-| `DEBUG` | Django debug mode (true/false) | false |
-| `UID` | User ID for running processes inside container | 99 |
-| `GID` | Group ID for running processes inside container | 100 |
-| `CELERY_WORKERS` | Number of celery worker processes for background tasks | 1 |
-| `CSRF_TRUSTED_ORIGINS` | Comma-separated list of trusted origins for CSRF protection | None |
-| `ALLOWED_HOSTS` | Comma-separated list of allowed hostnames for Django | localhost,127.0.0.1 |
-| `BROKER_URL` | Celery broker URL (Database or Redis) | sqlite:///db.sqlite3 |
-| `REGION` | Audible API region code (us, uk, de, fr, etc.) | us |
+## Usage
 
-### Production Security Headers
+The normal work is deliberately linear: **select, match, queue, finish**.
 
-When `DEBUG=False`, Bragibooks automatically enables production security headers:
-- `SECURE_SSL_REDIRECT` - Redirects HTTP to HTTPS
-- `SECURE_HSTS_SECONDS=31536000` - HSTS with 1 year max-age
-- `SECURE_HSTS_INCLUDE_SUBDOMAINS` - Include all subdomains in HSTS
-- `SECURE_HSTS_PRELOAD` - Allow HSTS preloading
-- `SECURE_CONTENT_TYPE_NOSNIFF` - Prevent MIME type sniffing
-- `X_FRAME_OPTIONS=DENY` - Prevent clickjacking
-- `CSRF_COOKIE_SECURE=True` - Secure CSRF cookies
-- `SESSION_COOKIE_SECURE=True` - Secure session cookies
+1. Start the container with the Docker command above. A compact version with explicit environment configuration is:
 
-## ⛏️ Built Using <a name = "built_using"></a>
+   ```sh
+   docker run --rm -d --name bragibooks \
+     -p 8888:8080 \
+     -v "$PWD/config:/app/config" \
+     -v /path/to/input:/input \
+     -v /path/to/output:/output \
+     -v /path/to/completed:/input/done \
+     -e SERVER_PORT=8080 \
+     -e DIRECTORIES_INPUT_DIR=/input \
+     -e DIRECTORIES_OUTPUT_DIR=/output \
+     -e DIRECTORIES_COMPLETED_DIR=/input/done \
+     -e PROCESSING_NUM_CPUS=1 \
+     -e PROCESSING_REGION=us \
+     -e API_KEY_API_KEY="${AUDIOBOOKDB_API_KEY:-}" \
+     ghcr.io/djdembeck/bragibooks:main
+   ```
 
-- [Go](https://go.dev/) - Backend runtime
-- [SvelteKit](https://svelte.dev/) - Frontend framework
-- [audiobookdb.org](https://audiobookdb.org/) - Community audiobook metadata database
-- [m4b-merge (Rust)](https://github.com/djdembeck/m4b-merge) - High-performance file merging and tagging
-- [SQLite](https://www.sqlite.org/) - Database
+2. Open [http://localhost:8888](http://localhost:8888) in a browser. You can check that the server is up first:
 
+   ```sh
+   curl http://localhost:8888/api/health
+   ```
 
-## ✍️ Authors <a name = "authors"></a>
-  <img src="https://github.com/djdembeck.png?size=100"/>
-  
-  [@djdembeck](https://github.com/djdembeck) - Idea & Initial work
+3. **Intake:** browse the mounted input directory and select one or more audiobook folders or files.
+4. **Match:** let Bragibooks search AudiobookDB, then confirm or correct the book, release, author, and narrator metadata. Custom search is available when the first match is wrong.
+5. **Queue:** submit the matched batch. Bragibooks invokes `m4b-merge` to merge, convert, clean, tag, and repackage the source files.
+6. **Finish:** follow live processing output in the browser, then review completed books and any errors. Jobs can take from seconds to hours depending on the number and type of files.
 
-## Contributors ✨
+Set `PROCESSING_REGION` to the Audible region you use for metadata lookup, such as `us`, `uk`, `de`, or `fr`. Bragibooks also accepts the legacy `REGION` environment variable as an alias.
 
-Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
+## Configuration
 
-<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
-<!-- prettier-ignore-start -->
-<!-- markdownlint-disable -->
-<table>
-  <tbody>
-    <tr>
-      <td align="center" valign="top" width="14.28%"><a href="https://koby.huckabee.dev"><img src="https://avatars.githubusercontent.com/u/14910857?v=4?s=100" width="100px;" alt="Koby Huckabee"/><br /><sub><b>Koby Huckabee</b></sub></a><br /><a href="https://github.com/djdembeck/bragibooks/commits?author=AceTugboat" title="Code">💻</a> <a href="#ideas-AceTugboat" title="Ideas, Planning, & Feedback">🤔</a> <a href="https://github.com/djdembeck/bragibooks/commits?author=AceTugboat" title="Documentation">📖</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://pilabor.com"><img src="https://avatars.githubusercontent.com/u/2050604?v=4?s=100" width="100px;" alt="Andreas"/><br /><sub><b>Andreas</b></sub></a><br /><a href="#tool-sandreas" title="Tools">🔧</a></td>
-    </tr>
-  </tbody>
-</table>
+Bragibooks reads `config/config.yaml` and falls back to environment variables. When the same setting is present in both, the YAML value takes precedence. Settings can also be changed at runtime through `PUT /api/settings`; runtime changes are persisted by the application.
 
-<!-- markdownlint-restore -->
-<!-- prettier-ignore-end -->
+The key environment variables are:
 
-<!-- ALL-CONTRIBUTORS-LIST:END -->
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `SERVER_HOST` | Address for the HTTP server | `0.0.0.0` |
+| `SERVER_PORT` | HTTP port | `8080` |
+| `DATABASE_PATH` | SQLite database path | `config/bragibooks.db` |
+| `M4B_MERGE_BINARY` | `m4b-merge` executable name or path | `m4b-merge` |
+| `API_KEY_API_KEY` | Optional AudiobookDB API key | empty |
+| `API_KEY_BASE_URL` | AudiobookDB API base URL | `https://audiobookdb.org/api` |
+| `DIRECTORIES_INPUT_DIR` | Source audiobook directory | `/input` |
+| `DIRECTORIES_OUTPUT_DIR` | Destination directory for processed books | `/output` |
+| `DIRECTORIES_COMPLETED_DIR` | Directory for completed source files | `/input/done` |
+| `PROCESSING_NUM_CPUS` | Number of processing workers | `1` |
+| `PROCESSING_PATH_FORMAT` | Output path format | `{author}/{title}` |
+| `PROCESSING_REGION` | Audible metadata region (`us`, `uk`, `de`, `fr`, and others) | `us` |
+| `PROCESSING_LOG_LEVEL` | Processing log level | `info` |
 
-This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind welcome!
+For a YAML-based setup, create `config/config.yaml` in the mounted config directory:
+
+```yaml
+server:
+  host: 0.0.0.0
+  port: 8080
+
+directories:
+  input_dir: /input
+  output_dir: /output
+  completed_dir: /input/done
+
+processing:
+  num_cpus: 1
+  path_format: "{author}/{title}"
+  region: us
+```
+
+<details>
+<summary>All configuration keys and precedence details</summary>
+
+Environment variables use the uppercase, prefixed form of the YAML path: `server.port` becomes `SERVER_PORT`, `directories.input_dir` becomes `DIRECTORIES_INPUT_DIR`, and so on. The remaining supported keys are `database.path`, `m4b_merge.binary`, `api_key.api_key`, `api_key.base_url`, `processing.log_level`, and `processing.path_format`.
+
+The configuration file is normally `config/config.yaml`; the loader also searches the working directory, `/app/data`, and `/config`. A value explicitly written in YAML overrides its environment-variable counterpart. If no YAML file exists, environment variables and defaults are used.
+
+</details>
+
+## API
+
+The web frontend uses the HTTP API below. Responses are JSON unless noted otherwise; job streams use server-sent events (SSE).
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/health` | Health and version check |
+| `GET` | `/api/directories?path=/input` | List a directory |
+| `GET` | `/api/directories/tree?path=/input` | Read a directory tree |
+| `GET` | `/api/directories/stream?path=/input` | Stream directory entries as NDJSON |
+| `GET` | `/api/books` | List books; supports status, page, and limit filters |
+| `POST` | `/api/books` | Add source book entries |
+| `GET`, `PUT`, `DELETE` | `/api/books/{id}` | Read, update, or remove a book |
+| `GET` | `/api/search?query=...&types=books&skip=0&take=20` | Search AudiobookDB |
+| `GET` | `/api/search/books/{id}` | Fetch an AudiobookDB book |
+| `GET` | `/api/search/releases/{id}` | Fetch an AudiobookDB release |
+| `POST` | `/api/process` | Queue processing for matched books |
+| `GET` | `/api/jobs` | List processing jobs |
+| `GET` | `/api/jobs/{id}` | Read job status |
+| `GET` | `/api/jobs/{id}/stream` | Stream live job output over SSE |
+| `GET`, `PUT` | `/api/settings` | Read or update runtime settings |
+| `POST` | `/api/migrate` | Migrate a legacy database |
+| `POST` | `/api/migrate/people` | Recover people from a legacy database |
+
+For example, monitor a queued job without opening the web UI:
+
+```sh
+curl -N http://localhost:8888/api/jobs/<job-id>/stream
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow, bug reports, enhancement proposals, and style guidance.
+
+Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). Feature work normally targets `develop`; releases are made from `main`. The CI pipeline checks formatting, vetting, module tidiness, frontend type checks, builds, and tests.
+
+## Building
+
+Building from source requires Go 1.25, [Bun](https://bun.sh/), and the runtime dependencies `ffmpeg` and [`m4b-merge`](https://github.com/djdembeck/m4b-merge). The production build embeds the SvelteKit frontend in the Go binary.
+
+### Make
+
+The repository's standard build is:
+
+```sh
+make build
+./bragibooks
+```
+
+`make build` installs the locked frontend dependencies, builds `web/`, copies the result into `webfs/build/`, and compiles the server with the `webui` build tag.
+
+### Explicit build steps
+
+The equivalent commands are:
+
+```sh
+cd web
+bun install --frozen-lockfile
+bun run build
+cd ..
+rm -rf webfs/build
+cp -r web/build webfs/build
+go build -tags webui -ldflags="-s -w" -o bragibooks ./cmd/bragibooks
+```
+
+### Build a Docker image
+
+The root [Dockerfile](Dockerfile) builds the SvelteKit frontend, embeds it in a statically compiled Go binary, and creates a Debian runtime image with `ffmpeg` and `m4b-merge`:
+
+```sh
+docker build -t bragibooks:local .
+docker run --rm -p 8888:8080 \
+  -v "$PWD/config:/app/config" \
+  -v /path/to/input:/input \
+  -v /path/to/output:/output \
+  bragibooks:local
+```
+
+### Development
+
+For backend hot reload with `air`, run:
+
+```sh
+make watch
+```
+
+For the complete two-service development environment, use the development compose file. It runs the Go backend on port `8080` and the Vite frontend on port `5175`:
+
+```sh
+docker compose -f docker/docker-compose.dev.yml up --build
+```
+
+Open [http://localhost:5175](http://localhost:5175) while the development stack is running. The Vite server proxies `/api` requests to the Go backend.
+
+## Maintainers
+
+- [@djdembeck](https://github.com/djdembeck) — idea and initial work
+
+Contributors are recorded using the [all-contributors](https://allcontributors.org/) specification:
+
+- [Koby Huckabee](https://koby.huckabee.dev) (`AceTugboat`) — code, ideas/planning/feedback, and documentation
+- [Andreas](https://pilabor.com) (`sandreas`) — tools
+
+Release notes are maintained in [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+[GPL-3.0-only](LICENSE) — GNU General Public License v3.
