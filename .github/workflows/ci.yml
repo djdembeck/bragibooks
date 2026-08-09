@@ -48,6 +48,9 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
+      - name: Install web dependencies
+        run: cd web && bun install --frozen-lockfile
+
       - name: Svelte type check
         run: cd web && bun run check
 
