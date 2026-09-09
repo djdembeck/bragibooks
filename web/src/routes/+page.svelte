@@ -1,23 +1,25 @@
 <script lang="ts">
 	import { get } from '$lib/api';
-	import type { BookWithPeople, BooksListResponse } from '$lib/types';
+	import type { BookWithPeople, BooksListResponse, JobsListResponse, ProcessingJob } from '$lib/types';
 	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, Button } from '$lib/components';
-	import { formatRuntime } from '$lib/types';
+	import { formatRuntime, bookCoverUrl } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
 	let totals = $state({ pending: 0, matched: 0, processing: 0, done: 0, error: 0 });
 	let recent: BookWithPeople[] = $state([]);
+	let jobs: ProcessingJob[] = $state([]);
 	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 
 	async function load() {
 		await dl.run(async () => {
-			const [pending, matched, processing, done, err, recentResp] = await Promise.all([
+			const [pending, matched, processing, done, err, recentResp, jobsResp] = await Promise.all([
 				get<BooksListResponse>('/books?status=pending&limit=1'),
 				get<BooksListResponse>('/books?status=matched&limit=1'),
 				get<BooksListResponse>('/books?status=processing&limit=1'),
 				get<BooksListResponse>('/books?status=done&limit=1'),
 				get<BooksListResponse>('/books?status=error&limit=1'),
 				get<BooksListResponse>('/books?limit=5'),
+				get<JobsListResponse>('/jobs?limit=20'),
 			]);
 			totals = {
 				pending: pending.total,
@@ -27,6 +29,7 @@
 				error: err.total,
 			};
 			recent = recentResp.books || [];
+			jobs = jobsResp.jobs || [];
 		});
 	}
 
@@ -34,7 +37,7 @@
 		load();
 	});
 
-	// ── Workflow rail stations with live counts ──
+	// ── Workflow bay counts ──
 	// Safe numeric defaults — never display NaN if API data is missing
 	const safePending = $derived(typeof totals.pending === 'number' ? totals.pending : 0);
 	const safeMatched = $derived(typeof totals.matched === 'number' ? totals.matched : 0);
@@ -42,7 +45,12 @@
 	const safeDone = $derived(typeof totals.done === 'number' ? totals.done : 0);
 	const safeErrors = $derived(typeof totals.error === 'number' ? totals.error : 0);
 
-	const stations = $derived([
+	// ── Bay status lights ──
+	// idle = no work in bay, active = work in flight, error = failures, done = settled output
+	const queueRunning = $derived(jobs.some((j) => j.status === 'running' || j.status === 'queued'));
+	const queueError = $derived(jobs.some((j) => j.status === 'error'));
+
+	const bays = $derived([
 		{
 			id: 'intake',
 			label: 'INTAKE',
@@ -50,6 +58,7 @@
 			count: safePending,
 			href: '/import',
 			description: 'Pending import',
+			state: safePending > 0 ? ('active' as const) : ('idle' as const),
 		},
 		{
 			id: 'match',
@@ -58,7 +67,7 @@
 			count: safeMatched,
 			href: '/match',
 			description: 'Metadata review & pairing',
-			active: safeMatched > 0,
+			state: safeMatched > 0 ? ('active' as const) : safeErrors > 0 ? ('error' as const) : ('idle' as const),
 		},
 		{
 			id: 'queue',
@@ -67,7 +76,12 @@
 			count: safeProcessing,
 			href: '/process',
 			description: 'Processing & conversion',
-			active: safeProcessing > 0,
+			state:
+				queueRunning || safeProcessing > 0
+					? ('active' as const)
+					: queueError
+						? ('error' as const)
+						: ('idle' as const),
 		},
 		{
 			id: 'finish',
@@ -76,7 +90,7 @@
 			count: safeDone,
 			href: '/books?status=done',
 			description: 'Completed library',
-			done: true,
+			state: safeDone > 0 ? ('done' as const) : ('idle' as const),
 		},
 	]);
 </script>
@@ -89,109 +103,99 @@
 	</div>
 {/if}
 
-<!-- ── Workflow Rail ─────────────────────────────────────────── -->
+<!-- ── Workflow Bays ─────────────────────────────────────────── -->
 {#if dl.showSkeleton}
-	<div class="mb-8" aria-label="Workflow rail loading">
-		<div class="flex items-center gap-0 overflow-x-auto pb-1">
+	<div class="mb-8" aria-label="Workflow bays loading">
+		<div class="grid grid-cols-2 gap-[3px] overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--rail-line)] lg:grid-cols-4">
 			{#each Array(4) as _}
-				<div class="flex-shrink-0 flex items-center gap-0">
-					{#if _ > 0}
-						<div class="h-0.5 w-4 sm:w-8 bg-[var(--border)]" aria-hidden="true"></div>
-					{/if}
-					<div class="card px-3 py-2 sm:px-4 sm:py-3">
-						<Skeleton height="0.5rem" width="2.5rem" />
-						<Skeleton class="mt-2" height="1.25rem" width="2rem" />
-					</div>
+				<div class="bg-[var(--bg-panel)] p-4 sm:p-5">
+					<Skeleton height="0.75rem" width="2.5rem" />
+					<Skeleton class="mt-3" height="2rem" width="3.5rem" />
+					<Skeleton class="mt-3" height="0.75rem" width="60%" />
 				</div>
 			{/each}
 		</div>
 	</div>
 {:else}
 	<!--
-		Signal Interlocking Panel — Workflow Rail
-		Contract: stations render as orthogonal panels linked by rails.
-		Each station has: number (#NN), label, live count, link target.
-		Narrow screens: horizontal scroll is permitted; station order is fixed.
+		Operator Instrument — Workflow Bays
+		Contract: four full-width bays on a continuous tape-path rail.
+		Each bay: number (#NN), uppercase label, hero live count (mono),
+		status light (fill + text, never color alone), description.
+		Narrow screens: 2x2 grid; wide: 4-across.
 	-->
 	<div
 		class="mb-8"
 		role="navigation"
-		aria-label="Workflow stations: {stations.map(s => `${s.station} ${s.label}`).join(', ')}"
+		aria-label="Workflow stations: {bays.map(s => `${s.station} ${s.label}`).join(', ')}"
 	>
-		<!-- Rail track line -->
-		<div class="relative flex items-stretch overflow-x-auto pb-1">
-			<!-- Background rail line (full width behind stations) -->
-			<div class="absolute left-0 top-1/2 -z-10 h-0.5 w-full bg-[var(--border-subtle)] -translate-y-1/2" aria-hidden="true"></div>
+		<!-- Tape-path rail: the grid's rail-line background shows through the
+		     3px gaps as a continuous groove connecting all four bays. -->
+		<div
+			class="grid grid-cols-2 gap-[3px] overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--rail-line)] lg:grid-cols-4"
+		>
+			{#each bays as bay (bay.id)}
+				<a
+					href={bay.href}
+					class={`group relative flex min-h-[7rem] flex-col justify-between gap-3 p-4 no-underline transition-colors sm:p-5 lg:min-h-[8rem] ${
+						bay.state === 'active' ? 'bg-[var(--state-amber-bg)]' :
+						bay.state === 'error' ? 'bg-[var(--state-red-bg)]' :
+						bay.state === 'done' ? 'bg-[var(--state-green-bg)]' :
+						'bg-[var(--bg-panel)] hover:bg-[var(--surface)]'
+					}`}
+					aria-label="{bay.station} {bay.label}: {bay.count} items, {bay.state}. {bay.description}"
+				>
+					<!-- Bay header: number + label -->
+					<div class="flex items-center gap-2">
+						<span class="font-mono text-xs tracking-widest text-[var(--text-muted)]">
+							{bay.station}
+						</span>
+						<span class="text-xs font-semibold tracking-wide text-[var(--text)]">
+							{bay.label}
+						</span>
+					</div>
 
-			{#each stations as station (station.id)}
-				<div class="flex items-center flex-shrink-0">
-					<!-- Rail segment connector -->
-					{#if station.id !== 'intake'}
-						<div
-							class="h-0.5 w-4 sm:w-8 flex-shrink-0"
-							class:bg-[var(--border)]={!station.active}
-							class:bg-[var(--state-amber)]={station.active}
-							aria-hidden="true"
-						></div>
-					{/if}
-
-					<!-- Station panel -->
-					<a
-						href={station.href}
-						class={`card group inline-flex min-w-[5rem] sm:min-w-[7rem] flex-col items-center gap-1 px-3 py-2 text-center no-underline sm:px-4 sm:py-3 ${station.active ? 'border-[var(--state-amber)]/40' : ''} ${station.done ? 'border-[var(--state-green)]/40' : ''}`}
-						aria-label="{station.station} {station.label}: {station.count} items. {station.description}"
+					<!-- Hero live count -->
+					<span
+						class="font-mono text-3xl font-semibold leading-none tracking-tight text-[var(--enamel)] sm:text-4xl"
+						aria-label="{bay.count} items"
 					>
-						<!-- Station number — monospace, always visible -->
-						<span class="text-xs font-mono tracking-widest text-[var(--text-muted)]">
-							{station.station}
-						</span>
+						{bay.count}
+					</span>
 
-						<!-- Station label — uppercase, compact -->
-						<span class="text-xs font-semibold tracking-wide text-[var(--text)] sm:text-sm">
-							{station.label}
-						</span>
-
-						<!-- Live count — monospace, integrated into station -->
-						<span
-							class="text-lg font-mono font-semibold leading-none tracking-tight sm:text-xl"
-							class:text-[var(--state-amber)]={station.active}
-							class:text-[var(--state-green)]={station.done}
-							class:text-[var(--text)]={!station.active && !station.done}
-							aria-label="{station.count} items"
-						>
-							{station.count}
-						</span>
-
-						<!-- Description — visible on wider screens -->
-						<span class="hidden text-[0.65rem] text-[var(--text-muted)] sm:block">
-							{station.description}
-						</span>
-
-						<!-- Active station pulse indicator -->
-						{#if station.active}
+					<!-- Footer: status light (fill + text, never color alone) + description -->
+					<div class="space-y-1.5">
+						<div class="flex items-center gap-2">
 							<span
-								class="absolute -right-0.5 -top-0.5 flex h-2 w-2"
+								class="h-2 w-2 flex-shrink-0 rounded-sm border border-[var(--border-strong)]"
+								class:bg-[var(--border)]={bay.state === 'idle'}
+								class:bg-[var(--state-amber)]={bay.state === 'active'}
+								class:bg-[var(--state-red)]={bay.state === 'error'}
+								class:bg-[var(--state-green)]={bay.state === 'done'}
 								aria-hidden="true"
-							>
-								<span
-									class="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--state-amber)]/50"
-								></span>
-								<span
-									class="relative inline-flex h-2 w-2 rounded-full bg-[var(--state-amber)]"
-								></span>
+							></span>
+							<span class="text-xs font-medium text-[var(--text-muted)]">
+								{bay.state === 'idle'
+									? 'idle'
+									: bay.state === 'active'
+										? 'active'
+										: bay.state === 'error'
+											? 'error'
+											: 'done'}
 							</span>
-						{/if}
-					</a>
-				</div>
+						</div>
+						<span class="block text-xs text-[var(--text-muted)]">{bay.description}</span>
+					</div>
+				</a>
 			{/each}
 		</div>
 	</div>
 {/if}
 
-<!-- ── Continuation Actions ──────────────────────────────────── -->
-<div class="mb-4 flex flex-wrap items-center gap-2">
-	<Button variant="secondary" href="/import">Import</Button>
-	<Button variant="primary" href="/match">Match</Button>
+<!-- ── Continuation Actions (subordinate to the bays) ─────────── -->
+<div class="mb-6 flex flex-wrap items-center gap-2">
+	<Button variant="ghost" href="/import">Import books</Button>
+	<Button variant="secondary" href="/match">Match metadata</Button>
 	{#if safeErrors > 0}
 		<a href="/books?status=error" class="ml-auto inline-flex items-center gap-1.5 rounded-md px-3 py-2.5 text-sm font-medium text-[var(--error)] no-underline hover:opacity-80 min-h-[44px] whitespace-nowrap">
 			<span>{safeErrors} error{#if safeErrors !== 1}s{/if} — view errors</span>
@@ -229,12 +233,12 @@
 	<div class="space-y-2" aria-label="Recent books manifest">
 		{#each recent as book (book.id)}
 			<a
-				href="/books?status={book.status}"
+				href="/books/{book.id}"
 				class="card group flex items-center gap-4 no-underline transition-colors hover:bg-[var(--surface-hover)]"
 			>
 				{#if book.cover_image_url}
 					<img
-						src={book.cover_image_url}
+						src={bookCoverUrl(book.cover_image_url, 'small')}
 						alt=""
 						loading="lazy"
 						decoding="async"

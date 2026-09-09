@@ -165,6 +165,12 @@ export interface AudiobookDBBook {
 	id: string;
 	title: string;
 	description: string | null;
+	/**
+	 * Search-hit payloads carry a single preselected cover (`image`,
+	 * absolute CDN URL) instead of the `images[]` array that detail
+	 * payloads include. Both fields are optional in practice.
+	 */
+	image?: { url: string; width: number; height: number; blurdata?: string } | null;
 	disambiguation: string | null;
 	type?: string;
 	originallyPublishedAt?: string;
@@ -215,17 +221,44 @@ export function formatRuntime(minutes: number): string {
 	return `${h}h ${m}m`;
 }
 
+/**
+ * Book cover URL at the right derivative size for where it renders.
+ *
+ * ADB cover URLs are storage keys — fetching as-is 404s; append a
+ * derivative per the API docs (small 192 / medium 384 / large 768 /
+ * detail 1200, .jpg or .webp). If the URL already carries a derivative,
+ * it is swapped for the requested one. Anything that is not an ADB
+ * storage key (local `/covers/…`, absolute non-CDN images) passes
+ * through untouched.
+ */
+const ADB_COVER_RE = /\/(small|medium|large|detail)\.(jpg|webp)$/i;
+
+export function adbCoverUrl(url: string | null | undefined, size: 'small' | 'medium' | 'large' | 'detail' = 'medium'): string {
+	if (!url) return '';
+	// Derivative-ready ADB key: swap the size suffix. Covers bare keys
+	// (no extension yet) and already-sized ones.
+	if (/\/[a-f0-9]{16,}$/i.test(url) || ADB_COVER_RE.test(url)) {
+		return url.replace(ADB_COVER_RE, '') + `/${size}.jpg`;
+	}
+	// Local asset or foreign absolute URL — render as-is.
+	return url;
+}
+
+/**
+ * Preselected search-hit cover (books carry `image` in hit payloads,
+ * `images[]` in detail payloads).
+ */
+export function hitCoverUrl(image: { url: string } | null | undefined, size: 'small' | 'medium' | 'large' | 'detail' = 'small'): string {
+	return adbCoverUrl(image?.url, size);
+}
+
 export function pickCover(images: AudiobookDBImage[] | undefined): string {
 	if (!images || images.length === 0) return '';
 	// Prefer the largest image that isn't absurdly huge.
 	const img = [...images]
 		.sort((a, b) => (b.width || 0) - (a.width || 0))
 		.find((img) => (img.width || 0) <= 1200) || images[0];
-	// Image URLs from audiobookdb need a size suffix to resolve.
-	if (img.url && !img.url.match(/\/\d+x\d+$|^.*\/original$/)) {
-		return img.url + '/750x750';
-	}
-	return img.url;
+	return adbCoverUrl(img.url, 'medium');
 }
 
 export function extractAsin(external: AudiobookDBExternal[] | undefined): string | null {
@@ -248,4 +281,64 @@ export function peopleByRole(
 	return people
 		.filter((p) => p.role.name.toLowerCase() === role.toLowerCase())
 		.map((p) => ({ name: p.person.name, audiobookdb_person_id: p.person.id || null }));
+}
+
+/**
+ * Normalize a raw API book payload (which may contain sql.Null* wrappers)
+ * into a BookWithPeople with plain values.
+ */
+export function normalizeBook(raw: unknown): BookWithPeople {
+	const r = raw as Record<string, unknown>;
+	const unwrap = (v: unknown): string | null => {
+		if (v == null) return null;
+		if (typeof v === 'object' && 'String' in (v as Record<string, unknown>)) {
+			const w = v as { String: string; Valid: boolean };
+			return w.Valid ? w.String : null;
+		}
+		return v as string;
+	};
+	const unwrapNum = (v: unknown): number =>
+		typeof v === 'number' ? v : Number(v) || 0;
+	const str = (v: unknown): string => unwrap(v) ?? '';
+	const people = (Array.isArray(r.authors) ? r.authors : [])
+		.concat(Array.isArray(r.narrators) ? r.narrators : []);
+	const toPerson = (p: Record<string, unknown>): Person => ({
+		id: unwrapNum(p.id),
+		book_id: unwrapNum(p.book_id),
+		name: String(p.name ?? ''),
+		role: p.role === 'narrator' ? 'narrator' : 'author',
+		audiobookdb_person_id: unwrap(p.audiobookdb_person_id),
+		created_at: String(p.created_at ?? ''),
+	});
+	return {
+		id: unwrapNum(r.id),
+		title: String(r.title ?? ''),
+		asin: unwrap(r.asin),
+		audiobookdb_book_id: unwrap(r.audiobookdb_book_id),
+		audiobookdb_release_id: unwrap(r.audiobookdb_release_id),
+		description: str(r.description),
+		release_date: str(r.release_date),
+		series: str(r.series),
+		publisher: str(r.publisher),
+		language: str(r.language),
+		runtime_length_minutes: unwrapNum(r.runtime_length_minutes),
+		format_type: str(r.format_type),
+		src_path: str(r.src_path),
+		dest_path: str(r.dest_path),
+		status: (str(r.status) || 'pending') as BookWithPeople['status'],
+		status_message: str(r.status_message),
+		cover_image_url: str(r.cover_image_url),
+		created_at: str(r.created_at),
+		updated_at: str(r.updated_at),
+		authors: people.filter((p) => p.role === 'author').map(toPerson),
+		narrators: people.filter((p) => p.role === 'narrator').map(toPerson),
+	};
+}
+
+/**
+ * Cover for a stored book record: local `/covers/…` passes through,
+ * ADB-stored keys get the requested derivative.
+ */
+export function bookCoverUrl(url: string | null | undefined, size: 'small' | 'medium' | 'large' | 'detail' = 'medium'): string {
+	return adbCoverUrl(url, size);
 }

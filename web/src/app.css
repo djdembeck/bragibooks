@@ -77,6 +77,14 @@
 		--accent-text: oklch(0.24 0.015 75);
 		--accent-wash: oklch(0.82 0.18 78 / 0.08);
 
+		/* ── Provenance (not a status, not an action) ────────────
+		 * ADB magenta — marks data sourced from AudiobookDB.
+		 * Always paired with a text label; never decorative.     */
+
+		--provenance: oklch(0.72 0.19 330);
+		--provenance-bg: oklch(0.72 0.19 330 / 0.10);
+		--provenance-border: oklch(0.72 0.19 330 / 0.30);
+
 		/* ── Focus ─────────────────────────────────────────────── */
 		--focus-ring: oklch(0.82 0.18 78 / 0.6);
 
@@ -570,6 +578,41 @@
 			animation: none;
 			background: var(--elevated);
 		}
+	}
+
+	/* ── ADB provenance tag — AudiobookDB data marks ────────────
+	 * Magenta provenance token; ALWAYS text + mark, never color
+	 * alone. Used on matched metadata, book records, ADB diff.  */
+	.abd-tag {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.375rem;
+		padding: 0.125rem 0.5rem;
+		border-radius: var(--radius-sm);
+		background: var(--provenance-bg);
+		border: 1px solid var(--provenance-border);
+		color: var(--provenance);
+		font-size: 0.75rem;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		text-decoration: none;
+		white-space: nowrap;
+	}
+
+	.abd-tag:hover {
+		text-decoration: none;
+		border-color: var(--provenance);
+	}
+
+	.abd-tag__mark {
+		font-weight: 700;
+	}
+
+	.abd-tag__label {
+		color: var(--text-secondary);
+		text-transform: none;
+		letter-spacing: normal;
 	}
 
 	/* ── Rail — workflow interlocking line ────────────────────── */

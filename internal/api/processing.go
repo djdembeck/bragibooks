@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -328,8 +329,9 @@ type ListJobsResponse struct {
 	Jobs []map[string]any `json:"jobs"`
 }
 
-// ListJobs handles GET /api/jobs?limit=N.
+// ListJobs handles GET /api/jobs?limit=N&book_id=B.
 // Returns recent jobs newest-first with clean JSON matching the single-job contract.
+// When book_id is present and positive, only that book's jobs are returned.
 func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 	limit := parseIntQueryParam(r, "limit", 20)
 	if limit <= 0 {
@@ -339,10 +341,22 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 		limit = 100
 	}
 
-	rows, err := h.svc.DB.Query(
-		"SELECT id, book_id, status, output, error, output_file, started_at, completed_at, created_at FROM processing_jobs ORDER BY created_at DESC LIMIT ?",
-		limit,
-	)
+	var bookID int64
+	if v, ok := r.URL.Query()["book_id"]; ok && len(v) > 0 {
+		// Non-numeric values are treated as absent for tolerance.
+		bookID, _ = strconv.ParseInt(v[0], 10, 64)
+	}
+
+	query := "SELECT id, book_id, status, output, error, output_file, started_at, completed_at, created_at FROM processing_jobs"
+	args := make([]any, 0, 2)
+	if bookID > 0 {
+		query += " WHERE book_id = ?"
+		args = append(args, bookID)
+	}
+	query += " ORDER BY created_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := h.svc.DB.Query(query, args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("query jobs: %v", err))
 		return

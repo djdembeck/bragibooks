@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { get, post, streamEvents } from '$lib/api';
 	import type { BookWithPeople, BooksListResponse, ProcessingResponse, ProcessingJob, JobsListResponse } from '$lib/types';
+	import { bookCoverUrl } from '$lib/types';
 	import { PageHeader, Button, Alert, Skeleton, EmptyState, StatusBadge } from '$lib/components';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 	import { CheckCircle, Clock, AlertTriangle } from '@lucide/svelte';
@@ -303,7 +304,7 @@
 					</div>
 					<div class="manifest-row__cover">
 						{#if book.cover_image_url}
-							<img src={book.cover_image_url} alt="" class="manifest-row__cover-img" />
+							<img src={bookCoverUrl(book.cover_image_url, 'small')} alt="" class="manifest-row__cover-img" />
 						{:else}
 							<div class="manifest-row__cover-placeholder" aria-hidden="true">—</div>
 						{/if}
@@ -347,7 +348,7 @@
 					</div>
 					<div class="manifest-row__cover">
 						{#if book.cover_image_url}
-							<img src={book.cover_image_url} alt="" class="manifest-row__cover-img" />
+							<img src={bookCoverUrl(book.cover_image_url, 'small')} alt="" class="manifest-row__cover-img" />
 						{:else}
 							<div class="manifest-row__cover-placeholder" aria-hidden="true">—</div>
 						{/if}
@@ -740,7 +741,7 @@
 		}
 	}
 
-	/* Narrow screens */
+	/* Narrow screens — compact rows, never hide state */
 	@media (max-width: 640px) {
 		.bay__controls {
 			flex-direction: column;
@@ -752,11 +753,19 @@
 		}
 
 		.manifest-row__cover {
-			display: none;
+			width: 2.25rem;
+			min-width: 2.25rem;
+			height: 3.25rem;
+		}
+
+		.manifest-row__cover-img,
+		.manifest-row__cover-placeholder {
+			height: 3.25rem;
+			object-fit: cover;
 		}
 
 		.manifest-row__status-text {
-			display: none;
+			font-size: 0.6875rem;
 		}
 
 		.job-cell__header {

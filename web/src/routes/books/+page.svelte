@@ -4,7 +4,7 @@ import { goto } from '$app/navigation';
 import { page as pageStore } from '$app/stores';
 	import type { BookWithPeople, BooksListResponse } from '$lib/types';
 	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, Button } from '$lib/components';
-	import { formatRuntime } from '$lib/types';
+	import { formatRuntime, bookCoverUrl } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
 	const limit = 20;
@@ -177,7 +177,7 @@ import { page as pageStore } from '$app/stores';
 				<!-- Cover thumbnail or placeholder -->
 				{#if book.cover_image_url}
 					<img
-						src={book.cover_image_url}
+						src={bookCoverUrl(book.cover_image_url, 'small')}
 						alt=""
 						loading="lazy"
 						decoding="async"

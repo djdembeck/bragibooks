@@ -186,7 +186,7 @@ The web frontend uses the HTTP API below. Responses are JSON unless noted otherw
 | `GET` | `/api/search/books/{id}` | Fetch an AudiobookDB book |
 | `GET` | `/api/search/releases/{id}` | Fetch an AudiobookDB release |
 | `POST` | `/api/process` | Queue processing for matched books |
-| `GET` | `/api/jobs` | List processing jobs |
+| `GET` | `/api/jobs?book_id=...` | List processing jobs, optionally filtered to one book |
 | `GET` | `/api/jobs/{id}` | Read job status |
 | `GET` | `/api/jobs/{id}/stream` | Stream live job output over SSE |
 | `GET`, `PUT` | `/api/settings` | Read or update runtime settings |
