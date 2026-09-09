@@ -22,16 +22,6 @@
 	});
 
 	// Client-side validation helpers
-	function validateUrl(value: string): string | null {
-		if (!value) return null; // optional field
-		try {
-			new URL(value);
-			return null;
-		} catch {
-			return 'Must be a valid URL (e.g. https://audiobookdb.org/api)';
-		}
-	}
-
 	function validateNonNegativeInt(value: number): string | null {
 		if (value < 0) return 'Must be zero or greater';
 		return null;
@@ -48,7 +38,6 @@
 	const inputDirDescId = $derived(fieldErrors.input_dir ? 'input_dir_desc_err' : 'input_dir_desc');
 	const outputDirDescId = $derived(fieldErrors.output_dir ? 'output_dir_desc_err' : 'output_dir_desc');
 	const numCpusDescId = $derived(fieldErrors.num_cpus ? 'num_cpus_desc_err' : 'num_cpus_desc');
-	const apiBaseDescId = $derived(fieldErrors.audiobookdb_base_url ? 'audiobookdb_base_url_desc_err' : 'audiobookdb_base_url_desc');
 
 	function runValidation(): boolean {
 		if (!settings) return false;
@@ -63,9 +52,6 @@
 
 		const cpusErr = validateNonNegativeInt(settings.num_cpus);
 		if (cpusErr) { fieldErrors.num_cpus = cpusErr; valid = false; }
-
-		const urlErr = validateUrl(settings.audiobookdb_base_url ?? '');
-		if (urlErr) { fieldErrors.audiobookdb_base_url = urlErr; valid = false; }
 
 		return valid;
 	}
@@ -228,19 +214,9 @@
 		<div class="cabinet__panel">
 			<div class="cabinet__panel-header">
 				<span class="cabinet__panel-label">C</span>
-				<span class="cabinet__panel-title">API &amp; Region</span>
+				<span class="cabinet__panel-title">AudiobookDB</span>
 			</div>
 			<div class="cabinet__grid">
-				<div class="cabinet__field">
-					<label for="region" class="cabinet__label">Region</label>
-					<select id="region" bind:value={settings.region}>
-						<option value="us">US</option>
-						<option value="uk">UK</option>
-						<option value="ca">CA</option>
-						<option value="au">AU</option>
-					</select>
-				</div>
-
 				<div class="cabinet__field">
 					<label for="audiobookdb_api_key" class="cabinet__label">AudiobookDB API key</label>
 					<input id="audiobookdb_api_key" type="password" bind:value={settings.audiobookdb_api_key} placeholder="Optional" />
@@ -265,21 +241,6 @@
 					</details>
 				</div>
 
-				<div class="cabinet__field cabinet__field--wide">
-					<label for="audiobookdb_base_url" class="cabinet__label">AudiobookDB API URL</label>
-					<input
-						id="audiobookdb_base_url"
-						type="url"
-						bind:value={settings.audiobookdb_base_url}
-						placeholder="https://audiobookdb.org/api"
-						aria-invalid={!!fieldErrors.audiobookdb_base_url}
-						aria-describedby={apiBaseDescId}
-					/>
-					<p id="audiobookdb_base_url_desc" class="cabinet__help">Base URL for the AudiobookDB API endpoint.</p>
-					{#if fieldErrors.audiobookdb_base_url}
-						<p id="audiobookdb_base_url_desc_err" class="cabinet__field-error" role="alert">{fieldErrors.audiobookdb_base_url}</p>
-					{/if}
-				</div>
 			</div>
 		</div>
 
@@ -427,16 +388,6 @@
 		border-left: 1px solid var(--border-subtle);
 	}
 
-	.cabinet__field--wide {
-		grid-column: 1 / -1;
-	}
-
-	@media (min-width: 640px) {
-		.cabinet__field--wide {
-			grid-column: 1 / -1;
-			border-left: none;
-		}
-	}
 
 	.cabinet__label {
 		display: block;
