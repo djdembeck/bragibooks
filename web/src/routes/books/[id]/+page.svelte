@@ -125,6 +125,12 @@
 		}
 	}
 
+	/** Seed data stores the literal word 'Unknown'; present it as the
+	 *  honest muted label it is, not as if it were a real publisher. */
+	function isUnknownLiteral(v: string): boolean {
+		return v.trim().toLowerCase() === 'unknown';
+	}
+
 	// Errors walk through the central ADB cleaner — human sentences out,
 	// raw payload available for the details expander.
 	function cleanApiError(e: unknown): CleanedAdbError {
@@ -228,7 +234,8 @@
 				<div class="detail__badges">
 					<StatusBadge status={book.status} />
 					{#if book.audiobookdb_book_id}
-						<AbdTag withLabel />
+						<!-- Single provenance mark — clickable, links to the record -->
+						<AbdTag withLabel href={abdHref ?? undefined} />
 					{/if}
 				</div>
 				{#if book.status_message}
@@ -246,30 +253,20 @@
 				{authorNames || 'Unknown author'}{#if narratorNames} · narrated by {narratorNames}{/if}
 			</p>
 
-			{#if abdHref}
-				<p class="detail__abd">
-					<AbdTag withLabel />
-					<a href={abdHref} target="_blank" rel="noopener noreferrer" class="detail__abd-link">
-						View on AudiobookDB
-						<ExternalLink class="h-3.5 w-3.5" aria-hidden="true" />
-					</a>
-				</p>
-			{/if}
-
 			<dl class="detail__meta">
 				<!-- 'Unknown' is shown ONLY for authors/narrators; every other field is omitted when empty -->
 				<div class="detail__meta-row">
 					<dt class="detail__meta-label">Authors</dt>
-					<dd class="detail__meta-value">{authorNames || 'Unknown'}</dd>
+					<dd class="detail__meta-value" class:detail__meta-value--unknown={isUnknownLiteral(authorNames || 'Unknown')}>{authorNames || 'Unknown'}</dd>
 				</div>
 				<div class="detail__meta-row">
 					<dt class="detail__meta-label">Narrators</dt>
-					<dd class="detail__meta-value">{narratorNames || 'Unknown'}</dd>
+					<dd class="detail__meta-value" class:detail__meta-value--unknown={isUnknownLiteral(narratorNames || 'Unknown')}>{narratorNames || 'Unknown'}</dd>
 				</div>
 				{#if book.publisher}
 					<div class="detail__meta-row">
 						<dt class="detail__meta-label">Publisher</dt>
-						<dd class="detail__meta-value">{book.publisher}</dd>
+						<dd class="detail__meta-value" class:detail__meta-value--unknown={isUnknownLiteral(book.publisher)}>{book.publisher}</dd>
 					</div>
 				{/if}
 				{#if book.release_date}
@@ -560,10 +557,10 @@
 	}
 
 	.detail__cover {
-		max-height: 240px;
+		max-height: 260px;
 		max-width: 100%;
 		width: auto;
-		aspect-ratio: 2 / 3;
+		aspect-ratio: 1 / 1;
 		object-fit: cover;
 		border-radius: var(--radius-md);
 		border: 1px solid var(--border);
@@ -633,29 +630,6 @@
 		font-style: italic;
 	}
 
-	.detail__abd {
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-		flex-wrap: wrap;
-		margin: 0.75rem 0 0;
-	}
-
-	.detail__abd-link {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.3rem;
-		font-size: 0.85rem;
-		font-weight: 600;
-		color: var(--accent);
-		text-decoration: underline;
-		text-underline-offset: 2px;
-	}
-
-	.detail__abd-link:hover {
-		color: var(--accent-hover);
-	}
-
 	/* Metadata grid — silkscreen labels, values are the data */
 	.detail__meta {
 		margin: 1.25rem 0 0;
@@ -677,6 +651,11 @@
 		font-size: 0.9rem;
 		color: var(--text);
 		overflow-wrap: anywhere;
+	}
+
+	.detail__meta-value--unknown {
+		color: var(--text-muted);
+		font-style: italic;
 	}
 
 	/* Paths — mono readouts, long paths wrap */

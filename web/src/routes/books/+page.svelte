@@ -170,10 +170,14 @@ import { page as pageStore } from '$app/stores';
 		actionHref="/import"
 	/>
 {:else}
-	<!-- Dense catalog manifest — book rows with explicit status -->
+	<!-- Dense catalog manifest — whole card links to the book's workbench -->
 	<div class="space-y-2" role="list" aria-label="Book catalog manifest">
 		{#each response.books as book (book.id)}
-			<div class="card flex items-center gap-4" role="listitem">
+			<a
+				href="/books/{book.id}"
+				class="card flex items-center gap-4 no-underline transition-colors hover:bg-[var(--surface-hover)]"
+				aria-label="{book.title} — open record"
+			>
 				<!-- Cover thumbnail or placeholder -->
 				{#if book.cover_image_url}
 					<img
@@ -211,7 +215,7 @@ import { page as pageStore } from '$app/stores';
 
 				<!-- Status badge — text + shape + color -->
 				<StatusBadge status={book.status} />
-			</div>
+			</a>
 		{/each}
 	</div>
 
