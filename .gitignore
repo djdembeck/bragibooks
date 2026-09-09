@@ -23,3 +23,5 @@ docker/config/*.db-shm
 # Local dev fixtures and runtime artifacts
 /dev/
 /web/static/covers/
+# Runtime databases and legacy backups under docker config
+docker/config/
