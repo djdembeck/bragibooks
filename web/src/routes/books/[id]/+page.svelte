@@ -4,6 +4,7 @@
 	import type { PageData } from './$types';
 	import type { BookWithPeople, ProcessingJob, JobsListResponse, AudiobookDBBook, AudiobookDBRelease } from '$lib/types';
 	import { formatRuntime, peopleByRole, bookCoverUrl } from '$lib/types';
+	import { cleanAdbError, type CleanedAdbError } from '$lib/adbError';
 	import { SpliceMeter, StatusBadge, AbdTag, EmptyState, Button, Alert, Skeleton } from '$lib/components';
 	import { ExternalLink, ArrowLeft } from '@lucide/svelte';
 
@@ -35,7 +36,7 @@
 	});
 
 	/* ── Actions ───────────────────────────────────────────────── */
-	let actionError = $state<string | null>(null);
+	let actionError = $state<CleanedAdbError | null>(null);
 	let confirming: 'reprocess' | 'rematch' | null = $state(null);
 	let acting = $state<'reprocess' | 'rematch' | null>(null);
 
@@ -99,7 +100,7 @@
 	let abdBook = $state<AudiobookDBBook | null>(null);
 	let abdRelease = $state<AudiobookDBRelease | null>(null);
 	let abdLoading = $state(false);
-	let abdError = $state<string | null>(null);
+	let abdError = $state<CleanedAdbError | null>(null);
 
 	async function loadAbd() {
 		const id = book?.audiobookdb_book_id;
@@ -124,35 +125,11 @@
 		}
 	}
 
-	// The api helper's error message embeds the raw response body, which can
-	// be a nested JSON blob (proxy error wrapping an ADB error body). Walk
-	// the nesting to the most specific detail so the alert reads as a
-	// sentence, not a payload dump; truncate anything still long.
-	function cleanApiError(e: unknown): string {
+	// Errors walk through the central ADB cleaner — human sentences out,
+	// raw payload available for the details expander.
+	function cleanApiError(e: unknown): CleanedAdbError {
 		const msg = e instanceof Error ? e.message : String(e ?? 'Unknown error');
-		try {
-			// The proxy error body is {"error": "<upstream text>"}, and that
-			// upstream text is itself a JSON:API payload ({"errors":[{detail}]})
-			// with a text prefix. Only substitute when a real detail surfaces.
-			const outer = jsonObject(msg);
-			const inner = outer && typeof outer.error === 'string' ? jsonObject(outer.error) : null;
-			const errors = inner?.errors as Array<{ detail?: unknown }> | undefined;
-			const detail = Array.isArray(errors) ? errors[0]?.detail : undefined;
-			const out = typeof detail === 'string' && detail.trim() ? detail.trim() : msg;
-			return out.length > 240 ? `${out.slice(0, 240)}…` : out;
-		} catch {
-			const out = msg;
-			return out.length > 240 ? `${out.slice(0, 240)}…` : out;
-		}
-	}
-
-	// Pull the first {...last} JSON object out of a string that may carry a
-	// text prefix/suffix, or null if there is none.
-	function jsonObject(s: string): Record<string, unknown> | null {
-		const start = s.indexOf('{');
-		const end = s.lastIndexOf('}');
-		if (start < 0 || end <= start) return null;
-		return JSON.parse(s.slice(start, end + 1)) as Record<string, unknown>;
+		return cleanAdbError(msg);
 	}
 
 	$effect(() => {
@@ -389,7 +366,15 @@
 		</div>
 		{#if actionError}
 			<div class="workbench__error">
-				<Alert variant="error">{actionError}</Alert>
+				<Alert variant="error">
+					{actionError.message}
+					{#if actionError.rateLimited}
+						<span class="block mt-1">
+							<a class="workbench__inline-link" href="/settings">Add an API key in Settings</a>
+							for higher limits.
+						</span>
+					{/if}
+				</Alert>
 			</div>
 		{/if}
 	</section>
@@ -421,8 +406,17 @@
 				{:else if abdError}
 					<Alert variant="error" onretry={loadAbd}>
 						<span class="block">
-							Could not load the AudiobookDB record: {abdError}
-							<span class="block mt-1 text-[var(--text-muted)]">Retry when the network allows.</span>
+							Could not load the AudiobookDB record: {abdError.message}
+							{#if abdError.rateLimited}
+								<span class="block mt-1">
+									<a class="workbench__inline-link" href="/settings">Add an API key in Settings</a>
+									for higher limits.
+								</span>
+							{/if}
+							<details class="mt-1">
+								<summary class="cursor-pointer select-none">Technical detail</summary>
+								<p class="mt-1 break-all font-mono text-xs text-[var(--text-muted)]">{abdError.raw}</p>
+							</details>
 						</span>
 					</Alert>
 				{:else if abdBook}

@@ -20,6 +20,7 @@
 		formatRuntime
 	} from '$lib/types';
 	import { PageHeader, Button, Alert, Skeleton, EmptyState, Modal, AbdTag } from '$lib/components';
+	import { cleanAdbError } from '$lib/adbError';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
 	interface CandidateDetails {
@@ -604,11 +605,12 @@
 							</div>
 						{:else if candidate.error}
 							<!-- Per-candidate search failure — human copy, raw detail expandable -->
+							{@const cleaned = cleanAdbError(candidate.error)}
 							<div class="mt-3">
 								<div class="flex flex-wrap items-center gap-2">
 									<span class="flex h-2 w-2 flex-shrink-0 rounded-full bg-[var(--error)]" aria-hidden="true"></span>
 									<span class="font-medium text-[var(--error)]">Search failed</span>
-									<span class="text-[var(--text-muted)]">— {cleanErrorMessage(candidate.error)}</span>
+									<span class="text-[var(--text-muted)]">— {cleaned.message}</span>
 									<button
 										type="button"
 										class="text-sm font-medium text-[var(--accent)] hover:underline"
@@ -616,13 +618,18 @@
 									>
 										Retry
 									</button>
+									{#if cleaned.rateLimited}
+										<a href="/settings" class="text-sm font-medium text-[var(--accent)] hover:underline">
+											Settings → API key
+										</a>
+									{/if}
 								</div>
 								<details class="mt-1.5">
 									<summary class="cursor-pointer select-none text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)]">
 										Technical detail
 									</summary>
 									<p class="mt-1 break-all rounded-sm border border-[var(--border-subtle)] bg-[var(--surface)] p-2 font-mono text-xs text-[var(--text-muted)]">
-										{candidate.error}
+										{cleaned.raw}
 									</p>
 								</details>
 							</div>

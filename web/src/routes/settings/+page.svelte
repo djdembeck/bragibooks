@@ -245,6 +245,24 @@
 					<label for="audiobookdb_api_key" class="cabinet__label">AudiobookDB API key</label>
 					<input id="audiobookdb_api_key" type="password" bind:value={settings.audiobookdb_api_key} placeholder="Optional" />
 					<p class="cabinet__help">Optional key for better rate limits on audiobookdb.org.</p>
+					<details class="apikey-help">
+						<summary class="apikey-help__summary">How to get an API key</summary>
+						<ol class="apikey-help__steps">
+							<li>
+								Create a free account at
+								<a href="https://audiobookdb.org/users/register" target="_blank" rel="noopener noreferrer">audiobookdb.org</a>
+								(Sign In → Register).
+							</li>
+							<li>Open your account settings once signed in.</li>
+							<li>Generate an API key — it is shown once, so copy it immediately.</li>
+							<li>Paste it into the field above and save.</li>
+						</ol>
+						<p class="apikey-help__note">
+							Anonymous access (no key) is limited to about 5 requests/second and 500/day;
+							a free key raises this 20×. If matching suddenly fails with “rate limit
+							exceeded”, this is why.
+						</p>
+					</details>
 				</div>
 
 				<div class="cabinet__field cabinet__field--wide">
@@ -296,6 +314,52 @@
 </svelte:head>
 
 <style>
+	/* API key help — steps to create an account and key */
+	.apikey-help {
+		margin-top: 0.5rem;
+		padding: 0.625rem 0.75rem;
+		background: var(--bg);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+	}
+
+	.apikey-help__summary {
+		cursor: pointer;
+		font-size: 0.8125rem;
+		font-weight: 600;
+		color: var(--text-secondary);
+	}
+
+	.apikey-help__summary:hover {
+		color: var(--text);
+	}
+
+	.apikey-help__steps {
+		margin: 0.625rem 0 0;
+		padding-left: 1.25rem;
+		display: grid;
+		gap: 0.375rem;
+		font-size: 0.8125rem;
+		color: var(--text-secondary);
+	}
+
+	.apikey-help__steps a {
+		color: var(--accent);
+		text-decoration: underline;
+		text-underline-offset: 2px;
+	}
+
+	.apikey-help__steps a:hover {
+		color: var(--accent-hover);
+	}
+
+	.apikey-help__note {
+		margin: 0.625rem 0 0;
+		font-size: 0.75rem;
+		line-height: 1.5;
+		color: var(--text-muted);
+	}
+
 	/* Cabinet — the settings form container */
 	.cabinet {
 		border: 1px solid var(--border);
