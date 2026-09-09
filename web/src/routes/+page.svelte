@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { get } from '$lib/api';
 	import type { BookWithPeople, BooksListResponse, JobsListResponse, ProcessingJob } from '$lib/types';
-	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, Button } from '$lib/components';
-	import { formatRuntime, bookCoverUrl } from '$lib/types';
+	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, Button, CoverArt } from '$lib/components';
+	import { formatRuntime } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
 	let totals = $state({ pending: 0, matched: 0, processing: 0, done: 0, error: 0 });
@@ -106,7 +106,7 @@
 <!-- ── Workflow Bays ─────────────────────────────────────────── -->
 {#if dl.showSkeleton}
 	<div class="mb-8" aria-label="Workflow bays loading">
-		<div class="grid grid-cols-2 gap-[3px] overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--rail-line)] lg:grid-cols-4">
+		<div class="grid grid-cols-2 gap-[3px] overflow-hidden rounded-sm border border-[var(--border-subtle)] bg-[var(--rail-line)] lg:grid-cols-4">
 			{#each Array(4) as _}
 				<div class="bg-[var(--bg-panel)] p-4 sm:p-5">
 					<Skeleton height="0.75rem" width="2.5rem" />
@@ -132,7 +132,7 @@
 		<!-- Tape-path rail: the grid's rail-line background shows through the
 		     3px gaps as a continuous groove connecting all four bays. -->
 		<div
-			class="grid grid-cols-2 gap-[3px] overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--rail-line)] lg:grid-cols-4"
+			class="grid grid-cols-2 gap-[3px] overflow-hidden rounded-sm border border-[var(--border-subtle)] bg-[var(--rail-line)] lg:grid-cols-4"
 		>
 			{#each bays as bay (bay.id)}
 				<a
@@ -197,7 +197,7 @@
 	<Button variant="ghost" href="/import">Import books</Button>
 	<Button variant="secondary" href="/match">Match metadata</Button>
 	{#if safeErrors > 0}
-		<a href="/books?status=error" class="ml-auto inline-flex items-center gap-1.5 rounded-md px-3 py-2.5 text-sm font-medium text-[var(--error)] no-underline hover:opacity-80 min-h-[44px] whitespace-nowrap">
+		<a href="/books?status=error" class="ml-auto inline-flex items-center gap-1.5 rounded-sm px-3 py-2.5 text-sm font-medium text-[var(--state-red)] no-underline hover:opacity-80 min-h-[44px] whitespace-nowrap">
 			<span>{safeErrors} error{#if safeErrors !== 1}s{/if} — view errors</span>
 			<span class="shrink-0" aria-hidden="true">→</span>
 		</a>
@@ -214,7 +214,7 @@
 	<div class="space-y-2" aria-label="Recent books loading">
 		{#each Array(3) as _}
 			<div class="card flex items-center gap-4">
-				<Skeleton variant="rect" width="48px" height="64px" />
+				<Skeleton variant="rect" width="48px" height="48px" />
 				<div class="flex-1">
 					<Skeleton height="1rem" width="40%" />
 					<Skeleton class="mt-2" height="0.875rem" width="25%" />
@@ -236,19 +236,7 @@
 				href="/books/{book.id}"
 				class="card group flex items-center gap-4 no-underline transition-colors hover:bg-[var(--surface-hover)]"
 			>
-				{#if book.cover_image_url}
-					<img
-						src={bookCoverUrl(book.cover_image_url, 'small')}
-						alt=""
-						loading="lazy"
-						decoding="async"
-						class="h-12 w-12 flex-shrink-0 rounded-sm object-cover"
-					/>
-				{:else}
-					<div class="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-sm bg-[var(--elevated)] text-xs text-[var(--text-muted)]">
-						—
-					</div>
-				{/if}
+				<CoverArt url={book.cover_image_url} size="sm" />
 				<div class="min-w-0 flex-1">
 					<h3 class="truncate font-medium">{book.title}</h3>
 					<p class="truncate text-sm text-[var(--text-muted)]">

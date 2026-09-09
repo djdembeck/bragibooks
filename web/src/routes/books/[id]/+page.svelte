@@ -3,9 +3,9 @@
 	import { get, put, post } from '$lib/api';
 	import type { PageData } from './$types';
 	import type { BookWithPeople, ProcessingJob, JobsListResponse, AudiobookDBBook, AudiobookDBRelease } from '$lib/types';
-	import { formatRuntime, peopleByRole, bookCoverUrl } from '$lib/types';
+	import { formatRuntime, peopleByRole } from '$lib/types';
 	import { cleanAdbError, type CleanedAdbError } from '$lib/adbError';
-	import { SpliceMeter, StatusBadge, AbdTag, EmptyState, Button, Alert, Skeleton } from '$lib/components';
+	import { SpliceMeter, StatusBadge, AbdTag, EmptyState, Button, Alert, Skeleton, CoverArt } from '$lib/components';
 	import { ExternalLink, ArrowLeft } from '@lucide/svelte';
 
 	let { data }: { data: PageData } = $props();
@@ -213,15 +213,10 @@
 		<!-- Left — the reel: cover + the splice, read fully -->
 		<div class="detail__reel">
 			{#if book.cover_image_url}
-				<img src={bookCoverUrl(book.cover_image_url, 'large')} alt="Cover of {book.title}" class="detail__cover" />
+				<CoverArt url={book.cover_image_url} size="xl" />
 			{:else}
-				<div class="detail__cover detail__cover--placeholder" aria-label="No cover" role="img">
-					<svg width="32%" height="40%" viewBox="0 0 16 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-						<rect x="1.5" y="1.5" width="13" height="17" rx="2" stroke="currentColor" stroke-width="1.5" />
-						<circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.5" />
-						<circle cx="8" cy="8" r="0.75" fill="currentColor" />
-						<line x1="4" y1="15.5" x2="12" y2="15.5" stroke="currentColor" stroke-width="1.5" />
-					</svg>
+				<div class="detail__cover--placeholder" aria-label="No cover" role="img">
+					<CoverArt size="xl" />
 				</div>
 			{/if}
 
@@ -556,24 +551,8 @@
 		}
 	}
 
-	.detail__cover {
-		max-height: 260px;
-		max-width: 100%;
-		width: auto;
-		aspect-ratio: 1 / 1;
-		object-fit: cover;
-		border-radius: var(--radius-md);
-		border: 1px solid var(--border);
-	}
-
 	.detail__cover--placeholder {
-		display: flex;
-		align-items: center;
-		justify-content: center;
 		width: 100%;
-		height: 240px;
-		background: var(--elevated);
-		color: var(--text-muted);
 	}
 
 	.detail__status {

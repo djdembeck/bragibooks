@@ -555,7 +555,7 @@
 										<span class="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" aria-hidden="true"></span>
 										Auto-selected
 									{:else}
-										<span class="h-1.5 w-1.5 rounded-full bg-[var(--success)]" aria-hidden="true"></span>
+										<span class="h-1.5 w-1.5 rounded-full bg-[var(--state-green)]" aria-hidden="true"></span>
 										Manually selected
 									{/if}
 									from
@@ -574,7 +574,7 @@
 									<span class="text-sm text-[var(--text-muted)]">Remove "{candidate.title}"?</span>
 									<button
 										type="button"
-										class="text-sm font-medium text-[var(--error)] hover:underline"
+										class="text-sm font-medium text-[var(--state-red)] hover:underline"
 										onclick={() => confirmRemoveCandidate(candidate)}
 									>
 										Yes, remove
@@ -590,7 +590,7 @@
 							{:else}
 								<Button
 									variant="ghost"
-									class="flex-shrink-0 text-[var(--error)] hover:bg-[var(--error-bg)]"
+									class="flex-shrink-0 text-[var(--state-red)] hover:bg-[var(--state-red-bg)]"
 									onclick={() => removeCandidate(candidate.bookId, candidate)}
 								>
 									Remove
@@ -608,8 +608,8 @@
 							{@const cleaned = cleanAdbError(candidate.error)}
 							<div class="mt-3">
 								<div class="flex flex-wrap items-center gap-2">
-									<span class="flex h-2 w-2 flex-shrink-0 rounded-full bg-[var(--error)]" aria-hidden="true"></span>
-									<span class="font-medium text-[var(--error)]">Search failed</span>
+									<span class="flex h-2 w-2 flex-shrink-0 rounded-full bg-[var(--state-red)]" aria-hidden="true"></span>
+									<span class="font-medium text-[var(--state-red)]">Search failed</span>
 									<span class="text-[var(--text-muted)]">— {cleaned.message}</span>
 									<button
 										type="button"

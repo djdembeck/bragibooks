@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { formatRuntime } from '$lib/types';
+	import { normalizeStatus } from '$lib/status';
 
 	interface Props {
 		status: string;
@@ -13,14 +14,7 @@
 
 	let { status, progress, runtimeMinutes, size = 'sm', cutColor = 'var(--bg-panel)' }: Props = $props();
 
-	const kind = $derived.by(() => {
-		const normalized = status.toLowerCase();
-		if (normalized === 'done' || normalized === 'completed') return 'done';
-		if (normalized === 'processing' || normalized === 'running' || normalized === 'queued') return 'processing';
-		if (normalized === 'error' || normalized === 'failed') return 'error';
-		if (normalized === 'ready' || normalized === 'matched') return 'matched';
-		return 'pending';
-	});
+	const kind = $derived(normalizeStatus(status));
 
 	// Geometry — bar height, chase width, seam angle all derive from size.
 	const w = $derived(size === 'lg' ? 200 : 110);
@@ -36,7 +30,7 @@
 				? 'Splice snapped'
 				: kind === 'processing'
 					? 'Splicing'
-					: kind === 'matched'
+					: kind === 'ready'
 						? 'Halves proofed'
 						: 'Unspooled'
 	);
@@ -50,7 +44,7 @@
 		{#if kind === 'pending'}
 			<rect x="1" y="3" width={half - gap - 2} height={barH} stroke="var(--text-muted)" stroke-width="1" stroke-dasharray="3 2" />
 			<rect x={half + gap + 2} y="3" width={half - gap - 2} height={barH} stroke="var(--text-muted)" stroke-width="1" stroke-dasharray="3 2" />
-		{:else if kind === 'matched'}
+		{:else if kind === 'ready'}
 			<rect x="1" y="3" width={half - 2} height={barH} fill="var(--state-green)" />
 			<rect x={half + 2} y="3" width={half - 2} height={barH} fill="var(--state-green)" />
 		{:else if kind === 'processing'}

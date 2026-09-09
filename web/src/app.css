@@ -55,18 +55,6 @@
 		--state-blue-bg: oklch(0.30 0.03 250);
 		--state-blue-border: oklch(0.44 0.06 250);
 
-		/* ── Legacy aliases — map old semantic names to state tokens ───
-		 * These are one-to-one aliases; route styles referencing the old
-		 * names resolve to the Signal Interlocking Panel palette.         */
-
-		--success: var(--state-green);
-		--success-bg: var(--state-green-bg);
-		--error: var(--state-red);
-		--error-bg: var(--state-red-bg);
-		--info: var(--state-blue);
-		--info-bg: var(--state-blue-bg);
-		--accent-wash-strong: var(--accent-wash);
-
 		/* ── Action accent (not a status) ────────────────────────
 		 * Gold — develop branch logo/brand accent. Visible on
 		 * dark warm surfaces, distinct from semantic states.     */
@@ -689,32 +677,6 @@
 		min-width: 0.5rem;
 	}
 
-	/* ── Rail responsive — narrow screens ─────────────────────── */
-	@media (max-width: 480px) {
-		.utility-link__label {
-			display: none;
-		}
-
-		.utility-link {
-			justify-content: center;
-			min-width: 2.75rem;
-			padding-inline: 0.5rem;
-		}
-
-		.rail-station-label {
-			font-size: 0.625rem;
-			letter-spacing: 0.02em;
-		}
-
-		.rail-segment {
-			min-width: 0.25rem;
-		}
-
-		.rail > div {
-			padding: 0.375rem 0.5rem;
-		}
-	}
-
 	/* ── Utility links (Dashboard / Settings) ─────────────────── */
 	.utility-link {
 		display: inline-flex;
@@ -749,28 +711,6 @@
 		display: inline;
 	}
 
-	/* ── Legacy nav-link (preserved for any route-level usage) ─── */
-	.nav-link {
-		@apply flex items-center gap-2 rounded-sm px-2.5 py-1.5 text-sm font-semibold;
-		min-height: 2.75rem;
-		color: var(--text-secondary);
-		transition: background-color var(--duration-fast) var(--ease-out),
-					color var(--duration-fast) var(--ease-out);
-		text-decoration: none;
-	}
-
-	.nav-link:hover {
-		background: var(--surface-hover);
-		color: var(--text);
-		text-decoration: none;
-	}
-
-	.nav-link-active {
-		background: var(--accent);
-		color: var(--accent-text);
-		border: 1.5px solid var(--accent);
-	}
-
 	/* ── Station identity badge (page header tag) ────────────── */
 	.station-id {
 		@apply inline-flex items-center gap-1.5 rounded-sm px-2 py-0.5 text-xs font-bold;
@@ -781,6 +721,7 @@
 		text-transform: uppercase;
 	}
 
+	/* ── Narrow screens — labels collapse to icons ────────────── */
 	@media (max-width: 480px) {
 		.utility-link__label {
 			display: none;
@@ -790,6 +731,19 @@
 			justify-content: center;
 			min-width: 2.75rem;
 			padding-inline: 0.5rem;
+		}
+
+		.rail-station-label {
+			font-size: 0.625rem;
+			letter-spacing: 0.02em;
+		}
+
+		.rail-segment {
+			min-width: 0.25rem;
+		}
+
+		.rail > div {
+			padding: 0.375rem 0.5rem;
 		}
 	}
 }

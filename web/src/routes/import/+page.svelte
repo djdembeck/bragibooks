@@ -218,7 +218,7 @@
 			{#if currentPath !== '/'}
 				<button
 					type="button"
-					class="min-h-[44px] rounded-md px-3 py-2.5 text-sm text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
+					class="min-h-[44px] rounded-sm px-3 py-2.5 text-sm text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
 					onclick={() => loadDirectory(parentPath(currentPath))}
 					aria-label="Go to parent directory"
 				>
@@ -231,11 +231,11 @@
 
 		<!-- Controls row -->
 		<div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-			<div class="flex items-center gap-1 rounded-md border border-[var(--border)]">
+			<div class="flex items-center gap-1 rounded-sm border border-[var(--border)]">
 				{#each ['name', 'date', 'size'] as field}
 					<button
 						type="button"
-						class={["min-h-[44px] rounded-md px-3 py-2.5 text-xs font-medium transition-colors", sortBy === field ? 'bg-[var(--accent-wash-strong)] text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text)]'].join(' ')}
+						class={["min-h-[44px] rounded-sm px-3 py-2.5 text-xs font-medium transition-colors", sortBy === field ? 'bg-[var(--accent-wash)] text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text)]'].join(' ')}
 						onclick={() => toggleSort(field as 'name' | 'date' | 'size')}
 						aria-label="Sort by {field}{sortBy === field ? (sortDir === 'asc' ? ', ascending' : ', descending') : ''}"
 					>
@@ -342,7 +342,7 @@
 						<div class="flex min-w-0 flex-1 items-center gap-2 truncate" aria-label={supported ? 'supported file' : 'unsupported file'}>
 							<span
 								class="flex h-2 w-2 flex-shrink-0 rounded-full"
-								class:bg-[var(--success)]={supported}
+								class:bg-[var(--state-green)]={supported}
 								class:bg-[var(--border)]={!supported}
 								aria-hidden="true"
 							></span>

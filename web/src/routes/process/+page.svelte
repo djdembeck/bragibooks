@@ -1,8 +1,7 @@
 <script lang="ts">
 	import { get, post, streamEvents } from '$lib/api';
 	import type { BookWithPeople, BooksListResponse, ProcessingResponse, ProcessingJob, JobsListResponse } from '$lib/types';
-	import { bookCoverUrl } from '$lib/types';
-	import { PageHeader, Button, Alert, Skeleton, EmptyState, StatusBadge } from '$lib/components';
+	import { PageHeader, Button, Alert, Skeleton, EmptyState, StatusBadge, Spinner, CoverArt } from '$lib/components';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 	import { CheckCircle, Clock, AlertTriangle } from '@lucide/svelte';
 
@@ -285,7 +284,7 @@
 				onclick={start}
 			>
 				{#if starting}
-					<SpinnerIcon />
+					<Spinner size="1rem" />
 				{/if}
 				Start processing
 			</Button>
@@ -303,11 +302,7 @@
 						/>
 					</div>
 					<div class="manifest-row__cover">
-						{#if book.cover_image_url}
-							<img src={bookCoverUrl(book.cover_image_url, 'small')} alt="" class="manifest-row__cover-img" />
-						{:else}
-							<div class="manifest-row__cover-placeholder" aria-hidden="true">—</div>
-						{/if}
+						<CoverArt url={book.cover_image_url} size="sm" />
 					</div>
 					<div class="manifest-row__info">
 						<p class="manifest-row__title">{book.title}</p>
@@ -347,11 +342,7 @@
 						<LockPlaceholder />
 					</div>
 					<div class="manifest-row__cover">
-						{#if book.cover_image_url}
-							<img src={bookCoverUrl(book.cover_image_url, 'small')} alt="" class="manifest-row__cover-img" />
-						{:else}
-							<div class="manifest-row__cover-placeholder" aria-hidden="true">—</div>
-						{/if}
+						<CoverArt url={book.cover_image_url} size="sm" />
 					</div>
 					<div class="manifest-row__info">
 						<p class="manifest-row__title">{book.title}</p>
@@ -406,7 +397,7 @@
 							<StatusBadge status={job.status} />
 							<span class="job-cell__status-text" aria-label="Job status: {jobStatusLabel(job.status)}">
 								{#if job.status.toLowerCase() === 'running'}
-									<SpinnerIcon class="h-3.5 w-3.5" />
+									<Spinner size="0.875rem" />
 								{:else if job.status.toLowerCase() === 'error' || job.status.toLowerCase() === 'failed'}
 									<AlertTriangle class="h-3.5 w-3.5" />
 								{:else if job.status.toLowerCase() === 'done' || job.status.toLowerCase() === 'completed'}
@@ -500,8 +491,8 @@
 	}
 
 	.bay__indicator--ready {
-		background: var(--success);
-		box-shadow: 0 0 0 3px var(--success-bg);
+		background: var(--state-green);
+		box-shadow: 0 0 0 3px var(--state-green-bg);
 	}
 
 	.bay__indicator--pending {
@@ -509,8 +500,8 @@
 	}
 
 	.bay__indicator--active {
-		background: var(--info);
-		box-shadow: 0 0 0 3px var(--info-bg);
+		background: var(--state-blue);
+		box-shadow: 0 0 0 3px var(--state-blue-bg);
 	}
 
 	/* Bay controls — select all + action button */
@@ -563,27 +554,6 @@
 		flex-shrink: 0;
 	}
 
-	.manifest-row__cover-img {
-		height: 3rem;
-		width: 3rem;
-		border-radius: var(--radius-sm);
-		object-fit: cover;
-		border: 1px solid var(--border-subtle);
-	}
-
-	.manifest-row__cover-placeholder {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		height: 3rem;
-		width: 3rem;
-		border-radius: var(--radius-sm);
-		background: var(--elevated);
-		font-size: 0.75rem;
-		color: var(--text-muted);
-		border: 1px solid var(--border-subtle);
-	}
-
 	.manifest-row__info {
 		min-width: 0;
 		flex: 1;
@@ -619,7 +589,7 @@
 		align-items: center;
 		gap: 0.35rem;
 		font-size: 0.75rem;
-		color: var(--success);
+		color: var(--state-green);
 		font-weight: 500;
 	}
 
@@ -718,28 +688,15 @@
 		gap: 0.4rem;
 		margin-top: 0.5rem;
 		padding: 0.5rem 0.75rem;
-		background: var(--error-bg);
-		border: 1px solid var(--error);
+		background: var(--state-red-bg);
+		border: 1px solid var(--state-red);
 		border-radius: var(--radius-sm);
 		font-size: 0.8rem;
-		color: var(--error);
+		color: var(--state-red);
 	}
 
-	/* Spinner for loading state */
-	:global(.animate-spin) {
-		animation: spin 1s linear infinite;
-	}
-
-	@keyframes spin {
-		from { transform: rotate(0deg); }
-		to { transform: rotate(360deg); }
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		:global(.animate-spin) {
-			animation: none;
-		}
-	}
+	/* Spinner: shared <Spinner> component owns the animation
+       and its reduced-motion fallback. */
 
 	/* Narrow screens — compact rows, never hide state */
 	@media (max-width: 640px) {
@@ -750,19 +707,6 @@
 
 		.manifest-row {
 			padding: 0.5rem 0.75rem;
-		}
-
-		.manifest-row__cover {
-			width: 2.75rem;
-			min-width: 2.75rem;
-			height: 2.75rem;
-		}
-
-		.manifest-row__cover-img,
-		.manifest-row__cover-placeholder {
-			height: 2.75rem;
-			width: 2.75rem;
-			object-fit: cover;
 		}
 
 		.manifest-row__status-text {
@@ -777,13 +721,6 @@
 </style>
 
 <!-- Inline SVG components to avoid extra imports -->
-{#snippet SpinnerIcon()}
-	<span
-		class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent"
-		aria-hidden="true"
-	></span>
-{/snippet}
-
 {#snippet LockPlaceholder()}
 	<span
 		class="inline-flex h-4 w-4 items-center justify-center text-[var(--text-muted)]"

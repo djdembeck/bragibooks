@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
+	import Spinner from './Spinner.svelte';
 
 	interface Props {
 		children: Snippet;
@@ -41,7 +42,7 @@
 {#if href}
 	<a href={href} class="{baseClass} {className}">
 		{#if loading}
-			<span class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" aria-hidden="true"></span>
+			<Spinner size="1rem" />
 		{/if}
 		{@render children()}
 	</a>
@@ -55,7 +56,7 @@
 		onclick={onclick}
 	>
 		{#if loading}
-			<span class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" aria-hidden="true"></span>
+			<Spinner size="1rem" />
 		{/if}
 		{@render children()}
 	</button>

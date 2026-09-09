@@ -3,8 +3,8 @@
 import { goto } from '$app/navigation';
 import { page as pageStore } from '$app/stores';
 	import type { BookWithPeople, BooksListResponse } from '$lib/types';
-	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, Button } from '$lib/components';
-	import { formatRuntime, bookCoverUrl } from '$lib/types';
+	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, Button, CoverArt } from '$lib/components';
+	import { formatRuntime } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
 	const limit = 20;
@@ -97,7 +97,8 @@ import { page as pageStore } from '$app/stores';
 
 <PageHeader
 	title="Library Catalog"
-	description="Station #04 — paginated manifest of all library entries with status filters."
+	description="Paginated manifest of all library entries with status filters."
+	station="#04 · FINISH"
 />
 
 {#if dl.error}
@@ -106,20 +107,14 @@ import { page as pageStore } from '$app/stores';
 	</div>
 {/if}
 
-<!-- ── Station Identity ──────────────────────────────────────── -->
-<div class="mb-4 flex items-center gap-3">
-	<span class="font-mono text-xs tracking-widest text-[var(--text-muted)]">#04 FINISH</span>
-	<div class="h-px flex-1 bg-[var(--border-subtle)]" aria-hidden="true"></div>
-	{#if response}
-		<span class="font-mono text-xs text-[var(--text-muted)]">{response.total} entries</span>
-	{/if}
-</div>
-
 <!-- ── Status Filters — route bay selectors ──────────────────── -->
 <div class="mb-6" role="group" aria-labelledby="catalog-filter-heading">
 	<div class="mb-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
 		<h2 id="catalog-filter-heading" class="text-sm font-semibold text-[var(--text)]">Filter catalog</h2>
-		<p class="text-xs text-[var(--text-muted)]">Showing {activeFilterLabel.toLowerCase()} books.</p>
+		<p class="text-xs text-[var(--text-muted)]">
+			{#if response}{response.total} entries · {/if}
+			showing {activeFilterLabel.toLowerCase()} books.
+		</p>
 	</div>
 	<div class="flex flex-wrap gap-2">
 		{#each filters as f}
@@ -154,7 +149,7 @@ import { page as pageStore } from '$app/stores';
 	<div class="space-y-2" aria-label="Catalog loading">
 		{#each Array(5) as _}
 			<div class="card flex items-center gap-4">
-				<Skeleton variant="rect" width="48px" height="64px" />
+				<Skeleton variant="rect" width="48px" height="48px" />
 				<div class="flex-1">
 					<Skeleton height="1rem" width="35%" />
 					<Skeleton class="mt-2" height="0.875rem" width="20%" />
@@ -179,19 +174,7 @@ import { page as pageStore } from '$app/stores';
 				aria-label="{book.title} — open record"
 			>
 				<!-- Cover thumbnail or placeholder -->
-				{#if book.cover_image_url}
-					<img
-						src={bookCoverUrl(book.cover_image_url, 'small')}
-						alt=""
-						loading="lazy"
-						decoding="async"
-						class="h-12 w-12 flex-shrink-0 rounded-sm object-cover"
-					/>
-				{:else}
-					<div class="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-sm bg-[var(--elevated)] text-xs text-[var(--text-muted)]">
-						—
-					</div>
-				{/if}
+				<CoverArt url={book.cover_image_url} size="sm" />
 
 				<!-- Book identity block -->
 				<div class="min-w-0 flex-1">

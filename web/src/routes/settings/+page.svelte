@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { get, put } from '$lib/api';
-	import { PageHeader, Button, Alert, Skeleton } from '$lib/components';
+	import { PageHeader, Button, Alert, Skeleton, Spinner } from '$lib/components';
 	import type { Settings } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 	import { CheckCircle, AlertTriangle, Save } from '@lucide/svelte';
@@ -132,7 +132,7 @@
 			</div>
 			<div class="cabinet__grid">
 				<div class="cabinet__field">
-					<label for="input_dir" class="cabinet__label">Input directory <span class="text-[var(--error)]">*</span></label>
+					<label for="input_dir" class="cabinet__label">Input directory <span class="text-[var(--state-red)]">*</span></label>
 					<input
 						id="input_dir"
 						type="text"
@@ -147,7 +147,7 @@
 				</div>
 
 				<div class="cabinet__field">
-					<label for="output_dir" class="cabinet__label">Output directory <span class="text-[var(--error)]">*</span></label>
+					<label for="output_dir" class="cabinet__label">Output directory <span class="text-[var(--state-red)]">*</span></label>
 					<input
 						id="output_dir"
 						type="text"
@@ -248,7 +248,7 @@
 		<div class="cabinet__save-rail">
 			{#if saving}
 				<span class="cabinet__save-status" aria-live="polite">
-					<span class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" aria-hidden="true"></span>
+					<Spinner size="1rem" />
 					Saving…
 				</span>
 			{/if}
@@ -400,7 +400,7 @@
 	.cabinet__field-error {
 		margin-top: 0.35rem;
 		font-size: 0.72rem;
-		color: var(--error);
+		color: var(--state-red);
 		font-weight: 500;
 	}
 
@@ -464,7 +464,7 @@
 		align-items: center;
 		gap: 0.4rem;
 		font-size: 0.8rem;
-		color: var(--info);
+		color: var(--state-blue);
 		font-weight: 500;
 	}
 
@@ -473,7 +473,7 @@
 		align-items: flex-start;
 		gap: 0.4rem;
 		font-size: 0.8rem;
-		color: var(--error);
+		color: var(--state-red);
 	}
 
 	.cabinet__save-actions {
@@ -486,29 +486,16 @@
 		align-items: center;
 		gap: 0.5rem;
 		padding: 0.6rem 1rem;
-		background: var(--success-bg);
-		border: 1px solid var(--success);
+		background: var(--state-green-bg);
+		border: 1px solid var(--state-green);
 		border-radius: var(--radius-md);
 		font-size: 0.85rem;
-		color: var(--success);
+		color: var(--state-green);
 		font-weight: 500;
 	}
 
-	/* Spinner */
-	:global(.animate-spin) {
-		animation: spin 1s linear infinite;
-	}
-
-	@keyframes spin {
-		from { transform: rotate(0deg); }
-		to { transform: rotate(360deg); }
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		:global(.animate-spin) {
-			animation: none;
-		}
-	}
+	/* Spinner: shared <Spinner> component owns the animation
+       and its reduced-motion fallback. */
 
 	/* Narrow screens */
 	@media (max-width: 639px) {

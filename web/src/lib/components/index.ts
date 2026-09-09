@@ -9,5 +9,6 @@ export { default as Button } from './Button.svelte';
 export { default as Modal } from './Modal.svelte';
 export { default as AbdTag } from './AbdTag.svelte';
 export { default as SpliceMeter } from './SpliceMeter.svelte';
-export { default as ReelRow } from './ReelRow.svelte';
 export { default as StationRail } from './StationRail.svelte';
+export { default as Spinner } from './Spinner.svelte';
+export { default as CoverArt } from './CoverArt.svelte';
