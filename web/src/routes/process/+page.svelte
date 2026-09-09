@@ -564,8 +564,8 @@
 	}
 
 	.manifest-row__cover-img {
-		height: 3.5rem;
-		width: 2.5rem;
+		height: 3rem;
+		width: 3rem;
 		border-radius: var(--radius-sm);
 		object-fit: cover;
 		border: 1px solid var(--border-subtle);
@@ -575,8 +575,8 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		height: 3.5rem;
-		width: 2.5rem;
+		height: 3rem;
+		width: 3rem;
 		border-radius: var(--radius-sm);
 		background: var(--elevated);
 		font-size: 0.75rem;
@@ -753,14 +753,15 @@
 		}
 
 		.manifest-row__cover {
-			width: 2.25rem;
-			min-width: 2.25rem;
-			height: 3.25rem;
+			width: 2.75rem;
+			min-width: 2.75rem;
+			height: 2.75rem;
 		}
 
 		.manifest-row__cover-img,
 		.manifest-row__cover-placeholder {
-			height: 3.25rem;
+			height: 2.75rem;
+			width: 2.75rem;
 			object-fit: cover;
 		}
 

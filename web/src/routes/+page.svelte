@@ -242,10 +242,10 @@
 						alt=""
 						loading="lazy"
 						decoding="async"
-						class="h-12 w-9 flex-shrink-0 rounded-sm object-cover sm:h-16 sm:w-12"
+						class="h-12 w-12 flex-shrink-0 rounded-sm object-cover"
 					/>
 				{:else}
-					<div class="flex h-12 w-9 flex-shrink-0 items-center justify-center rounded-sm bg-[var(--elevated)] text-xs text-[var(--text-muted)] sm:h-16 sm:w-12">
+					<div class="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-sm bg-[var(--elevated)] text-xs text-[var(--text-muted)]">
 						—
 					</div>
 				{/if}

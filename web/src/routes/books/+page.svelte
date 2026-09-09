@@ -181,10 +181,10 @@ import { page as pageStore } from '$app/stores';
 						alt=""
 						loading="lazy"
 						decoding="async"
-						class="h-16 w-12 flex-shrink-0 rounded-sm object-cover"
+						class="h-12 w-12 flex-shrink-0 rounded-sm object-cover"
 					/>
 				{:else}
-					<div class="flex h-16 w-12 flex-shrink-0 items-center justify-center rounded-sm bg-[var(--elevated)] text-xs text-[var(--text-muted)]">
+					<div class="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-sm bg-[var(--elevated)] text-xs text-[var(--text-muted)]">
 						—
 					</div>
 				{/if}
