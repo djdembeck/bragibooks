@@ -1,0 +1,230 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-09T21:22:50.847442+00:00",
+  "title": "Design System: Bragi Books",
+  "extensions": {
+    "colorMeta": {
+      "bg": {
+        "role": "neutral",
+        "displayName": "Bench Ground",
+        "canonical": "oklch(0.24 0.015 75)"
+      },
+      "bg-panel": {
+        "role": "neutral",
+        "displayName": "Bench Panel",
+        "canonical": "oklch(0.30 0.012 75)"
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Bench Face",
+        "canonical": "oklch(0.36 0.010 75)"
+      },
+      "enamel": {
+        "role": "neutral",
+        "displayName": "Enamel White",
+        "canonical": "oklch(0.98 0.003 75)"
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Bench Gold",
+        "canonical": "oklch(0.82 0.18 78)"
+      },
+      "provenance": {
+        "role": "tertiary",
+        "displayName": "Catalog Magenta",
+        "canonical": "oklch(0.72 0.19 330)"
+      },
+      "state-red": {
+        "role": "status",
+        "displayName": "Snap Red",
+        "canonical": "oklch(0.69 0.18 25)"
+      },
+      "state-amber": {
+        "role": "status",
+        "displayName": "Splice Amber",
+        "canonical": "oklch(0.78 0.12 85)"
+      },
+      "state-green": {
+        "role": "status",
+        "displayName": "Reel Green",
+        "canonical": "oklch(0.67 0.14 145)"
+      },
+      "state-blue": {
+        "role": "info",
+        "displayName": "Scope Blue",
+        "canonical": "oklch(0.65 0.12 250)"
+      }
+    },
+    "typographyMeta": {
+      "body": {
+        "displayName": "Body",
+        "purpose": "Default copy; 65ch measure on prose."
+      },
+      "monospace": {
+        "displayName": "Readout Mono",
+        "purpose": "Paths, job IDs, output, tabular data."
+      },
+      "badge": {
+        "displayName": "Badge Track",
+        "purpose": "11px uppercase tracked badges and station labels."
+      }
+    },
+    "motion": [
+      {
+        "name": "ease-out",
+        "value": "cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Default easing for hover, focus, state transitions."
+      },
+      {
+        "name": "splice-chase",
+        "value": "1.6s linear infinite",
+        "purpose": "Running join indicator on SpliceMeter (reduced-motion collapses)."
+      },
+      {
+        "name": "skeleton-shimmer",
+        "value": "1.4s ease-in-out infinite",
+        "purpose": "Loading fill cycle; static fill when motion is reduced."
+      }
+    ],
+    "shadows": [
+      {
+        "name": "overlay",
+        "value": "0 25px 50px -12px rgba(0,0,0,0.6)",
+        "purpose": "Modal dialog only \u2014 the system's single shadow."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "sm",
+        "value": "640px"
+      },
+      {
+        "name": "md",
+        "value": "768px"
+      },
+      {
+        "name": "lg",
+        "value": "1024px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Gold action button; the only non-terminal gold in the header.",
+      "html": "<button class=\"ds-btn-primary\">Start processing</button>",
+      "css": ".ds-btn-primary { background: var(--accent, oklch(0.82 0.18 78)); color: var(--accent-text, oklch(0.24 0.015 75)); padding: 0.5rem 1rem; min-height: 44px; border: 1.5px solid var(--accent); border-radius: 2px; font-weight: 600; font-size: 14px; display: inline-flex; align-items: center; gap: 8px; } .ds-btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); } .ds-btn-primary:focus-visible { outline: 2px solid var(--enamel); outline-offset: 2px; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Face-filled supporting action.",
+      "html": "<button class=\"ds-btn-secondary\">Custom search</button>",
+      "css": ".ds-btn-secondary { background: var(--surface, oklch(0.36 0.010 75)); color: var(--text); padding: 0.5rem 1rem; min-height: 44px; border: 1.5px solid var(--border); border-radius: 2px; font-weight: 600; font-size: 14px; } .ds-btn-secondary:hover { background: var(--surface-hover); border-color: var(--border-strong); } .ds-btn-secondary:focus-visible { outline: 2px solid var(--enamel); outline-offset: 2px; }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Quiet action; face appears on hover.",
+      "html": "<button class=\"ds-btn-ghost\">Back to catalog</button>",
+      "css": ".ds-btn-ghost { background: transparent; color: var(--text-secondary); padding: 0.5rem 1rem; min-height: 44px; border: 1.5px solid transparent; border-radius: 2px; font-weight: 600; font-size: 14px; } .ds-btn-ghost:hover { background: var(--surface-hover); color: var(--text); }"
+    },
+    {
+      "name": "Status Badge",
+      "kind": "chip",
+      "refersTo": "status-badge",
+      "description": "Glyph + word + color state readout.",
+      "html": "<span class=\"ds-badge ds-badge-done\">&#9670; done</span>",
+      "css": ".ds-badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; font-size: 12px; font-weight: 600; border-radius: 2px; border: 1.5px solid; } .ds-badge-done { color: var(--state-green); background: var(--state-green-bg); border-color: var(--state-green-border); } .ds-badge-processing { color: var(--state-amber); background: var(--state-amber-bg); border-color: var(--state-amber-border); } .ds-badge-pending { color: var(--text-secondary); background: var(--surface); border-color: var(--border); }"
+    },
+    {
+      "name": "Card / Manifest Row",
+      "kind": "card",
+      "refersTo": "card-panel",
+      "description": "Bench panel container; row anatomy = square art, identity, state.",
+      "html": "<a class=\"ds-card\"><span class=\"ds-card__art\"></span><span class=\"ds-card__body\"><strong>The Order of Time</strong><em>Carlo Rovelli \u00b7 4h 19m</em></span><span class=\"ds-badge ds-badge-done\">&#9670; done</span></a>",
+      "css": ".ds-card { display: flex; align-items: center; gap: 16px; background: var(--bg-panel); border: 1.5px solid var(--border-subtle); border-radius: 4px; padding: 16px; text-decoration: none; color: var(--text); } .ds-card:hover { background: var(--surface); } .ds-card__art { width: 48px; height: 48px; border-radius: 2px; background: var(--elevated); flex-shrink: 0; border: 1px solid var(--border-subtle); } .ds-card__body { flex: 1; min-width: 0; display: grid; gap: 2px; } .ds-card__body strong { font-weight: 500; } .ds-card__body em { font-style: normal; font-size: 12px; color: var(--text-muted); }"
+    },
+    {
+      "name": "Input Field",
+      "kind": "input",
+      "refersTo": "input-field",
+      "description": "Face-filled form field with gold focus ring.",
+      "html": "<input class=\"ds-input\" placeholder=\"Optional\" />",
+      "css": ".ds-input { background: var(--surface); color: var(--text); min-height: 44px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 2px; font-size: 16px; width: 100%; } .ds-input:hover { border-color: var(--text-muted); } .ds-input:focus-visible { border-color: var(--text); box-shadow: 0 0 0 2px var(--focus-ring); } ::placeholder { color: var(--text-placeholder); }"
+    },
+    {
+      "name": "ADB Provenance Tag",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "Magenta chip marking AudiobookDB-sourced data; link when a record exists.",
+      "html": "<a class=\"ds-abd\" href=\"https://audiobookdb.org/book/xyz\">AbDB</a>",
+      "css": ".ds-abd { display: inline-flex; align-items: center; padding: 2px 8px; background: var(--provenance-bg); border: 1px solid var(--provenance-border); border-radius: 2px; color: var(--provenance); font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-decoration: none; } .ds-abd:hover { border-color: var(--provenance); }"
+    },
+    {
+      "name": "Splice Meter",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "Tape-join status light: dashed stubs, halves, chase, seamed bar, snapped break.",
+      "html": "<span class=\"ds-splice\" role=\"img\" aria-label=\"Splice: Spliced\"><svg width=\"200\" height=\"12\" viewBox=\"0 0 200 12\"><rect x=\"1\" y=\"3\" width=\"198\" height=\"6\" fill=\"var(--state-green)\"/><path d=\"M98 0 L102 12 L105 12 L101 0 Z\" fill=\"var(--bg-panel)\"/><path d=\"M189 5.5 l3 3 l6 -6\" stroke=\"var(--state-green)\" stroke-width=\"1.75\" fill=\"none\"/></svg></span>",
+      "css": ".ds-splice { line-height: 0; display: inline-block; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Merge Bench",
+    "overview": "Bragi Books is a tape editor's bench for a personal audiobook pipeline. The operator routes source folders in one side (Intake), confirms catalog metadata (Match), queues the join (Queue), and collects finished reels (Finish). Everything on the surface is bench equipment \u2014 a tape-path rail connecting the four stations, a splice meter per book, manifest reels for lists, catalog badges marking community-sourced data. The bench metaphor is the interface's vocabulary for real pipeline state.",
+    "keyCharacteristics": [
+      "Dark warm brown-charcoal surfaces, OKLCH hue 75\u00b0 axis",
+      "Tonal depth by surface mixing; no box-shadows except the modal",
+      "Orthogonal geometry: 2\u20134px radii, square dots, miter joints",
+      "Gold = action only; magenta = provenance only; red/amber/green/blue = status only",
+      "Monospace for paths, job IDs, tabular data; system sans elsewhere",
+      "Every status is shape + text + color; reduced motion collapses animation"
+    ],
+    "rules": [
+      {
+        "name": "The Action-Only Gold Rule",
+        "body": "--accent marks where a hand goes: primary buttons, the active utility link, the brand badge. Never decoration, never status, never a heading color.",
+        "section": "colors"
+      },
+      {
+        "name": "The Provenance-Magenta Rule",
+        "body": "--provenance marks data sourced from AudiobookDB and is always paired with a text label. Never applied to status, actions, or empty decoration.",
+        "section": "colors"
+      },
+      {
+        "name": "The Status-Never-Decorative Rule",
+        "body": "Red/amber/green signal state; blue signals information. They never color furniture, borders, or text emphasis.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tonal-Depth Rule",
+        "body": "Depth is background mixing, never shadow: bg \u2192 bg-panel \u2192 surface \u2192 elevated. The only shadow is the modal overlay.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do draw depth with surface mixes; bg \u2192 bg-panel \u2192 surface \u2192 elevated (0.24 \u2192 0.30 \u2192 0.36 \u2192 0.40).",
+      "Do pair every status color with its shape glyph and word.",
+      "Do use monospace for any path, ID, or numeric readout (tabular-nums for tables).",
+      "Do keep gold interactive: if it isn't clickable or actively marking you, it isn't gold.",
+      "Do keep the whole manifest card as the click target.",
+      "Do collapse all animation under prefers-reduced-motion.",
+      "Do label absent state honestly: Not generated, Unknown, No processing jobs yet \u2014 italic muted, never hidden."
+    ],
+    "donts": [
+      "Don't add box-shadows (exception: modal) \u2014 depth is tonal.",
+      "Don't exceed 4px radius anywhere.",
+      "Don't apply gold to static emphasis, headings, or status.",
+      "Don't apply magenta outside provenance contexts.",
+      "Don't render raw JSON in operator-facing errors \u2014 walk the payload to a sentence, keep the raw under a Technical detail expander.",
+      "Don't use serif faces or bookshelf imagery \u2014 this is a bench, not a library.",
+      "Don't repeat the workflow bays outside the dashboard.",
+      "Don't stand unicode in for drawn icons outside the status-glyph vocabulary."
+    ]
+  }
+}
