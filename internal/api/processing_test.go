@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -433,5 +434,56 @@ func TestGetBooksCountsShape(t *testing.T) {
 	// The response must always carry exactly the five known keys.
 	if len(resp.Counts) != 5 {
 		t.Errorf("counts has %d keys; want 5: %v", len(resp.Counts), resp.Counts)
+	}
+}
+
+func TestSweepOrphansOnStartup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sweep.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	if _, err := db.Exec(processingSchemaSQL); err != nil {
+		t.Fatalf("create jobs schema: %v", err)
+	}
+
+	// A prior run's state: one queued job, one running job (both with stuck
+	// books), and one finished job that must be left alone.
+	seed := `
+		INSERT INTO books (id, title, status) VALUES (1, 'Queued Book', 'processing'), (2, 'Running Book', 'processing'), (3, 'Done Book', 'done');
+		INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status) VALUES
+			('q1', 1, '{}', 'queued'),
+			('r1', 2, '{}', 'running'),
+			('d1', 3, '{}', 'done');
+	`
+	if _, err := db.Exec(seed); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Constructing the service triggers the startup sweep.
+	NewProcessingService(db, &audio.Processor{}, 1)
+
+	for id, want := range map[string]string{"q1": "error", "r1": "error", "d1": "done"} {
+		status, err := jobStatusFromDB(t, db, id)
+		if err != nil {
+			t.Fatalf("job %s: %v", id, err)
+		}
+		if status != want {
+			t.Errorf("job %s status = %q; want %q", id, status, want)
+		}
+	}
+	var orphanErr string
+	db.QueryRow("SELECT error FROM processing_jobs WHERE id = 'q1'").Scan(&orphanErr)
+	if !strings.Contains(orphanErr, "orphaned") {
+		t.Errorf("q1 error = %q; want it to contain %q", orphanErr, "orphaned")
+	}
+	for id, want := range map[int64]string{1: "pending", 2: "pending", 3: "done"} {
+		if got := bookStatusFromDB(t, db, int64(id)); got != want {
+			t.Errorf("book %d status = %q; want %q", id, got, want)
+		}
 	}
 }

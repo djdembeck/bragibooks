@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -38,9 +40,10 @@ func NewProcessor(binary, outputDir, completedDir string, numCPUs int, pathForma
 
 // ProcessResult holds the output of a single m4b-merge run.
 type ProcessResult struct {
-	OutputFile string
-	Stdout     string
-	Stderr     string
+	OutputFile    string
+	Stdout        string
+	Stderr        string
+	OutputWarning string
 }
 
 // Run executes m4b-merge with the given input file paths.
@@ -58,8 +61,11 @@ func (p *Processor) Run(ctx context.Context, inputPaths []string, asin string) (
 	if asin != "" {
 		args = append(args, "-a", asin)
 	}
-	args = append(args, "-i")
-	args = append(args, inputPaths...)
+	// m4b-merge (clap) requires one -i per input; a single -i with multiple
+	// values errors with "unexpected argument".
+	for _, in := range inputPaths {
+		args = append(args, "-i", in)
+	}
 
 	cmd := exec.CommandContext(ctx, p.Binary, args...)
 	// Own process group: ctx cancellation must kill the whole tree, not just
@@ -78,6 +84,7 @@ func (p *Processor) Run(ctx context.Context, inputPaths []string, asin string) (
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
 
+	start := time.Now()
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("m4b-merge start: %w", err)
 	}
@@ -97,7 +104,53 @@ func (p *Processor) Run(ctx context.Context, inputPaths []string, asin string) (
 		Stderr: string(stderrBytes),
 	}
 
+	// m4b-merge writes its output under -o using a path scheme; discover it
+	// by walking the output dir for the newest .m4b written during the run.
+	// The 1s margin absorbs clock granularity between start and mtime.
+	if out, err := findNewestM4B(p.OutputDir, start.Add(-time.Second)); err != nil {
+		result.OutputWarning = "output file discovery failed: " + err.Error()
+	} else if out == "" {
+		result.OutputWarning = "no output .m4b found in output directory"
+	} else {
+		result.OutputFile = out
+	}
+
 	return result, nil
+}
+
+// findNewestM4B walks dir recursively for *.m4b files and returns the absolute
+// path of the newest one by mtime, ignoring files older than since. Returns
+// "" (no error) when no qualifying file exists.
+func findNewestM4B(dir string, since time.Time) (string, error) {
+	var newest string
+	var newestMtime time.Time
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".m4b") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.ModTime().Before(since) {
+			return nil
+		}
+		if newest == "" || info.ModTime().After(newestMtime) {
+			newest = path
+			newestMtime = info.ModTime()
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("walk %s: %w", dir, err)
+	}
+	if newest == "" {
+		return "", nil
+	}
+	return filepath.Abs(newest)
 }
 
 // MinimumM4bMergeVersion is the minimum required m4b-merge version.

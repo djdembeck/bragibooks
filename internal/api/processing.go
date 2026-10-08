@@ -46,13 +46,52 @@ type jobState struct {
 
 // NewProcessingService creates a ProcessingService backed by the given database
 // and audio processor, with the specified number of concurrent workers.
+// On startup it sweeps jobs left active by a previous run: they are marked
+// error and their books reset to 'pending' so they can be re-queued.
 func NewProcessingService(db *sql.DB, proc *audio.Processor, numWorkers int) *ProcessingService {
-	return &ProcessingService{
+	s := &ProcessingService{
 		db:       db,
 		proc:     proc,
 		workers:  numWorkers,
 		jobs:     make(map[string]*jobState),
 		workerCh: make(chan *models.ProcessingJob, 100),
+	}
+	s.sweepOrphans()
+	return s
+}
+
+// sweepOrphans marks jobs that were queued/running when the service last
+// exited as error, and resets their stuck 'processing' books to 'pending'.
+func (s *ProcessingService) sweepOrphans() {
+	res, err := s.db.Exec(
+		"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE status IN (?, ?)",
+		jobStatusError, "orphaned: service restarted while job was active", jobStatusQueued, jobStatusRunning,
+	)
+	if err != nil {
+		log.Printf("orphan job sweep: %v", err)
+		return
+	}
+	n, _ := res.RowsAffected()
+	// Book ids of the swept jobs, so only their stuck books are reset.
+	var bookIDs []int64
+	rows, err := s.db.Query(
+		"SELECT book_id FROM processing_jobs WHERE status = ? AND book_id IS NOT NULL AND error = ?",
+		jobStatusError, "orphaned: service restarted while job was active",
+	)
+	if err == nil {
+		for rows.Next() {
+			var bid int64
+			if rows.Scan(&bid) == nil {
+				bookIDs = append(bookIDs, bid)
+			}
+		}
+		rows.Close()
+	}
+	for _, bid := range bookIDs {
+		s.db.Exec("UPDATE books SET status = 'pending', status_message = '' WHERE id = ? AND status = 'processing'", bid)
+	}
+	if n > 0 {
+		log.Printf("orphan job sweep: marked %d job(s) as error, reset %d stuck book(s) to pending", n, len(bookIDs))
 	}
 }
 
@@ -375,14 +414,24 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 
 	outputFile := result.OutputFile
 	if job.BookID.Valid {
+		// An empty discovered output is a warning, not a failure: the book
+		// stays 'done' and the warning is recorded in its status message.
+		msg := ""
+		if outputFile == "" && result.OutputWarning != "" {
+			msg = result.OutputWarning
+		}
 		s.db.Exec(
-			"UPDATE books SET status = 'done', status_message = '', dest_path = ? WHERE id = ?",
-			outputFile, job.BookID.Int64,
+			"UPDATE books SET status = 'done', status_message = ?, dest_path = ? WHERE id = ?",
+			msg, outputFile, job.BookID.Int64,
 		)
+	}
+	output := result.Stdout
+	if outputFile == "" && result.OutputWarning != "" {
+		output = strings.TrimRight(output, "\n") + "\n" + result.OutputWarning
 	}
 	s.db.Exec(
 		"UPDATE processing_jobs SET status = ?, output = ?, output_file = ?, completed_at = datetime('now') WHERE id = ?",
-		jobStatusDone, result.Stdout, outputFile, job.ID,
+		jobStatusDone, output, outputFile, job.ID,
 	)
 	if state != nil {
 		state.finalize(`{"status":"done","message":"processing complete"}`, nil)
@@ -717,7 +766,7 @@ func (h *Handler) StreamJob(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "data: %s\n\n", `{"status":"done"}`)
 		}
 		flusher.Flush()
-	case <-time.After(60 * time.Second):
+	case <-time.After(10 * time.Second):
 		// Force close if no done signal
 	}
 }
