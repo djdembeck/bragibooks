@@ -78,12 +78,10 @@
 			};
 			items.push(item);
 
-			// Reconnect SSE for active (queued/running) jobs
+			// Reconnect SSE for active (queued/running) jobs; terminal jobs
+			// stay visible as recent history with nothing to sync
 			if (j.status === 'queued' || j.status === 'running') {
 				connectSSE(item);
-			} else {
-				// Terminal jobs: poll for state sync
-				startPolling(item);
 			}
 		}
 		jobs = items;
@@ -132,7 +130,7 @@
 
 	function startPolling(item: JobItem) {
 		stopPolling(item.id);
-		const timer = setInterval(() => pollJob(item), 5000);
+		const timer = setInterval(() => pollJob(item), 3000);
 		pollTimers.set(item.id, timer);
 	}
 
@@ -145,7 +143,7 @@
 				if (job.output) item.output = job.output;
 			}
 			// If job moved to terminal, stop polling and refresh
-			if (job.status === 'done' || job.status === 'error') {
+			if (job.status === 'done' || job.status === 'error' || job.status === 'cancelled') {
 				stopPolling(item.id);
 				refreshAfterTerminal(item.id);
 			}
@@ -279,7 +277,7 @@
 				<span>Job Bay</span>
 				<span class="bay__count">{jobs.length}</span>
 			</div>
-			<p class="bay__hint">Live output from m4b-merge jobs. SSE streams with polling fallback.</p>
+			<p class="bay__hint">Live output from m4b-merge jobs. Live log streams; state syncs by poll.</p>
 		</div>
 
 		<div class="job-grid">
