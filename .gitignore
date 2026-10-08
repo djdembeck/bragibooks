@@ -25,3 +25,5 @@ docker/config/*.db-shm
 /web/static/covers/
 # Runtime databases and legacy backups under docker config
 docker/config/
+# Runtime book data under docker
+docker/books/
