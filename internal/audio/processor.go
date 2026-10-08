@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
 
 var jobBeginRe = regexp.MustCompile(`job begin:\s+(.+)$`)
@@ -60,6 +62,18 @@ func (p *Processor) Run(ctx context.Context, inputPaths []string, asin string) (
 	args = append(args, inputPaths...)
 
 	cmd := exec.CommandContext(ctx, p.Binary, args...)
+	// Own process group: ctx cancellation must kill the whole tree, not just
+	// the direct child. m4b-merge is a script wrapper here (and may spawn
+	// children in general); a grandchild that inherits the stdout pipe would
+	// otherwise hold io.ReadAll open long after the child itself is killed.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return syscall.ESRCH // nothing further for os/exec to kill
+	}
+	// Guard against any writer we could not kill: force Wait to return
+	// shortly after cancel instead of blocking on inherited pipes.
+	cmd.WaitDelay = 5 * time.Second
 
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()

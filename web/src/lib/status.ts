@@ -11,5 +11,6 @@ export function normalizeStatus(status: string): StatusKind {
 	if (s === 'processing' || s === 'running' || s === 'queued') return 'processing'
 	if (s === 'error' || s === 'failed') return 'error'
 	if (s === 'ready' || s === 'matched') return 'ready'
+	if (s === 'cancelled') return 'pending'
 	return 'pending'
 }

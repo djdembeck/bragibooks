@@ -63,9 +63,56 @@ type UpdateBookRequest struct {
 	Narrators            []PersonUpdate `json:"narrators,omitempty"`
 }
 
-// ListBooks handles GET /api/books with optional status filter and pagination.
+// booksColumns is the SELECT column list for the books table, shared by the
+// list and count helpers so the scan column set stays in one place.
+const booksColumns = "id, title, asin, audiobookdb_book_id, audiobookdb_release_id, description, release_date, series, publisher, language, runtime_length_minutes, format_type, src_path, dest_path, status, status_message, cover_image_url, created_at, updated_at"
+
+// validBookStatus reports whether s is an accepted book status filter value.
+func validBookStatus(s string) bool {
+	switch s {
+	case "done", "processing", "error", "pending", "matched":
+		return true
+	}
+	return false
+}
+
+// escapeLikeTerm escapes LIKE wildcards in a user-supplied substring so it is
+// matched literally rather than as a pattern.
+func escapeLikeTerm(term string) string {
+	term = strings.ReplaceAll(term, `\`, `\\`)
+	term = strings.ReplaceAll(term, `%`, `\%`)
+	term = strings.ReplaceAll(term, `_`, `\_`)
+	return term
+}
+
+// buildBooksFilter assembles the WHERE fragment (without leading WHERE) and
+// bound args for the books list/count/ids queries from the optional status
+// and text filters. Returns an empty fragment when no filter is present.
+func buildBooksFilter(status, q string) (string, []any) {
+	var conds []string
+	var args []any
+	if status != "" {
+		conds = append(conds, "status = ?")
+		args = append(args, status)
+	}
+	if q != "" {
+		// SQLite LIKE is case-insensitive for ASCII, matching the contract.
+		like := "%" + escapeLikeTerm(q) + "%"
+		conds = append(conds, "(title LIKE ? ESCAPE '\\' OR series LIKE ? ESCAPE '\\')")
+		args = append(args, like, like)
+	}
+	if len(conds) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(conds, " AND "), args
+}
+
+// ListBooks handles GET /api/books with optional status, text (q) and
+// pagination filters. all_ids=1 switches the response to a bare ID list for
+// bulk selection.
 func (h *Handler) ListBooks(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
+	q := r.URL.Query().Get("q")
 	page := parseIntQueryParam(r, "page", 0)
 	limit := parseIntQueryParam(r, "limit", 20)
 
@@ -76,55 +123,39 @@ func (h *Handler) ListBooks(w http.ResponseWriter, r *http.Request) {
 		page = 0
 	}
 
-	offset := page * limit
-
-	var books []models.Book
-	var totalCount int
-
-	switch status {
-	case "":
-		// List all
-		rows, err := h.svc.DB.Query(
-			"SELECT id, title, asin, audiobookdb_book_id, audiobookdb_release_id, description, release_date, series, publisher, language, runtime_length_minutes, format_type, src_path, dest_path, status, status_message, cover_image_url, created_at, updated_at FROM books ORDER BY created_at DESC LIMIT ? OFFSET ?",
-			limit, offset,
-		)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("query books: %v", err))
-			return
-		}
-		defer rows.Close()
-		books, err = scanBooks(rows)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("scan books: %v", err))
-			return
-		}
-		countRow := h.svc.DB.QueryRow("SELECT COUNT(*) FROM books")
-		if err := countRow.Scan(&totalCount); err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("count books: %v", err))
-			return
-		}
-	case "done", "processing", "error", "pending", "matched":
-		rows, err := h.svc.DB.Query(
-			"SELECT id, title, asin, audiobookdb_book_id, audiobookdb_release_id, description, release_date, series, publisher, language, runtime_length_minutes, format_type, src_path, dest_path, status, status_message, cover_image_url, created_at, updated_at FROM books WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-			status, limit, offset,
-		)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("query books: %v", err))
-			return
-		}
-		defer rows.Close()
-		books, err = scanBooks(rows)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("scan books: %v", err))
-			return
-		}
-		countRow := h.svc.DB.QueryRow("SELECT COUNT(*) FROM books WHERE status = ?", status)
-		if err := countRow.Scan(&totalCount); err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("count books: %v", err))
-			return
-		}
-	default:
+	if status != "" && !validBookStatus(status) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid status filter: %s", status))
+		return
+	}
+
+	// all_ids mode: return just the matching IDs (capped) for bulk select.
+	if parseBoolQueryParam(r, "all_ids") {
+		h.listBookIDs(w, status, q)
+		return
+	}
+
+	offset := page * limit
+	where, filterArgs := buildBooksFilter(status, q)
+
+	queryArgs := append(append([]any{}, filterArgs...), limit, offset)
+	rows, err := h.svc.DB.Query(
+		"SELECT "+booksColumns+" FROM books"+where+" ORDER BY created_at DESC LIMIT ? OFFSET ?",
+		queryArgs...,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("query books: %v", err))
+		return
+	}
+	defer rows.Close()
+	books, err := scanBooks(rows)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("scan books: %v", err))
+		return
+	}
+
+	var totalCount int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM books"+where, filterArgs...).Scan(&totalCount); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("count books: %v", err))
 		return
 	}
 
@@ -140,6 +171,80 @@ func (h *Handler) ListBooks(w http.ResponseWriter, r *http.Request) {
 		Page:  page,
 		Limit: limit,
 	})
+}
+
+// maxBookIDs caps the all_ids response so a bulk-select payload stays small.
+const maxBookIDs = 1000
+
+// listBookIDs writes {"ids":[...]} for the given filters, capped at maxBookIDs.
+func (h *Handler) listBookIDs(w http.ResponseWriter, status, q string) {
+	where, filterArgs := buildBooksFilter(status, q)
+	queryArgs := append(append([]any{}, filterArgs...), maxBookIDs)
+	rows, err := h.svc.DB.Query(
+		"SELECT id FROM books"+where+" ORDER BY created_at DESC LIMIT ?",
+		queryArgs...,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("query books: %v", err))
+		return
+	}
+	defer rows.Close()
+
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("scan book ids: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string][]int64{"ids": ids})
+}
+
+// BooksCountsResponse is the JSON shape returned by GET /api/books/counts.
+type BooksCountsResponse struct {
+	Counts map[string]int `json:"counts"`
+}
+
+// GetBooksCounts handles GET /api/books/counts, returning per-status book
+// counts in a single grouped query (the dashboard previously made five
+// separate limit=1 calls).
+func (h *Handler) GetBooksCounts(w http.ResponseWriter, r *http.Request) {
+	counts := map[string]int{
+		"pending":    0,
+		"matched":    0,
+		"processing": 0,
+		"done":       0,
+		"error":      0,
+	}
+	rows, err := h.svc.DB.Query("SELECT status, COUNT(*) FROM books GROUP BY status")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("query book counts: %v", err))
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var s string
+		var n int
+		if err := rows.Scan(&s, &n); err != nil {
+			continue
+		}
+		if _, ok := counts[s]; ok {
+			counts[s] = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("scan book counts: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, BooksCountsResponse{Counts: counts})
 }
 
 // GetBook handles GET /api/books/:id, returning the book with authors and narrators.

@@ -18,6 +18,8 @@
 	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 	let starting = $state(false);
 	let jobs = $state<JobItem[]>([]);
+	// Jobs with a cancel request in flight, keyed by job id
+	let cancelling = $state<Set<string>>(new Set());
 
 	// SSE stream cleanup map — keyed by job id
 	const cleanupMap = $state(new Map<string, () => void>());
@@ -112,11 +114,9 @@
 						startPolling(item);
 						refreshAfterTerminal(item.id);
 					}
-					jobs = jobs;
 				} catch {
 					// Not JSON — treat as raw output line
 					item.output += raw + '\n';
-					jobs = jobs;
 				}
 			},
 			() => {
@@ -143,7 +143,6 @@
 				item.status = job.status;
 				item.error = job.error;
 				if (job.output) item.output = job.output;
-				jobs = jobs;
 			}
 			// If job moved to terminal, stop polling and refresh
 			if (job.status === 'done' || job.status === 'error') {
@@ -214,6 +213,8 @@
 
 	const matchedBooks = $derived(books.filter((b) => b.status === 'matched'));
 	const pendingBooks = $derived(books.filter((b) => b.status === 'pending'));
+	const runningJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'running').length);
+	const queuedJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'queued').length);
 
 	function jobStatusLabel(status: string): string {
 		switch (status.toLowerCase()) {
@@ -221,9 +222,37 @@
 			case 'running': return 'running — m4b-merge active';
 			case 'done':
 			case 'completed': return 'done — merged successfully';
+			case 'cancelled': return 'cancelled — stopped by operator';
 			case 'error':
 			case 'failed': return 'error — job failed';
 			default: return status;
+		}
+	}
+
+	async function cancelJob(job: JobItem) {
+		if (cancelling.has(job.id)) return;
+		const next = new Set(cancelling);
+		next.add(job.id);
+		cancelling = next;
+		try {
+			await post(`/jobs/${job.id}/cancel`, {});
+			job.status = 'cancelled';
+			job.error = null;
+			stopPolling(job.id);
+			const existing = cleanupMap.get(job.id);
+			if (existing) {
+				existing();
+				cleanupMap.delete(job.id);
+			}
+			// Reassign so the new array reference re-renders the Job Bay
+			jobs = [...jobs];
+			await loadBooks();
+		} catch (e) {
+			job.error = e instanceof Error ? e.message : 'Failed to cancel job';
+		} finally {
+			const done = new Set(cancelling);
+			done.delete(job.id);
+			cancelling = done;
 		}
 	}
 </script>
@@ -237,6 +266,77 @@
 {#if dl.error}
 	<div class="mb-6">
 		<Alert variant="error" onretry={load}>{dl.error}</Alert>
+	</div>
+{/if}
+
+{#if jobs.length > 0}
+	<!-- Job Bay: active and recent jobs — the live event, rendered first; books are the backlog below -->
+	<div class="bay bay--jobs mb-6">
+		<p class="jobbay-status" role="status" aria-live="polite">{runningJobs} running, {queuedJobs} queued</p>
+		<div class="bay__header">
+			<div class="bay__title">
+				<span class="bay__indicator bay__indicator--active" aria-hidden="true"></span>
+				<span>Job Bay</span>
+				<span class="bay__count">{jobs.length}</span>
+			</div>
+			<p class="bay__hint">Live output from m4b-merge jobs. SSE streams with polling fallback.</p>
+		</div>
+
+		<div class="job-grid">
+			{#each jobs as job (job.id)}
+				<div class="job-cell">
+					<div class="job-cell__header">
+						<div class="job-cell__identity">
+							<span class="job-cell__id" title={job.id}>{job.id.slice(0, 8)}</span>
+							<span class="job-cell__bookid">book #{job.bookId ?? '?'}</span>
+						</div>
+						<div class="job-cell__status">
+							<StatusBadge status={job.status} />
+							<span class="job-cell__status-text" aria-label="Job status: {jobStatusLabel(job.status)}">
+								{#if job.status.toLowerCase() === 'running'}
+									<Spinner size="0.875rem" />
+								{:else if job.status.toLowerCase() === 'error' || job.status.toLowerCase() === 'failed'}
+									<AlertTriangle class="h-3.5 w-3.5" />
+								{:else if job.status.toLowerCase() === 'done' || job.status.toLowerCase() === 'completed'}
+									<CheckCircle class="h-3.5 w-3.5" />
+								{:else}
+									<Clock class="h-3.5 w-3.5" />
+								{/if}
+								{jobStatusLabel(job.status)}
+							</span>
+						</div>
+					</div>
+
+					{#if job.output}
+						<div class="job-cell__output" role="log" aria-label="Job {job.id.slice(0, 8)} output" aria-live="polite">
+							{job.output}
+						</div>
+					{:else}
+						<p class="job-cell__waiting">Waiting for output…</p>
+					{/if}
+
+					{#if job.error}
+						<div class="job-cell__error" role="alert">
+							<AlertTriangle class="h-3.5 w-3.5" aria-hidden="true" />
+							{job.error}
+						</div>
+					{/if}
+
+					{#if job.status.toLowerCase() === 'queued' || job.status.toLowerCase() === 'running'}
+						<Button
+							variant="ghost"
+							class="job-cell__cancel text-[var(--state-red)] hover:bg-[var(--state-red-bg)]"
+							loading={cancelling.has(job.id)}
+							disabled={cancelling.has(job.id)}
+							aria-label="Cancel job {job.id}"
+							onclick={() => cancelJob(job)}
+						>
+							{cancelling.has(job.id) ? 'Cancelling…' : 'Cancel'}
+						</Button>
+					{/if}
+				</div>
+			{/each}
+		</div>
 	</div>
 {/if}
 
@@ -302,7 +402,7 @@
 						/>
 					</div>
 					<div class="manifest-row__cover">
-						<CoverArt url={book.cover_image_url} size="sm" />
+						<CoverArt url={book.cover_image_url} title={book.title} size="sm" />
 					</div>
 					<div class="manifest-row__info">
 						<p class="manifest-row__title">{book.title}</p>
@@ -339,10 +439,10 @@
 			{#each pendingBooks as book (book.id)}
 				<div class="manifest-row manifest-row--pending">
 					<div class="manifest-row__select manifest-row__select--locked" aria-hidden="true">
-						<LockPlaceholder />
+						{@render LockPlaceholder()}
 					</div>
 					<div class="manifest-row__cover">
-						<CoverArt url={book.cover_image_url} size="sm" />
+						<CoverArt url={book.cover_image_url} title={book.title} size="sm" />
 					</div>
 					<div class="manifest-row__info">
 						<p class="manifest-row__title">{book.title}</p>
@@ -371,63 +471,6 @@
 		actionLabel="Go to Match"
 		actionHref="/match"
 	/>
-{/if}
-
-<!-- Job Bay: active and recent jobs — shown independently of book count -->
-{#if jobs.length > 0}
-	<div class="bay bay--jobs mt-6">
-		<div class="bay__header">
-			<div class="bay__title">
-				<span class="bay__indicator bay__indicator--active" aria-hidden="true"></span>
-				<span>Job Bay</span>
-				<span class="bay__count">{jobs.length}</span>
-			</div>
-			<p class="bay__hint">Live output from m4b-merge jobs. SSE streams with polling fallback.</p>
-		</div>
-
-		<div class="job-grid">
-			{#each jobs as job (job.id)}
-				<div class="job-cell">
-					<div class="job-cell__header">
-						<div class="job-cell__identity">
-							<span class="job-cell__id" title={job.id}>{job.id.slice(0, 8)}</span>
-							<span class="job-cell__bookid">book #{job.bookId ?? '?'}</span>
-						</div>
-						<div class="job-cell__status">
-							<StatusBadge status={job.status} />
-							<span class="job-cell__status-text" aria-label="Job status: {jobStatusLabel(job.status)}">
-								{#if job.status.toLowerCase() === 'running'}
-									<Spinner size="0.875rem" />
-								{:else if job.status.toLowerCase() === 'error' || job.status.toLowerCase() === 'failed'}
-									<AlertTriangle class="h-3.5 w-3.5" />
-								{:else if job.status.toLowerCase() === 'done' || job.status.toLowerCase() === 'completed'}
-									<CheckCircle class="h-3.5 w-3.5" />
-								{:else}
-									<Clock class="h-3.5 w-3.5" />
-								{/if}
-								{jobStatusLabel(job.status)}
-							</span>
-						</div>
-					</div>
-
-					{#if job.output}
-						<div class="job-cell__output" role="log" aria-label="Job {job.id.slice(0, 8)} output" aria-live="polite">
-							{job.output}
-						</div>
-					{:else}
-						<p class="job-cell__waiting">Waiting for output…</p>
-					{/if}
-
-					{#if job.error}
-						<div class="job-cell__error" role="alert">
-							<AlertTriangle class="h-3.5 w-3.5" aria-hidden="true" />
-							{job.error}
-						</div>
-					{/if}
-				</div>
-			{/each}
-		</div>
-	</div>
 {/if}
 
 <svelte:head>
@@ -482,11 +525,11 @@
 		color: var(--text-muted);
 	}
 
-	/* Rail indicators — small colored dots for bay status */
+	/* Rail indicators — small colored squares (bench dots are square) */
 	.bay__indicator {
 		width: 0.5rem;
 		height: 0.5rem;
-		border-radius: 50%;
+		border-radius: 0;
 		flex-shrink: 0;
 	}
 
@@ -638,7 +681,7 @@
 
 	.job-cell__bookid {
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.7rem;
+		font-size: 0.75rem;
 		color: var(--text-muted);
 		padding: 0.1rem 0.4rem;
 		background: var(--elevated);
@@ -668,7 +711,7 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-sm);
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.72rem;
+		font-size: 0.75rem;
 		line-height: 1.55;
 		color: var(--text-secondary);
 		white-space: pre-wrap;
@@ -693,6 +736,28 @@
 		border-radius: var(--radius-sm);
 		font-size: 0.8rem;
 		color: var(--state-red);
+	}
+
+	/* Screen-reader-only queue state line above the Job Bay */
+	.jobbay-status {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
+		border: 0;
+	}
+
+	/* :global — the class lands on the child <Button> element, which is outside
+	   this component's CSS scope; scoping would strip the rule. */
+	:global(.job-cell__cancel) {
+		margin-top: 0.5rem;
+		min-height: 2rem;
+		padding: 0.25rem 0.75rem;
+		font-size: 0.75rem;
 	}
 
 	/* Spinner: shared <Spinner> component owns the animation
@@ -720,7 +785,9 @@
 	}
 </style>
 
-<!-- Inline SVG components to avoid extra imports -->
+<!-- Inline SVG. Declared at top level so Svelte hoists it as a function, not a
+     component. MUST be invoked via {@render ...} — a tag-style call resolves as
+     a component and triggers invalid_snippet_arguments. -->
 {#snippet LockPlaceholder()}
 	<span
 		class="inline-flex h-4 w-4 items-center justify-center text-[var(--text-muted)]"

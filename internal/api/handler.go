@@ -50,6 +50,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		// Books CRUD
 		r.Get("/books", h.ListBooks)
 		r.Post("/books", h.CreateBooks)
+		r.Get("/books/counts", h.GetBooksCounts)
 		r.Get("/books/{id}", h.GetBook)
 		r.Put("/books/{id}", h.UpdateBook)
 		r.Delete("/books/{id}", h.DeleteBook)
@@ -57,6 +58,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		// Processing
 		r.Post("/process", h.StartProcessing)
 		r.Get("/jobs", h.ListJobs)
+		r.Post("/jobs/{id}/cancel", h.CancelJob)
 		r.Get("/jobs/{id}", h.GetJobStatus)
 		r.Get("/jobs/{id}/stream", h.StreamJob)
 

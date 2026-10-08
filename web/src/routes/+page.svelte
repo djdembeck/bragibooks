@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { get } from '$lib/api';
-	import type { BookWithPeople, BooksListResponse, JobsListResponse, ProcessingJob } from '$lib/types';
+	import type { BookWithPeople, BooksListResponse, JobsListResponse, ProcessingJob, StatusCounts } from '$lib/types';
 	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, Button, CoverArt } from '$lib/components';
 	import { formatRuntime } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
@@ -12,22 +12,12 @@
 
 	async function load() {
 		await dl.run(async () => {
-			const [pending, matched, processing, done, err, recentResp, jobsResp] = await Promise.all([
-				get<BooksListResponse>('/books?status=pending&limit=1'),
-				get<BooksListResponse>('/books?status=matched&limit=1'),
-				get<BooksListResponse>('/books?status=processing&limit=1'),
-				get<BooksListResponse>('/books?status=done&limit=1'),
-				get<BooksListResponse>('/books?status=error&limit=1'),
+			const [countsResp, recentResp, jobsResp] = await Promise.all([
+				get<StatusCounts>('/books/counts'),
 				get<BooksListResponse>('/books?limit=5'),
 				get<JobsListResponse>('/jobs?limit=20'),
 			]);
-			totals = {
-				pending: pending.total,
-				matched: matched.total,
-				processing: processing.total,
-				done: done.total,
-				error: err.total,
-			};
+			totals = countsResp.counts;
 			recent = recentResp.books || [];
 			jobs = jobsResp.jobs || [];
 		});
@@ -67,7 +57,9 @@
 			count: safeMatched,
 			href: '/match',
 			description: 'Metadata review & pairing',
-			state: safeMatched > 0 ? ('active' as const) : safeErrors > 0 ? ('error' as const) : ('idle' as const),
+			// Empty bay is idle — red `error` is reserved for actual match
+			// failures; book-level errors stay on the "N errors" summary link.
+			state: safeMatched > 0 ? ('active' as const) : ('idle' as const),
 		},
 		{
 			id: 'queue',
@@ -194,7 +186,7 @@
 
 <!-- ── Continuation Actions (subordinate to the bays) ─────────── -->
 <div class="mb-6 flex flex-wrap items-center gap-2">
-	<Button variant="ghost" href="/import">Import books</Button>
+	<Button variant="ghost" href="/import">Route folders in</Button>
 	<Button variant="secondary" href="/match">Match metadata</Button>
 	{#if safeErrors > 0}
 		<a href="/books?status=error" class="ml-auto inline-flex items-center gap-1.5 rounded-sm px-3 py-2.5 text-sm font-medium text-[var(--state-red)] no-underline hover:opacity-80 min-h-[44px] whitespace-nowrap">
@@ -236,7 +228,7 @@
 				href="/books/{book.id}"
 				class="card group flex items-center gap-4 no-underline transition-colors hover:bg-[var(--surface-hover)]"
 			>
-				<CoverArt url={book.cover_image_url} size="sm" />
+				<CoverArt url={book.cover_image_url} title={book.title} size="sm" />
 				<div class="min-w-0 flex-1">
 					<h3 class="truncate font-medium">{book.title}</h3>
 					<p class="truncate text-sm text-[var(--text-muted)]">

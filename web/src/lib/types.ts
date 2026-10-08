@@ -93,7 +93,7 @@ export interface UpdateBookRequest {
 export interface ProcessingJob {
 	id: string;
 	book_id: number | null;
-	status: 'queued' | 'running' | 'done' | 'error';
+	status: 'queued' | 'running' | 'done' | 'error' | 'cancelled';
 	output: string;
 	error: string | null;
 	output_file: string | null;
@@ -104,6 +104,16 @@ export interface ProcessingJob {
 
 export interface JobsListResponse {
 	jobs: ProcessingJob[];
+}
+
+export interface StatusCounts {
+	counts: {
+		pending: number;
+		matched: number;
+		processing: number;
+		done: number;
+		error: number;
+	};
 }
 
 export interface Settings {
