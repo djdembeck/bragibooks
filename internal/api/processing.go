@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,6 +36,12 @@ type jobState struct {
 	job      models.ProcessingJob
 	progress chan string
 	done     chan error
+	// jobCtx/cancel let the API kill the job's m4b-merge process mid-run.
+	jobCtx context.Context
+	cancel context.CancelFunc
+	// finalized ensures the terminal progress/done signal is sent exactly once,
+	// no matter how many components (cancel request, worker, timeout) finalize.
+	finalized sync.Once
 }
 
 // NewProcessingService creates a ProcessingService backed by the given database
@@ -49,7 +57,13 @@ func NewProcessingService(db *sql.DB, proc *audio.Processor, numWorkers int) *Pr
 }
 
 // RunWorkers starts the worker goroutines that consume jobs from the channel.
+// numWorkers < 1 (the "use all cores" convention for m4b-merge) would
+// otherwise spawn no workers and leave every job queued forever, so it is
+// clamped to at least one.
 func (s *ProcessingService) RunWorkers(ctx context.Context, numWorkers int) {
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
 	for range numWorkers {
 		s.wg.Add(1)
 		go func() {
@@ -59,6 +73,13 @@ func (s *ProcessingService) RunWorkers(ctx context.Context, numWorkers int) {
 				case job, ok := <-s.workerCh:
 					if !ok {
 						return
+					}
+					// Skip jobs cancelled while still queued: the per-job
+					// context is already done and the cancel request set the
+					// terminal status. Finalize so any open stream closes.
+					if st := s.GetJob(job.ID); st != nil && st.jobCtx != nil && st.jobCtx.Err() != nil {
+						st.finalize(cancelledProgressMsg, nil)
+						continue
 					}
 					s.processJob(ctx, job)
 				case <-ctx.Done():
@@ -101,11 +122,18 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 		return "", fmt.Errorf("insert processing job: %w", err)
 	}
 
+	// The per-job context is cancelable from the API (POST /jobs/:id/cancel)
+	// so a running m4b-merge process can be killed mid-flight. It is derived
+	// from Background, not the request context, because the job outlives the
+	// request that queued it.
+	jobCtx, jobCancel := context.WithCancel(context.Background())
 	s.mu.Lock()
 	s.jobs[id] = &jobState{
 		job:      *job,
 		progress: make(chan string, 10),
 		done:     make(chan error, 1),
+		jobCtx:   jobCtx,
+		cancel:   jobCancel,
 	}
 	s.mu.Unlock()
 
@@ -116,6 +144,7 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 			"UPDATE books SET status = 'processing', status_message = '' WHERE id = ?",
 			bookID,
 		); err != nil {
+			jobCancel() // the job will never run; release its context
 			return "", fmt.Errorf("mark book processing: %w", err)
 		}
 	}
@@ -131,10 +160,126 @@ func (s *ProcessingService) GetJob(jobID string) *jobState {
 	return s.jobs[jobID]
 }
 
+// Terminal job statuses. Cancelled is a first-class terminal state: the DB may
+// hold it, and ListJobs/GetJobStatus pass it through as-is.
+const (
+	jobStatusQueued    = "queued"
+	jobStatusRunning   = "running"
+	jobStatusDone      = "done"
+	jobStatusError     = "error"
+	jobStatusCancelled = "cancelled"
+)
+
+var errJobNotFound = errors.New("job not found")
+
+var errJobTerminal = errors.New("job already finished")
+
+const cancelledProgressMsg = `{"status":"cancelled","message":"job cancelled"}`
+
+// finalize sends the terminal progress event and signals the done channel
+// exactly once, so that the SSE stream closes and the done receiver unblocks
+// regardless of which component (worker, timeout, or cancel request) won.
+func (st *jobState) finalize(msg string, doneErr error) {
+	st.finalized.Do(func() {
+		select {
+		case st.progress <- msg:
+		default:
+		}
+		select {
+		case st.done <- doneErr:
+		default:
+		}
+	})
+}
+
+// CancelJob cancels a processing job and returns the job's book_id.
+//
+// Behavior by current DB status:
+//   - queued:  the job is marked 'cancelled' in the DB immediately and the
+//     book is reset to 'matched'; the worker will dequeue the job and skip it.
+//   - running: the per-job context is cancelled so m4b-merge is killed via its
+//     context; the worker's finalizeCancelled then writes the terminal
+//     'cancelled' status and resets the book. CancelJob does not touch the
+//     book itself here, so a job that finishes successfully in the race window
+//     ends up consistently 'done'.
+//   - done/error/cancelled: errJobTerminal is returned.
+func (s *ProcessingService) CancelJob(jobID string) (sql.NullInt64, error) {
+	var status string
+	var bookID sql.NullInt64
+	err := s.db.QueryRow(
+		"SELECT status, book_id FROM processing_jobs WHERE id = ?", jobID,
+	).Scan(&status, &bookID)
+	if err == sql.ErrNoRows {
+		return sql.NullInt64{}, errJobNotFound
+	}
+	if err != nil {
+		return sql.NullInt64{}, fmt.Errorf("query job for cancel: %w", err)
+	}
+	if status != jobStatusQueued && status != jobStatusRunning {
+		return sql.NullInt64{}, errJobTerminal
+	}
+
+	state := s.GetJob(jobID)
+	if state != nil && state.cancel != nil {
+		state.cancel()
+	}
+
+	if status == jobStatusQueued {
+		s.db.Exec(
+			"UPDATE processing_jobs SET status = ?, completed_at = datetime('now') WHERE id = ?",
+			jobStatusCancelled, jobID,
+		)
+		if bookID.Valid {
+			s.db.Exec(
+				"UPDATE books SET status = 'matched', status_message = '' WHERE id = ? AND status = 'processing'",
+				bookID.Int64,
+			)
+		}
+		// Close any open progress stream; the worker's skip path finalizes
+		// idempotently via sync.Once.
+		if state != nil {
+			state.finalize(cancelledProgressMsg, nil)
+		}
+	} else if status == jobStatusRunning && state == nil {
+		// Running job with no in-memory state (the process restarted while
+		// the job was running): no worker owns it, so nobody would observe
+		// the cancelled context. Persist the terminal state directly.
+		s.db.Exec(
+			"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE id = ?",
+			jobStatusCancelled, "cancelled by user", jobID,
+		)
+		if bookID.Valid {
+			s.db.Exec(
+				"UPDATE books SET status = 'matched', status_message = '' WHERE id = ? AND status = 'processing'",
+				bookID.Int64,
+			)
+		}
+	}
+	return bookID, nil
+}
+
 func (s *ProcessingService) processJob(ctx context.Context, job *models.ProcessingJob) {
-	// Apply a 4-hour per-job timeout
-	ctx, cancel := context.WithTimeout(ctx, 4*time.Hour)
-	defer cancel()
+	state := s.GetJob(job.ID)
+
+	// The per-job context (created in QueueJob) is the cancel surface: the
+	// API's CancelJob cancels it to kill m4b-merge via its exec ctx. A
+	// 4-hour timeout is layered on top so a stuck process still terminates.
+	var runCtx context.Context
+	var runCancel context.CancelFunc
+	if state != nil && state.jobCtx != nil {
+		runCtx, runCancel = context.WithTimeout(state.jobCtx, 4*time.Hour)
+		defer runCancel()
+	} else {
+		runCtx = ctx
+	}
+
+	if state != nil && state.jobCtx != nil && state.jobCtx.Err() != nil {
+		// Cancelled between dequeue and here; the cancel request already set
+		// the terminal status.
+		state.finalize(cancelledProgressMsg, nil)
+		return
+	}
+
 	if job.BookID.Valid {
 		s.db.Exec(
 			"UPDATE books SET status = 'processing', status_message = '' WHERE id = ?",
@@ -142,13 +287,13 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		)
 	}
 
-	// Update status to 'running'
+	// Only a queued job may transition to running: a queued job cancelled
+	// by CancelJob is already 'cancelled' and must not be overwritten.
 	s.db.Exec(
-		"UPDATE processing_jobs SET status = ?, started_at = datetime('now') WHERE id = ?",
-		"running", job.ID,
+		"UPDATE processing_jobs SET status = ?, started_at = datetime('now') WHERE id = ? AND status = ?",
+		jobStatusRunning, job.ID, jobStatusQueued,
 	)
 
-	state := s.GetJob(job.ID)
 	if state != nil {
 		select {
 		case state.progress <- `{"status":"running","message":"started processing"}`:
@@ -168,88 +313,107 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 
 	// Parse source paths from stored args
 	var args map[string]any
-	if err := json.Unmarshal([]byte(job.M4bMergeArgs), &args); err == nil {
-		if paths, ok := args["src_paths"].([]interface{}); ok {
-			srcPaths := make([]string, len(paths))
-			for i, p := range paths {
-				if s, ok := p.(string); ok {
-					srcPaths[i] = s
-				}
-			}
-
-			result, err := s.proc.Run(ctx, srcPaths, asin)
-			if err != nil {
-				if job.BookID.Valid {
-					s.db.Exec(
-						"UPDATE books SET status = 'error', status_message = ? WHERE id = ?",
-						err.Error(), job.BookID.Int64,
-					)
-				}
-				stdout := ""
-				if result != nil {
-					stdout = result.Stdout
-				}
-				s.db.Exec(
-					"UPDATE processing_jobs SET status = ?, error = ?, output = ?, completed_at = datetime('now') WHERE id = ?",
-					"error", err.Error(), stdout, job.ID,
-				)
-				if state != nil {
-					select {
-					case state.progress <- `{"status":"error","message":"` + escapeJSON(err.Error()) + `"}`:
-					default:
-					}
-					state.done <- err
-				}
-				return
-			}
-
-			outputFile := result.OutputFile
-			if job.BookID.Valid {
-				s.db.Exec(
-					"UPDATE books SET status = 'done', status_message = '', dest_path = ? WHERE id = ?",
-					outputFile, job.BookID.Int64,
-				)
-			}
-			s.db.Exec(
-				"UPDATE processing_jobs SET status = ?, output = ?, output_file = ?, completed_at = datetime('now') WHERE id = ?",
-				"done", result.Stdout, outputFile, job.ID,
-			)
-			if state != nil {
-				select {
-				case state.progress <- `{"status":"done","message":"processing complete"}`:
-				default:
-				}
-				state.done <- nil
-			}
-		} else {
-			if job.BookID.Valid {
-				s.db.Exec(
-					"UPDATE books SET status = 'error', status_message = ? WHERE id = ?",
-					"invalid args: no src_paths", job.BookID.Int64,
-				)
-			}
-			s.db.Exec(
-				"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE id = ?",
-				"error", "invalid args: no src_paths", job.ID,
-			)
-			if state != nil {
-				state.done <- fmt.Errorf("invalid args: no src_paths")
+	var srcPaths []string
+	var argsErr error
+	if err := json.Unmarshal([]byte(job.M4bMergeArgs), &args); err != nil {
+		argsErr = fmt.Errorf("failed to parse args")
+	} else if paths, ok := args["src_paths"].([]interface{}); !ok {
+		argsErr = fmt.Errorf("invalid args: no src_paths")
+	} else {
+		srcPaths = make([]string, len(paths))
+		for i, p := range paths {
+			if s, ok := p.(string); ok {
+				srcPaths[i] = s
 			}
 		}
-	} else {
+	}
+
+	if argsErr != nil {
 		if job.BookID.Valid {
 			s.db.Exec(
 				"UPDATE books SET status = 'error', status_message = ? WHERE id = ?",
-				"failed to parse args", job.BookID.Int64,
+				argsErr.Error(), job.BookID.Int64,
 			)
 		}
 		s.db.Exec(
 			"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE id = ?",
-			"error", "failed to parse args", job.ID,
+			jobStatusError, argsErr.Error(), job.ID,
 		)
 		if state != nil {
-			state.done <- fmt.Errorf("failed to parse args")
+			state.finalize(`{"status":"error","message":"`+escapeJSON(argsErr.Error())+`"}`, argsErr)
 		}
+		return
+	}
+
+	result, err := s.proc.Run(runCtx, srcPaths, asin)
+	if err != nil {
+		// A cancellation during the run kills m4b-merge via its context;
+		// that is 'cancelled', not 'error'.
+		if state != nil && state.jobCtx != nil && state.jobCtx.Err() != nil {
+			s.finalizeCancelled(job)
+			return
+		}
+		if job.BookID.Valid {
+			s.db.Exec(
+				"UPDATE books SET status = 'error', status_message = ? WHERE id = ?",
+				err.Error(), job.BookID.Int64,
+			)
+		}
+		stdout := ""
+		if result != nil {
+			stdout = result.Stdout
+		}
+		s.db.Exec(
+			"UPDATE processing_jobs SET status = ?, error = ?, output = ?, completed_at = datetime('now') WHERE id = ?",
+			jobStatusError, err.Error(), stdout, job.ID,
+		)
+		if state != nil {
+			state.finalize(`{"status":"error","message":"`+escapeJSON(err.Error())+`"}`, err)
+		}
+		return
+	}
+
+	outputFile := result.OutputFile
+	if job.BookID.Valid {
+		s.db.Exec(
+			"UPDATE books SET status = 'done', status_message = '', dest_path = ? WHERE id = ?",
+			outputFile, job.BookID.Int64,
+		)
+	}
+	s.db.Exec(
+		"UPDATE processing_jobs SET status = ?, output = ?, output_file = ?, completed_at = datetime('now') WHERE id = ?",
+		jobStatusDone, result.Stdout, outputFile, job.ID,
+	)
+	if state != nil {
+		state.finalize(`{"status":"done","message":"processing complete"}`, nil)
+	}
+}
+
+// finalizeCancelled marks a running job cancelled in the DB after its
+// m4b-merge process was killed via the job context, resets the book to
+// 'matched' (only if it is still 'processing'), and emits the terminal
+// progress signal. The queued-cancel path resets the book in CancelJob
+// instead; this is the running path.
+func (s *ProcessingService) finalizeCancelled(job *models.ProcessingJob) {
+	var stdout string
+	if job.BookID.Valid {
+		var out sql.NullString
+		if err := s.db.QueryRow("SELECT output FROM processing_jobs WHERE id = ?", job.ID).Scan(&out); err == nil {
+			stdout = out.String
+		}
+	}
+	s.db.Exec(
+		"UPDATE processing_jobs SET status = ?, error = ?, output = ?, completed_at = datetime('now') WHERE id = ?",
+		jobStatusCancelled, "cancelled by user", stdout, job.ID,
+	)
+	if job.BookID.Valid {
+		s.db.Exec(
+			"UPDATE books SET status = 'matched', status_message = '' WHERE id = ? AND status = 'processing'",
+			job.BookID.Int64,
+		)
+	}
+	if state := s.GetJob(job.ID); state != nil {
+		state.finalize(cancelledProgressMsg, nil)
 	}
 }
 
@@ -289,19 +453,25 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 		// Use the corresponding src_dir (or wrap around if fewer dirs than books)
 		srcDir := req.SrcDirs[i%len(req.SrcDirs)]
 
-		// Collect input file paths from the source directory
-		entries, err := readDirectory(srcDir)
-		if err != nil {
+		// Collect input file paths: a source is either a directory of
+		// audio files (the folder route) or a bare audio file itself.
+		var inputPaths []string
+		if info, err := os.Stat(srcDir); err == nil && info.IsDir() {
+			entries, err := readDirectory(srcDir)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot read src_dir %s: %v", srcDir, err))
+				return
+			}
+			for _, e := range entries {
+				if e.Type == "file" && isAudioFile(e.Name) {
+					inputPaths = append(inputPaths, e.Path)
+				}
+			}
+		} else if _, err := os.Stat(srcDir); err == nil && isAudioFile(srcDir) {
+			inputPaths = append(inputPaths, srcDir)
+		} else {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot read src_dir %s: %v", srcDir, err))
 			return
-		}
-
-		// Only consider audio files
-		var inputPaths []string
-		for _, e := range entries {
-			if e.Type == "file" && isAudioFile(e.Name) {
-				inputPaths = append(inputPaths, e.Path)
-			}
 		}
 
 		if len(inputPaths) == 0 {
@@ -490,7 +660,7 @@ func (h *Handler) StreamJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if already done
-	if status == "done" || status == "error" {
+	if status == "done" || status == "error" || status == "cancelled" {
 		msg := map[string]string{
 			"status":  status,
 			"message": "job finished",
@@ -570,6 +740,38 @@ func escapeJSON(s string) string {
 	s = strings.ReplaceAll(s, "\n", `\\n`)
 	s = strings.ReplaceAll(s, "\r", `\\r`)
 	return s
+}
+
+// CancelJob handles POST /api/jobs/{id}/cancel.
+//
+//   - 200 {"id": "...", "book_id": N|null, "status": "cancelled"} on success
+//   - 404 {"error": "job not found"} for an unknown id
+//   - 409 {"error": "job already finished"} for a terminal job
+func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
+	jobID := chiURLParam(r, "id")
+
+	bookID, err := h.svc.ProcessingSvc.CancelJob(jobID)
+	switch {
+	case errors.Is(err, errJobNotFound):
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	case errors.Is(err, errJobTerminal):
+		writeError(w, http.StatusConflict, "job already finished")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("cancel job: %v", err))
+		return
+	}
+
+	resp := map[string]any{
+		"id":      jobID,
+		"book_id": nil,
+		"status":  jobStatusCancelled,
+	}
+	if bookID.Valid {
+		resp["book_id"] = bookID.Int64
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // Ensure io import is used
