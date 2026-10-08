@@ -2,6 +2,7 @@ package audiobookdb
 
 import (
 	"encoding/json"
+	"strconv"
 )
 
 // Book represents an audiobookdb book entity.
@@ -88,10 +89,48 @@ type IdName struct {
 	Name string `json:"name"`
 }
 
-// BookInSeries indicates a book's position within a series.
+// BookInSeries indicates a book's position within a series. Upstream
+// sends Position as either a plain integer or an object
+// ({"value":"1","label":"1",...}) depending on the record.
 type BookInSeries struct {
-	SeriesId string `json:"seriesId"`
-	Position int    `json:"position"`
+	SeriesId string  `json:"seriesId"`
+	Position flexInt `json:"position"`
+}
+
+// flexInt accepts a JSON number or an object whose "value"/"label" field is
+// a number or string-encoded number, as upstream series positions vary.
+type flexInt int
+
+func (f *flexInt) UnmarshalJSON(data []byte) error {
+	var n int
+	if err := json.Unmarshal(data, &n); err == nil {
+		*f = flexInt(n)
+		return nil
+	}
+	var obj struct {
+		Value json.Number `json:"value"`
+		Label json.Number `json:"label"`
+	}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return err
+	}
+	for _, cand := range []json.Number{obj.Value, obj.Label} {
+		if cand == "" {
+			continue
+		}
+		if n, err := cand.Int64(); err == nil {
+			*f = flexInt(n)
+			return nil
+		}
+		if s := cand.String(); s != "" {
+			if n, err := strconv.Atoi(s); err == nil {
+				*f = flexInt(n)
+				return nil
+			}
+		}
+	}
+	*f = 0
+	return nil
 }
 
 // ExternalRelation links to an external resource (Goodreads, etc.).
