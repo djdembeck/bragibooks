@@ -349,7 +349,7 @@
 
 	.cabinet__panel-label {
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.7rem;
+		font-size: 0.75rem;
 		font-weight: 700;
 		letter-spacing: 0.05em;
 		color: var(--accent);
@@ -399,14 +399,14 @@
 
 	.cabinet__field-error {
 		margin-top: 0.35rem;
-		font-size: 0.72rem;
+		font-size: 0.75rem;
 		color: var(--state-red);
 		font-weight: 500;
 	}
 
 	.cabinet__help {
 		margin-top: 0.35rem;
-		font-size: 0.72rem;
+		font-size: 0.75rem;
 		color: var(--text-muted);
 		line-height: 1.45;
 	}
@@ -436,13 +436,13 @@
 
 	.cabinet__ref-text {
 		margin-top: 0.25rem;
-		font-size: 0.72rem;
+		font-size: 0.75rem;
 		color: var(--text-muted);
 	}
 
 	.cabinet__ref-keywords {
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.68rem;
+		font-size: 0.75rem;
 		color: var(--text-muted);
 		line-height: 1.6;
 	}

@@ -20,12 +20,12 @@
 
 <header class="sticky top-0 z-30 border-b border-[var(--border-subtle)] bg-[var(--bg)]">
 	<!-- Top bar: logo + utility nav -->
-	<div class="mx-auto flex max-w-6xl items-center gap-4 px-4 py-2">
-		<a href="/" aria-label="Bragi Books" class="flex shrink-0 items-center gap-2.5 text-base font-bold text-[var(--enamel)] no-underline hover:opacity-80 min-h-[44px] min-w-[44px]">
+	<div class="mx-auto flex max-w-6xl items-center gap-3 px-4 py-2 sm:gap-4">
+		<a href="/" aria-label="Bragi Books" class="header-brand flex shrink-0 items-center gap-2.5 text-base font-bold text-[var(--enamel)] no-underline hover:opacity-80 min-h-[44px] min-w-[44px]">
 			<span class="flex h-8 w-8 items-center justify-center text-[var(--accent)]">
 				<Logo class="h-8 w-8" />
 			</span>
-			<span>Bragi Books</span>
+			<span class="header-brand-name">Bragi Books</span>
 		</a>
 
 		<nav aria-label="Utility" class="ml-auto flex items-center gap-0.5">

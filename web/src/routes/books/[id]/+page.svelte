@@ -18,27 +18,42 @@
 	const abdHref = $derived(book?.audiobookdb_book_id ? `https://audiobookdb.org/book/${book.audiobookdb_book_id}` : null);
 
 	/* ── Job history ─────────────────────────────────────────────
-	 * Newest-first from the queue API, filtered to this book client-side
-	 * (the API's book_id filter is not wired up in this build). Live
-	 * updating for running jobs is out of scope — reload the page.  */
+	 * Newest-first from the queue API, filtered server-side by book_id.
+	 * While any job is queued/running the list re-fetches every 8s so
+	 * the lock note and history stay live without a manual reload.  */
 	let jobs = $state<ProcessingJob[]>([]);
 
 	$effect(() => {
 		const id = book?.id;
 		if (!id) return;
-		get<JobsListResponse>('/jobs?limit=100')
-			.then((resp) => {
-				if (book?.id === id) jobs = (resp.jobs || []).filter((j) => j.book_id === id);
-			})
-			.catch(() => {
-				if (book?.id === id) jobs = [];
-			});
+		let cancelled = false;
+		let t: ReturnType<typeof setInterval> | null = null;
+		const stop = () => {
+			if (t) clearInterval(t);
+			t = null;
+		};
+		const load = async () => {
+			try {
+				const resp = await get<JobsListResponse>(`/jobs?book_id=${id}&limit=20`);
+				if (!cancelled && book?.id === id) jobs = resp.jobs || [];
+			} catch {
+				if (!cancelled && book?.id === id) jobs = [];
+			}
+			// Poll only while this book has an in-flight job; otherwise stop.
+			if (!cancelled && book?.id === id) {
+				if (inFlightJob && !t) t = setInterval(load, 8000);
+				else if (!inFlightJob) stop();
+			}
+		};
+		load();
+		return stop;
 	});
 
 	/* ── Actions ───────────────────────────────────────────────── */
 	let actionError = $state<CleanedAdbError | null>(null);
 	let confirming: 'reprocess' | 'rematch' | null = $state(null);
 	let acting = $state<'reprocess' | 'rematch' | null>(null);
+	let cancellingJob = $state(false);
 
 	// File-backed heuristic: a single audio file (by extension) is not a
 	// mergeable source directory — re-process it from the Queue instead.
@@ -83,7 +98,7 @@
 		if (!book) return;
 		acting = 'rematch';
 		try {
-			await put(`/books/${book.id}`, { status: 'matched' });
+			await put(`/books/${book.id}`, { status: 'pending' });
 			confirming = null;
 			await invalidateAll();
 			await goto('/match');
@@ -92,6 +107,22 @@
 			confirming = null;
 		} finally {
 			acting = null;
+		}
+	}
+
+	async function cancelInFlight() {
+		if (!book || cancellingJob) return;
+		const job = jobs.find((j) => j.status === 'queued' || j.status === 'running');
+		if (!job) return;
+		cancellingJob = true;
+		actionError = null;
+		try {
+			await post(`/jobs/${job.id}/cancel`, {});
+			await invalidateAll(); // book reverts to matched + job list shows cancelled
+		} catch (e) {
+			actionError = cleanApiError(e);
+		} finally {
+			cancellingJob = false;
 		}
 	}
 
@@ -188,6 +219,35 @@
 		const d = new Date(ts.replace(' ', 'T'));
 		return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
 	}
+
+	/* ── Display hygiene ───────────────────────────────────────
+	 * Stored descriptions may carry HTML source (<p>/<b>/<br />);
+	 * operator-facing views show clean plain text only, with the
+	 * raw payload available in a Technical detail expander.       */
+	const descriptionHasMarkup = $derived(Boolean(book?.description?.match(/<[a-zA-Z/][^>]*>/)));
+	const cleanDescription = $derived(
+		book?.description
+			? book.description
+					.replace(/<br\s*\/?>/gi, '\n')
+					.replace(/<\/p>/gi, '\n\n')
+					.replace(/<[^>]+>/g, '')
+					.replace(/\n{3,}/g, '\n\n')
+					.trim()
+			: ''
+	);
+
+	/* Human release date (e.g. "Dec 12, 2025"); raw ISO kept in
+	 * the Technical detail expander below the metadata grid. */
+	const releaseDateHuman = $derived.by(() => {
+		const raw = book?.release_date || '';
+		if (!raw) return '';
+		const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+		if (m) {
+			const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+			return Number.isNaN(d.getTime()) ? raw : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
+		}
+		return raw;
+	});
 </script>
 
 <svelte:head>
@@ -213,7 +273,7 @@
 		<!-- Left — the reel: cover + the splice, read fully -->
 		<div class="detail__reel">
 			{#if book.cover_image_url}
-				<CoverArt url={book.cover_image_url} size="xl" />
+				<CoverArt url={book.cover_image_url} title={book.title} size="xl" />
 			{:else}
 				<div class="detail__cover--placeholder" aria-label="No cover" role="img">
 					<CoverArt size="xl" />
@@ -267,7 +327,7 @@
 				{#if book.release_date}
 					<div class="detail__meta-row">
 						<dt class="detail__meta-label">Release date</dt>
-						<dd class="detail__meta-value">{book.release_date}</dd>
+						<dd class="detail__meta-value">{releaseDateHuman}</dd>
 					</div>
 				{/if}
 				{#if book.series}
@@ -304,9 +364,21 @@
 
 			{#if book.description}
 				<section class="detail__desc">
-					<h2 class="detail__meta-label">Description</h2>
-					<p class="detail__desc-body">{book.description}</p>
+					<h2 class="detail__section-title">Description</h2>
+					<p class="detail__desc-body">{cleanDescription}</p>
+					{#if descriptionHasMarkup}
+						<details class="detail__raw">
+							<summary>Technical detail</summary>
+							<pre class="detail__raw-pre">{book.description}</pre>
+						</details>
+					{/if}
 				</section>
+			{/if}
+			{#if book.release_date}
+				<details class="detail__raw detail__raw--release">
+					<summary>Raw release date</summary>
+					<pre class="detail__raw-pre">{book.release_date}</pre>
+				</details>
 			{/if}
 		</div>
 	</article>
@@ -315,7 +387,7 @@
 
 	<!-- ACTIONS — the operator's two levers, always confirm-gated -->
 	<section class="card workbench" aria-label="Actions">
-		<h2 class="workbench__title">Actions</h2>
+		<h2 class="detail__section-title">Actions</h2>
 		<div class="workbench__actions">
 			{#if confirming === 'reprocess'}
 				<div class="workbench__confirm">
@@ -342,9 +414,18 @@
 						<Button variant="primary" disabled>Re-process</Button>
 						<p class="workbench__note">
 							{jobs.find((j) => j.status === 'queued' || j.status === 'running')?.status === 'queued'
-								? 'Queued — wait or cancel in Queue.'
-								: 'Running — wait or cancel in Queue.'}
+								? 'Queued — wait or cancel below.'
+								: 'Running — wait or cancel below.'}
 						</p>
+						<Button
+							variant="ghost"
+							class="text-[var(--state-red)] hover:bg-[var(--state-red-bg)]"
+							disabled={cancellingJob}
+							aria-label="Cancel job {jobs.find((j) => j.status === 'queued' || j.status === 'running')?.id}"
+							onclick={cancelInFlight}
+						>
+							{cancellingJob ? 'Cancelling…' : 'Cancel job'}
+						</Button>
 					{:else}
 						<Button variant="primary" onclick={() => beginAction('reprocess')}>Re-process</Button>
 					{/if}
@@ -374,7 +455,7 @@
 	<!-- ADB DIFF — provenance is the only magenta on the bench -->
 	<section class="card workbench" aria-label="Compare with AudiobookDB">
 		<div class="workbench__head">
-			<h2 class="workbench__title">Compare with AudiobookDB</h2>
+			<h2 class="detail__section-title">Compare with AudiobookDB</h2>
 			{#if abdHref}
 				<a href={abdHref} target="_blank" rel="noopener noreferrer" class="workbench__link">
 					Open on AudiobookDB
@@ -444,7 +525,7 @@
 
 	<!-- JOB HISTORY — the tape of every merge attempt, newest first -->
 	<section class="card workbench" aria-label="Job history">
-		<h2 class="workbench__title">Job history</h2>
+		<h2 class="detail__section-title">Job history</h2>
 		{#if jobs.length === 0}
 			<p class="workbench__note">No processing jobs yet.</p>
 		{:else}
@@ -484,7 +565,7 @@
 
 	<!-- FILE FACTS — where the tape enters and exits -->
 	<section class="card workbench" aria-label="File facts">
-		<h2 class="workbench__title">File facts</h2>
+		<h2 class="detail__section-title">File facts</h2>
 		<dl class="workbench__facts">
 			<div class="workbench__fact">
 				<dt class="workbench__label">Source</dt>
@@ -591,7 +672,7 @@
 
 	.detail__title {
 		margin: 0;
-		font-size: 1.75rem;
+		font-size: clamp(1.5rem, 1.35rem + 0.6vw, 2rem);
 		font-weight: 700;
 		letter-spacing: -0.02em;
 		color: var(--enamel);
@@ -671,6 +752,41 @@
 		white-space: pre-line;
 	}
 
+	/* Raw payload expanders — Technical detail stays available, hidden by default */
+	.detail__raw {
+		margin-top: 0.75rem;
+	}
+
+	.detail__raw--release {
+		margin-top: 1.25rem;
+	}
+
+	.detail__raw summary {
+		cursor: pointer;
+		font-size: 0.75rem;
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		color: var(--text-muted);
+		user-select: none;
+	}
+
+	.detail__raw-pre {
+		margin: 0.5rem 0 0;
+		max-height: 14rem;
+		overflow: auto;
+		padding: 0.625rem 0.75rem;
+		background: var(--surface);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-size: 0.75rem;
+		line-height: 1.5;
+		color: var(--text-secondary);
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+
 	/* ── Workbench sections — stacked bays below the record ───── */
 	.workbench {
 		margin-top: 1rem;
@@ -684,7 +800,10 @@
 		flex-wrap: wrap;
 	}
 
-	.workbench__title {
+	/* Section header — one class for every section title on the bench
+	 * (Actions / Compare with AudiobookDB / Job history / File facts /
+	 * Description): 0.8rem / 700. */
+	.detail__section-title {
 		margin: 0;
 		font-size: 0.8rem;
 		font-weight: 700;

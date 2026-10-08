@@ -11,6 +11,7 @@
 		onclick?: (e: MouseEvent) => void;
 		href?: string;
 		class?: string;
+		[key: string]: unknown;
 	}
 
 	let {
@@ -21,7 +22,8 @@
 		loading = false,
 		onclick,
 		href,
-		class: className = ''
+		class: className = '',
+		...rest
 	}: Props = $props();
 
 	const isDisabled = $derived(disabled || loading);
@@ -40,7 +42,7 @@
 </script>
 
 {#if href}
-	<a href={href} class="{baseClass} {className}">
+	<a href={href} class="{baseClass} {className}" {...rest}>
 		{#if loading}
 			<Spinner size="1rem" />
 		{/if}
@@ -54,6 +56,7 @@
 		aria-disabled={isDisabled}
 		aria-busy={loading}
 		onclick={onclick}
+		{...rest}
 	>
 		{#if loading}
 			<Spinner size="1rem" />

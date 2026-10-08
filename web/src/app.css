@@ -25,7 +25,7 @@
 		--text: oklch(0.96 0.005 75);
 		--text-secondary: oklch(0.88 0.006 75);
 		--text-muted: oklch(0.80 0.006 75);
-		--text-placeholder: oklch(0.76 0.005 75);
+		--text-placeholder: oklch(0.80 0.005 75);
 		--enamel: oklch(0.98 0.003 75);
 
 		/* ── Semantic states — RED / AMBER / GREEN ──────────────
@@ -35,15 +35,15 @@
 		 * Neutral graphite = pending / idle
 		 * Only used for status; never decorative.                */
 
-		--state-red: oklch(0.69 0.18 25);
+		--state-red: oklch(0.75 0.18 25);
 		--state-red-bg: oklch(0.30 0.04 25);
 		--state-red-border: oklch(0.44 0.08 25);
 
-		--state-amber: oklch(0.78 0.12 85);
+		--state-amber: oklch(0.82 0.12 85);
 		--state-amber-bg: oklch(0.32 0.04 85);
 		--state-amber-border: oklch(0.44 0.08 85);
 
-		--state-green: oklch(0.67 0.14 145);
+		--state-green: oklch(0.76 0.14 145);
 		--state-green-bg: oklch(0.30 0.04 145);
 		--state-green-border: oklch(0.44 0.08 145);
 
@@ -51,7 +51,7 @@
 		 * Blue = info / help / neutral notification
 		 * Complements the warm surfaces with a cool reference.   */
 
-		--state-blue: oklch(0.65 0.12 250);
+		--state-blue: oklch(0.70 0.12 250);
 		--state-blue-bg: oklch(0.30 0.03 250);
 		--state-blue-border: oklch(0.44 0.06 250);
 
@@ -452,7 +452,10 @@
 
 	/* ── Badge — compact status tag ───────────────────────────── */
 	.badge {
-		@apply inline-flex items-center gap-1.5 rounded-sm px-2 py-0.5 text-xs font-semibold;
+		@apply inline-flex items-center gap-1.5 rounded-sm px-2 py-0.5 font-semibold;
+		font-size: 0.6875rem;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
 		border: 1.5px solid;
 		white-space: nowrap;
 	}
@@ -721,16 +724,22 @@
 		text-transform: uppercase;
 	}
 
-	/* ── Narrow screens — labels collapse to icons ────────────── */
+	/* ── Narrow screens ─────────────────────────────────────────
+	 * Utility nav keeps text labels at 390px — two links fit, and
+	 * icon-only nav is not acceptable on a touch surface.        */
 	@media (max-width: 480px) {
-		.utility-link__label {
-			display: none;
+		.header-brand {
+			gap: 0.5rem;
+		}
+
+		.header-brand-name {
+			font-size: 0.875rem;
 		}
 
 		.utility-link {
-			justify-content: center;
-			min-width: 2.75rem;
-			padding-inline: 0.5rem;
+			gap: 0.3125rem;
+			padding: 0.25rem 0.4375rem;
+			font-size: 0.8125rem;
 		}
 
 		.rail-station-label {

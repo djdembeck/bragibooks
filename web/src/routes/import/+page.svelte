@@ -235,7 +235,7 @@
 				{#each ['name', 'date', 'size'] as field}
 					<button
 						type="button"
-						class={["min-h-[44px] rounded-sm px-3 py-2.5 text-xs font-medium transition-colors", sortBy === field ? 'bg-[var(--accent-wash)] text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text)]'].join(' ')}
+						class={["min-h-[44px] rounded-sm px-3 py-2.5 text-xs font-medium transition-colors", sortBy === field ? 'bg-[var(--surface-hover)] text-[var(--enamel)]' : 'text-[var(--text-muted)] hover:text-[var(--text)]'].join(' ')}
 						onclick={() => toggleSort(field as 'name' | 'date' | 'size')}
 						aria-label="Sort by {field}{sortBy === field ? (sortDir === 'asc' ? ', ascending' : ', descending') : ''}"
 					>
@@ -316,7 +316,7 @@
 						/>
 						<button
 							type="button"
-							class="flex min-w-0 flex-1 items-center truncate text-left text-sm font-medium text-[var(--accent)] hover:underline"
+							class="flex min-w-0 flex-1 items-center truncate text-left text-sm font-medium text-[var(--enamel)] hover:underline"
 							onclick={() => loadDirectory(entry.path)}
 						>
 							<span class="mr-1 flex-shrink-0" aria-hidden="true">▸</span>
@@ -341,7 +341,7 @@
 						<!-- Signal dot for file type -->
 						<div class="flex min-w-0 flex-1 items-center gap-2 truncate" aria-label={supported ? 'supported file' : 'unsupported file'}>
 							<span
-								class="flex h-2 w-2 flex-shrink-0 rounded-full"
+								class="flex h-2 w-2 flex-shrink-0 rounded-none"
 								class:bg-[var(--state-green)]={supported}
 								class:bg-[var(--border)]={!supported}
 								aria-hidden="true"
@@ -360,7 +360,7 @@
 					No entries match your filter.
 					<button
 						type="button"
-						class="ml-1 text-[var(--accent)] hover:underline"
+						class="ml-1 text-[var(--text-secondary)] hover:text-[var(--text)] hover:underline"
 						onclick={() => (search = '')}
 					>
 						Clear filter

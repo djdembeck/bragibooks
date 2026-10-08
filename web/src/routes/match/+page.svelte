@@ -110,9 +110,14 @@
 		try {
 			const hits = await searchBooks(stripExtension(candidate.title));
 			candidate.searchResults = hits;
-			if (hits.length > 0) {
-				candidate.selectedBookId = hits[0].id;
-				candidate.details = await fetchDetails(hits[0].id);
+			// Only auto-select a result that clearly IS the source: the
+			// shorter title's tokens must be fully contained in the other
+			// (containment >= 0.9). Blindly taking hits[0] attaches unrelated
+			// books (e.g. a "Ghost Stories" hit on a "Forbidden Grove" folder).
+			const best = bestContainedHit(candidate.title, hits);
+			if (best) {
+				candidate.selectedBookId = best.id;
+				candidate.details = await fetchDetails(best.id);
 				candidate.selectedReleaseId = candidate.details.release?.id ?? null;
 				candidate.manualPick = false;
 			}
@@ -121,6 +126,46 @@
 		} finally {
 			candidate.loading = false;
 		}
+	}
+
+	// Returns the best hit whose title is near-fully token-contained by (or
+	// contains) the source title, or null when no hit is a confident match.
+	function bestContainedHit(
+		sourceTitle: string,
+		hits: AudiobookDBBook[]
+	): AudiobookDBBook | null {
+		const srcTokens = titleTokens(sourceTitle);
+		if (srcTokens.size === 0) return null;
+		let best: AudiobookDBBook | null = null;
+		let bestScore = 0;
+		for (const hit of hits) {
+			const hitTokens = titleTokens(hit.title);
+			if (hitTokens.size === 0) continue;
+			const inter = setIntersection(srcTokens, hitTokens);
+			const smaller = Math.min(srcTokens.size, hitTokens.size);
+			const score = inter / smaller;
+			if (score >= 0.9 && score > bestScore) {
+				bestScore = score;
+				best = hit;
+			}
+		}
+		return best;
+	}
+
+	function titleTokens(s: string): Set<string> {
+		return new Set(
+			s
+				.toLowerCase()
+				.replace(/[^a-z0-9]+/g, ' ')
+				.split(' ')
+				.filter(Boolean)
+		);
+	}
+
+	function setIntersection(a: Set<string>, b: Set<string>): number {
+		let n = 0;
+		for (const t of a) if (b.has(t)) n++;
+		return n;
 	}
 
 	async function searchBooks(query: string): Promise<AudiobookDBBook[]> {
@@ -465,6 +510,9 @@
 
 <svelte:window
 	onclick={(e) => {
+		// The custom-search dialog (native <dialog> in the top layer) is not
+		// part of the listbox DOM — clicks inside it must not close the picker.
+		if (modalOpen) return;
 		if (listboxCandidateId !== null && !(e.target instanceof Element && e.target.closest('.match-listbox, .match-listbox__trigger'))) {
 			closeListbox();
 		}
@@ -546,7 +594,7 @@
 						<div class="flex items-start justify-between gap-3">
 							{#if candidate.loading && !candidate.details.book}
 								<span class="flex items-center gap-1.5 text-xs font-medium text-[var(--text-muted)]">
-									<span class="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--text-muted)]" aria-hidden="true"></span>
+									<span class="h-1.5 w-1.5 rounded-full bg-[var(--text-muted)]" aria-hidden="true"></span>
 									Searching…
 								</span>
 							{:else if candidate.details.book}
@@ -581,7 +629,7 @@
 									</button>
 									<button
 										type="button"
-										class="text-sm text-[var(--accent)] hover:underline"
+										class="text-sm text-[var(--text-secondary)] hover:text-[var(--text)] hover:underline"
 										onclick={() => undoRemoveCandidate(candidate)}
 									>
 										Cancel
@@ -613,13 +661,13 @@
 									<span class="text-[var(--text-muted)]">— {cleaned.message}</span>
 									<button
 										type="button"
-										class="text-sm font-medium text-[var(--accent)] hover:underline"
+										class="text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text)] hover:underline"
 										onclick={() => autoMatch(candidate)}
 									>
 										Retry
 									</button>
 									{#if cleaned.rateLimited}
-										<a href="/settings" class="text-sm font-medium text-[var(--accent)] hover:underline">
+										<a href="/settings" class="text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text)] hover:underline">
 											Settings → API key
 										</a>
 									{/if}
@@ -636,7 +684,7 @@
 						{:else if candidate.details.book}
 							<!-- Match found — the one record, in full -->
 							<div class="mt-2">
-								<h3 class="text-xl font-semibold text-[var(--enamel)]">{selectedTitle(candidate)}</h3>
+								<h2 class="text-xl font-semibold text-[var(--enamel)]">{selectedTitle(candidate)}</h2>
 								<p class="mt-1 text-sm text-[var(--text)]">{selectedAuthors(candidate) || 'Unknown author'}</p>
 								{#if selectedNarrators(candidate)}
 									<p class="mt-0.5 text-sm text-[var(--text-secondary)]">
@@ -683,7 +731,14 @@
 										}
 									}}
 								>
-									<span class="truncate">
+									<span
+										class="truncate"
+										title={candidate.selectedBookId
+											? candidate.details.book?.title
+												?? candidate.searchResults.find((b) => b.id === candidate.selectedBookId)?.title
+												?? ''
+											: ''}
+									>
 										{#if candidate.selectedBookId}
 											{candidate.searchResults.find((b) => b.id === candidate.selectedBookId)?.title
 												?? candidate.details.book?.title
@@ -820,7 +875,7 @@
 				<p class="mt-1 text-[var(--text-muted)]">{modalError}</p>
 				<button
 					type="button"
-					class="mt-2 text-sm font-medium text-[var(--accent)] hover:underline"
+					class="mt-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text)] hover:underline"
 					onclick={runCustomSearch}
 				>
 					Retry
@@ -854,7 +909,7 @@
 
 	.matchrow__pipe-label {
 		flex-shrink: 0;
-		font-size: 0.65rem;
+		font-size: 0.75rem;
 		font-weight: 700;
 		letter-spacing: 0.06em;
 		text-transform: uppercase;

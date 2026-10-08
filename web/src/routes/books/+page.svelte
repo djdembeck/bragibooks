@@ -1,9 +1,9 @@
 <script lang="ts">
-	import { get } from '$lib/api';
+	import { get, post } from '$lib/api';
 import { goto } from '$app/navigation';
 import { page as pageStore } from '$app/stores';
-	import type { BookWithPeople, BooksListResponse } from '$lib/types';
-	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, Button, CoverArt } from '$lib/components';
+	import type { BooksListResponse, Settings } from '$lib/types';
+	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, Button, CoverArt, SpliceMeter } from '$lib/components';
 	import { formatRuntime } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
@@ -19,10 +19,22 @@ import { page as pageStore } from '$app/stores';
 
 	let filter = $state('all');
 	let currentPage = $state(0);
+	let q = $state('');
 	let response = $state<BooksListResponse | null>(null);
 	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 
 	const validFilters = new Set(filters.map((item) => item.value));
+
+	let searchInput = $state<HTMLInputElement | null>(null);
+	// Uncontrolled-style input value; the debounce below commits it to `q`.
+	let inputValue = $state('');
+
+	// Select-all-matching selection state
+	let allMatchedIds = $state<Set<number> | null>(null);
+	let allMatchedTotal = $state(0);
+	let selectingAll = $state(false);
+	let bulkRequeueing = $state(false);
+	let bulkError = $state<string | null>(null);
 
 	function normalizedFilter(value: string | null): string {
 		return value && validFilters.has(value) ? value : 'all';
@@ -33,12 +45,16 @@ import { page as pageStore } from '$app/stores';
 		return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
 	}
 
-	function updateUrl(nextFilter: string, nextPage: number) {
+	function updateUrl(nextFilter: string, nextPage: number, nextQ?: string) {
 		const params = new URLSearchParams($pageStore.url.searchParams);
 		if (nextFilter === 'all') params.delete('status');
 		else params.set('status', nextFilter);
 		if (nextPage > 0) params.set('page', String(nextPage));
 		else params.delete('page');
+		if (nextQ !== undefined) {
+			if (nextQ) params.set('q', nextQ);
+			else params.delete('q');
+		}
 		const query = params.toString();
 		void goto(`/books${query ? `?${query}` : ''}`, {
 			replaceState: true,
@@ -47,10 +63,18 @@ import { page as pageStore } from '$app/stores';
 		});
 	}
 
+	function buildBooksQuery(extra = '') {
+		const params = new URLSearchParams();
+		if (filter !== 'all') params.set('status', filter);
+		if (q) params.set('q', q);
+		params.set('page', String(currentPage));
+		params.set('limit', String(limit));
+		return `/books?${params.toString()}${extra}`;
+	}
+
 	async function loadBooks() {
 		await dl.run(async () => {
-			const statusParam = filter === 'all' ? '' : `status=${filter}&`;
-			const nextResponse = await get<BooksListResponse>(`/books?${statusParam}page=${currentPage}&limit=${limit}`);
+			const nextResponse = await get<BooksListResponse>(buildBooksQuery());
 			const lastPage = Math.max(0, Math.ceil(nextResponse.total / limit) - 1);
 			if (currentPage > lastPage) {
 				currentPage = lastPage;
@@ -72,16 +96,119 @@ import { page as pageStore } from '$app/stores';
 		updateUrl(filter, currentPage);
 	}
 
+	// Debounced search — plain timer in the input handler (not a reactive
+	// effect, so it can't be re-armed by state churn). Fires 300ms after the
+	// user stops typing: commit q, reset the page, and drive the ?q= nav.
+	let searchTimer: ReturnType<typeof setTimeout> | null = null;
+	function onSearchInput() {
+		if (searchTimer) clearTimeout(searchTimer);
+		searchTimer = setTimeout(() => {
+			const next = inputValue.trim();
+			if (next === q) return;
+			q = next;
+			currentPage = 0;
+			updateUrl(filter, 0, next);
+		}, 300);
+	}
+	$effect(() => () => {
+		if (searchTimer) clearTimeout(searchTimer);
+	});
+
+	// Select all matching books for the current filter + search
+	async function selectAllMatching() {
+		selectingAll = true;
+		bulkError = null;
+		try {
+			const params = new URLSearchParams();
+			if (filter !== 'all') params.set('status', filter);
+			if (q) params.set('q', q);
+			params.set('all_ids', '1');
+			const res = await get<{ ids: number[] }>(`/books?${params.toString()}`);
+			if (!res || !Array.isArray(res.ids)) throw new Error('Could not load matching book IDs.');
+			allMatchedIds = new Set(res.ids);
+			allMatchedTotal = res.ids.length;
+		} catch (e) {
+			bulkError = e instanceof Error ? e.message : 'Failed to load matching books';
+			allMatchedIds = null;
+		} finally {
+			selectingAll = false;
+		}
+	}
+
+	function clearSelection() {
+		allMatchedIds = null;
+		allMatchedTotal = 0;
+		bulkError = null;
+	}
+
+	async function bulkRequeue() {
+		if (!allMatchedIds || allMatchedIds.size === 0) return;
+		bulkRequeueing = true;
+		bulkError = null;
+		try {
+			const settings = await get<Settings>('/settings');
+			if (!settings?.input_dir) throw new Error('Source directory is not configured. Open Settings to set input_dir.');
+			// One POST: the backend wraps src_dirs around each book id, so a
+			// single common input_dir (the readable root) covers the whole set.
+			const ids = [...allMatchedIds];
+			await post(`/process`, { book_ids: ids, src_dirs: [settings.input_dir] });
+			await goto('/process');
+		} catch (e) {
+			bulkError = e instanceof Error ? e.message : 'Bulk requeue failed';
+		} finally {
+			bulkRequeueing = false;
+		}
+	}
+
+	// Pagination jump
+	let jumpValue = $state('');
+	function jumpToPage() {
+		const n = Number(jumpValue);
+		if (!Number.isInteger(n) || n < 1) return;
+		setPage(n - 1);
+		jumpValue = '';
+	}
+
+	// Keyboard: j/k page, '/' focus search. Ignore inputs and open modals.
+	function onKeydown(e: KeyboardEvent) {
+		const target = e.target as HTMLElement | null;
+		if (target) {
+			const tag = target.tagName;
+			if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'DIALOG') return;
+			if (target.isContentEditable) return;
+		}
+		if (document.querySelector('dialog[open]')) return;
+		if (e.metaKey || e.ctrlKey || e.altKey) return;
+		if (e.key === 'j') {
+			setPage(currentPage + 1);
+		} else if (e.key === 'k') {
+			setPage(currentPage - 1);
+		} else if (e.key === '/') {
+			e.preventDefault();
+			searchInput?.focus();
+		}
+	}
+
 	$effect(() => {
 		const nextFilter = normalizedFilter($pageStore.url.searchParams.get('status'));
 		const nextPage = normalizedPage($pageStore.url.searchParams.get('page'));
+		const nextQ = $pageStore.url.searchParams.get('q') ?? '';
 		if (filter !== nextFilter) filter = nextFilter;
 		if (currentPage !== nextPage) currentPage = nextPage;
+		if (q !== nextQ) q = nextQ;
+		// Mirror the search term into the input field when the URL changes from
+		// outside (back/forward, deep link). Gate on focus: while the user is
+		// typing (input focused) we never touch the field, which keeps the
+		// in-progress value authoritative and avoids racing the debounce nav.
+		if (searchInput && document.activeElement !== searchInput && inputValue !== nextQ) {
+			inputValue = nextQ;
+		}
 	});
 
 	$effect(() => {
 		filter;
 		currentPage;
+		q;
 		loadBooks();
 	});
 
@@ -94,6 +221,8 @@ import { page as pageStore } from '$app/stores';
 <svelte:head>
 	<title>Finish — Bragi Books</title>
 </svelte:head>
+
+<svelte:window onkeydown={onKeydown} />
 
 <PageHeader
 	title="Library Catalog"
@@ -109,21 +238,37 @@ import { page as pageStore } from '$app/stores';
 
 <!-- ── Status Filters — route bay selectors ──────────────────── -->
 <div class="mb-6" role="group" aria-labelledby="catalog-filter-heading">
-	<div class="mb-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+	<div class="mb-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
 		<h2 id="catalog-filter-heading" class="text-sm font-semibold text-[var(--text)]">Filter catalog</h2>
-		<p class="text-xs text-[var(--text-muted)]">
-			{#if response}{response.total} entries · {/if}
-			showing {activeFilterLabel.toLowerCase()} books.
-		</p>
+		<div class="flex flex-wrap items-center gap-2">
+			<input
+				bind:this={searchInput}
+				bind:value={inputValue}
+				type="search"
+				placeholder="Title or series…"
+				class="min-h-11 w-full sm:w-64"
+				aria-label="Search catalog"
+				oninput={onSearchInput}
+			/>
+			{#if response && response.total > 0}
+				<Button
+					variant="secondary"
+					loading={selectingAll}
+					onclick={() => (allMatchedIds ? clearSelection() : selectAllMatching())}
+				>
+					{allMatchedIds ? 'Clear selection' : `Select all ${response.total}`}
+				</Button>
+			{/if}
+		</div>
 	</div>
 	<div class="flex flex-wrap gap-2">
 		{#each filters as f}
 			<button
 				type="button"
 				class="min-h-11 rounded-sm border border-[var(--border)] px-3 py-2 text-sm font-mono font-semibold tracking-wide transition-colors"
-				class:bg-[var(--accent)]={filter === f.value}
-				class:text-[var(--accent-text)]={filter === f.value}
-				class:border-transparent={filter === f.value}
+				class:bg-[var(--surface-hover)]={filter === f.value}
+				class:text-[var(--enamel)]={filter === f.value}
+				class:border-[var(--border-strong)]={filter === f.value}
 				class:bg-[var(--surface)]={filter !== f.value}
 				class:text-[var(--text-muted)]={filter !== f.value}
 				class:hover:bg-[var(--surface-hover)]={filter !== f.value}
@@ -135,6 +280,25 @@ import { page as pageStore } from '$app/stores';
 			</button>
 		{/each}
 	</div>
+
+	<!-- ── Select-all-matching — bulk requeue bar ──────────────── -->
+	{#if allMatchedIds}
+		<div class="panel mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 p-3" role="region" aria-label="Bulk requeue" aria-live="polite">
+			<p class="text-sm text-[var(--text)]">
+				<span class="font-mono font-semibold">{allMatchedTotal}</span> books selected for bulk requeue
+				<span class="text-xs text-[var(--text-muted)]">· {activeFilterLabel.toLowerCase()}{q ? ` · “${q}”` : ''}</span>
+			</p>
+			<div class="flex items-center gap-2">
+				<Button loading={bulkRequeueing} onclick={bulkRequeue}>Requeue selected</Button>
+				<Button variant="ghost" disabled={bulkRequeueing} onclick={clearSelection}>Clear</Button>
+			</div>
+		</div>
+	{/if}
+	{#if bulkError}
+		<div class="mt-3">
+			<Alert variant="error" onretry={selectAllMatching}>{bulkError}</Alert>
+		</div>
+	{/if}
 </div>
 
 <!-- ── Manifest List ─────────────────────────────────────────── -->
@@ -174,7 +338,7 @@ import { page as pageStore } from '$app/stores';
 				aria-label="{book.title} — open record"
 			>
 				<!-- Cover thumbnail or placeholder -->
-				<CoverArt url={book.cover_image_url} size="sm" />
+				<CoverArt url={book.cover_image_url} title={book.title} size="sm" />
 
 				<!-- Book identity block -->
 				<div class="min-w-0 flex-1">
@@ -196,6 +360,11 @@ import { page as pageStore } from '$app/stores';
 					{/if}
 				</div>
 
+				<!-- Splice meter — process state as a physical seam (hidden on mobile) -->
+				<div class="hidden sm:block shrink-0">
+					<SpliceMeter status={book.status} cutColor="var(--surface)" />
+				</div>
+
 				<!-- Status badge — text + shape + color -->
 				<StatusBadge status={book.status} />
 			</a>
@@ -204,12 +373,12 @@ import { page as pageStore } from '$app/stores';
 
 	<!-- ── Pagination — page bay controls ────────────────────── -->
 	{#if totalPages > 1}
-		<div class="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+		<div class="mt-6 flex flex-wrap flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
 			<p class="text-sm text-[var(--text-muted)]">
 				Showing <span class="font-mono">{startIndex}–{endIndex}</span> of
 				<span class="font-mono">{response.total}</span>
 			</p>
-			<div class="flex items-center gap-2">
+			<div class="flex flex-wrap items-center gap-2">
 				<Button variant="secondary" disabled={currentPage === 0} onclick={() => setPage(currentPage - 1)}>
 					← Previous
 				</Button>
@@ -219,6 +388,20 @@ import { page as pageStore } from '$app/stores';
 				<Button variant="secondary" disabled={currentPage >= totalPages - 1} onclick={() => setPage(currentPage + 1)}>
 					Next →
 				</Button>
+				<div class="ml-2 flex items-center gap-1">
+					<input
+						bind:value={jumpValue}
+						type="number"
+						min={1}
+						max={totalPages}
+						aria-label="Jump to page"
+						class="w-16 font-mono text-sm"
+						onkeydown={(e) => {
+							if (e.key === 'Enter') jumpToPage();
+						}}
+					/>
+					<Button variant="secondary" onclick={jumpToPage}>Go</Button>
+				</div>
 			</div>
 		</div>
 	{/if}

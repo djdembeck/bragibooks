@@ -4,11 +4,13 @@
 	interface Props {
 		/** Cover URL in any backend form; a falsy value renders the placeholder spine. */
 		url?: string | null;
+		/** Book title — becomes meaningful alt text (`"{title} — cover art"`). */
+		title?: string;
 		/** sm — 48px manifest row · xl — record page hero. */
 		size?: 'sm' | 'xl';
 	}
 
-	let { url, size = 'sm' }: Props = $props();
+	let { url, title, size = 'sm' }: Props = $props();
 
 	const variant = $derived(size === 'xl' ? 'large' : 'small');
 </script>
@@ -18,7 +20,7 @@
 {#if url}
 	<img
 		src={bookCoverUrl(url, variant)}
-		alt=""
+		alt={title ? `${title} — cover art` : ''}
 		loading="lazy"
 		decoding="async"
 		class="cover cover--{size}"
