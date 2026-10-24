@@ -1,3 +1,5 @@
+import { cleanAdbError, toCleanedError, type CleanedAdbError } from './adbError';
+
 export interface DelayedLoadOptions {
 	/** Milliseconds to wait before showing a skeleton. Defaults to 200. */
 	delay?: number;
@@ -7,11 +9,11 @@ export interface DelayedLoadState {
 	/** True only after `delay` has elapsed while a load is in flight. */
 	readonly showSkeleton: boolean;
 
-	/** Error message from the most recent failed load, or null. */
-	readonly error: string | null;
+	/** Cleaned error from the most recent failed load, or null. */
+	readonly error: CleanedAdbError | null;
 
-	/** Manually set the error message (for form submissions, etc.). */
-	setError(value: string | null): void;
+	/** Manually set the error (for form submissions, etc.). */
+	setError(value: string | CleanedAdbError | null): void;
 
 	/**
 	 * Run `fn` with delayed skeleton and error handling. If another call to
@@ -26,7 +28,7 @@ export interface DelayedLoadState {
  */
 export function delayedLoad(options: DelayedLoadOptions = {}): DelayedLoadState {
 	let showSkeleton = $state(false);
-	let error = $state<string | null>(null);
+	let error = $state<CleanedAdbError | null>(null);
 	let timer: number | null = null;
 	let generation = 0;
 	const delay = options.delay ?? 200;
@@ -50,7 +52,7 @@ export function delayedLoad(options: DelayedLoadOptions = {}): DelayedLoadState 
 			}
 		} catch (e) {
 			if (g === generation) {
-				error = e instanceof Error ? e.message : 'Failed to load';
+				error = toCleanedError(e);
 			}
 		} finally {
 			if (timer !== null) {
@@ -70,8 +72,8 @@ export function delayedLoad(options: DelayedLoadOptions = {}): DelayedLoadState 
 		get error() {
 			return error;
 		},
-		setError(value: string | null) {
-			error = value;
+		setError(value: string | CleanedAdbError | null) {
+			error = value === null ? null : typeof value === 'string' ? cleanAdbError(value) : value;
 		},
 		run
 	};

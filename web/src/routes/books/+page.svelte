@@ -3,9 +3,10 @@
 import { goto } from '$app/navigation';
 import { page as pageStore } from '$app/stores';
 	import type { BooksListResponse, Settings } from '$lib/types';
-	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, Button, CoverArt, SpliceMeter } from '$lib/components';
+	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt } from '$lib/components';
 	import { formatRuntime } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
+	import { toCleanedError, type CleanedAdbError } from '$lib/adbError';
 
 	const limit = 20;
 	const filters: { value: string; label: string }[] = [
@@ -34,7 +35,7 @@ import { page as pageStore } from '$app/stores';
 	let allMatchedTotal = $state(0);
 	let selectingAll = $state(false);
 	let bulkRequeueing = $state(false);
-	let bulkError = $state<string | null>(null);
+	let bulkError = $state<CleanedAdbError | null>(null);
 
 	function normalizedFilter(value: string | null): string {
 		return value && validFilters.has(value) ? value : 'all';
@@ -128,7 +129,7 @@ import { page as pageStore } from '$app/stores';
 			allMatchedIds = new Set(res.ids);
 			allMatchedTotal = res.ids.length;
 		} catch (e) {
-			bulkError = e instanceof Error ? e.message : 'Failed to load matching books';
+			bulkError = toCleanedError(e);
 			allMatchedIds = null;
 		} finally {
 			selectingAll = false;
@@ -154,7 +155,7 @@ import { page as pageStore } from '$app/stores';
 			await post(`/process`, { book_ids: ids, src_dirs: [settings.input_dir] });
 			await goto('/process');
 		} catch (e) {
-			bulkError = e instanceof Error ? e.message : 'Bulk requeue failed';
+			bulkError = toCleanedError(e);
 		} finally {
 			bulkRequeueing = false;
 		}
@@ -219,27 +220,29 @@ import { page as pageStore } from '$app/stores';
 </script>
 
 <svelte:head>
-	<title>Finish — Bragi Books</title>
+	<title>Books — Bragi Books</title>
 </svelte:head>
 
 <svelte:window onkeydown={onKeydown} />
 
 <PageHeader
-	title="Library Catalog"
-	description="Paginated manifest of all library entries with status filters."
-	station="#04 · FINISH"
+	title="Books"
+	description="Every book in your library, with status filters and bulk requeue."
 />
 
 {#if dl.error}
 	<div class="mb-6">
-		<Alert variant="error" onretry={loadBooks}>{dl.error}</Alert>
+		<Alert variant="error" onretry={loadBooks}>
+			{dl.error.message}
+			<ErrorDetail raw={dl.error.raw} needsSettings={dl.error.needsSettings} />
+		</Alert>
 	</div>
 {/if}
 
-<!-- ── Status Filters — route bay selectors ──────────────────── -->
+<!-- ── Status filters ────────────────────────────────────────── -->
 <div class="mb-6" role="group" aria-labelledby="catalog-filter-heading">
 	<div class="mb-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-		<h2 id="catalog-filter-heading" class="text-sm font-semibold text-[var(--text)]">Filter catalog</h2>
+		<h2 id="catalog-filter-heading" class="text-sm font-semibold text-[var(--text)]">Filter</h2>
 		<div class="flex flex-wrap items-center gap-2">
 			<input
 				bind:this={searchInput}
@@ -265,14 +268,11 @@ import { page as pageStore } from '$app/stores';
 		{#each filters as f}
 			<button
 				type="button"
-				class="min-h-11 rounded-sm border border-[var(--border)] px-3 py-2 text-sm font-mono font-semibold tracking-wide transition-colors"
-				class:bg-[var(--surface-hover)]={filter === f.value}
-				class:text-[var(--enamel)]={filter === f.value}
+				class="min-h-11 rounded-sm border border-[var(--border)] bg-[var(--bg-panel)] px-3 py-2 text-sm font-medium transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
 				class:border-[var(--border-strong)]={filter === f.value}
-				class:bg-[var(--surface)]={filter !== f.value}
+				class:bg-[var(--surface)]={filter === f.value}
+				class:text-[var(--text)]={filter === f.value}
 				class:text-[var(--text-muted)]={filter !== f.value}
-				class:hover:bg-[var(--surface-hover)]={filter !== f.value}
-				class:hover:border-[var(--border-subtle)]={filter !== f.value}
 				onclick={() => setFilter(f.value)}
 				aria-pressed={filter === f.value ? 'true' : 'false'}
 			>
@@ -281,7 +281,7 @@ import { page as pageStore } from '$app/stores';
 		{/each}
 	</div>
 
-	<!-- ── Select-all-matching — bulk requeue bar ──────────────── -->
+	<!-- ── Bulk requeue bar ──────────────────────────────────── -->
 	{#if allMatchedIds}
 		<div class="panel mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 p-3" role="region" aria-label="Bulk requeue" aria-live="polite">
 			<p class="text-sm text-[var(--text)]">
@@ -296,12 +296,15 @@ import { page as pageStore } from '$app/stores';
 	{/if}
 	{#if bulkError}
 		<div class="mt-3">
-			<Alert variant="error" onretry={selectAllMatching}>{bulkError}</Alert>
+			<Alert variant="error" onretry={selectAllMatching}>
+				{bulkError.message}
+				<ErrorDetail raw={bulkError.raw} needsSettings={bulkError.needsSettings} />
+			</Alert>
 		</div>
 	{/if}
 </div>
 
-<!-- ── Manifest List ─────────────────────────────────────────── -->
+<!-- ── Catalog list ──────────────────────────────────────────── -->
 {#if response && !dl.showSkeleton}
 	<p class="sr-only" role="status" aria-live="polite">
 		{response.total === 0
@@ -310,9 +313,9 @@ import { page as pageStore } from '$app/stores';
 	</p>
 {/if}
 {#if dl.showSkeleton}
-	<div class="space-y-2" aria-label="Catalog loading">
+	<div class="overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]" aria-label="Catalog loading">
 		{#each Array(5) as _}
-			<div class="card flex items-center gap-4">
+			<div class="flex items-center gap-4 border-b border-[var(--border-subtle)] px-4 py-3 last:border-b-0">
 				<Skeleton variant="rect" width="48px" height="48px" />
 				<div class="flex-1">
 					<Skeleton height="1rem" width="35%" />
@@ -329,20 +332,19 @@ import { page as pageStore } from '$app/stores';
 		actionHref="/import"
 	/>
 {:else}
-	<!-- Dense catalog manifest — whole card links to the book's workbench -->
-	<div class="space-y-2" role="list" aria-label="Book catalog manifest">
+	<!-- Catalog list — whole row links to the book record -->
+	<ul class="divide-y divide-[var(--border-subtle)] overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]" aria-label="Book catalog">
 		{#each response.books as book (book.id)}
-			<a
-				href="/books/{book.id}"
-				class="card flex items-center gap-4 no-underline transition-colors hover:bg-[var(--surface-hover)]"
-				aria-label="{book.title} — open record"
-			>
-				<!-- Cover thumbnail or placeholder -->
+			<li>
+				<a
+					href="/books/{book.id}"
+					class="flex items-center gap-4 px-4 py-3 no-underline transition-colors hover:bg-[var(--surface-hover)]"
+					aria-label="{book.title} — open record"
+				>
 				<CoverArt url={book.cover_image_url} title={book.title} size="sm" />
 
-				<!-- Book identity block -->
 				<div class="min-w-0 flex-1">
-					<h3 class="truncate font-medium" title={book.title}>{book.title}</h3>
+					<h3 class="line-clamp-2 sm:truncate font-medium" title={book.title}>{book.title}</h3>
 					<p
 						class="truncate text-sm text-[var(--text-muted)]"
 						title={book.authors.map((a) => a.name).join(', ') || 'Unknown author'}
@@ -352,7 +354,7 @@ import { page as pageStore } from '$app/stores';
 							<span class="text-[var(--text-muted)]"> · {book.series}</span>
 						{/if}
 						{#if book.runtime_length_minutes}
-							<span class="text-[var(--text-muted)]"> · {formatRuntime(book.runtime_length_minutes)}</span>
+							<span class="text-[var(--text-secondary)]"> · {formatRuntime(book.runtime_length_minutes)}</span>
 						{/if}
 					</p>
 					{#if book.status_message}
@@ -360,18 +362,13 @@ import { page as pageStore } from '$app/stores';
 					{/if}
 				</div>
 
-				<!-- Splice meter — process state as a physical seam (hidden on mobile) -->
-				<div class="hidden sm:block shrink-0">
-					<SpliceMeter status={book.status} cutColor="var(--surface)" />
-				</div>
-
-				<!-- Status badge — text + shape + color -->
 				<StatusBadge status={book.status} />
-			</a>
+				</a>
+			</li>
 		{/each}
-	</div>
+	</ul>
 
-	<!-- ── Pagination — page bay controls ────────────────────── -->
+	<!-- ── Pagination ────────────────────────────────────────── -->
 	{#if totalPages > 1}
 		<div class="mt-6 flex flex-wrap flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
 			<p class="text-sm text-[var(--text-muted)]">

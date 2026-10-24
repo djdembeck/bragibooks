@@ -30,7 +30,7 @@
 		{#if onretry}
 			<button
 				type="button"
-				class="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center px-2 text-sm font-bold text-[var(--accent)] hover:underline focus-visible:outline-[var(--accent)]"
+				class="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center px-2 text-sm font-bold text-[var(--workspace-action)] hover:underline focus-visible:outline-[var(--focus-ring)]"
 				onclick={onretry}
 			>
 				Retry

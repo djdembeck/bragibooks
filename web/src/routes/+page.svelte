@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { get } from '$lib/api';
 	import type { BookWithPeople, BooksListResponse, JobsListResponse, ProcessingJob, StatusCounts } from '$lib/types';
-	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, Button, CoverArt } from '$lib/components';
+	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt } from '$lib/components';
 	import { formatRuntime } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
@@ -27,7 +27,7 @@
 		load();
 	});
 
-	// ── Workflow bay counts ──
+	// Workflow counts
 	// Safe numeric defaults — never display NaN if API data is missing
 	const safePending = $derived(typeof totals.pending === 'number' ? totals.pending : 0);
 	const safeMatched = $derived(typeof totals.matched === 'number' ? totals.matched : 0);
@@ -35,50 +35,47 @@
 	const safeDone = $derived(typeof totals.done === 'number' ? totals.done : 0);
 	const safeErrors = $derived(typeof totals.error === 'number' ? totals.error : 0);
 
-	// ── Bay status lights ──
-	// idle = no work in bay, active = work in flight, error = failures, done = settled output
+	// idle = no work in step, active = ready or in-flight work, error = failures,
+	// done = settled output
 	const queueRunning = $derived(jobs.some((j) => j.status === 'running' || j.status === 'queued'));
 	const queueError = $derived(jobs.some((j) => j.status === 'error'));
 
-	const bays = $derived([
+	const workflow = $derived([
 		{
-			id: 'intake',
-			label: 'INTAKE',
-			station: '#01',
-			count: safePending,
+			id: 'import',
+			label: 'Import',
+			count: null,
 			href: '/import',
-			description: 'Pending import',
-			state: safePending > 0 ? ('active' as const) : ('idle' as const),
+			description: 'Add source folders',
+			state: 'idle' as const,
 		},
 		{
 			id: 'match',
-			label: 'MATCH',
-			station: '#02',
-			count: safeMatched,
+			label: 'Match',
+			count: safePending,
 			href: '/match',
-			description: 'Metadata review & pairing',
-			// Empty bay is idle — red `error` is reserved for actual match
-			// failures; book-level errors stay on the "N errors" summary link.
-			state: safeMatched > 0 ? ('active' as const) : ('idle' as const),
+			description: 'Metadata review',
+			// A step with nothing in it is idle — red `error` is reserved
+			// for actual match failures; book-level errors stay on the
+			// "N errors" summary link.
+			state: safePending > 0 ? ('active' as const) : ('idle' as const),
 		},
 		{
 			id: 'queue',
-			label: 'QUEUE',
-			station: '#03',
-			count: safeProcessing,
+			label: 'Queue',
+			count: safeMatched + safeProcessing,
 			href: '/process',
-			description: 'Processing & conversion',
+			description: `${safeMatched} ready · ${safeProcessing} processing`,
 			state:
-				queueRunning || safeProcessing > 0
+				queueRunning || safeMatched > 0 || safeProcessing > 0
 					? ('active' as const)
 					: queueError
 						? ('error' as const)
 						: ('idle' as const),
 		},
 		{
-			id: 'finish',
-			label: 'FINISH',
-			station: '#04',
+			id: 'done',
+			label: 'Done',
 			count: safeDone,
 			href: '/books?status=done',
 			description: 'Completed library',
@@ -87,118 +84,79 @@
 	]);
 </script>
 
-<PageHeader title="Dashboard" description="Operations board — workflow stations and recent activity manifest." />
+<PageHeader title="Overview" description="What needs attention in your library, and where each book is right now." />
 
 {#if dl.error}
 	<div class="mb-6">
-		<Alert variant="error" onretry={load}>{dl.error}</Alert>
+		<Alert variant="error" onretry={load}>
+			{dl.error.message}
+			<ErrorDetail raw={dl.error.raw} needsSettings={dl.error.needsSettings} />
+		</Alert>
 	</div>
 {/if}
 
-<!-- ── Workflow Bays ─────────────────────────────────────────── -->
+<!-- ── Workflow summary ──────────────────────────────────────── -->
 {#if dl.showSkeleton}
-	<div class="mb-8" aria-label="Workflow bays loading">
-		<div class="grid grid-cols-2 gap-[3px] overflow-hidden rounded-sm border border-[var(--border-subtle)] bg-[var(--rail-line)] lg:grid-cols-4">
+	<div class="mb-6" aria-label="Workflow loading">
+		<div class="overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]">
 			{#each Array(4) as _}
-				<div class="bg-[var(--bg-panel)] p-4 sm:p-5">
-					<Skeleton height="0.75rem" width="2.5rem" />
-					<Skeleton class="mt-3" height="2rem" width="3.5rem" />
-					<Skeleton class="mt-3" height="0.75rem" width="60%" />
+				<div class="flex items-center gap-4 border-b border-[var(--border-subtle)] px-4 py-3 last:border-b-0">
+					<Skeleton height="1rem" width="4rem" />
+					<Skeleton class="hidden flex-1 max-w-[11rem] sm:block" height="0.75rem" width="9rem" />
+					<Skeleton class="ml-auto" height="0.75rem" width="2rem" />
 				</div>
 			{/each}
 		</div>
 	</div>
 {:else}
-	<!--
-		Operator Instrument — Workflow Bays
-		Contract: four full-width bays on a continuous tape-path rail.
-		Each bay: number (#NN), uppercase label, hero live count (mono),
-		status light (fill + text, never color alone), description.
-		Narrow screens: 2x2 grid; wide: 4-across.
-	-->
-	<div
-		class="mb-8"
-		role="navigation"
-		aria-label="Workflow stations: {bays.map(s => `${s.station} ${s.label}`).join(', ')}"
-	>
-		<!-- Tape-path rail: the grid's rail-line background shows through the
-		     3px gaps as a continuous groove connecting all four bays. -->
-		<div
-			class="grid grid-cols-2 gap-[3px] overflow-hidden rounded-sm border border-[var(--border-subtle)] bg-[var(--rail-line)] lg:grid-cols-4"
-		>
-			{#each bays as bay (bay.id)}
-				<a
-					href={bay.href}
-					class={`group relative flex min-h-[7rem] flex-col justify-between gap-3 p-4 no-underline transition-colors sm:p-5 lg:min-h-[8rem] ${
-						bay.state === 'active' ? 'bg-[var(--state-amber-bg)]' :
-						bay.state === 'error' ? 'bg-[var(--state-red-bg)]' :
-						bay.state === 'done' ? 'bg-[var(--state-green-bg)]' :
-						'bg-[var(--bg-panel)] hover:bg-[var(--surface)]'
-					}`}
-					aria-label="{bay.station} {bay.label}: {bay.count} items, {bay.state}. {bay.description}"
-				>
-					<!-- Bay header: number + label -->
-					<div class="flex items-center gap-2">
-						<span class="font-mono text-xs tracking-widest text-[var(--text-muted)]">
-							{bay.station}
-						</span>
-						<span class="text-xs font-semibold tracking-wide text-[var(--text)]">
-							{bay.label}
-						</span>
-					</div>
-
-					<!-- Hero live count -->
-					<span
-						class="font-mono text-3xl font-semibold leading-none tracking-tight text-[var(--enamel)] sm:text-4xl"
-						aria-label="{bay.count} items"
+	<nav aria-label="Library workflow" class="mb-6">
+		<ol class="divide-y divide-[var(--border-subtle)] overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]">
+			{#each workflow as step (step.id)}
+				<li>
+					<a
+						href={step.href}
+						class="flex min-h-[48px] items-center gap-3 px-4 py-2 no-underline transition-colors hover:bg-[var(--surface-hover)]"
+						aria-label={step.count === null ? `${step.label}: ${step.description}` : `${step.label}: ${step.count} books, ${step.state}. ${step.description}`}
 					>
-						{bay.count}
-					</span>
-
-					<!-- Footer: status light (fill + text, never color alone) + description -->
-					<div class="space-y-1.5">
-						<div class="flex items-center gap-2">
-							<span
-								class="h-2 w-2 flex-shrink-0 rounded-sm border border-[var(--border-strong)]"
-								class:bg-[var(--border)]={bay.state === 'idle'}
-								class:bg-[var(--state-amber)]={bay.state === 'active'}
-								class:bg-[var(--state-red)]={bay.state === 'error'}
-								class:bg-[var(--state-green)]={bay.state === 'done'}
-								aria-hidden="true"
-							></span>
-							<span class="text-xs font-medium text-[var(--text-muted)]">
-								{bay.state === 'idle'
-									? 'idle'
-									: bay.state === 'active'
-										? 'active'
-										: bay.state === 'error'
-											? 'error'
-											: 'done'}
+						<span class="w-16 flex-shrink-0 text-sm font-semibold text-[var(--text)]">{step.label}</span>
+						<span class="hidden min-w-0 flex-1 truncate text-xs text-[var(--text-muted)] sm:block">{step.description}</span>
+						{#if step.count === null}
+							<span class="ml-auto text-sm text-[var(--text-secondary)]">Browse</span>
+						{:else}
+							<span class="ml-auto flex flex-shrink-0 items-center gap-2">
+								{#if step.state === 'active'}
+									<span class="rounded-sm border border-[var(--state-amber-border)] bg-[var(--state-amber-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--state-amber)]">active</span>
+								{:else if step.state === 'error'}
+									<span class="rounded-sm border border-[var(--state-red-border)] bg-[var(--state-red-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--state-red)]">error</span>
+								{:else if step.state === 'done'}
+									<span class="rounded-sm border border-[var(--state-green-border)] bg-[var(--state-green-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--state-green)]">done</span>
+								{/if}
+								<span class="font-mono text-sm tabular-nums text-[var(--text-secondary)]">{step.count}</span>
 							</span>
-						</div>
-						<span class="block text-xs text-[var(--text-muted)]">{bay.description}</span>
-					</div>
-				</a>
+						{/if}
+					</a>
+				</li>
 			{/each}
-		</div>
-	</div>
+		</ol>
+	</nav>
 {/if}
 
-<!-- ── Continuation Actions (subordinate to the bays) ─────────── -->
+<!-- ── Primary next action ───────────────────────────────────── -->
 <div class="mb-6 flex flex-wrap items-center gap-2">
-	<Button variant="ghost" href="/import">Route folders in</Button>
-	<Button variant="secondary" href="/match">Match metadata</Button>
 	{#if safeErrors > 0}
-		<a href="/books?status=error" class="ml-auto inline-flex items-center gap-1.5 rounded-sm px-3 py-2.5 text-sm font-medium text-[var(--state-red)] no-underline hover:opacity-80 min-h-[44px] whitespace-nowrap">
-			<span>{safeErrors} error{#if safeErrors !== 1}s{/if} — view errors</span>
-			<span class="shrink-0" aria-hidden="true">→</span>
-		</a>
-	{:else if recent.length > 0}
-		<Button variant="ghost" href="/books" class="ml-auto">View all →</Button>
+		<Button variant="primary" href="/books?status=error">Review {safeErrors} error{#if safeErrors !== 1}s{/if}</Button>
 	{/if}
+	{#if safePending > 0}
+		<Button variant={safeErrors > 0 ? 'secondary' : 'primary'} href="/match">Match metadata</Button>
+	{/if}
+	{#if safeMatched > 0 || safeProcessing > 0 || queueRunning}
+		<Button variant={safeErrors > 0 || safePending > 0 ? 'secondary' : 'primary'} href="/process">View queue</Button>
+	{/if}
+	<Button variant={safePending > 0 || safeMatched > 0 || safeProcessing > 0 || queueRunning || safeErrors > 0 ? 'ghost' : 'primary'} href="/import">Import books</Button>
+	<Button variant="ghost" href="/books">View all books</Button>
 </div>
 
-<!-- ── Recent Manifest ───────────────────────────────────────── -->
+<!-- ── Recent books ──────────────────────────────────────────── -->
 <div class="mb-3">
 	<h2 class="text-lg font-semibold text-[var(--enamel)]">Recent books</h2>
 </div>
@@ -222,7 +180,7 @@
 		actionHref="/import"
 	/>
 {:else}
-	<div class="space-y-2" aria-label="Recent books manifest">
+	<div class="space-y-2" aria-label="Recent books">
 		{#each recent as book (book.id)}
 			<a
 				href="/books/{book.id}"
@@ -230,7 +188,7 @@
 			>
 				<CoverArt url={book.cover_image_url} title={book.title} size="sm" />
 				<div class="min-w-0 flex-1">
-					<h3 class="truncate font-medium">{book.title}</h3>
+					<h3 class="line-clamp-2 sm:truncate font-medium">{book.title}</h3>
 					<p class="truncate text-sm text-[var(--text-muted)]">
 						{book.authors.map((a) => a.name).join(', ') || 'Unknown author'}
 						{#if book.runtime_length_minutes}

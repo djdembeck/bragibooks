@@ -28,6 +28,16 @@
 	function onClose() {
 		open = false;
 	}
+
+	// Native <dialog> normally closes on Escape, but some environments
+	// (headless browsers, embedded webviews) suppress the cancel event.
+	// Close explicitly so Escape is deterministic everywhere.
+	function onKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') {
+			e.preventDefault();
+			dialog?.close();
+		}
+	}
 </script>
 
 <dialog
@@ -35,6 +45,7 @@
 	aria-labelledby={title ? 'dialog-title' : undefined}
 	class="relative w-full max-w-lg rounded-sm border border-[var(--border-strong)] bg-[var(--bg-panel)] p-0 text-[var(--text)] shadow-2xl backdrop:bg-[var(--enamel)]/50"
 	onclose={onClose}
+	onkeydown={onKeydown}
 >
 	<div class="flex flex-col max-h-[80vh]">
 		{#if title}

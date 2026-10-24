@@ -1,90 +1,74 @@
 @import 'tailwindcss';
 
+/* ── Self-hosted display face ────────────────────────────────
+ * Public Sans 700 (Latin subset, SIL OFL 1.1). Served from
+ * /fonts so the app never requests hosted CSS or fonts at
+ * runtime. License: /fonts/PublicSans-LICENSE.txt.           */
+@font-face {
+	font-family: 'Public Sans';
+	font-style: normal;
+	font-weight: 700;
+	font-display: swap;
+	src: url('/fonts/public-sans-latin-700.woff2') format('woff2');
+	unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 @layer base {
 	:root {
-		/* ── Surfaces ───────────────────────────────────────────
-		 * Dark warm surface. Brown-charcoal page with layered
-		 * warm-grey panels. Light warm text. Gold brand accent,
-		 * blue information. No gradients, no cream, no SaaS
-		 * chrome. Derived from develop branch palette.             */
+		--bg: #f5f5f4;
+		--bg-panel: #ffffff;
+		--surface: #f8f8f6;
+		--surface-hover: #efefec;
+		--surface-pressed: #e7e7e2;
+		--elevated: #eeeee9;
 
-		--bg: oklch(0.24 0.015 75);
-		--bg-panel: oklch(0.30 0.012 75);
-		--surface: oklch(0.36 0.010 75);
-		--surface-hover: oklch(0.40 0.010 75);
-		--surface-pressed: oklch(0.44 0.010 75);
-		--elevated: oklch(0.40 0.010 75);
+		--border: #d7d7d0;
+		--border-subtle: #e3e3dc;
+		--border-strong: #92928a;
 
-		/* ── Structural lines ─────────────────────────────────── */
-		--border: oklch(0.52 0.010 75);
-		--border-subtle: oklch(0.44 0.008 75);
-		--border-strong: oklch(0.60 0.012 75);
-		--rail-line: oklch(0.42 0.012 75);
+		--text: #292923;
+		--text-secondary: #4c4c43;
+		--text-muted: #65655a;
+		--text-placeholder: #727267;
+		--enamel: var(--text);
 
-		/* ── Typography ───────────────────────────────────────── */
-		--text: oklch(0.96 0.005 75);
-		--text-secondary: oklch(0.88 0.006 75);
-		--text-muted: oklch(0.80 0.006 75);
-		--text-placeholder: oklch(0.80 0.005 75);
-		--enamel: oklch(0.98 0.003 75);
+		--state-red: #b3261e;
+		--state-red-bg: #fdecea;
+		--state-red-border: #e7b9b5;
+		--state-amber: #80530b;
+		--state-amber-bg: #fff4d6;
+		--state-amber-border: #dfc58d;
+		--state-green: #286442;
+		--state-green-bg: #eaf3eb;
+		--state-green-border: #b6d0bc;
+		--state-blue: #4c5155;
+		--state-blue-bg: #f0f1ef;
+		--state-blue-border: #c9cdc6;
 
-		/* ── Semantic states — RED / AMBER / GREEN ──────────────
-		 * Red = error / stop / critical
-		 * Amber = processing / warning / in-progress
-		 * Green = done / success / go
-		 * Neutral graphite = pending / idle
-		 * Only used for status; never decorative.                */
+		--brand-gold: #ffe08a;
+		--accent: var(--brand-gold);
+		--accent-hover: #ffda70;
+		--accent-pressed: #f4cd62;
+		--accent-text: #302609;
+		--accent-wash: #fff4d3;
+		--provenance: #8a286d;
+		--provenance-bg: #f8edf5;
+		--provenance-border: #dcc2d5;
+		--focus-ring: #705413;
 
-		--state-red: oklch(0.75 0.18 25);
-		--state-red-bg: oklch(0.30 0.04 25);
-		--state-red-border: oklch(0.44 0.08 25);
-
-		--state-amber: oklch(0.82 0.12 85);
-		--state-amber-bg: oklch(0.32 0.04 85);
-		--state-amber-border: oklch(0.44 0.08 85);
-
-		--state-green: oklch(0.76 0.14 145);
-		--state-green-bg: oklch(0.30 0.04 145);
-		--state-green-border: oklch(0.44 0.08 145);
-
-		/* ── Semantic states — BLUE (information) ────────────────
-		 * Blue = info / help / neutral notification
-		 * Complements the warm surfaces with a cool reference.   */
-
-		--state-blue: oklch(0.70 0.12 250);
-		--state-blue-bg: oklch(0.30 0.03 250);
-		--state-blue-border: oklch(0.44 0.06 250);
-
-		/* ── Action accent (not a status) ────────────────────────
-		 * Gold — develop branch logo/brand accent. Visible on
-		 * dark warm surfaces, distinct from semantic states.     */
-
-		--accent: oklch(0.82 0.18 78);
-		--accent-hover: oklch(0.88 0.18 78);
-		--accent-pressed: oklch(0.76 0.18 78);
-		--accent-text: oklch(0.24 0.015 75);
-		--accent-wash: oklch(0.82 0.18 78 / 0.08);
-
-		/* ── Provenance (not a status, not an action) ────────────
-		 * ADB magenta — marks data sourced from AudiobookDB.
-		 * Always paired with a text label; never decorative.     */
-
-		--provenance: oklch(0.72 0.19 330);
-		--provenance-bg: oklch(0.72 0.19 330 / 0.10);
-		--provenance-border: oklch(0.72 0.19 330 / 0.30);
-
-		/* ── Focus ─────────────────────────────────────────────── */
-		--focus-ring: oklch(0.82 0.18 78 / 0.6);
-
-		/* ── Radii — signal board is orthogonal ────────────────── */
-		--radius-sm: 0.125rem;
-		--radius-md: 0.25rem;
-		--radius-lg: 0.25rem;
-
-		/* ── Motion ────────────────────────────────────────────── */
+		--radius-sm: 0.375rem;
+		--radius-md: 0.625rem;
+		--radius-lg: 0.75rem;
 		--ease-out: cubic-bezier(0.22, 1, 0.36, 1);
 		--duration-fast: 100ms;
 		--duration-normal: 150ms;
+		--nav-height: calc(4.25rem + 1px);
+
+		--workspace-panel: var(--bg-panel);
+		--workspace-ink: var(--text);
+		--workspace-selected: #fff4d3;
+		--workspace-action: #705413;
+		--workspace-header: var(--brand-gold);
 	}
 
 	* {
@@ -165,7 +149,7 @@
 		width: 100%;
 		background: var(--surface);
 		color: var(--text);
-		border: 1px solid var(--border);
+		border: 1px solid var(--border-strong);
 		border-radius: var(--radius-sm);
 		padding: 0.5rem 0.75rem;
 		outline: none;
@@ -180,7 +164,7 @@
 		height: 1rem;
 		padding: 0;
 		background: var(--surface);
-		border: 1.5px solid var(--border);
+		border: 1.5px solid var(--border-strong);
 		border-radius: var(--radius-sm);
 		cursor: pointer;
 		vertical-align: middle;
@@ -194,26 +178,33 @@
 		border-color: var(--accent);
 	}
 
-	input[type="checkbox"]:checked::after {
+	input[type="checkbox"]:checked::before {
 		content: '';
 		position: absolute;
-		inset: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
+		left: 50%;
+		top: 45%;
+		width: 0.35rem;
+		height: 0.65rem;
+		border: solid currentColor;
+		border-width: 0 2px 2px 0;
+		color: var(--accent-text);
+		transform: translate(-50%, -50%) rotate(45deg);
 	}
 
-	input[type="checkbox"]:checked::before {
-		content: '✓';
+	input[type="checkbox"]:indeterminate {
+		background: var(--workspace-action);
+		border-color: var(--workspace-action);
+	}
+
+	input[type="checkbox"]:indeterminate::before {
+		content: '';
 		position: absolute;
-		inset: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		color: var(--accent-text);
-		font-size: 0.7rem;
-		font-weight: 700;
-		line-height: 1;
+		left: 50%;
+		top: 50%;
+		width: 0.65rem;
+		height: 2px;
+		background: #fff;
+		transform: translate(-50%, -50%);
 	}
 
 	input[type="checkbox"]:disabled {
@@ -262,11 +253,10 @@
 	select:focus-visible,
 	textarea:focus-visible {
 		border-color: var(--text);
-		box-shadow: 0 0 0 2px var(--focus-ring);
 	}
 
 	select {
-		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23c8c0b6' stroke-width='2.5' stroke-linecap='square' stroke-linejoin='miter'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2365655a' stroke-width='2.5' stroke-linecap='square' stroke-linejoin='miter'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 		background-repeat: no-repeat;
 		background-position: right 0.625rem center;
 		padding-right: 2.25rem;
@@ -325,18 +315,11 @@
 		outline-offset: 2px;
 	}
 
-	/* ── Page header — one hierarchy for every station ─────────── */
+	/* ── Page header ──────────────────────────────────────────── */
 	.page-header {
 		margin-bottom: 1.75rem;
 		padding-bottom: 1rem;
 		border-bottom: 1px solid var(--border);
-	}
-
-	.page-header__row {
-		display: flex;
-		align-items: center;
-		flex-wrap: wrap;
-		gap: 0.75rem;
 	}
 
 	.page-header__title {
@@ -346,15 +329,12 @@
 		color: var(--enamel);
 	}
 
-	.page-header__station {
-		align-self: center;
-	}
-
 	.page-header__description {
 		max-width: 65ch;
 		margin-top: 0.35rem;
 		color: var(--text-secondary);
 		font-size: 0.9375rem;
+		text-wrap: pretty;
 	}
 
 	/* Shared panel — quiet containment for route-level work surfaces */
@@ -466,80 +446,35 @@
 		background: var(--surface);
 		border-color: var(--border);
 	}
-	.status-pending::before {
-		content: '◇';
-		display: inline-block;
-		width: 0.55rem;
-		height: 0.55rem;
-		line-height: 0.55rem;
-		text-align: center;
-		font-size: 0.5rem;
-		flex-shrink: 0;
-	}
+
 
 	.status-processing {
 		color: var(--state-amber);
 		background: var(--state-amber-bg);
 		border-color: var(--state-amber-border);
 	}
-	.status-processing::before {
-		content: '◐';
-		display: inline-block;
-		width: 0.55rem;
-		height: 0.55rem;
-		line-height: 0.55rem;
-		text-align: center;
-		font-size: 0.5rem;
-		flex-shrink: 0;
-	}
+
 
 	.status-done {
 		color: var(--state-green);
 		background: var(--state-green-bg);
 		border-color: var(--state-green-border);
 	}
-	.status-done::before {
-		content: '◆';
-		display: inline-block;
-		width: 0.55rem;
-		height: 0.55rem;
-		line-height: 0.55rem;
-		text-align: center;
-		font-size: 0.5rem;
-		flex-shrink: 0;
-	}
+
 
 	.status-error {
 		color: var(--state-red);
 		background: var(--state-red-bg);
 		border-color: var(--state-red-border);
 	}
-	.status-error::before {
-		content: '✕';
-		display: inline-block;
-		width: 0.55rem;
-		height: 0.55rem;
-		line-height: 0.55rem;
-		text-align: center;
-		font-size: 0.5rem;
-		flex-shrink: 0;
-	}
+
 
 	.status-ready {
 		color: var(--text);
 		background: var(--accent-wash);
 		border-color: var(--border-strong);
 	}
-	.status-ready::before {
-		content: '▣';
-		display: inline-block;
-		width: 0.55rem;
-		height: 0.55rem;
-		line-height: 0.55rem;
-		text-align: center;
-		font-size: 0.5rem;
-		flex-shrink: 0;
-	}
+
 
 	/* ── Skeleton — static graphite bar ──────────────────────── */
 	.skeleton {
@@ -606,153 +541,342 @@
 		letter-spacing: normal;
 	}
 
-	/* ── Rail — workflow interlocking line ────────────────────── */
-	.rail {
+	/* Shared workspace shell; tokens are defined once at the root. */
+	.app-shell--workspace {
 		background: var(--bg);
-		border-bottom: 2px solid var(--rail-line);
+		color: var(--text);
+	}
+
+	/* Display face — workspace headings and brand only. Body
+	   copy keeps the system UI sans; sizes and ink unchanged. */
+	.app-shell--workspace :is(h1, h2, h3),
+	.workspace-brand__name {
+		font-family: 'Public Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+	}
+
+	/* Header — familiar topnav: brand, primary destinations, settings */
+	.workspace-header {
 		position: sticky;
 		top: 0;
 		z-index: 40;
+		background: var(--workspace-header);
+		border-bottom: 1px solid #d7b85f;
 	}
 
-	.rail-line-inner {
-		height: 2px;
-		background: var(--rail-line);
-		border-radius: 0;
+	.workspace-header__inner {
+		display: flex;
+		align-items: center;
+		gap: 1.5rem;
+		padding: 0 2.5rem;
+		min-height: 4.25rem;
 	}
 
-	/* Station dot on rail — always shape + label */
-	.rail-station {
-		@apply flex flex-col items-center gap-1;
+	.workspace-brand {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		font-size: 1.25rem;
+		font-weight: 700;
+		letter-spacing: -0.025em;
+		white-space: nowrap;
+		color: var(--workspace-ink);
 		text-decoration: none;
-		/* Touch-friendly: clickable area wraps dot + label */
 		min-height: 2.75rem;
-		min-width: 2.75rem;
-		padding: 0.25rem 0;
 	}
 
-	.rail-station:hover {
+	.workspace-brand:hover {
 		text-decoration: none;
 	}
 
-	.rail-station-dot {
-		width: 0.75rem;
-		height: 0.75rem;
-		border-radius: 0;
-		border: 2px solid var(--border);
-		background: var(--surface);
-		transition: border-color var(--duration-fast) var(--ease-out),
-					background var(--duration-fast) var(--ease-out);
+	/* Original develop artwork, without a replacement badge. */
+	.workspace-brand__mark {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 3rem;
+		height: 2.75rem;
 		flex-shrink: 0;
 	}
 
-	.rail-station-active .rail-station-dot {
-		border-color: var(--enamel);
-		background: var(--enamel);
+	.workspace-brand__mark > img {
+		width: 44px;
+		height: auto;
 	}
 
-	.rail-station:hover .rail-station-dot {
-		border-color: var(--text-secondary);
+	.workspace-brand__name {
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
-	.rail-station-label {
-		font-size: 0.6875rem;
-		font-weight: 600;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
-		color: var(--text-muted);
-		transition: color var(--duration-fast) var(--ease-out);
+	.workspace-nav {
+		display: flex;
+		align-self: stretch;
+		align-items: center;
+		gap: 0.25rem;
 	}
 
-	.rail-station-active .rail-station-label {
-		color: var(--enamel);
-	}
-
-	.rail-station:hover .rail-station-label {
-		color: var(--text);
-	}
-
-	/* Segment connector between stations */
-	.rail-segment {
-		flex: 1;
-		height: 1px;
-		background: var(--border);
-		min-width: 0.5rem;
-	}
-
-	/* ── Utility links (Dashboard / Settings) ─────────────────── */
-	.utility-link {
-		display: inline-flex;
+	.workspace-nav__link {
+		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		min-height: 2.75rem;
-		padding: 0.375rem 0.75rem;
+		height: 2.75rem;
+		padding: 0 0.875rem;
+		border: 1px solid transparent;
 		border-radius: var(--radius-sm);
 		font-size: 0.875rem;
 		font-weight: 600;
-		color: var(--text-secondary);
+		color: var(--accent-text);
 		text-decoration: none;
+		white-space: nowrap;
 		transition: background-color var(--duration-fast) var(--ease-out),
 					color var(--duration-fast) var(--ease-out);
-		border: 1.5px solid transparent;
-		white-space: nowrap;
 	}
 
-	.utility-link:hover {
-		background: var(--surface-hover);
-		color: var(--text);
+	.workspace-nav__link:hover {
+		background: #f3cf73;
+		color: var(--workspace-ink);
 		text-decoration: none;
 	}
 
-	.utility-link-active {
-		background: var(--accent);
+	.workspace-nav__link[aria-current='page'] {
+		background: #fff;
+		color: var(--text);
+		border-color: var(--workspace-action);
+	}
+
+	.workspace-nav__link[aria-current='page']:hover {
+		background: #fff;
+		color: var(--text);
+	}
+
+	.workspace-settings {
+		margin-left: auto;
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		min-height: 2.75rem;
+		padding: 0 0.4375rem;
+		border: 1px solid transparent;
+		border-radius: var(--radius-sm);
+		font-size: 0.875rem;
+		font-weight: 600;
 		color: var(--accent-text);
-		border-color: var(--accent);
+		text-decoration: none;
+		white-space: nowrap;
+		transition: background-color var(--duration-fast) var(--ease-out),
+					color var(--duration-fast) var(--ease-out);
 	}
 
-	.utility-link__label {
-		display: inline;
+	.workspace-settings:hover {
+		background: #f3cf73;
+		color: var(--workspace-ink);
+		text-decoration: none;
 	}
 
-	/* ── Station identity badge (page header tag) ────────────── */
-	.station-id {
-		@apply inline-flex items-center gap-1.5 rounded-sm px-2 py-0.5 text-xs font-bold;
-		background: var(--surface);
-		border: 1.5px solid var(--border);
-		color: var(--text-secondary);
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
+	.workspace-settings[aria-current='page'] {
+		background: #fff;
+		color: var(--text);
+		border-color: var(--workspace-action);
+	}
+
+	/* Content — full-width composition, no max-w-6xl there */
+	.workspace-main {
+		width: 100%;
+		max-width: 90rem;
+		margin-inline: auto;
+		padding: 2rem 2.5rem 3rem;
+		/* Skip-link target must land below the sticky header */
+		scroll-margin-top: calc(var(--nav-height) + 1rem);
+	}
+
+	/* Browser surfaces inside the workspace scope */
+	.app-shell--workspace ::selection {
+		background: var(--workspace-selected);
+		color: var(--workspace-ink);
+	}
+
+	.app-shell--workspace input,
+	.app-shell--workspace select,
+	.app-shell--workspace textarea {
+		border-radius: var(--radius-sm);
+	}
+
+	.app-shell--workspace input::selection,
+	.app-shell--workspace textarea::selection {
+		background: var(--workspace-selected);
+		color: var(--workspace-ink);
+	}
+
+	.app-shell--workspace input[type='checkbox'] {
+		border-radius: var(--radius-sm);
+	}
+
+	.app-shell--workspace input[type='checkbox']:checked,
+	.app-shell--workspace input[type='radio']:checked {
+		/* Dark controls stay distinct from gold primary actions. */
+		background: var(--workspace-action);
+		border-color: var(--workspace-action);
+	}
+
+	.app-shell--workspace input[type='checkbox']:checked::before {
+		color: #fff;
+	}
+
+	.app-shell--workspace input[type='radio']:checked {
+		background: #fff;
+		border-color: var(--workspace-action);
+	}
+
+	.app-shell--workspace input[type='radio']:checked::before {
+		background: var(--workspace-action);
+	}
+
+	/* Element-prefixed focus rules override base control styles. */
+	.app-shell--workspace :focus-visible,
+	.app-shell--workspace a:focus-visible,
+	.app-shell--workspace button:focus-visible,
+	.app-shell--workspace input:focus-visible,
+	.app-shell--workspace select:focus-visible,
+	.app-shell--workspace textarea:focus-visible,
+	.app-shell--workspace summary:focus-visible,
+	.app-shell--workspace [tabindex]:focus-visible {
+		outline: 3px solid var(--focus-ring);
+		outline-offset: 3px;
+	}
+
+	.app-shell--workspace ::-webkit-scrollbar {
+		width: 10px;
+		height: 10px;
+	}
+
+	.app-shell--workspace ::-webkit-scrollbar-track {
+		background: transparent;
+	}
+
+	.app-shell--workspace ::-webkit-scrollbar-thumb {
+		background: var(--border-strong);
+		border-radius: 999px;
+		border: 2px solid var(--bg);
+	}
+
+	.app-shell--workspace ::-webkit-scrollbar-thumb:hover {
+		background: var(--workspace-action);
+	}
+
+	.app-shell--workspace * {
+		scrollbar-color: var(--border-strong) transparent;
+		scrollbar-width: thin;
+	}
+
+	/* Existing components — restyled once, in this scope */
+	.app-shell--workspace .btn {
+		min-height: 2.75rem;
+	}
+
+	.app-shell--workspace .btn-primary {
+		/* Visible boundary on the light surface */
+		border: 1.5px solid #92701c;
+		box-shadow: 0 1px 2px #29292314;
+	}
+
+	.app-shell--workspace .btn-primary:hover {
+		border-color: #806115;
+	}
+
+	.app-shell--workspace .btn-primary:active {
+		border-color: #705413;
+	}
+
+	.app-shell--workspace .btn-secondary {
+		min-height: 2.75rem;
+	}
+
+	/* Loading — the spinner rides the button text color; the label
+	   stays visible, interaction is locked.                          */
+	.app-shell--workspace .btn[aria-busy='true'] {
+		cursor: progress;
+	}
+
+	.app-shell--workspace .btn:focus-visible {
+		outline: 3px solid var(--focus-ring);
+		outline-offset: 3px;
+	}
+
+	.app-shell--workspace .page-header {
+		margin-bottom: 1.5rem;
+	}
+
+	.app-shell--workspace .panel {
+		background: var(--workspace-panel);
+		border-width: 1px;
+	}
+
+	.app-shell--workspace .card {
+		border-width: 1px;
 	}
 
 	/* ── Narrow screens ─────────────────────────────────────────
-	 * Utility nav keeps text labels at 390px — two links fit, and
-	 * icon-only nav is not acceptable on a touch surface.        */
-	@media (max-width: 480px) {
-		.header-brand {
-			gap: 0.5rem;
+	 * 390px: the primary destinations move to a second, scrollable
+	 * row with full labels and ≥44px targets; Settings stays on
+	 * the brand row. Toolbars reach ≥44px targets.                 */
+	@media (max-width: 900px) {
+		.app-shell--workspace {
+			--nav-height: calc(6.5625rem + 1px);
 		}
 
-		.header-brand-name {
-			font-size: 0.875rem;
+		.workspace-header__inner {
+			flex-wrap: wrap;
+			gap: 0;
+			padding: 0.75rem 1rem 0;
+			min-height: 0;
+			height: 6.5625rem;
 		}
 
-		.utility-link {
-			gap: 0.3125rem;
-			padding: 0.25rem 0.4375rem;
+		.workspace-brand {
+			font-size: 1.125rem;
+			gap: 0.5625rem;
+			min-height: 2.75rem;
+		}
+
+		.workspace-brand__mark {
+			width: 2rem;
+			height: 2rem;
+		}
+
+		.workspace-brand__mark > img {
+			width: 32px;
+			height: auto;
+		}
+
+		.workspace-settings {
 			font-size: 0.8125rem;
+			padding: 0 0.375rem;
 		}
 
-		.rail-station-label {
-			font-size: 0.625rem;
-			letter-spacing: 0.02em;
+		.workspace-nav {
+			flex-basis: 100%;
+			align-self: auto;
+			align-items: stretch;
+			gap: 0.0625rem;
+			margin-top: 0.125rem;
+			order: 3;
+			overflow-x: auto;
+			scrollbar-width: none;
 		}
 
-		.rail-segment {
-			min-width: 0.25rem;
+		.workspace-nav::-webkit-scrollbar {
+			display: none;
 		}
 
-		.rail > div {
-			padding: 0.375rem 0.5rem;
+		.workspace-nav__link {
+			height: 2.75rem;
+			padding: 0 0.5rem;
+			font-size: 0.8125rem;
+			flex-shrink: 0;
+		}
+
+		.workspace-main {
+			padding: 1.25rem 1rem 2rem;
 		}
 	}
 }

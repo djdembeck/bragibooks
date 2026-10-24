@@ -4,8 +4,8 @@
 	import type { PageData } from './$types';
 	import type { BookWithPeople, ProcessingJob, JobsListResponse, AudiobookDBBook, AudiobookDBRelease } from '$lib/types';
 	import { formatRuntime, peopleByRole } from '$lib/types';
-	import { cleanAdbError, type CleanedAdbError } from '$lib/adbError';
-	import { SpliceMeter, StatusBadge, AbdTag, EmptyState, Button, Alert, Skeleton, CoverArt } from '$lib/components';
+	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '$lib/adbError';
+	import { StatusBadge, AbdTag, EmptyState, Button, Alert, ErrorDetail, Skeleton, CoverArt } from '$lib/components';
 	import { ExternalLink, ArrowLeft } from '@lucide/svelte';
 
 	let { data }: { data: PageData } = $props();
@@ -15,15 +15,19 @@
 	const authorNames = $derived(book ? book.authors.map((a) => a.name).join(', ') : '');
 	const narratorNames = $derived(book ? book.narrators.map((n) => n.name).join(', ') : '');
 
-	const abdHref = $derived(book?.audiobookdb_book_id ? `https://audiobookdb.org/book/${book.audiobookdb_book_id}` : null);
+	const abdHref = $derived(book?.audiobookdb_book_id ? `https://audiobookdb.org/books/${book.audiobookdb_book_id}` : null);
 
 	/* ── Job history ─────────────────────────────────────────────
 	 * Newest-first from the queue API, filtered server-side by book_id.
 	 * While any job is queued/running the list re-fetches every 8s so
 	 * the lock note and history stay live without a manual reload.  */
 	let jobs = $state<ProcessingJob[]>([]);
+	let jobsError = $state<CleanedAdbError | null>(null);
+	// Bumped by the retry button to force the effect below to re-run.
+	let jobsReload = $state(0);
 
 	$effect(() => {
+		jobsReload; // dependency — retry re-runs this effect
 		const id = book?.id;
 		if (!id) return;
 		let cancelled = false;
@@ -35,9 +39,14 @@
 		const load = async () => {
 			try {
 				const resp = await get<JobsListResponse>(`/jobs?book_id=${id}&limit=20`);
-				if (!cancelled && book?.id === id) jobs = resp.jobs || [];
-			} catch {
-				if (!cancelled && book?.id === id) jobs = [];
+				if (!cancelled && book?.id === id) {
+					jobs = resp.jobs || [];
+					jobsError = null;
+				}
+			} catch (e) {
+				// Don't blank the history into a misleading "no jobs yet" —
+				// surface the failure instead (polling retries it).
+				if (!cancelled && book?.id === id) jobsError = toCleanedError(e);
 			}
 			// Poll only while this book has an in-flight job; otherwise stop.
 			if (!cancelled && book?.id === id) {
@@ -87,7 +96,7 @@
 			await invalidateAll(); // refresh book status + job list for the new job
 			await goto('/process');
 		} catch (e) {
-			actionError = cleanApiError(e);
+			actionError = toCleanedError(e);
 			confirming = null;
 		} finally {
 			acting = null;
@@ -103,7 +112,7 @@
 			await invalidateAll();
 			await goto('/match');
 		} catch (e) {
-			actionError = cleanApiError(e);
+			actionError = toCleanedError(e);
 			confirming = null;
 		} finally {
 			acting = null;
@@ -120,7 +129,7 @@
 			await post(`/jobs/${job.id}/cancel`, {});
 			await invalidateAll(); // book reverts to matched + job list shows cancelled
 		} catch (e) {
-			actionError = cleanApiError(e);
+			actionError = toCleanedError(e);
 		} finally {
 			cancellingJob = false;
 		}
@@ -150,7 +159,7 @@
 				abdRelease = r;
 			}
 		} catch (e) {
-			abdError = cleanApiError(e);
+			abdError = toCleanedError(e);
 		} finally {
 			abdLoading = false;
 		}
@@ -160,13 +169,6 @@
 	 *  honest muted label it is, not as if it were a real publisher. */
 	function isUnknownLiteral(v: string): boolean {
 		return v.trim().toLowerCase() === 'unknown';
-	}
-
-	// Errors walk through the central ADB cleaner — human sentences out,
-	// raw payload available for the details expander.
-	function cleanApiError(e: unknown): CleanedAdbError {
-		const msg = e instanceof Error ? e.message : String(e ?? 'Unknown error');
-		return cleanAdbError(msg);
 	}
 
 	$effect(() => {
@@ -222,7 +224,7 @@
 
 	/* ── Display hygiene ───────────────────────────────────────
 	 * Stored descriptions may carry HTML source (<p>/<b>/<br />);
-	 * operator-facing views show clean plain text only, with the
+	 * the record view shows clean plain text only, with the
 	 * raw payload available in a Technical detail expander.       */
 	const descriptionHasMarkup = $derived(Boolean(book?.description?.match(/<[a-zA-Z/][^>]*>/)));
 	const cleanDescription = $derived(
@@ -255,12 +257,19 @@
 </svelte:head>
 
 {#if !book}
-	<EmptyState
-		title="Reel not found"
-		description="This book isn't on the bench — it may have been removed or the id is wrong."
-		actionLabel="Back to catalog"
-		actionHref="/books"
-	/>
+	{#if data.loadError}
+		<Alert variant="error" onretry={() => invalidateAll()}>
+			Could not load this book: {data.loadError.message}
+			<ErrorDetail raw={data.loadError.raw} needsSettings={data.loadError.needsSettings} />
+		</Alert>
+	{:else}
+		<EmptyState
+			title="Book not found"
+			description="This book isn't in your library — it may have been removed, or the id is wrong."
+			actionLabel="Back to catalog"
+			actionHref="/books"
+		/>
+	{/if}
 {:else}
 	<div class="mb-5">
 		<Button variant="ghost" href="/books">
@@ -270,8 +279,8 @@
 	</div>
 
 	<article class="detail">
-		<!-- Left — the reel: cover + the splice, read fully -->
-		<div class="detail__reel">
+		<!-- Left — record identity: cover, status, provenance -->
+		<div class="detail__identity">
 			{#if book.cover_image_url}
 				<CoverArt url={book.cover_image_url} title={book.title} size="xl" />
 			{:else}
@@ -281,11 +290,6 @@
 			{/if}
 
 			<div class="detail__status">
-				<SpliceMeter
-					status={book.status}
-					runtimeMinutes={book.runtime_length_minutes}
-					size="lg"
-				/>
 				<div class="detail__badges">
 					<StatusBadge status={book.status} />
 					{#if book.audiobookdb_book_id}
@@ -383,36 +387,36 @@
 		</div>
 	</article>
 
-	<!-- Below the record — the workbench sections -->
+	<!-- Below the record — grouped sections -->
 
-	<!-- ACTIONS — the operator's two levers, always confirm-gated -->
-	<section class="card workbench" aria-label="Actions">
+	<!-- ── Actions — both confirm-gated ─────────────────────────── -->
+	<section class="card record-section" aria-label="Actions">
 		<h2 class="detail__section-title">Actions</h2>
-		<div class="workbench__actions">
+		<div class="record-section__actions">
 			{#if confirming === 'reprocess'}
-				<div class="workbench__confirm">
-					<span class="workbench__confirm-text">Confirm re-process?</span>
+				<div class="record-section__confirm">
+					<span class="record-section__confirm-text">Confirm re-process?</span>
 					<Button variant="primary" loading={acting === 'reprocess'} onclick={doReprocess}>
 						Yes, re-process
 					</Button>
 					<Button variant="ghost" onclick={cancelAction}>Cancel</Button>
 				</div>
 			{:else if confirming === 'rematch'}
-				<div class="workbench__confirm">
-					<span class="workbench__confirm-text">Send back to the Match station?</span>
+				<div class="record-section__confirm">
+					<span class="record-section__confirm-text">Send back to Match for metadata review?</span>
 					<Button variant="secondary" loading={acting === 'rematch'} onclick={doRematch}>
 						Yes, re-match
 					</Button>
 					<Button variant="ghost" onclick={cancelAction}>Cancel</Button>
 				</div>
 			{:else}
-				<div class="workbench__btns">
+				<div class="record-section__btns">
 					{#if isFileBacked}
 						<Button variant="primary" disabled>Re-process</Button>
-						<p class="workbench__note">Source is a single file — re-process from the Queue.</p>
+						<p class="record-section__note">Source is a single file — re-process from the Queue.</p>
 					{:else if inFlightJob}
 						<Button variant="primary" disabled>Re-process</Button>
-						<p class="workbench__note">
+						<p class="record-section__note">
 							{jobs.find((j) => j.status === 'queued' || j.status === 'running')?.status === 'queued'
 								? 'Queued — wait or cancel below.'
 								: 'Running — wait or cancel below.'}
@@ -438,26 +442,27 @@
 			{/if}
 		</div>
 		{#if actionError}
-			<div class="workbench__error">
+			<div class="record-section__error">
 				<Alert variant="error">
 					{actionError.message}
 					{#if actionError.rateLimited}
 						<span class="block mt-1">
-							<a class="workbench__inline-link" href="/settings">Add an API key in Settings</a>
+							<a class="record-section__inline-link" href="/settings">Add an API key in Settings</a>
 							for higher limits.
 						</span>
 					{/if}
+					<ErrorDetail raw={actionError.raw} needsSettings={actionError.needsSettings} />
 				</Alert>
 			</div>
 		{/if}
 	</section>
 
-	<!-- ADB DIFF — provenance is the only magenta on the bench -->
-	<section class="card workbench" aria-label="Compare with AudiobookDB">
-		<div class="workbench__head">
+	<!-- ── Compare with AudiobookDB ────────────────────────────── -->
+	<section class="card record-section" aria-label="Compare with AudiobookDB">
+		<div class="record-section__head">
 			<h2 class="detail__section-title">Compare with AudiobookDB</h2>
 			{#if abdHref}
-				<a href={abdHref} target="_blank" rel="noopener noreferrer" class="workbench__link">
+				<a href={abdHref} target="_blank" rel="noopener noreferrer" class="record-section__link">
 					Open on AudiobookDB
 					<ExternalLink class="h-3.5 w-3.5" aria-hidden="true" />
 				</a>
@@ -465,13 +470,13 @@
 		</div>
 
 		{#if !book.audiobookdb_book_id}
-			<p class="workbench__note">Not matched to AudiobookDB. Use <a class="workbench__inline-link" href="/match">Re-match</a> below to link it.</p>
+			<p class="record-section__note">Not matched to AudiobookDB. Use <a class="record-section__inline-link" href="/match">Re-match</a> below to link it.</p>
 		{:else}
 			{#if !abdExpanded}
 				<Button variant="secondary" onclick={() => (abdExpanded = true)}>Show comparison</Button>
 			{:else}
 				{#if abdLoading}
-					<div class="workbench__skeleton" aria-label="Loading AudiobookDB record">
+					<div class="record-section__skeleton" aria-label="Loading AudiobookDB record">
 						<Skeleton variant="line" height="1.25rem" />
 						<Skeleton variant="line" height="1.25rem" width="80%" />
 						<Skeleton variant="line" height="1.25rem" width="60%" />
@@ -482,14 +487,11 @@
 							Could not load the AudiobookDB record: {abdError.message}
 							{#if abdError.rateLimited}
 								<span class="block mt-1">
-									<a class="workbench__inline-link" href="/settings">Add an API key in Settings</a>
+									<a class="record-section__inline-link" href="/settings">Add an API key in Settings</a>
 									for higher limits.
 								</span>
 							{/if}
-							<details class="mt-1">
-								<summary class="cursor-pointer select-none">Technical detail</summary>
-								<p class="mt-1 break-all font-mono text-xs text-[var(--text-muted)]">{abdError.raw}</p>
-							</details>
+							<ErrorDetail raw={abdError.raw} needsSettings={abdError.needsSettings} />
 						</span>
 					</Alert>
 				{:else if abdBook}
@@ -497,7 +499,7 @@
 						<thead>
 							<tr>
 								<th scope="col" class="diff__label">Field</th>
-								<th scope="col" class="diff__col">This bench</th>
+								<th scope="col" class="diff__col">This record</th>
 								<th scope="col" class="diff__col">
 									<AbdTag withLabel />
 								</th>
@@ -523,12 +525,21 @@
 		{/if}
 	</section>
 
-	<!-- JOB HISTORY — the tape of every merge attempt, newest first -->
-	<section class="card workbench" aria-label="Job history">
+	<!-- ── Job history, newest first ───────────────────────────── -->
+	<section class="card record-section" aria-label="Job history">
 		<h2 class="detail__section-title">Job history</h2>
-		{#if jobs.length === 0}
-			<p class="workbench__note">No processing jobs yet.</p>
-		{:else}
+		{#if jobsError}
+			<div class="mb-3">
+				<Alert variant="error" onretry={() => (jobsReload += 1)}>
+					Could not load job history: {jobsError.message}
+					<ErrorDetail raw={jobsError.raw} needsSettings={jobsError.needsSettings} />
+				</Alert>
+			</div>
+		{/if}
+		{#if jobs.length === 0 && !jobsError}
+			<p class="record-section__note">No processing jobs yet.</p>
+		{/if}
+		{#if jobs.length > 0}
 			<ol class="joblist">
 				{#each jobs as job}
 					<li class="joblist__item">
@@ -543,11 +554,13 @@
 							</span>
 						</div>
 						{#if job.error}
-							<p class="joblist__error">{job.error}</p>
+							{@const jerr = cleanAdbError(job.error)}
+							<p class="joblist__error">{jerr.message}</p>
+							<ErrorDetail raw={job.error} needsSettings={jerr.needsSettings} />
 						{/if}
 						{#if job.output_file}
 							<p class="joblist__file">
-								<span class="workbench__label">Output</span>
+								<span class="record-section__label">Output</span>
 								<code class="joblist__path">{job.output_file}</code>
 							</p>
 						{/if}
@@ -563,19 +576,19 @@
 		{/if}
 	</section>
 
-	<!-- FILE FACTS — where the tape enters and exits -->
-	<section class="card workbench" aria-label="File facts">
-		<h2 class="detail__section-title">File facts</h2>
-		<dl class="workbench__facts">
-			<div class="workbench__fact">
-				<dt class="workbench__label">Source</dt>
-				<dd class="workbench__fact-value">
+	<!-- ── File paths: source and output ───────────────────────── -->
+	<section class="card record-section" aria-label="File paths">
+		<h2 class="detail__section-title">File paths</h2>
+		<dl class="record-section__facts">
+			<div class="record-section__fact">
+				<dt class="record-section__label">Source</dt>
+				<dd class="record-section__fact-value">
 					<code class="detail__path">{book.src_path || '—'}</code>
 				</dd>
 			</div>
-			<div class="workbench__fact">
-				<dt class="workbench__label">Dest</dt>
-				<dd class="workbench__fact-value">
+			<div class="record-section__fact">
+				<dt class="record-section__label">Dest</dt>
+				<dd class="record-section__fact-value">
 					{#if book.dest_path}
 						<code class="detail__path">{book.dest_path}</code>
 					{:else}
@@ -583,9 +596,9 @@
 					{/if}
 				</dd>
 			</div>
-			<div class="workbench__fact">
-				<dt class="workbench__label">Format</dt>
-				<dd class="workbench__fact-value">
+			<div class="record-section__fact">
+				<dt class="record-section__label">Format</dt>
+				<dd class="record-section__fact-value">
 					{#if book.format_type}
 						<code class="detail__path">{book.format_type}</code>
 					{:else}
@@ -598,7 +611,7 @@
 {/if}
 
 <style>
-	/* Two columns on the bench — reel left, record right; stack on mobile */
+	/* Two columns — identity left, record right; stack on mobile */
 	.detail {
 		display: grid;
 		grid-template-columns: minmax(0, 20rem) minmax(0, 1fr);
@@ -612,22 +625,22 @@
 		}
 	}
 
-	/* The reel side — cover + the big splice */
-	.detail__reel {
+	/* Record identity — cover, status, provenance */
+	.detail__identity {
 		display: flex;
-		flex-direction: column;
-		align-items: flex-start;
-		gap: 1rem;
-		padding: 1rem;
-		background: var(--bg-panel);
-		border: 1.5px solid var(--border-subtle);
-		border-radius: var(--radius-md);
-		position: sticky;
-		top: 5.5rem;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 1rem;
+	padding: 1rem;
+	background: var(--bg-panel);
+	border: 1.5px solid var(--border-subtle);
+	border-radius: var(--radius-md);
+	position: sticky;
+	top: calc(var(--nav-height) + 12px);
 	}
 
 	@media (max-width: 800px) {
-		.detail__reel {
+		.detail__identity {
 			position: static;
 		}
 	}
@@ -787,12 +800,12 @@
 		overflow-wrap: anywhere;
 	}
 
-	/* ── Workbench sections — stacked bays below the record ───── */
-	.workbench {
+	/* ── Record sections stacked below the identity/record grid ─── */
+	.record-section {
 		margin-top: 1rem;
 	}
 
-	.workbench__head {
+	.record-section__head {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
@@ -800,9 +813,8 @@
 		flex-wrap: wrap;
 	}
 
-	/* Section header — one class for every section title on the bench
-	 * (Actions / Compare with AudiobookDB / Job history / File facts /
-	 * Description): 0.8rem / 700. */
+	/* One header class for every section title
+	 * (Actions / Compare / Job history / File paths / Description). */
 	.detail__section-title {
 		margin: 0;
 		font-size: 0.8rem;
@@ -812,22 +824,22 @@
 		color: var(--text-secondary);
 	}
 
-	.workbench__link {
+	.record-section__link {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.3rem;
 		font-size: 0.85rem;
 		font-weight: 600;
-		color: var(--accent);
+		color: var(--workspace-action);
 		text-decoration: underline;
 		text-underline-offset: 2px;
 	}
 
-	.workbench__link:hover {
-		color: var(--accent-hover);
+	.record-section__link:hover {
+		color: var(--text);
 	}
 
-	.workbench__label {
+	.record-section__label {
 		font-size: 0.7rem;
 		font-weight: 600;
 		letter-spacing: 0.05em;
@@ -835,65 +847,65 @@
 		color: var(--text-muted);
 	}
 
-	.workbench__note {
+	.record-section__note {
 		margin: 0.5rem 0 0;
 		font-size: 0.85rem;
 		color: var(--text-muted);
 	}
 
-	.workbench__inline-link {
-		color: var(--accent);
+	.record-section__inline-link {
+		color: var(--workspace-action);
 		text-decoration: underline;
 		text-underline-offset: 2px;
 	}
 
-	.workbench__actions {
+	.record-section__actions {
 		margin-top: 0.75rem;
 		display: flex;
 		flex-direction: column;
 		gap: 0.25rem;
 	}
 
-	.workbench__btns {
+	.record-section__btns {
 		display: flex;
 		align-items: center;
 		gap: 0.75rem;
 		flex-wrap: wrap;
 	}
 
-	.workbench__confirm {
+	.record-section__confirm {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
 		flex-wrap: wrap;
 	}
 
-	.workbench__confirm-text {
+	.record-section__confirm-text {
 		font-size: 0.9rem;
 		font-weight: 600;
 		color: var(--text);
 		margin-right: 0.5rem;
 	}
 
-	.workbench__error {
+	.record-section__error {
 		margin-top: 0.75rem;
 	}
 
-	.workbench__skeleton {
+	.record-section__skeleton {
 		margin-top: 0.75rem;
 		display: flex;
 		flex-direction: column;
 		gap: 0.5rem;
 	}
 
-	.workbench__facts {
+	.record-section__facts {
 		margin-top: 0.75rem;
 		display: grid;
 		grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
 		gap: 0.625rem 1.25rem;
 	}
 
-	.workbench__fact-value {
+	.record-section__fact-value {
 		margin: 0.25rem 0 0;
 	}
 
@@ -960,7 +972,7 @@
 		white-space: nowrap;
 	}
 
-	/* Job history — one line per pass over the tape */
+	/* Job history — one entry per processing attempt */
 	.joblist {
 		margin: 0.75rem 0 0;
 		padding: 0;

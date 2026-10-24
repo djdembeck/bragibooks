@@ -1,4 +1,24 @@
+import { cleanAdbError, type CleanedAdbError } from '$lib/adbError';
+
 const API_BASE = '';
+
+/**
+ * Error thrown by every api.ts call. `message` is the operator sentence;
+ * `cleaned` carries the full result (including `raw`) so pages can offer a
+ * "Technical detail" expander. Subclasses Error so `instanceof Error` holds.
+ */
+export class ApiError extends Error {
+	readonly status: number;
+	readonly cleaned: CleanedAdbError;
+
+	constructor(status: number, text: string) {
+		const cleaned = cleanAdbError(`API ${status}: ${text}`);
+		super(cleaned.message);
+		this.name = 'ApiError';
+		this.status = status;
+		this.cleaned = cleaned;
+	}
+}
 
 export async function get<T>(path: string, init?: RequestInit): Promise<T> {
 	const res = await fetch(`${API_BASE}/api${path}`, {
@@ -7,7 +27,7 @@ export async function get<T>(path: string, init?: RequestInit): Promise<T> {
 	});
 	if (!res.ok) {
 		const text = await res.text();
-		throw new Error(`API ${res.status}: ${text}`);
+		throw new ApiError(res.status, text);
 	}
 	if (res.status === 204) return undefined as T;
 	return (await res.json()) as T;

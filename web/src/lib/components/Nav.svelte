@@ -1,52 +1,56 @@
 <script lang="ts">
 	import { page } from '$app/stores';
-	import { Logo, StationRail } from '$lib/components';
-	import { Gauge, Settings } from '@lucide/svelte';
+	import { Logo } from '$lib/components';
 
-	// Utility navigation — clearly separated from the workflow
-	const utilityLinks = [
-		{ href: '/', label: 'Dashboard', icon: Gauge },
-		{ href: '/settings', label: 'Settings', icon: Settings },
+	// One familiar topnav for every route. No polling, no count badges:
+	// batch counts live in the workspace that owns the data.
+	const links = [
+		{ href: '/', label: 'Overview' },
+		{ href: '/import', label: 'Import' },
+		{ href: '/match', label: 'Match' },
+		{ href: '/process', label: 'Queue' },
+		{ href: '/books', label: 'Books' },
 	];
 
 	function isActive(href: string, pathname: string) {
 		if (href === '/') return pathname === '/';
 		return pathname === href || pathname.startsWith(`${href}/`);
 	}
+
+	const pathname = $derived($page.url.pathname);
 </script>
 
 <!-- Skip link — first focusable element -->
 <a href="#main-content" class="skip-link">Skip to main content</a>
 
-<header class="sticky top-0 z-30 border-b border-[var(--border-subtle)] bg-[var(--bg)]">
-	<!-- Top bar: logo + utility nav -->
-	<div class="mx-auto flex max-w-6xl items-center gap-3 px-4 py-2 sm:gap-4">
-		<a href="/" aria-label="Bragi Books" class="header-brand flex shrink-0 items-center gap-2.5 text-base font-bold text-[var(--enamel)] no-underline hover:opacity-80 min-h-[44px] min-w-[44px]">
-			<span class="flex h-8 w-8 items-center justify-center text-[var(--accent)]">
-				<Logo class="h-8 w-8" />
+<header class="workspace-header">
+	<div class="workspace-header__inner">
+		<a href="/" class="workspace-brand" aria-label="Bragi Books">
+			<span class="workspace-brand__mark">
+				<Logo />
 			</span>
-			<span class="header-brand-name">Bragi Books</span>
+			<span class="workspace-brand__name">Bragi Books</span>
 		</a>
 
-		<nav aria-label="Utility" class="ml-auto flex items-center gap-0.5">
-			{#each utilityLinks as link}
-				{@const active = isActive(link.href, $page.url.pathname)}
+		<nav class="workspace-nav" aria-label="Main">
+			{#each links as link (link.href)}
+				{@const active = isActive(link.href, pathname)}
 				<a
 					href={link.href}
-					class="utility-link"
-					class:utility-link-active={active}
-					aria-label={link.label}
+					class="workspace-nav__link"
 					aria-current={active ? 'page' : undefined}
 				>
-					<link.icon class="h-4 w-4 shrink-0" aria-hidden="true" />
-					<span class="utility-link__label">{link.label}</span>
+					{link.label}
 				</a>
 			{/each}
 		</nav>
-	</div>
 
-	<!-- Slim workflow strip — hidden on the dashboard, which owns the bays -->
-	{#if $page.url.pathname !== '/'}
-		<StationRail />
-	{/if}
+		<a
+			href="/settings"
+			class="workspace-settings"
+			aria-current={isActive('/settings', pathname) ? 'page' : undefined}
+		>
+			Settings
+		</a>
+	</div>
 </header>

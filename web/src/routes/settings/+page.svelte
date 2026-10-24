@@ -1,15 +1,37 @@
 <script lang="ts">
 	import { get, put } from '$lib/api';
-	import { PageHeader, Button, Alert, Skeleton, Spinner } from '$lib/components';
+	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker } from '$lib/components';
 	import type { Settings } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
-	import { CheckCircle, AlertTriangle, Save } from '@lucide/svelte';
+	import { toCleanedError, type CleanedAdbError } from '$lib/adbError';
+	import { Save, FolderOpen } from '@lucide/svelte';
+
+	type PathField = 'input_dir' | 'output_dir' | 'completed_dir';
 
 	let settings = $state<Settings | null>(null);
+	let pickerOpen = $state(false);
+	let pickerField = $state<PathField>('input_dir');
+
+	const pickerTitles: Record<PathField, string> = {
+		input_dir: 'Choose input directory',
+		output_dir: 'Choose output directory',
+		completed_dir: 'Choose completed directory'
+	};
+
+	function openPicker(field: PathField) {
+		pickerField = field;
+		pickerOpen = true;
+	}
+
+	function onPick(path: string) {
+		if (!settings) return;
+		settings[pickerField] = path;
+		pickerOpen = false;
+	}
 	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 	let saving = $state(false);
 	let saved = $state(false);
-	let saveError = $state<string | null>(null);
+	let saveError = $state<CleanedAdbError | null>(null);
 
 	async function load() {
 		await dl.run(async () => {
@@ -69,7 +91,7 @@
 			saved = true;
 			setTimeout(() => (saved = false), 3000);
 		} catch (e) {
-			saveError = e instanceof Error ? e.message : 'Failed to save settings';
+			saveError = toCleanedError(e);
 		} finally {
 			saving = false;
 		}
@@ -78,121 +100,124 @@
 
 <PageHeader
 	title="Settings"
-	station="CONTROL CABINET"
 	description="Configure directories, processing, and API options."
 />
 
 {#if dl.error && !settings}
-	<div class="mb-6 card p-6">
-		<div class="flex items-start gap-3">
-			<AlertTriangle class="shrink-0 text-[var(--state-red)] mt-0.5" aria-hidden="true" />
-			<div class="flex-1">
-				<p class="text-sm font-semibold">Unable to load settings</p>
-				<p class="text-sm text-[var(--text-muted)] mt-1">We couldn't reach the control cabinet. Press Retry to try again.</p>
-				<p class="text-xs text-[var(--text-muted)] mt-2">{dl.error}</p>
-			</div>
-			<button
-				type="button"
-				class="shrink-0 text-sm font-bold text-[var(--accent)] hover:underline focus-visible:outline-[var(--accent)]"
-				onclick={load}
-			>
-				Retry
-			</button>
-		</div>
+	<div class="mb-6">
+		<Alert variant="error" onretry={load}>
+			<span class="font-medium">Unable to load settings</span>
+			<span class="block text-xs opacity-80 mt-1">{dl.error.message}</span>
+			<ErrorDetail raw={dl.error.raw} />
+		</Alert>
 	</div>
 {/if}
 
 {#if saveError}
 	<div class="mb-6">
-		<Alert variant="error">{saveError}</Alert>
+		<Alert variant="error">
+			{saveError.message}
+			<ErrorDetail raw={saveError.raw} />
+		</Alert>
 	</div>
 {/if}
 
 {#if saved}
-	<div class="mb-6 cabinet-feedback cabinet-feedback--success" role="status" aria-live="polite">
-		<CheckCircle class="shrink-0" aria-hidden="true" />
-		<span>Settings saved.</span>
+	<div class="mb-6" role="status" aria-live="polite">
+		<Alert variant="success">Settings saved.</Alert>
 	</div>
 {/if}
 
 {#if dl.showSkeleton}
-	<div class="card space-y-4">
+	<div class="mx-auto max-w-3xl space-y-4" aria-label="Loading settings">
 		{#each Array(6) as _}
 			<Skeleton height="1rem" width="7rem" />
 			<Skeleton height="2.75rem" />
 		{/each}
 	</div>
 {:else if settings}
-	<form class="cabinet" onsubmit={save} novalidate>
-		<!-- Panel A: Paths -->
-		<div class="cabinet__panel">
-			<div class="cabinet__panel-header">
-				<span class="cabinet__panel-label">A</span>
-				<span class="cabinet__panel-title">Paths &amp; Directories</span>
-			</div>
-			<div class="cabinet__grid">
-				<div class="cabinet__field">
-					<label for="input_dir" class="cabinet__label">Input directory <span class="text-[var(--state-red)]">*</span></label>
-					<input
-						id="input_dir"
-						type="text"
-						bind:value={settings.input_dir}
-						aria-invalid={!!fieldErrors.input_dir}
-						aria-describedby={inputDirDescId}
-					/>
-					<p id="input_dir_desc" class="cabinet__help">Where Bragi Books looks for source audiobook files and folders.</p>
+	<form class="settings-form mx-auto max-w-3xl space-y-6" onsubmit={save} novalidate>
+		<!-- Paths & directories -->
+		<section class="settings-section" aria-labelledby="settings-paths">
+			<h2 class="settings-section__title" id="settings-paths">Paths &amp; directories</h2>
+			<div class="settings-grid">
+				<div class="settings-field">
+					<label for="input_dir" class="settings-label">Input directory <span class="text-[var(--state-red)]">*</span></label>
+					<div class="settings-input-row">
+						<input
+							id="input_dir"
+							type="text"
+							bind:value={settings.input_dir}
+							aria-invalid={!!fieldErrors.input_dir}
+							aria-describedby={inputDirDescId}
+						/>
+						<Button variant="secondary" class="shrink-0" onclick={() => openPicker('input_dir')}>
+							<FolderOpen class="h-4 w-4" aria-hidden="true" />
+							Browse
+						</Button>
+					</div>
+					<p id="input_dir_desc" class="settings-help">Where Bragi Books looks for source audiobook files and folders.</p>
 					{#if fieldErrors.input_dir}
-						<p id="input_dir_desc_err" class="cabinet__field-error" role="alert">{fieldErrors.input_dir}</p>
+						<p id="input_dir_desc_err" class="settings-field-error" role="alert">{fieldErrors.input_dir}</p>
 					{/if}
 				</div>
 
-				<div class="cabinet__field">
-					<label for="output_dir" class="cabinet__label">Output directory <span class="text-[var(--state-red)]">*</span></label>
-					<input
-						id="output_dir"
-						type="text"
-						bind:value={settings.output_dir}
-						aria-invalid={!!fieldErrors.output_dir}
-						aria-describedby={outputDirDescId}
-					/>
-					<p id="output_dir_desc" class="cabinet__help">Where Bragi Books will place finished audiobook files.</p>
+				<div class="settings-field">
+					<label for="output_dir" class="settings-label">Output directory <span class="text-[var(--state-red)]">*</span></label>
+					<div class="settings-input-row">
+						<input
+							id="output_dir"
+							type="text"
+							bind:value={settings.output_dir}
+							aria-invalid={!!fieldErrors.output_dir}
+							aria-describedby={outputDirDescId}
+						/>
+						<Button variant="secondary" class="shrink-0" onclick={() => openPicker('output_dir')}>
+							<FolderOpen class="h-4 w-4" aria-hidden="true" />
+							Browse
+						</Button>
+					</div>
+					<p id="output_dir_desc" class="settings-help">Where Bragi Books will place finished audiobook files.</p>
 					{#if fieldErrors.output_dir}
-						<p id="output_dir_desc_err" class="cabinet__field-error" role="alert">{fieldErrors.output_dir}</p>
+						<p id="output_dir_desc_err" class="settings-field-error" role="alert">{fieldErrors.output_dir}</p>
 					{/if}
 				</div>
 
-				<div class="cabinet__field">
-					<label for="completed_dir" class="cabinet__label">Completed directory</label>
-					<input id="completed_dir" type="text" bind:value={settings.completed_dir} />
-					<p class="cabinet__help">Leave blank to keep original input files in place.</p>
+				<div class="settings-field">
+					<label for="completed_dir" class="settings-label">Completed directory</label>
+					<div class="settings-input-row">
+						<input id="completed_dir" type="text" bind:value={settings.completed_dir} />
+						<Button variant="secondary" class="shrink-0" onclick={() => openPicker('completed_dir')}>
+							<FolderOpen class="h-4 w-4" aria-hidden="true" />
+							Browse
+						</Button>
+					</div>
+					<p class="settings-help">Leave blank to keep original input files in place.</p>
 				</div>
 
-				<div class="cabinet__field">
-					<label for="output_scheme" class="cabinet__label">Output path format</label>
+				<div class="settings-field">
+					<label for="output_scheme" class="settings-label">Output path format</label>
 					<input id="output_scheme" type="text" bind:value={settings.output_scheme} />
-					<div class="cabinet__ref">
-						<p class="cabinet__ref-title">Use <code>/</code> for subdirectories.</p>
-						<p class="cabinet__ref-text">Supported keywords:</p>
-						<p class="cabinet__ref-keywords">asin, author, narrator, series_name, series_position, subtitle, title, year</p>
+					<div class="settings-ref">
+						<p class="settings-ref__title">Use <code>/</code> for subdirectories.</p>
+						<p class="settings-ref__text">Supported keywords:</p>
+						<p class="settings-ref__keywords">asin, author, narrator, series_name, series_position, subtitle, title, year</p>
 					</div>
 				</div>
 			</div>
-		</div>
+		</section>
 
-		<!-- Panel B: Processing -->
-		<div class="cabinet__panel">
-			<div class="cabinet__panel-header">
-				<span class="cabinet__panel-label">B</span>
-				<span class="cabinet__panel-title">Processing</span>
-			</div>
-			<div class="cabinet__grid">
-				<div class="cabinet__field">
-					<label for="m4b_merge_binary" class="cabinet__label">m4b-merge binary</label>
+		<!-- Processing -->
+		<section class="settings-section" aria-labelledby="settings-processing">
+			<h2 class="settings-section__title" id="settings-processing">Processing</h2>
+			<div class="settings-grid">
+				<div class="settings-field">
+					<label for="m4b_merge_binary" class="settings-label">m4b-merge binary</label>
 					<input id="m4b_merge_binary" type="text" bind:value={settings.m4b_merge_binary} />
 				</div>
 
-				<div class="cabinet__field">
-					<label for="num_cpus" class="cabinet__label">CPUs to use</label>
+				<div class="settings-field">
+					<label for="num_cpus" class="settings-label">CPUs to use</label>
 					<input
 						id="num_cpus"
 						type="number"
@@ -202,76 +227,69 @@
 						aria-invalid={!!fieldErrors.num_cpus}
 						aria-describedby={numCpusDescId}
 					/>
-					<p id="num_cpus_desc" class="cabinet__help">Number of parallel processing threads. Use 0 to use all available cores.</p>
+					<p id="num_cpus_desc" class="settings-help">Number of parallel processing threads. Use 0 to use all available cores.</p>
 					{#if fieldErrors.num_cpus}
-						<p id="num_cpus_desc_err" class="cabinet__field-error" role="alert">{fieldErrors.num_cpus}</p>
+						<p id="num_cpus_desc_err" class="settings-field-error" role="alert">{fieldErrors.num_cpus}</p>
 					{/if}
 				</div>
 			</div>
-		</div>
+		</section>
 
-		<!-- Panel C: API & Region -->
-		<div class="cabinet__panel">
-			<div class="cabinet__panel-header">
-				<span class="cabinet__panel-label">C</span>
-				<span class="cabinet__panel-title">AudiobookDB</span>
+		<!-- AudiobookDB -->
+		<section class="settings-section" aria-labelledby="settings-audiobookdb">
+			<h2 class="settings-section__title" id="settings-audiobookdb">AudiobookDB</h2>
+			<div class="settings-field">
+				<label for="audiobookdb_api_key" class="settings-label">API key</label>
+				<input id="audiobookdb_api_key" type="password" bind:value={settings.audiobookdb_api_key} placeholder="Optional" />
+				<p class="settings-help">Optional key for better rate limits on audiobookdb.org.</p>
+				<details class="apikey-help">
+					<summary class="apikey-help__summary">How to get an API key</summary>
+					<ol class="apikey-help__steps">
+						<li>
+							Create a free account at
+							<a href="https://audiobookdb.org/users/signup" target="_blank" rel="noopener noreferrer">audiobookdb.org</a>
+							(Sign In → Register).
+						</li>
+						<li>Open your account settings once signed in.</li>
+						<li>Generate an API key — it is shown once, so copy it immediately.</li>
+						<li>Paste it into the field above and save.</li>
+					</ol>
+					<p class="apikey-help__note">
+						Anonymous access (no key) is limited to about 5 requests/second and 500/day;
+						a free key raises this 20×. If matching suddenly fails with “rate limit
+						exceeded”, this is why.
+					</p>
+				</details>
 			</div>
-			<div class="cabinet__grid">
-				<div class="cabinet__field">
-					<label for="audiobookdb_api_key" class="cabinet__label">AudiobookDB API key</label>
-					<input id="audiobookdb_api_key" type="password" bind:value={settings.audiobookdb_api_key} placeholder="Optional" />
-					<p class="cabinet__help">Optional key for better rate limits on audiobookdb.org.</p>
-					<details class="apikey-help">
-						<summary class="apikey-help__summary">How to get an API key</summary>
-						<ol class="apikey-help__steps">
-							<li>
-								Create a free account at
-								<a href="https://audiobookdb.org/users/register" target="_blank" rel="noopener noreferrer">audiobookdb.org</a>
-								(Sign In → Register).
-							</li>
-							<li>Open your account settings once signed in.</li>
-							<li>Generate an API key — it is shown once, so copy it immediately.</li>
-							<li>Paste it into the field above and save.</li>
-						</ol>
-						<p class="apikey-help__note">
-							Anonymous access (no key) is limited to about 5 requests/second and 500/day;
-							a free key raises this 20×. If matching suddenly fails with “rate limit
-							exceeded”, this is why.
-						</p>
-					</details>
-				</div>
+		</section>
 
-			</div>
-		</div>
-
-		<!-- Save rail -->
-		<div class="cabinet__save-rail">
+		<!-- Save -->
+		<div class="settings-save">
 			{#if saving}
-				<span class="cabinet__save-status" aria-live="polite">
+				<span class="settings-save__status" aria-live="polite">
 					<Spinner size="1rem" />
 					Saving…
 				</span>
 			{/if}
-			{#if saveError}
-				<div class="cabinet__save-error" role="alert">
-					<AlertTriangle class="shrink-0 mt-0.5" aria-hidden="true" />
-					{saveError}
-				</div>
-			{/if}
-			<div class="cabinet__save-actions">
-				<Button variant="primary" type="submit" loading={saving}>
-					{#if !saving}
-						<Save class="h-4 w-4" aria-hidden="true" />
-					{/if}
-					Save settings
-				</Button>
-			</div>
+			<Button variant="primary" type="submit" loading={saving}>
+				{#if !saving}
+					<Save class="h-4 w-4" aria-hidden="true" />
+				{/if}
+				Save settings
+			</Button>
 		</div>
 	</form>
+
+	<DirPicker
+		bind:open={pickerOpen}
+		startPath={settings[pickerField]}
+		title={pickerTitles[pickerField]}
+		onselect={onPick}
+	/>
 {/if}
 
 <svelte:head>
-	<title>Control Cabinet — Bragi Books</title>
+	<title>Settings — Bragi Books</title>
 </svelte:head>
 
 <style>
@@ -305,13 +323,13 @@
 	}
 
 	.apikey-help__steps a {
-		color: var(--accent);
+		color: var(--workspace-action);
 		text-decoration: underline;
 		text-underline-offset: 2px;
 	}
 
 	.apikey-help__steps a:hover {
-		color: var(--accent-hover);
+		color: var(--text);
 	}
 
 	.apikey-help__note {
@@ -321,75 +339,44 @@
 		color: var(--text-muted);
 	}
 
-	/* Cabinet — the settings form container */
-	.cabinet {
+	/* Section — one labeled white panel per group */
+	.settings-section {
 		border: 1px solid var(--border);
 		border-radius: var(--radius-md);
 		overflow: hidden;
-		background: var(--surface);
+		background: var(--bg-panel);
 	}
 
-	/* Cabinet panel — grouped section */
-	.cabinet__panel {
+	.settings-section__title {
+		margin: 0;
+		padding: 0.75rem 1.25rem;
+		font-size: 0.875rem;
+		font-weight: 600;
+		color: var(--text);
+		background: var(--surface);
 		border-bottom: 1px solid var(--border-subtle);
 	}
 
-	.cabinet__panel:last-of-type {
-		border-bottom: none;
-	}
-
-	.cabinet__panel-header {
-		display: flex;
-		align-items: center;
-		gap: 0.6rem;
-		padding: 0.75rem 1rem;
-		background: var(--surface-hover);
-		border-bottom: 1px dashed var(--border-subtle);
-	}
-
-	.cabinet__panel-label {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.75rem;
-		font-weight: 700;
-		letter-spacing: 0.05em;
-		color: var(--accent);
-		background: var(--accent-wash);
-		border: 1px solid var(--accent);
-		padding: 0.1rem 0.4rem;
-		border-radius: var(--radius-sm);
-	}
-
-	.cabinet__panel-title {
-		font-size: 0.85rem;
-		font-weight: 600;
-		color: var(--text);
-	}
-
-	.cabinet__grid {
+	/* Field — hairline dividers drawn as a 1px grid gap */
+	.settings-grid {
 		display: grid;
 		grid-template-columns: 1fr;
-		gap: 0;
-		padding: 0;
+		gap: 1px;
+		background: var(--border-subtle);
 	}
 
 	@media (min-width: 640px) {
-		.cabinet__grid {
+		.settings-grid {
 			grid-template-columns: 1fr 1fr;
 		}
 	}
 
-	/* Cabinet field */
-	.cabinet__field {
-		padding: 0.875rem 1rem;
-		border-bottom: 1px solid var(--border-subtle);
+	.settings-field {
+		padding: 1rem 1.25rem;
+		background: var(--bg-panel);
 	}
 
-	.cabinet__field:nth-child(even) {
-		border-left: 1px solid var(--border-subtle);
-	}
-
-
-	.cabinet__label {
+	.settings-label {
 		display: block;
 		margin-bottom: 0.375rem;
 		font-size: 0.8rem;
@@ -397,22 +384,38 @@
 		color: var(--text-secondary);
 	}
 
-	.cabinet__field-error {
+	.settings-input-row {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.5rem;
+	}
+
+	.settings-input-row input {
+		flex: 1 1 auto;
+		min-width: 0;
+	}
+
+	.settings-field-error {
 		margin-top: 0.35rem;
 		font-size: 0.75rem;
 		color: var(--state-red);
 		font-weight: 500;
 	}
 
-	.cabinet__help {
+	.settings-help {
 		margin-top: 0.35rem;
 		font-size: 0.75rem;
 		color: var(--text-muted);
 		line-height: 1.45;
+		text-wrap: pretty;
+	}
+
+	#input_dir_desc {
+		text-wrap: balance;
 	}
 
 	/* Reference box for output scheme keywords */
-	.cabinet__ref {
+	.settings-ref {
 		margin-top: 0.5rem;
 		padding: 0.5rem 0.75rem;
 		background: var(--bg);
@@ -420,13 +423,13 @@
 		border-radius: var(--radius-sm);
 	}
 
-	.cabinet__ref-title {
+	.settings-ref__title {
 		font-size: 0.78rem;
 		font-weight: 500;
 		color: var(--text);
 	}
 
-	.cabinet__ref-title code {
+	.settings-ref__title code {
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 		font-size: 0.75rem;
 		padding: 0.05rem 0.3rem;
@@ -434,82 +437,46 @@
 		border-radius: 2px;
 	}
 
-	.cabinet__ref-text {
+	.settings-ref__text {
 		margin-top: 0.25rem;
 		font-size: 0.75rem;
 		color: var(--text-muted);
 	}
 
-	.cabinet__ref-keywords {
+	.settings-ref__keywords {
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 		font-size: 0.75rem;
 		color: var(--text-muted);
 		line-height: 1.6;
 	}
 
-	/* Save rail — bottom action bar */
-	.cabinet__save-rail {
+	/* Save bar — end of the form, reachable without scrolling */
+	.settings-save {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.75rem;
-		padding: 0.75rem 1rem;
-		background: var(--surface);
-		border-top: 1px dashed var(--border-subtle);
 		flex-wrap: wrap;
 	}
 
-	.cabinet__save-status {
+	.settings-save__status {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.4rem;
 		font-size: 0.8rem;
-		color: var(--state-blue);
+		color: var(--text-secondary);
 		font-weight: 500;
 	}
-
-	.cabinet__save-error {
-		display: flex;
-		align-items: flex-start;
-		gap: 0.4rem;
-		font-size: 0.8rem;
-		color: var(--state-red);
-	}
-
-	.cabinet__save-actions {
-		margin-left: auto;
-	}
-
-	/* Feedback banner (saved state) */
-	.cabinet-feedback {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		padding: 0.6rem 1rem;
-		background: var(--state-green-bg);
-		border: 1px solid var(--state-green);
-		border-radius: var(--radius-md);
-		font-size: 0.85rem;
-		color: var(--state-green);
-		font-weight: 500;
-	}
-
-	/* Spinner: shared <Spinner> component owns the animation
-       and its reduced-motion fallback. */
 
 	/* Narrow screens */
 	@media (max-width: 639px) {
-		.cabinet__field {
-			border-left: none !important;
-		}
-
-		.cabinet__save-rail {
+		.settings-save {
 			flex-direction: column;
 			align-items: stretch;
 		}
 
-		.cabinet__save-actions {
-			margin-left: 0;
+		.settings-save :global(.btn) {
+			width: 100%;
 		}
 	}
 </style>
