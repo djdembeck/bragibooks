@@ -1,0 +1,68 @@
+# TEMPORARY helper workflow (delete after success): one-shot archiving retag.
+# Retag the pinned final-Python image index to :python-final on GHCR and
+# Docker Hub by digest, preserving the exact OCI index (linux/amd64 +
+# attestation). Dispatch-only, hardcoded pinned digest, idempotent.
+name: ArchivePythonFinal
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  PINNED_DIGEST: ghcr.io/djdembeck/bragibooks:develop@sha256:e583597e3823a091a11a78e277805d453d791b65ad8da827ff2355bd8cb2f924
+
+jobs:
+  retag:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retag to GHCR python-final by pinned digest
+        run: |
+          set -euo pipefail
+          if docker manifest inspect ghcr.io/djdembeck/bragibooks:python-final >/dev/null 2>&1; then
+            echo "GHCR python-final already exists - skipping"
+          else
+            docker buildx imagetools create \
+              --tag ghcr.io/djdembeck/bragibooks:python-final \
+              "${PINNED_DIGEST}"
+          fi
+
+      - name: Retag to Docker Hub python-final by pinned digest
+        run: |
+          set -euo pipefail
+          if docker manifest inspect docker.io/djdembeck/bragibooks:python-final >/dev/null 2>&1; then
+            echo "Hub python-final already exists - skipping"
+          else
+            docker buildx imagetools create \
+              --tag docker.io/djdembeck/bragibooks:python-final \
+              "${PINNED_DIGEST}"
+          fi
+
+      - name: Verify readback
+        run: |
+          set -euo pipefail
+          for img in ghcr.io/djdembeck/bragibooks:python-final docker.io/djdembeck/bragibooks:python-final; do
+            digest=$(docker buildx imagetools inspect --format '{{.Digest}}' "${img}")
+            echo "${img} -> ${digest}"
+            [ "${digest}" = "sha256:e583597e3823a091a11a78e277805d453d791b65ad8da827ff2355bd8cb2f924" ] || { echo "DIGEST MISMATCH" >&2; exit 1; }
+          done
+          echo "Both registry tags verified at pinned digest"
