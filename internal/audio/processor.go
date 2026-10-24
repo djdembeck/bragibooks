@@ -74,6 +74,58 @@ type ProcessResult struct {
 	OutputWarning string
 }
 
+// stripEscapeSequences removes ANSI/VT100 escape sequences from s so the
+// captured m4b-merge output persists and renders as plain text. Only escape
+// sequences are removed: newlines, tabs, and all ordinary text — including a
+// literal "[32m" that is not preceded by ESC — are preserved.
+func stripEscapeSequences(s string) string {
+	const esc = 0x1b
+	if !strings.ContainsRune(s, esc) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != esc {
+			b.WriteByte(s[i])
+			continue
+		}
+		i = escapeSequenceEnd(s, i)
+	}
+	return b.String()
+}
+
+// escapeSequenceEnd returns the index of the last byte of the escape
+// sequence starting at s[i] (an ESC byte), so the caller's loop resumes just
+// past it. A truncated sequence consumes the remainder of the input.
+func escapeSequenceEnd(s string, i int) int {
+	j := i + 1
+	if j >= len(s) {
+		return i
+	}
+	switch s[j] {
+	case '[': // CSI: parameter/intermediate bytes, then one final byte.
+		for j++; j < len(s); j++ {
+			if s[j] >= 0x40 && s[j] <= 0x7e {
+				return j
+			}
+		}
+		return len(s) - 1
+	case ']', 'P', 'X', '^', '_': // OSC/DCS/SOS/PM/APC: BEL- or ST-terminated.
+		for j++; j < len(s); j++ {
+			if s[j] == 0x07 {
+				return j
+			}
+			if s[j] == 0x1b && j+1 < len(s) && s[j+1] == '\\' {
+				return j + 1
+			}
+		}
+		return len(s) - 1
+	default: // Two-byte escape.
+		return j
+	}
+}
+
 // Run executes m4b-merge with the given input file paths.
 // Returns the output .m4b file path, or an error.
 //
@@ -167,9 +219,14 @@ func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, 
 
 	waitErr := cmd.Wait()
 
+	// m4b-merge colorizes its tracing output unconditionally (no TTY check,
+	// no --no-color flag), so the pipes receive ANSI SGR sequences. Strip
+	// them here, at the single point both streams enter the app: processJob
+	// persists Stdout as processing_jobs.output (rendered verbatim in the
+	// job-log <pre>) and embeds Stderr in the persisted error message.
 	result := &ProcessResult{
-		Stdout: stdoutBuf.String(),
-		Stderr: stderrBuf.String(),
+		Stdout: stripEscapeSequences(stdoutBuf.String()),
+		Stderr: stripEscapeSequences(stderrBuf.String()),
 	}
 
 	if waitErr != nil {
@@ -179,7 +236,7 @@ func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, 
 		if workDir != "" {
 			_ = os.RemoveAll(workDir)
 		}
-		return result, fmt.Errorf("m4b-merge: %w: %s", waitErr, stderrBuf.Bytes())
+		return result, fmt.Errorf("m4b-merge: %w: %s", waitErr, result.Stderr)
 	}
 
 	// m4b-merge writes its output under -o using a path scheme; discovery is

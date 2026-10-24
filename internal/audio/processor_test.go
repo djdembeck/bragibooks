@@ -343,3 +343,122 @@ func TestRunMergeFailureCleansJobSubtree(t *testing.T) {
 		t.Errorf("per-job subtree mer1.tmp not cleaned up (stat err = %v)", serr)
 	}
 }
+
+// TestStripEscapeSequences covers the job-log fix: m4b-merge's tracing
+// output carries ANSI escapes even when stdout is a pipe, and those bytes
+// must not reach processing_jobs.output (rendered verbatim in the UI).
+func TestStripEscapeSequences(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "tracing SGR line",
+			in:   "\x1b[2m2026-10-24T22:06:07.897356Z\x1b[0m \x1b[32mINFO\x1b[0m \x1b[2mm4b_merge: merged\x1b[0m\n",
+			want: "2026-10-24T22:06:07.897356Z INFO m4b_merge: merged\n",
+		},
+		{
+			name: "cursor visibility",
+			in:   "\x1b[?25lprogress\x1b[?25h",
+			want: "progress",
+		},
+		{
+			name: "OSC hyperlink with ST",
+			in:   "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\",
+			want: "link",
+		},
+		{
+			name: "OSC title with BEL",
+			in:   "\x1b]0;title\x07text",
+			want: "text",
+		},
+		{
+			name: "DCS payload",
+			in:   "\x1bP1;2|data\x1b\\visible",
+			want: "visible",
+		},
+		{
+			name: "two-byte escape",
+			in:   "before\x1bMafter",
+			want: "beforeafter",
+		},
+		{
+			name: "literal bracket text is not a sequence",
+			in:   "[32m INFO [0m\n",
+			want: "[32m INFO [0m\n",
+		},
+		{
+			name: "truncated CSI",
+			in:   "abc\x1b[2",
+			want: "abc",
+		},
+		{
+			name: "plain text untouched",
+			in:   "Author/Title.m4b\tmerged ✓\n",
+			want: "Author/Title.m4b\tmerged ✓\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripEscapeSequences(tt.in); got != tt.want {
+				t.Errorf("stripEscapeSequences(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRunStripsEscapeSequences is the end-to-end regression test for #439:
+// the fake binary emits colored lines on both streams, and what Run returns
+// (which processJob persists) must be plain text. The failing-binary case
+// also covers the stderr text embedded in the persisted error message.
+func TestRunStripsEscapeSequences(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "ansi-m4b")
+	script := `#!/bin/sh
+out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift; fi
+  shift
+done
+mkdir -p "$out/Author"
+printf 'book' > "$out/Author/Title.m4b"
+printf '\033[2m2026-10-24T22:06:07.897356Z\033[0m \033[32mINFO\033[0m \033[2mm4b_merge: merged\033[0m\n'
+printf '\033[33mWARN\033[0m \033[2mcover missing\033[0m\n' >&2
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+
+	proc := NewProcessor(bin, t.TempDir(), "", 1, "{author}/{title}", "info")
+	res, err := proc.Run(context.Background(), "ansi1", []string{"/tmp/x/a.m4b"}, "")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	const wantStdout = "2026-10-24T22:06:07.897356Z INFO m4b_merge: merged\n"
+	if res.Stdout != wantStdout {
+		t.Errorf("Stdout = %q, want %q", res.Stdout, wantStdout)
+	}
+	const wantStderr = "WARN cover missing\n"
+	if res.Stderr != wantStderr {
+		t.Errorf("Stderr = %q, want %q", res.Stderr, wantStderr)
+	}
+
+	failBin := filepath.Join(dir, "ansi-fail-m4b")
+	failScript := "#!/bin/sh\nprintf '\\033[31mmerge failed\\033[0m\\n' >&2\nexit 1\n"
+	if err := os.WriteFile(failBin, []byte(failScript), 0o755); err != nil {
+		t.Fatalf("write failing fake binary: %v", err)
+	}
+	proc = NewProcessor(failBin, "", "", 1, "{title}", "info")
+	_, err = proc.Run(context.Background(), "", []string{"/tmp/x/a.m4b"}, "")
+	if err == nil {
+		t.Fatal("Run: succeeded, want a merge failure")
+	}
+	if strings.ContainsRune(err.Error(), 0x1b) {
+		t.Errorf("error still carries escape sequences: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "merge failed") {
+		t.Errorf("error = %q, want the child's stderr text preserved", err.Error())
+	}
+}
