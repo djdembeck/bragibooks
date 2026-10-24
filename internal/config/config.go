@@ -250,11 +250,12 @@ func (cm *ConfigManager) AddYAMLKeys(keys ...string) {
 
 // Save persists the current config (all keys) to the YAML file using atomic
 // writes. If no config file was loaded (configPath is empty), defaults to
-// config/config.yaml.
+// defaultConfigPath() (the /config volume in the container image,
+// config/config.yaml elsewhere).
 func (cm *ConfigManager) Save() error {
 	path := cm.configPath
 	if path == "" {
-		path = "config/config.yaml"
+		path = defaultConfigPath()
 	}
 	data, err := yaml.Marshal(cm.Config())
 	if err != nil {
@@ -271,7 +272,7 @@ func (cm *ConfigManager) Save() error {
 func (cm *ConfigManager) SaveKeys(changed map[string]any) error {
 	path := cm.configPath
 	if path == "" {
-		path = "config/config.yaml"
+		path = defaultConfigPath()
 	}
 
 	// Changed keys serialized as a YAML map: top-level section maps get
@@ -536,6 +537,18 @@ func overrideKey(target, yamlOnly *Config, key string) {
 	case "processing.log_level":
 		target.Processing.LogLevel = yamlOnly.Processing.LogLevel
 	}
+}
+
+// defaultConfigPath is the fallback YAML location for settings writes when
+// no config file was loaded. /config is the writable, app-owned volume in
+// the container image (the same tree the built-in search paths probe);
+// locally the conventional relative path applies (finding: container
+// default paths).
+func defaultConfigPath() string {
+	if st, err := os.Stat("/config"); err == nil && st.IsDir() {
+		return "/config/config.yaml"
+	}
+	return "config/config.yaml"
 }
 
 // setDefaults sets default configuration values for Viper.

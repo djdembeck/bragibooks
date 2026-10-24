@@ -35,7 +35,22 @@ function authHeaders(): Record<string, string> {
 			// and SSE degrades to polling while fetches keep using the header.
 			if (!/[;\s]/.test(token)) document.cookie = `bragibooks_token=${token}; path=/`;
 		}
-		return token ? { Authorization: `Bearer ${token}` } : {};
+		const headers: Record<string, string> = {};
+		if (token) headers.Authorization = `Bearer ${token}`;
+		// The server requires a double-submit CSRF token on state-changing
+		// requests when no Authorization header is present (local mode).
+		// Echo the server-set bragibooks_csrf cookie into X-CSRF-Token;
+		// request with no cookie (first hit) sends an empty value, which
+		// the server rejects and the next UI action retries after the
+		// GET (or any prior response) has set the cookie.
+		const csrf = document.cookie
+			.split('; ')
+			.find((c) => c.startsWith('bragibooks_csrf='))
+			?.slice('bragibooks_csrf='.length);
+		if (csrf && !headers.Authorization) {
+			headers['X-CSRF-Token'] = csrf;
+		}
+		return headers;
 	} catch {
 		return {};
 	}

@@ -227,3 +227,119 @@ exit 0
 		t.Errorf("Stderr length = %d, want the captured ~200KB flood", len(res.Stderr))
 	}
 }
+
+// TestRunRelocationFailureKeepsOutput is the regression test for the
+// relocation-failure path: when the final move of the discovered .m4b
+// fails, the run must return a real error (not a silent success with no
+// output file) AND the per-job subtree must be preserved so the operator
+// can recover the completed artifact.
+func TestRunRelocationFailureKeepsOutput(t *testing.T) {
+	out := t.TempDir()
+	bin := writeFakeM4b(t, t.TempDir())
+
+	// Block writing the final location: point the destination at a file,
+	// so MkdirAll's parent would collide.
+	blockedParent := filepath.Join(out, "Author")
+	if err := os.WriteFile(blockedParent, []byte("not a dir"), 0o644); err != nil {
+		t.Fatalf("seed blocked parent: %v", err)
+	}
+
+	proc := NewProcessor(bin, out, "", 1, "{author}/{title}", "info")
+	_, err := proc.Run(context.Background(), "rel2", []string{"/tmp/x/a.m4b"}, "")
+	if err == nil {
+		t.Fatalf("Run: succeeded, want a relocation failure")
+	}
+	if !strings.Contains(err.Error(), "output") {
+		t.Errorf("Run error = %q, want a relocation/output-path error", err)
+	}
+	// The per-job subtree that holds the only completed .m4b must
+	// survive for recovery (NOT be RemoveAll'd on failure).
+	workDir := filepath.Join(out, "rel2.tmp")
+	if _, serr := os.Stat(workDir); serr != nil {
+		t.Errorf("workDir %s missing after relocation failure: %v", workDir, serr)
+	}
+	found := ""
+	_ = filepath.WalkDir(workDir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".m4b") {
+			found = p
+		}
+		return nil
+	})
+	if !strings.HasSuffix(found, ".m4b") {
+		t.Errorf("completed .m4b not present under preserved workDir: %q", found)
+	}
+}
+
+// TestRunRenameCopyFailurePreservesM4B covers the other relocation
+// failure shape: MkdirAll succeeds because the final destination
+// directory exists, but the rename itself fails (read-only destination
+// dir — the copy-then-delete fallback is used precisely because the
+// directory came up writable as far as MkdirAll is concerned). The run
+// must still report a real error AND keep the per-job subtree, since the
+// .m4b there is the only completed artifact.
+func TestRunRenameCopyFailurePreservesM4B(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the permission bits; cannot make the destination read-only")
+	}
+	out := t.TempDir()
+	bin := writeFakeM4b(t, t.TempDir())
+
+	// Final destination dir exists, so MkdirAll passes; its read-only
+	// mode makes the rename (and the copy fallback) fail.
+	dst := filepath.Join(out, "Author")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dst, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dst, 0o755) })
+
+	proc := NewProcessor(bin, out, "", 1, "{author}/{title}", "info")
+	_, err := proc.Run(context.Background(), "ren1", []string{"/tmp/x/a.m4b"}, "")
+	if err == nil {
+		t.Fatalf("Run: succeeded, want a move failure")
+	}
+	if !strings.Contains(err.Error(), "move output") {
+		t.Errorf("Run error = %q, want the move-to-final-location error", err)
+	}
+	// The per-job subtree holding the completed .m4b must be preserved
+	// (NOT RemoveAll'd on failure).
+	workDir := filepath.Join(out, "ren1.tmp")
+	found := ""
+	_ = filepath.WalkDir(workDir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".m4b") {
+			found = p
+		}
+		return nil
+	})
+	if !strings.HasSuffix(found, ".m4b") {
+		t.Errorf("completed .m4b not present under preserved workDir: %q", found)
+	}
+}
+
+// TestRunMergeFailureCleansJobSubtree covers the opposite failure side:
+// when the m4b-merge binary itself exits nonzero there is no output to
+// recover, so the per-job subtree must be deleted.
+func TestRunMergeFailureCleansJobSubtree(t *testing.T) {
+	out := t.TempDir()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "fail-merge")
+	script := "#!/bin/sh\necho merge-failed >&2\nexit 1\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+
+	proc := NewProcessor(bin, out, "", 1, "{author}/{title}", "info")
+	_, err := proc.Run(context.Background(), "mer1", []string{"/tmp/x/a.m4b"}, "")
+	if err == nil {
+		t.Fatalf("Run: succeeded, want a merge failure")
+	}
+	if !strings.Contains(err.Error(), "m4b-merge") {
+		t.Errorf("Run error = %q, want an m4b-merge failure", err)
+	}
+	workDir := filepath.Join(out, "mer1.tmp")
+	if _, serr := os.Stat(workDir); !os.IsNotExist(serr) {
+		t.Errorf("per-job subtree mer1.tmp not cleaned up (stat err = %v)", serr)
+	}
+}

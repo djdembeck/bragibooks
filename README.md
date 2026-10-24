@@ -54,7 +54,7 @@ Create or choose host directories for the database/configuration, input books, o
 ```sh
 docker run --rm -d --name bragibooks \
   --publish 8888:8080 \
-  --volume "$PWD/config:/app/config" \
+  --volume "$PWD/config:/config" \
   --volume /path/to/input:/input \
   --volume /path/to/output:/output \
   --volume /path/to/completed:/input/done \
@@ -66,7 +66,7 @@ docker run --rm -d --name bragibooks \
   ghcr.io/djdembeck/bragibooks:main
 ```
 
-The container listens on port `8080`; the command above publishes it as `http://localhost:8888`. The mounted `/app/config` directory stores `config/config.yaml` and the SQLite database. `API_KEY_API_KEY` is optional, but setting it enables AudiobookDB requests that require an API key.
+The container listens on port `8080`; the command above publishes it as `http://localhost:8888`. The mounted `/config` directory holds the SQLite database (by default `bragibooks.db`) and any runtime configuration; it is declared a volume in the image so the database persists across container recreation. `API_KEY_API_KEY` is optional, but setting it enables AudiobookDB requests that require an API key.
 
 A Docker Compose deployment can use the same image and mounts. The repository's [production compose file](docker/docker-compose.yml) is the reference for the container port and persistent config mount; replace its local image name with `ghcr.io/djdembeck/bragibooks:main` when running the pre-built image.
 
@@ -92,7 +92,7 @@ The normal work is deliberately linear: **select, match, queue, finish**.
    ```sh
    docker run --rm -d --name bragibooks \
      -p 8888:8080 \
-     -v "$PWD/config:/app/config" \
+     -v "$PWD/config:/config" \
      -v /path/to/input:/input \
      -v /path/to/output:/output \
      -v /path/to/completed:/input/done \
@@ -239,7 +239,7 @@ The root [Dockerfile](Dockerfile) builds the SvelteKit frontend, embeds it in a 
 ```sh
 docker build -t bragibooks:local .
 docker run --rm -p 8888:8080 \
-  -v "$PWD/config:/app/config" \
+  -v "$PWD/config:/config" \
   -v /path/to/input:/input \
   -v /path/to/output:/output \
   bragibooks:local

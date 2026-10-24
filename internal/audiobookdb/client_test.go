@@ -31,6 +31,11 @@ func TestValidateTargetPolicy(t *testing.T) {
 		{name: "localhost with dev=1", url: "http://localhost:8100/api", ok: true, env: "1"},
 		{name: "localhost with dev=true", url: "http://localhost:8100/api", ok: true, env: "true"},
 		{name: "127 with dev=yes", url: "http://127.0.0.1:8100/api", ok: true, env: "yes"},
+		{name: "127.0.0.1 with dev=1", url: "http://127.0.0.1:8100/api", ok: true, env: "1"},
+		{name: "v6 loopback literal with dev", url: "http://[::1]:8100/api", ok: true, env: "1"},
+		// A name merely starting with 127. is NOT a loopback literal
+		// (finding: 127-prefix) and must be refused in dev.
+		{name: "127. lookalike domain with dev", url: "http://127.attacker.example:8100/api", ok: false, env: "1"},
 		{name: "localhost with dev=0", url: "http://localhost:8100/api", ok: false, env: "0"},
 		{name: "relative URL refused", url: "/api/search", ok: false},
 		{name: "empty refused", url: "", ok: false},

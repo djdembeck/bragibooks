@@ -171,11 +171,14 @@ func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, 
 		Stdout: stdoutBuf.String(),
 		Stderr: stderrBuf.String(),
 	}
-	if workDir != "" {
-		defer os.RemoveAll(workDir)
-	}
 
 	if waitErr != nil {
+		// No output was produced: the per-job subtree is garbage and safe
+		// to drop. (A relocation failure, by contrast, keeps the subtree —
+		// there the .m4b is the only completed artifact; see below.)
+		if workDir != "" {
+			_ = os.RemoveAll(workDir)
+		}
 		return result, fmt.Errorf("m4b-merge: %w: %s", waitErr, stderrBuf.Bytes())
 	}
 
@@ -188,34 +191,43 @@ func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, 
 		result.OutputWarning = "no output .m4b found in output directory"
 	} else if workDir != "" {
 		// Relocate into the shared output tree, keeping the scheme-relative
-		// path (e.g. Author/Title.m4b under {author}/{title}).
+		// path (e.g. Author/Title.m4b under {author}/{title}). The .m4b was
+		// found only inside the per-job subtree: on relocation failure the
+		// subtree is kept (recovery possible) and the run reports a real
+		// failure instead of succeeding with no output file.
 		rel, err := filepath.Rel(workDir, out)
 		if err != nil {
-			result.OutputWarning = "output file discovery failed: " + err.Error()
-		} else {
-			finalPath := filepath.Join(outputRoot, rel)
-			if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
-				result.OutputWarning = "create output path: " + err.Error()
-			} else if err := os.Rename(out, finalPath); err != nil {
-				if err2 := os.MkdirAll(filepath.Dir(finalPath), 0o755); err2 == nil {
-					// Cross-device rename: copy then delete.
-					if data, rdErr := os.ReadFile(out); rdErr == nil {
-						err = os.WriteFile(finalPath, data, 0o644)
-					} else {
-						err = rdErr
+			return result, fmt.Errorf("resolve output file %s relative to job dir %s: %w", out, workDir, err)
+		}
+		finalPath := filepath.Join(outputRoot, rel)
+		if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
+			return result, fmt.Errorf("create output path for %s: %w", finalPath, err)
+		}
+		if err := os.Rename(out, finalPath); err != nil {
+			if err2 := os.MkdirAll(filepath.Dir(finalPath), 0o755); err2 == nil {
+				// Cross-device rename: copy then delete.
+				if data, rdErr := os.ReadFile(out); rdErr == nil {
+					err = os.WriteFile(finalPath, data, 0o644)
+					if err == nil {
+						os.Remove(out)
 					}
-				}
-				if err != nil {
-					result.OutputWarning = "move output to final location: " + err.Error()
 				} else {
-					result.OutputFile, _ = filepath.Abs(finalPath)
+					err = rdErr
 				}
-			} else {
-				result.OutputFile, _ = filepath.Abs(finalPath)
+			}
+			if err != nil {
+				return result, fmt.Errorf("move output to final location %s: %w (job output kept at %s)", finalPath, err, workDir)
 			}
 		}
+		result.OutputFile, _ = filepath.Abs(finalPath)
 	} else {
 		result.OutputFile = out
+	}
+
+	// Publication succeeded: the .m4b is at its final location, so the
+	// per-job subtree is garbage to clean up.
+	if workDir != "" {
+		_ = os.RemoveAll(workDir)
 	}
 
 	return result, nil

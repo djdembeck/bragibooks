@@ -157,3 +157,79 @@ func TestLoadParseErrorIsNotSilent(t *testing.T) {
 		t.Errorf("missing file must not be an error: %v", err)
 	}
 }
+
+// TestSaveAndSaveKeysUseDefaultConfigPath covers the container default-path
+// fallback: with no config file loaded (ConfigPath == ""), Save and
+// SaveKeys must fall back to defaultConfigPath() — /config/config.yaml
+// when the app-owned /config volume exists, config/config.yaml (relative
+// to the working directory) elsewhere.
+func TestSaveAndSaveKeysUseDefaultConfigPath(t *testing.T) {
+	tests := []struct {
+		name      string
+		container bool // /config volume present
+	}{
+		{name: "config-volume-present", container: true},
+		{name: "config-volume-absent", container: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			oldWd, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chdir(base); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+			var removeVolumeDir bool
+			if tc.container {
+				st, statErr := os.Stat("/config")
+				switch {
+				case statErr != nil:
+					// No volume in this environment; only a root test
+					// harness can create it, so skip the case elsewhere.
+					if err := os.MkdirAll("/config", 0o755); err != nil {
+						t.Skipf("cannot create /config volume for this case: %v", err)
+					}
+					removeVolumeDir = true
+				case !st.IsDir():
+					t.Fatalf("/config exists but is not a directory")
+				}
+				t.Cleanup(func() {
+					if removeVolumeDir {
+						_ = os.RemoveAll("/config")
+					}
+				})
+			} else if st, statErr := os.Stat("/config"); statErr == nil && st.IsDir() {
+				t.Fatalf("case expects /config absent, but a directory exists at /config")
+			}
+
+			// No explicit path: built the same way NewConfigManager()
+			// resolves at startup (conventional search paths only).
+			m := NewConfigManager()
+			if p := m.ConfigPath(); p != "" && p != "/config/config.yaml" {
+				t.Skipf("unexpected config file %q found in this environment; cannot exercise the fallback", p)
+			}
+
+			target := filepath.Join(base, "config", "config.yaml")
+			if tc.container {
+				target = "/config/config.yaml"
+			}
+
+			if err := m.Save(); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			st, statErr := os.Stat(target)
+			if statErr != nil || !st.Mode().IsRegular() {
+				t.Errorf("Save did not write %s (stat err = %v)", target, statErr)
+			}
+
+			if err := m.SaveKeys(map[string]any{"api_key": map[string]any{"api_key": "k1"}}); err != nil {
+				t.Fatalf("SaveKeys: %v", err)
+			}
+			assertContains(t, readFile(t, target), "api_key: k1", "SaveKeys missed the default-path file")
+		})
+	}
+}

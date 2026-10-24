@@ -1,11 +1,14 @@
 package api
 
 import (
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -24,10 +27,25 @@ import (
 // mode, which is why the env token (BRAGIBOOKS_ADMIN_TOKEN) is the
 // recommended configuration for anything not on a trusted quiet LAN.
 //
-// X-Forwarded-For is trusted ONLY when the direct TCP peer
-// (RemoteAddr) is itself in one of the above networks (the service sits
-// behind its own proxy on the LAN); from any other peer the header is
-// ignored entirely, so a remote client cannot forge a trusted first hop.
+// X-Forwarded-For is honored ONLY when the direct TCP peer (RemoteAddr)
+// is in an explicitly configured trusted-proxy set (env
+// BRAGIBOOKS_TRUSTED_PROXIES: comma-separated IPs and/or CIDRs, default
+// empty). The chain is
+// then walked from the rightmost hop to the client, skipping trusted-proxy
+// entries, and the first untrusted entry is the end client. With no
+// trusted proxies configured the header is ignored entirely and the direct
+// peer decides, so a remote client behind any unconfigured proxy cannot
+// forge a trusted first hop. (Finding: XFF trust.)
+//
+// State-changing (POST/PUT/PATCH/DELETE) requests additionally pass a
+// double-submit-cookie CSRF check: the client echoes the server-set
+// bragibooks_csrf cookie in an X-CSRF-Token header. Requests authenticated
+// by an explicit "Bearer" Authorization header are exempt — browsers never
+// attach that header to cross-origin requests, so they cannot be forged
+// by a third-party page. Any other Authorization value does not exempt
+// the request; its token then rides the auto-attached cookie and takes
+// the CSRF guard.
+//
 // Token auth (header or cookie) grants remote access in token mode and is
 // subject to the same loopback-LAN rule only in local mode.
 
@@ -43,18 +61,30 @@ import (
 // auth works from any address.
 //
 // Local mode (adminToken == ""): requests must come from a loopback-LAN
-// address (see above); X-Forwarded-For is honored only from a
-// loopback-LAN direct peer. Everything else is 403. One warning is
-// logged at construction time so the operator knows the service is
-// running without a secret.
+// address (see above). X-Forwarded-For is honored only when the direct
+// peer is explicitly listed in BRAGIBOOKS_TRUSTED_PROXIES; the chain is
+// walked from the rightmost hop to the client and the first untrusted
+// entry is taken as the end client (with no trusted proxies configured
+// the header is ignored and the direct peer decides). Everything else is
+// 403. One warning is logged at construction time so the operator knows
+// the service is running without a secret.
 func RequireAdmin(adminToken string) func(http.Handler) http.Handler {
 	if adminToken == "" {
 		log.Printf("Warning: no BRAGIBOOKS_ADMIN_TOKEN configured — admin API is in local mode: only loopback/10./192.168./172.16-31 clients are accepted. Set the env var to enable token auth for remote access.")
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token, ok := bearerToken(r)
-			if ok {
+			token, hasToken := bearerToken(r)
+			// Requests authenticated by an explicit "Bearer" Authorization
+			// header are CSRF-exempt: browsers never attach that header to
+			// a cross-origin request, so a third-party page cannot forge
+			// them. A non-Bearer Authorization value changes nothing —
+			// the token then rides the auto-attached adminCookieName
+			// cookie, which a third-party page can present — and takes the
+			// normal CSRF guard (finding: CSRF).
+			exempt := bearerHeaderPresent(r)
+
+			if hasToken {
 				if adminToken == "" {
 					// Token mode is not active; a token-bearing request in
 					// local mode is checked against the loopback-LAN rule
@@ -63,11 +93,19 @@ func RequireAdmin(adminToken string) func(http.Handler) http.Handler {
 						writeError(w, http.StatusForbidden, "admin API access from non-local address without a configured token")
 						return
 					}
-					next.ServeHTTP(w, r)
+					if exempt {
+						next.ServeHTTP(w, r)
+						return
+					}
+					csrfGuard(w, r, next)
 					return
 				}
 				if subtle.ConstantTimeCompare([]byte(token), []byte(adminToken)) == 1 {
-					next.ServeHTTP(w, r)
+					if exempt {
+						next.ServeHTTP(w, r)
+						return
+					}
+					csrfGuard(w, r, next)
 					return
 				}
 				writeError(w, http.StatusForbidden, "invalid admin token")
@@ -85,7 +123,7 @@ func RequireAdmin(adminToken string) func(http.Handler) http.Handler {
 				writeError(w, http.StatusForbidden, "admin API is only reachable from loopback/LAN addresses (set BRAGIBOOKS_ADMIN_TOKEN for remote access)")
 				return
 			}
-			next.ServeHTTP(w, r)
+			csrfGuard(w, r, next)
 		})
 	}
 }
@@ -122,25 +160,197 @@ func bearerToken(r *http.Request) (string, bool) {
 	return "", false
 }
 
-// isLoopbackLAN reports whether the request's client is in the
+// isLoopbackLAN reports whether the request's end client is in the
 // loopback-LAN networks defined at the top of this file. The direct TCP
-// peer (RemoteAddr) must be in those networks; only then, when the request
-// arrives via a proxy, is the first X-Forwarded-For hop consulted (it is
-// the end client as seen by the nearest proxy). From a non-local direct
-// peer the XFF header is ignored and the request is rejected.
+// peer (RemoteAddr) must be in those networks, or the peer must be an
+// explicitly trusted proxy (env BRAGIBOOKS_TRUSTED_PROXIES). When the peer
+// is a trusted proxy, the X-Forwarded-For chain is walked from the
+// rightmost entry to the client: entries of trusted proxies are skipped
+// and the first untrusted entry is the end client. With no trusted
+// proxies configured the header is ignored entirely and the direct peer
+// decides (finding: XFF trust).
 func isLoopbackLAN(r *http.Request) bool {
 	peer := clientAddress(r)
-	if !isLoopbackLANIP(peer) {
-		return false
+	proxies := parseTrustedProxies()
+	if len(proxies) > 0 && isTrustedProxyIP(peer, proxies) {
+		// The peer is an explicitly trusted proxy, so the forwarded chain
+		// is authoritative: the proxy has told us the true end client, and
+		// a LAN end client is accepted while a foreign one is rejected
+		// (we do NOT fall back to accepting on the peer's own LAN status).
+		return isLoopbackLANIP(endClientFromChain(peer, r.Header.Get("X-Forwarded-For"), proxies))
 	}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if first := strings.TrimSpace(strings.Split(xff, ",")[0]); first != "" {
-			if ip := net.ParseIP(first); ip != nil {
-				return isLoopbackLANIP(ip)
-			}
+	// Not arriving from a trusted proxy: the XFF header is not trusted and
+	// the direct peer decides (finding: XFF trust).
+	return isLoopbackLANIP(peer)
+}
+
+// endClientFromChain resolves the end client from an X-Forwarded-For chain
+// received from a trusted proxy. Proxies append their client's hop to the
+// right, so the chain is walked from the rightmost entry to the left:
+// trusted-proxy entries (each one the hop its appender appended) are
+// skipped, and the first untrusted, parseable entry is the end client.
+// Walking this direction matters — a leftward scan would let a remote
+// attacker plant a LAN entry to the left of the hop the trusted proxy
+// appended for them. When every entry is a trusted proxy, the peer itself
+// is the best available answer; when a rightward-reached entry is not an
+// IP literal (proxies sometimes log the client hostname), no address can
+// be verified and nil is returned (rejection).
+func endClientFromChain(peer net.IP, xff string, proxies []trustedProxy) net.IP {
+	entries := strings.Split(xff, ",")
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := strings.TrimSpace(entries[i])
+		if entry == "" {
+			continue
+		}
+		ip := net.ParseIP(entry)
+		if ip == nil {
+			return nil
+		}
+		if !isTrustedProxyIP(ip, proxies) {
+			return ip
 		}
 	}
-	return true
+	return peer
+}
+
+// trustedProxy is one element of the configured trusted-proxy set: a
+// single IP (netmask 0 → exact match) or a CIDR range.
+type trustedProxy struct {
+	ip   net.IP
+	mask net.IPMask
+}
+
+// parseTrustedProxies reads the BRAGIBOOKS_TRUSTED_PROXIES env var: a
+// comma-separated list of IP literals and/or CIDR ranges. Unparseable
+// entries are ignored with a log line; the default (unset/empty) is an
+// empty set, in which case XFF is never honored.
+func parseTrustedProxies() []trustedProxy {
+	raw := strings.TrimSpace(os.Getenv("BRAGIBOOKS_TRUSTED_PROXIES"))
+	if raw == "" {
+		return nil
+	}
+	var out []trustedProxy
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, ipnet, err := net.ParseCIDR(part); err == nil {
+			out = append(out, trustedProxy{ip: ipnet.IP, mask: ipnet.Mask})
+			continue
+		}
+		if ip := net.ParseIP(part); ip != nil {
+			out = append(out, trustedProxy{ip: ip})
+			continue
+		}
+		log.Printf("Warning: ignoring unparseable BRAGIBOOKS_TRUSTED_PROXIES entry %q (want an IP or CIDR)", part)
+	}
+	return out
+}
+
+// isTrustedProxyIP reports whether ip matches any configured trusted
+// proxy. A bare IP entry is an exact match; a CIDR entry is a range
+// match (IPv4-in-v6-mapped forms compare equal under masking).
+func isTrustedProxyIP(ip net.IP, proxies []trustedProxy) bool {
+	for _, p := range proxies {
+		if p.mask != nil {
+			if ip.Mask(p.mask).Equal(p.ip.Mask(p.mask)) {
+				return true
+			}
+		} else if p.ip.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// bearerHeaderPresent reports whether the client explicitly presented a
+// "Bearer <token>" Authorization header with a non-empty token. Browsers
+// never attach that header cross-origin (it is a forbidden header name),
+// so its presence is existential proof the request was crafted by
+// same-origin code — the CSRF exemption (finding: CSRF). Any other value
+// (e.g. "Basic …" from a cached forwarding proxy) grants none: the token
+// then rides the auto-attached cookie and the request must pass the CSRF
+// guard, as does a "Bearer" header whose token is empty.
+func bearerHeaderPresent(r *http.Request) bool {
+	h := strings.TrimSpace(r.Header.Get("Authorization"))
+	const prefix = "Bearer "
+	return len(h) >= len(prefix) &&
+		strings.EqualFold(h[:len(prefix)], prefix) &&
+		strings.TrimSpace(h[len(prefix):]) != ""
+}
+
+// csrfCookieName carries the per-session CSRF double-submit token.
+const csrfCookieName = "bragibooks_csrf"
+
+// X-CSRF-Token header carrying the echoed csrfCookieName value.
+const csrfHeaderName = "X-CSRF-Token"
+
+// csrfGuard enforces the double-submit-cookie CSRF check. The caller has
+// already applied the authorization rule and the Authorization-header
+// exemption; here, state-changing requests may proceed only when the
+// client echoes the server-set csrf cookie in the X-CSRF-Token header.
+// Safe methods receive the cookie when absent and pass through unchanged.
+func csrfGuard(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	ensureCSRFCookie(r, w)
+	if methodAllowedWithoutToken(r.Method) {
+		next.ServeHTTP(w, r)
+		return
+	}
+	token := ""
+	if c, err := r.Cookie(csrfCookieName); err == nil {
+		token = c.Value
+	}
+	if token == "" || !constantTimeTokenEqual(token, r.Header.Get(csrfHeaderName)) {
+		writeError(w, http.StatusForbidden, "CSRF token mismatch")
+		return
+	}
+	next.ServeHTTP(w, r)
+}
+
+// methodAllowedWithoutToken reports whether a method is safe under the
+// CSRF rule: no state change is expected, so no token is required.
+func methodAllowedWithoutToken(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return true
+	default:
+		return false
+	}
+}
+
+// ensureCSRFCookie issues the random double-submit CSRF cookie when the
+// request has no such cookie yet. The value is a 128-bit random hex
+// string; no signature is needed because the check is equality between
+// the cookie and the header within one origin. The cookie is deliberately
+// NOT HttpOnly: it is a bearer token the same-origin UI must echo in the
+// X-CSRF-Token header, and browsers hide HttpOnly cookies from
+// document.cookie. SameSite=Lax is what keeps it out of cross-origin
+// requests.
+func ensureCSRFCookie(r *http.Request, w http.ResponseWriter) {
+	if _, err := r.Cookie(csrfCookieName); err == nil {
+		return
+	}
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		// crypto/rand failure is effectively unreachable on supported
+		// platforms; reject the request rather than proceed with no
+		// cookie at all.
+		writeError(w, http.StatusInternalServerError, "unable to initialize CSRF token")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     csrfCookieName,
+		Value:    hex.EncodeToString(buf),
+		Path:     "/",
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// constantTimeTokenEqual compares two CSRF token values in constant time
+// (and only when lengths match) to avoid side channels.
+func constantTimeTokenEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // isLoopbackLANIP reports whether ip falls in the loopback-LAN networks
