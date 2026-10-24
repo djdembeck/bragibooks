@@ -583,7 +583,7 @@
 			candidate.removing = false;
 			candidate.removingConfirming = false;
 			candidate._removeSnapshot = undefined;
-			void returnFocusToBatchRemove(id);
+			if (mode === 'batch') void returnFocusToBatchRemove(id);
 		}
 	}
 
@@ -1628,10 +1628,18 @@
 							Remove “{stripExtension(c.title)}” from the batch? This deletes the source
 							record.
 							<span class="match__removal-actions">
-								<Button variant="danger" onclick={() => confirmRemoveCandidate(c)}>
+								<Button
+									variant="danger"
+									disabled={c.removingConfirming}
+									onclick={() => confirmRemoveCandidate(c)}
+								>
 									Yes, remove
 								</Button>
-								<Button variant="ghost" onclick={() => cancelRemoveCandidate(c)}>
+								<Button
+									variant="ghost"
+									disabled={c.removingConfirming}
+									onclick={() => cancelRemoveCandidate(c)}
+								>
 									Cancel
 								</Button>
 							</span>
