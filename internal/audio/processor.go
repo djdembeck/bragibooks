@@ -29,6 +29,7 @@ type Processor struct {
 	NumCPUs      int
 	PathFormat   string
 	LogLevel     string
+	version      string
 }
 
 // snapshot returns a consistent copy of the mutable CLI settings (see the
@@ -271,30 +272,55 @@ func findNewestM4B(dir string, since time.Time) (string, error) {
 // MinimumM4bMergeVersion is the minimum required m4b-merge version.
 const MinimumM4bMergeVersion = "1.0.0"
 
-// CheckVersion runs the m4b-merge binary with --version and ensures it is
-// at least MinimumM4bMergeVersion. Returns an error if the binary cannot
-// be found, fails to report a version, or is too old.
-func (p *Processor) CheckVersion() error {
+// Version runs the m4b-merge binary with --version and returns the last
+// whitespace-separated token of its output as the reported version.
+func (p *Processor) Version() (string, error) {
 	binary, _, _, _, _, _ := p.snapshot()
 	cmd := exec.Command(binary, "--version")
 	out, err := cmd.Output()
 	if err != nil {
 		if ex, ok := err.(*exec.Error); ok {
-			return fmt.Errorf("m4b-merge binary not found (%s): %w", ex.Name, ex.Err)
+			return "", fmt.Errorf("m4b-merge binary not found (%s): %w", ex.Name, ex.Err)
 		}
-		return fmt.Errorf("m4b-merge --version failed: %w", err)
+		return "", fmt.Errorf("m4b-merge --version failed: %w", err)
 	}
 
 	version := strings.Fields(strings.TrimSpace(string(out)))
 	if len(version) == 0 {
-		return fmt.Errorf("m4b-merge --version produced empty output")
+		return "", fmt.Errorf("m4b-merge --version produced empty output")
 	}
-	reported := version[len(version)-1] // last token is the version string
+	return version[len(version)-1], nil // last token is the version string
+}
 
-	if err := checkSemver(reported, MinimumM4bMergeVersion); err != nil {
-		return fmt.Errorf("m4b-merge version %s is too old, need >= %s", reported, MinimumM4bMergeVersion)
+// CheckVersion runs the m4b-merge binary with --version and ensures it is
+// at least MinimumM4bMergeVersion. Returns the reported version and an
+// error if the binary cannot be found, fails to report a version, or is
+// too old.
+func (p *Processor) CheckVersion() (string, error) {
+	reported, err := p.Version()
+	if err != nil {
+		return "", err
 	}
-	return nil
+	if err := checkSemver(reported, MinimumM4bMergeVersion); err != nil {
+		return "", fmt.Errorf("m4b-merge version %s is too old, need >= %s", reported, MinimumM4bMergeVersion)
+	}
+	return reported, nil
+}
+
+// StoreVersion records the last successfully reported m4b-merge version
+// for display in the settings page.
+func (p *Processor) StoreVersion(v string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.version = v
+}
+
+// ReadVersion returns the last recorded m4b-merge version, or "" if none
+// has been stored.
+func (p *Processor) ReadVersion() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.version
 }
 
 // checkSemver returns nil if got >= want. Both are "MAJOR.MINOR.PATCH" strings.

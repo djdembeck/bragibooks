@@ -87,7 +87,11 @@
 		saved = false;
 		saveError = null;
 		try {
-			await put<Settings>('/settings', settings);
+			const updated = await put<Settings>('/settings', settings);
+			if (updated) {
+				settings.bragibooks_version = updated.bragibooks_version;
+				settings.m4b_merge_version = updated.m4b_merge_version;
+			}
 			saved = true;
 			setTimeout(() => (saved = false), 3000);
 		} catch (e) {
@@ -263,6 +267,21 @@
 			</div>
 		</section>
 
+		<!-- Version -->
+		<section class="settings-section" aria-labelledby="settings-version">
+			<h2 class="settings-section__title" id="settings-version">Version</h2>
+			<div class="settings-grid">
+				<div class="settings-field">
+					<span class="settings-label">Bragi Books</span>
+					<p class="settings-value font-mono">{settings.bragibooks_version || 'unknown'}</p>
+				</div>
+				<div class="settings-field">
+					<span class="settings-label">m4b-merge</span>
+					<p class="settings-value font-mono">{settings.m4b_merge_version || 'unknown'}</p>
+				</div>
+			</div>
+		</section>
+
 		<!-- Save -->
 		<div class="settings-save">
 			{#if saving}
@@ -408,6 +427,13 @@
 		color: var(--text-muted);
 		line-height: 1.45;
 		text-wrap: pretty;
+	}
+
+	.settings-value {
+		margin: 0;
+		font-size: 0.875rem;
+		line-height: 1.5;
+		color: var(--text);
 	}
 
 	#input_dir_desc {
