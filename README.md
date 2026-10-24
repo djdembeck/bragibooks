@@ -15,17 +15,9 @@
 
 ## Long Description
 
-Bragibooks is a self-hosted, single-operator web application for cleaning up and organizing audiobook files. It merges split `mp3`, `m4a`, and `m4b` chapters, converts formats, cleans existing metadata, and writes correctly tagged output through [`m4b-merge`](https://github.com/djdembeck/m4b-merge). Books are matched against the community-maintained [AudiobookDB](https://audiobookdb.org/) database for title, author, narrator, and release information, then processed in a queue you watch live.
+Bragibooks is a self-hosted, single-operator web application for cleaning up and organizing audiobook files. It runs as one Go binary with an embedded SvelteKit frontend, merging split `mp3`, `m4a`, and `m4b` chapters, converting formats, cleaning existing metadata, and writing correctly tagged output through [`m4b-merge`](https://github.com/djdembeck/m4b-merge). Books are matched against the community-maintained [AudiobookDB](https://audiobookdb.org/) database for title, author, narrator, and release information, then processed in a queue you watch live.
 
 It is an operations board for a personal audiobook pipeline, not a cloud library, SaaS dashboard, or media player. Run it on a home server with Docker, select a batch, match it, queue it, and watch the work finish. It is single-user and local-first, with no account and no telemetry.
-
-> [!NOTE]
-> **Go rewrite in progress.** This repository's default branches (`main`, `develop`) currently contain the
-> Python/Django application. A full rewrite — Go backend with an embedded SvelteKit frontend, the design
-> and assets shown here — is under review in [PR #430](https://github.com/djdembeck/bragibooks/pull/430).
-> Screenshots come from that pull request, and Docker **preview images for the Go build are tagged
-> `pr-430`** on both [GHCR](https://ghcr.io/djdembeck/bragibooks) and [Docker Hub](https://hub.docker.com/r/djdembeck/bragibooks).
-> Upgrading from the Python app? See [Migrating from the Python (Django) app](#migrating-from-the-python-django-app).
 
 ## Table of Contents
 
@@ -67,11 +59,11 @@ The interface follows the same idea the app itself serves: a calm, dense work su
 
 Docker is the fastest way to run Bragibooks. The image includes the Go server, embedded SvelteKit frontend, `ffmpeg`, and `m4b-merge`; no host toolchain is required.
 
-> **Image tag:** `pr-430` is the moving preview build of the Go rewrite (replaced as the [PR](https://github.com/djdembeck/bragibooks/pull/430) gains commits). Rewritten prereleases will be published as versioned tags on the default branches after the merge; the final Python release image remains available as `python-final` (see [Migrating](#migrating-from-the-python-django-app)).
+> **Image tag:** `develop` is the rolling development channel, built by CI from the `develop` branch. For a stable deployment, pin a versioned release tag instead; the final Python image remains available as `python-final` (see [Migrating](#migrating-from-the-python-django-app)).
 
 ### Docker
 
-Create or choose host directories for the database/configuration, input books, output books, and completed source files. Then start the preview image:
+Create or choose host directories for the database/configuration, input books, output books, and completed source files. Then start Bragibooks:
 
 ```sh
 docker run --rm -d --name bragibooks \
@@ -84,12 +76,12 @@ docker run --rm -d --name bragibooks \
   --env DIRECTORIES_INPUT_DIR=/input \
   --env DIRECTORIES_OUTPUT_DIR=/output \
   --env DIRECTORIES_COMPLETED_DIR=/input/done \
-  ghcr.io/djdembeck/bragibooks:pr-430
+  ghcr.io/djdembeck/bragibooks:develop
 ```
 
-The equivalent Docker Hub image is `djdembeck/bragibooks:pr-430`. The container listens on port `8080`; the command above publishes it as `http://localhost:8888`. The mounted `/config` directory holds the SQLite database (by default `bragibooks.db`) and any runtime configuration; it is declared a volume in the image so the database persists across container recreation. `API_KEY_API_KEY` is optional, but setting it enables AudiobookDB requests that require an API key.
+The equivalent Docker Hub image is `djdembeck/bragibooks:develop`. The container listens on port `8080`; the command above publishes it as `http://localhost:8888`. The mounted `/config` directory holds the SQLite database (by default `bragibooks.db`) and any runtime configuration; it is declared a volume in the image so the database persists across container recreation. `API_KEY_API_KEY` is optional, but setting it enables AudiobookDB requests that require an API key.
 
-The repository's [production compose file](docker/docker-compose.yml) shows the same container ports and config/input/output mount points; it hardcodes a host input path and has no separate completed-directory mount, so edit its host paths and add the completed mount before replacing the image name with the preview image above.
+The repository's [production compose file](docker/docker-compose.yml) shows the same container ports and config/input/output mount points; it hardcodes a host input path and has no separate completed-directory mount, so edit its host paths and add the completed mount before replacing the image name with the one above.
 
 ### Existing binary
 
@@ -121,7 +113,7 @@ The normal work is deliberately linear: **select, match, queue, finish**.
 
 ## Screens
 
-Current design previews from the Go rewrite [PR #430](https://github.com/djdembeck/bragibooks/pull/430):
+Screens of the current interface:
 
 <p align="center">
   <img width="100%" alt="Bragibooks overview — the Record Workspace home, showing the batch and focused match modes"
@@ -214,7 +206,7 @@ README covers the main path; the full guide with candidate paths, troubleshootin
 
 **Archived images.** The final Python source is preserved as the `python-final` Git tag, and the matching container image carries that tag on both registries — `ghcr.io/djdembeck/bragibooks:python-final` and `djdembeck/bragibooks:python-final` —
 pinned at index digest `sha256:e583597e3823a091a11a78e277805d453d791b65ad8da827ff2355bd8cb2f924` (linux/amd64) so the archive never moves. That is the last image built from the Python
-codebase: the `pr-430` preview tags are the Go rewrite, and versioned releases will resume after it merges.
+codebase. The current application is the Go build described in this README, and stable deployments can pin a versioned release tag.
 
 ## API
 

@@ -1,6 +1,6 @@
-# Migrating from the Python (Django) app to the Go rewrite
+# Migrating from the Python app to the current Bragi Books Go app
 
-The Go rewrite can take over a Python app's library. On an eligible first start it finds the legacy Django SQLite database, opens it **read-only**, and copies all books, people, and settings into the new database. The legacy file is not modified or renamed, and stays in place.
+The current Bragi Books Go app can take over a Python app's library. On an eligible first start it finds the legacy Django SQLite database, opens it **read-only**, and copies all books, people, and settings into the new database. The legacy file is not modified or renamed, and stays in place.
 
 This guide covers the practical Docker upgrade, what does and does not get copied, how to verify the result, and how to roll back.
 
@@ -15,15 +15,13 @@ This guide covers the practical Docker upgrade, what does and does not get copie
 
 | Image | Build | Use |
 | --- | --- | --- |
-| `ghcr.io/djdembeck/bragibooks:pr-430` / `djdembeck/bragibooks:pr-430` | Go rewrite (PR [#430](https://github.com/djdembeck/bragibooks/pull/430)) | The current app. The `pr-430` tag is a moving preview build — it moves as the PR gains commits. Versioned releases resume after the PR merges. |
+| `ghcr.io/djdembeck/bragibooks:develop` / `djdembeck/bragibooks:develop` | Current Go app | Rolling development channel. Use a versioned release tag to pin a release. |
 | `ghcr.io/djdembeck/bragibooks:python-final` / `djdembeck/bragibooks:python-final` | Last Python source (commit `69aabfea`) | Archive/rollback image, pinned at index digest `sha256:e583597e3823a091a11a78e277805d453d791b65ad8da827ff2355bd8cb2f924` (linux/amd64) on both registries. |
-
-Do not use `:main`, `:develop`, or `:latest` for the Go build: those tags still point at older Python images.
 
 ## Upgrade steps
 
 1. Stop and remove the Python container.
-2. Start the preview image against the **same host `/config` directory** that holds `db.sqlite3`:
+2. Start the `:develop` image against the **same host `/config` directory** that holds `db.sqlite3`:
 
    ```sh
    docker run --rm -d --name bragibooks \
@@ -36,7 +34,7 @@ Do not use `:main`, `:develop`, or `:latest` for the Go build: those tags still 
      --env DIRECTORIES_INPUT_DIR=/input \
      --env DIRECTORIES_OUTPUT_DIR=/output \
      --env DIRECTORIES_COMPLETED_DIR=/input/done \
-     ghcr.io/djdembeck/bragibooks:pr-430
+     ghcr.io/djdembeck/bragibooks:develop
    ```
 
    The Python image exposed container port `8000`; the Go image listens on `8080` (`SERVER_PORT`). Pick whatever host port you like — `8888` is the example used in the [README](../README.md#docker).
