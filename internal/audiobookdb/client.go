@@ -48,6 +48,7 @@ func (c *Client) do(ctx context.Context, req *http.Request, v interface{}) error
 		req.Header.Set("X-CSRF-Token", token)
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Bragibooks/1.0 (+https://github.com/djdembeck/bragibooks)")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -106,6 +107,7 @@ func (c *Client) csrfToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("build CSRF prime request: %w", err)
 	}
 	prime.Header.Set("Accept", "application/json")
+	prime.Header.Set("User-Agent", "Bragibooks/1.0 (+https://github.com/djdembeck/bragibooks)")
 	resp, err := c.http.Do(prime)
 	if err != nil {
 		return "", fmt.Errorf("audiobookdb CSRF prime request failed: %w", err)
