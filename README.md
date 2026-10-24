@@ -1,18 +1,31 @@
+<p align="center">
+  <img width="220" alt="Bragibooks logo"
+       src="https://raw.githubusercontent.com/djdembeck/bragibooks/assets/logos/logo.png">
+</p>
+
 # Bragibooks
 
 [![CI](https://img.shields.io/github/actions/workflow/status/djdembeck/bragibooks/ci.yml?branch=develop&label=CI)](https://github.com/djdembeck/bragibooks/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/djdembeck/bragibooks.svg)](LICENSE)
+[![License: GPL-3.0-only](https://img.shields.io/github/license/djdembeck/bragibooks.svg)](LICENSE)
 [![Docker pulls](https://img.shields.io/docker/pulls/djdembeck/bragibooks.svg)](https://hub.docker.com/r/djdembeck/bragibooks)
 [![Docker image version](https://img.shields.io/docker/v/djdembeck/bragibooks.svg)](https://hub.docker.com/r/djdembeck/bragibooks)
 [![Contributors](https://img.shields.io/github/contributors/djdembeck/bragibooks.svg)](https://github.com/djdembeck/bragibooks/graphs/contributors)
 
-> The only known web GUI for `m4b-merge`: batch audiobook processing with AudiobookDB metadata, running on your server.
+> A self-hosted web board for batch audiobook processing with `m4b-merge`, AudiobookDB metadata, and a live queue.
 
 ## Long Description
 
-Bragibooks is a self-hosted web application for cleaning up and organizing audiobook files. It merges split `mp3`, `m4a`, and `m4b` chapters, converts formats such as `mp3` to `m4b`, cleans existing metadata, and writes correctly tagged output through [`m4b-merge`](https://github.com/djdembeck/m4b-merge). Match books against the community-maintained [AudiobookDB](https://audiobookdb.org/) database for title, author, narrator, and release information.
+Bragibooks is a self-hosted, single-operator web application for cleaning up and organizing audiobook files. It merges split `mp3`, `m4a`, and `m4b` chapters, converts formats, cleans existing metadata, and writes correctly tagged output through [`m4b-merge`](https://github.com/djdembeck/m4b-merge). Books are matched against the community-maintained [AudiobookDB](https://audiobookdb.org/) database for title, author, narrator, and release information, then processed in a queue you watch live.
 
-It is an operations board for a personal audiobook pipeline, not a cloud library, SaaS dashboard, or media player. Run it locally or on a home server, select a batch, match it, queue it, and watch the work finish. Bragibooks is single-user, local-first, and has no cloud account or telemetry requirement.
+It is an operations board for a personal audiobook pipeline, not a cloud library, SaaS dashboard, or media player. Run it on a home server with Docker, select a batch, match it, queue it, and watch the work finish. It is single-user and local-first, with no account and no telemetry.
+
+> [!NOTE]
+> **Go rewrite in progress.** This repository's default branches (`main`, `develop`) currently contain the
+> Python/Django application. A full rewrite — Go backend with an embedded SvelteKit frontend, the design
+> and assets shown here — is under review in [PR #430](https://github.com/djdembeck/bragibooks/pull/430).
+> Screenshots come from that pull request, and Docker **preview images for the Go build are tagged
+> `pr-430`** on both [GHCR](https://ghcr.io/djdembeck/bragibooks) and [Docker Hub](https://hub.docker.com/r/djdembeck/bragibooks).
+> Upgrading from the Python app? See [Migrating from the Python (Django) app](#migrating-from-the-python-django-app).
 
 ## Table of Contents
 
@@ -22,7 +35,9 @@ It is an operations board for a personal audiobook pipeline, not a cloud library
   - [Docker](#docker)
   - [Existing binary](#existing-binary)
 - [Usage](#usage)
+- [Screens](#screens)
 - [Configuration](#configuration)
+- [Migrating from the Python (Django) app](#migrating-from-the-python-django-app)
 - [API](#api)
 - [Contributing](#contributing)
 - [Building](#building)
@@ -35,21 +50,28 @@ It is an operations board for a personal audiobook pipeline, not a cloud library
 
 ## Security
 
-Bragibooks is designed for one operator on a private network. The application does not provide authentication, so do not expose it directly to the public internet; put it behind a trusted network boundary and, when needed, an authenticated reverse proxy.
+Bragibooks is designed for one operator on a private network, and the API routes are protected by admin authentication with two modes:
+
+- **Local mode** (no token set): requests are accepted only from loopback and private LAN addresses (`127.0/8`, `10/8`, `172.16/12`, `192.168/16`). Everything else is refused. This mode starts with a logged warning.
+- **Token mode**: set `BRAGIBOOKS_ADMIN_TOKEN` to allow access from any address to clients that present the token (browser cookie or `Authorization: Bearer` header).
+
+The web interface itself has no login screen; it relies on the boundary above. Do not expose the port directly to the public internet — keep it on a trusted network and, when you need wider access, set `BRAGIBOOKS_ADMIN_TOKEN` and put an authenticated reverse proxy in front of the app.
 
 ## Background
 
-**Bragi - god of poetry in [Norse mythology](https://en.wikipedia.org/wiki/Bragi).** The name fits an application concerned with spoken books and music.
+**Bragi — god of poetry in [Norse mythology](https://en.wikipedia.org/wiki/Bragi).** The name fits an application concerned with spoken books and music.
 
-The interface follows a **Signal Interlocking Panel**: a calm, dense work surface modeled after a railway control board. Its four stations are **Intake**, **Match**, **Queue**, and **Finish**. The person who runs the server, owns the books, and needs to see state should be able to tell what is happening without decoration or guesswork.
+The interface follows the same idea the app itself serves: a calm, dense work surface that tells you what is happening without decoration or guesswork. The person who runs the server and owns the books can see state at a glance. The normal work is linear — **select, match, queue, finish**.
 
 ## Install/Running
 
 Docker is the fastest way to run Bragibooks. The image includes the Go server, embedded SvelteKit frontend, `ffmpeg`, and `m4b-merge`; no host toolchain is required.
 
+> **Image tag:** `pr-430` is the moving preview build of the Go rewrite (replaced as the [PR](https://github.com/djdembeck/bragibooks/pull/430) gains commits). Rewritten prereleases will be published as versioned tags on the default branches after the merge; the final Python release image remains available as `python-final` (see [Migrating](#migrating-from-the-python-django-app)).
+
 ### Docker
 
-Create or choose host directories for the database/configuration, input books, output books, and completed source files. Then start the pre-built image:
+Create or choose host directories for the database/configuration, input books, output books, and completed source files. Then start the preview image:
 
 ```sh
 docker run --rm -d --name bragibooks \
@@ -58,17 +80,16 @@ docker run --rm -d --name bragibooks \
   --volume /path/to/input:/input \
   --volume /path/to/output:/output \
   --volume /path/to/completed:/input/done \
-  --env SERVER_HOST=0.0.0.0 \
   --env SERVER_PORT=8080 \
   --env DIRECTORIES_INPUT_DIR=/input \
   --env DIRECTORIES_OUTPUT_DIR=/output \
   --env DIRECTORIES_COMPLETED_DIR=/input/done \
-  ghcr.io/djdembeck/bragibooks:main
+  ghcr.io/djdembeck/bragibooks:pr-430
 ```
 
-The container listens on port `8080`; the command above publishes it as `http://localhost:8888`. The mounted `/config` directory holds the SQLite database (by default `bragibooks.db`) and any runtime configuration; it is declared a volume in the image so the database persists across container recreation. `API_KEY_API_KEY` is optional, but setting it enables AudiobookDB requests that require an API key.
+The equivalent Docker Hub image is `djdembeck/bragibooks:pr-430`. The container listens on port `8080`; the command above publishes it as `http://localhost:8888`. The mounted `/config` directory holds the SQLite database (by default `bragibooks.db`) and any runtime configuration; it is declared a volume in the image so the database persists across container recreation. `API_KEY_API_KEY` is optional, but setting it enables AudiobookDB requests that require an API key.
 
-A Docker Compose deployment can use the same image and mounts. The repository's [production compose file](docker/docker-compose.yml) is the reference for the container port and persistent config mount; replace its local image name with `ghcr.io/djdembeck/bragibooks:main` when running the pre-built image.
+The repository's [production compose file](docker/docker-compose.yml) shows the same container ports and config/input/output mount points; it hardcodes a host input path and has no separate completed-directory mount, so edit its host paths and add the completed mount before replacing the image name with the preview image above.
 
 ### Existing binary
 
@@ -81,70 +102,85 @@ DIRECTORIES_COMPLETED_DIR=/path/to/completed \
 ./bragibooks
 ```
 
-The binary serves the web UI on `SERVER_HOST:SERVER_PORT` (port `8080` by default). See [Building](#building) for the source-build commands.
+The binary serves the web UI on `SERVER_HOST:SERVER_PORT` (port `8080` by default). `SERVER_HOST` is unset by default, which makes Go bind all interfaces (`:8080`); set `SERVER_HOST=127.0.0.1` to restrict it to loopback. See [Building](#building) for the source-build commands.
 
 ## Usage
 
 The normal work is deliberately linear: **select, match, queue, finish**.
 
-1. Start the container with the Docker command above. A compact version with explicit environment configuration is:
-
-   ```sh
-   docker run --rm -d --name bragibooks \
-     -p 8888:8080 \
-     -v "$PWD/config:/config" \
-     -v /path/to/input:/input \
-     -v /path/to/output:/output \
-     -v /path/to/completed:/input/done \
-     -e SERVER_PORT=8080 \
-     -e DIRECTORIES_INPUT_DIR=/input \
-     -e DIRECTORIES_OUTPUT_DIR=/output \
-     -e DIRECTORIES_COMPLETED_DIR=/input/done \
-     -e PROCESSING_NUM_CPUS=1 \
-     -e API_KEY_API_KEY="${AUDIOBOOKDB_API_KEY:-}" \
-     ghcr.io/djdembeck/bragibooks:main
-   ```
-
-2. Open [http://localhost:8888](http://localhost:8888) in a browser. You can check that the server is up first:
+1. Start the container with the Docker command above, then open <http://localhost:8888> in a browser. You can check that the server is up first:
 
    ```sh
    curl http://localhost:8888/api/health
    ```
 
-3. **Intake:** browse the mounted input directory and select one or more audiobook folders or files.
-4. **Match:** let Bragibooks search AudiobookDB, then confirm or correct the book, release, author, and narrator metadata. Custom search is available when the first match is wrong.
-5. **Queue:** submit the matched batch. Bragibooks invokes `m4b-merge` to merge, convert, clean, tag, and repackage the source files.
-6. **Finish:** follow live processing output in the browser, then review completed books and any errors. Jobs can take from seconds to hours depending on the number and type of files.
+2. **Intake:** browse the mounted input directory and select one or more audiobook folders or files.
+3. **Match:** let Bragibooks search AudiobookDB, then confirm or correct the book, release, author, and narrator metadata. Custom search is available when the first match is wrong.
+4. **Queue:** submit the matched batch. Bragibooks invokes `m4b-merge` to merge, convert, clean, tag, and repackage the source files.
+5. **Finish:** follow live processing output in the browser, then review completed books and any errors. Jobs can take from seconds to hours depending on the number and type of files.
 
-`PROCESSING_REGION` (and the legacy `REGION` alias) is accepted for compatibility with older setups; it has no effect on processing.
+## Screens
+
+Current design previews from the Go rewrite [PR #430](https://github.com/djdembeck/bragibooks/pull/430):
+
+<p align="center">
+  <img width="100%" alt="Bragibooks overview — the Record Workspace home, showing the batch and focused match modes"
+       src="https://raw.githubusercontent.com/djdembeck/bragibooks/assets/screens/record-workspace/overview-desktop.png">
+</p>
+
+<details>
+<summary>All screens (desktop and mobile)</summary>
+
+| Match — batch mode | Match — focused mode |
+| --- | --- |
+| <p align="center"><img width="100%" alt="Batch match: several selected audiobooks matched against AudiobookDB results" src="https://raw.githubusercontent.com/djdembeck/bragibooks/assets/screens/record-workspace/match-batch-desktop.png"></p> | <p align="center"><img width="100%" alt="Focused match: one audiobook with a single recommended release" src="https://raw.githubusercontent.com/djdembeck/bragibooks/assets/screens/record-workspace/match-focused-desktop.png"></p> |
+
+| Import | Queue |
+| --- | --- |
+| <p align="center"><img width="100%" alt="Import screen: choosing folders of source audiobook files" src="https://raw.githubusercontent.com/djdembeck/bragibooks/assets/screens/record-workspace/import-desktop.png"></p> | <p align="center"><img width="100%" alt="Queue screen: matched books ready to process and live job progress" src="https://raw.githubusercontent.com/djdembeck/bragibooks/assets/screens/record-workspace/queue-desktop.png"></p> |
+
+| Books | Book detail | Settings |
+| --- | --- | --- |
+| <p align="center"><img width="55%" alt="Books list of processed audiobooks" src="https://raw.githubusercontent.com/djdembeck/bragibooks/assets/screens/record-workspace/books-desktop.png"></p> | <p align="center"><img width="55%" alt="Book detail with metadata, files, and history" src="https://raw.githubusercontent.com/djdembeck/bragibooks/assets/screens/record-workspace/book-detail-desktop.png"></p> | <p align="center"><img width="55%" alt="Settings page with runtime configuration" src="https://raw.githubusercontent.com/djdembeck/bragibooks/assets/screens/record-workspace/settings-desktop.png"></p> |
+
+Mobile (390px):
+
+| Overview (mobile) | Batch match (mobile) |
+| --- | --- |
+| <p align="center"><img width="45%" alt="Overview screen on a 390px-wide phone layout" src="https://raw.githubusercontent.com/djdembeck/bragibooks/assets/screens/record-workspace/overview-mobile.png"></p> | <p align="center"><img width="45%" alt="Batch match screen on a 390px-wide phone layout" src="https://raw.githubusercontent.com/djdembeck/bragibooks/assets/screens/record-workspace/match-batch-mobile.png"></p> |
+
+| Books (mobile) |
+| --- |
+| <p align="center"><img width="45%" alt="Books list on a 390px-wide phone layout" src="https://raw.githubusercontent.com/djdembeck/bragibooks/assets/screens/record-workspace/books-mobile.png"></p> |
+
+</details>
 
 ## Configuration
 
-Bragibooks reads `config/config.yaml` and falls back to environment variables. When the same setting is present in both, the YAML value takes precedence. Settings can also be changed at runtime through `PUT /api/settings`; runtime changes are persisted by the application.
+Bragibooks reads `config/config.yaml` and falls back to environment variables. When the same setting is present in both, **the environment variable wins**, so the YAML file is never surprised by a default. Settings can also be changed at runtime through `PUT /api/settings`; runtime changes are persisted by the application.
 
 The key environment variables are:
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `SERVER_HOST` | Address for the HTTP server | `0.0.0.0` |
+| `SERVER_HOST` | Address for the HTTP server | empty (all interfaces; set `127.0.0.1` for loopback only) |
 | `SERVER_PORT` | HTTP port | `8080` |
 | `DATABASE_PATH` | SQLite database path | `config/bragibooks.db` |
 | `M4B_MERGE_BINARY` | `m4b-merge` executable name or path | `m4b-merge` |
 | `API_KEY_API_KEY` | Optional AudiobookDB API key | empty |
 | `API_KEY_BASE_URL` | AudiobookDB API base URL | `https://audiobookdb.org/api` |
-| `DIRECTORIES_INPUT_DIR` | Source audiobook directory | unset; Compose sets `/input` |
-| `DIRECTORIES_OUTPUT_DIR` | Destination directory for processed books | unset; Compose sets `/output` |
-| `DIRECTORIES_COMPLETED_DIR` | Directory for completed source files | unset; Compose sets `/input/done` |
+| `DIRECTORIES_INPUT_DIR` | Source audiobook directory | unset |
+| `DIRECTORIES_OUTPUT_DIR` | Destination directory for processed books | unset |
+| `DIRECTORIES_COMPLETED_DIR` | Directory for completed source files | unset |
 | `PROCESSING_NUM_CPUS` | Number of processing workers | `1` |
 | `PROCESSING_PATH_FORMAT` | Output path format | `{author}/{title}` |
-| `PROCESSING_REGION` | Accepted for compatibility with older setups; no effect | — |
+| `PROCESSING_REGION` | Accepted for compatibility with older setups; no effect | `us` |
 | `PROCESSING_LOG_LEVEL` | Processing log level | `info` |
 
 For a YAML-based setup, create `config/config.yaml` in the mounted config directory:
 
 ```yaml
 server:
-  host: 0.0.0.0
   port: 8080
 
 directories:
@@ -161,11 +197,24 @@ processing:
 <details>
 <summary>All configuration keys and precedence details</summary>
 
-Environment variables use the uppercase, prefixed form of the YAML path: `server.port` becomes `SERVER_PORT`, `directories.input_dir` becomes `DIRECTORIES_INPUT_DIR`, and so on. The remaining supported keys are `database.path`, `m4b_merge.binary`, `api_key.api_key`, `api_key.base_url`, `processing.log_level`, `processing.path_format`, and `processing.region`.
+Environment variables use the uppercase, prefixed form of the YAML path: `server.port` becomes `SERVER_PORT`, `directories.input_dir` becomes `DIRECTORIES_INPUT_DIR`, and so on. The remaining supported keys are `database.path`, `m4b_merge.binary`, `api_key.api_key`, `api_key.base_url`, `processing.log_level`, `processing.path_format`, and `processing.region` (`region` also accepts the legacy `REGION` alias).
 
-The configuration file is normally `config/config.yaml`; the loader also searches the working directory, `/app/data`, and `/config`. A value explicitly written in YAML overrides its environment-variable counterpart. If no YAML file exists, environment variables and defaults are used.
+Precedence is **environment variable > YAML > default**. The configuration file is normally `config/config.yaml`; the loader also searches the working directory, `/app/data`, and `/config`. If no YAML file exists, environment variables and defaults are used.
 
 </details>
+
+## Migrating from the Python (Django) app
+
+README covers the main path; the full guide with candidate paths, troubleshooting, and the manual endpoint lives in [docs/migration-from-python.md](docs/migration-from-python.md).
+
+1. **Stop the old app first** and **back up the legacy `/config` volume** (including any `db.sqlite3-wal` sidecar files) and your audio directories yourself — the migration does not create an automatic backup of the old database.
+2. Point the new container's `/config` volume at the same mount so the legacy `db.sqlite3` sits at `/config/db.sqlite3` (or set `LEGACY_DB_PATH` to point elsewhere).
+3. On first start, if the new Go database is empty, Bragibooks opens the legacy Django database read-only and copies books, authors, narrators, and settings over automatically. Book status maps as Done → `done`, Processing → `pending`, Error → `error`.
+4. The migrated data then lives in `/config/bragibooks.db`; keep that path (or set `DATABASE_PATH`) persistently across container updates.
+
+**Archived images.** The final Python source is preserved as the `python-final` Git tag, and the matching container image carries that tag on both registries — `ghcr.io/djdembeck/bragibooks:python-final` and `djdembeck/bragibooks:python-final` —
+pinned at index digest `sha256:e583597e3823a091a11a78e277805d453d791b65ad8da827ff2355bd8cb2f924` (linux/amd64) so the archive never moves. That is the last image built from the Python
+codebase: the `pr-430` preview tags are the Go rewrite, and versioned releases will resume after it merges.
 
 ## API
 
@@ -179,7 +228,9 @@ The web frontend uses the HTTP API below. Responses are JSON unless noted otherw
 | `GET` | `/api/directories/stream?path=/input` | Stream directory entries as NDJSON |
 | `GET` | `/api/books` | List books; supports status, page, and limit filters |
 | `POST` | `/api/books` | Add source book entries |
-| `GET`, `PUT`, `DELETE` | `/api/books/{id}` | Read, update, or remove a book |
+| `GET` | `/api/books/{id}` | Read a book |
+| `PUT` | `/api/books/{id}` | Update a book |
+| `DELETE` | `/api/books/{id}` | Remove a book |
 | `GET` | `/api/search?query=...&types=books&skip=0&take=20` | Search AudiobookDB |
 | `GET` | `/api/search/books/{id}` | Fetch an AudiobookDB book |
 | `GET` | `/api/search/releases/{id}` | Fetch an AudiobookDB release |
@@ -187,7 +238,8 @@ The web frontend uses the HTTP API below. Responses are JSON unless noted otherw
 | `GET` | `/api/jobs?book_id=...` | List processing jobs, optionally filtered to one book |
 | `GET` | `/api/jobs/{id}` | Read job status |
 | `GET` | `/api/jobs/{id}/stream` | Stream live job output over SSE |
-| `GET`, `PUT` | `/api/settings` | Read or update runtime settings |
+| `GET` | `/api/settings` | Read runtime settings |
+| `PUT` | `/api/settings` | Update runtime settings |
 | `POST` | `/api/migrate` | Migrate a legacy database |
 | `POST` | `/api/migrate/people` | Recover people from a legacy database |
 

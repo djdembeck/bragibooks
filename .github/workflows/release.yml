@@ -9,7 +9,7 @@
 #      BREAKING CHANGE/feat! -> major, feat -> minor, else patch). Dispatch
 #      with a `version` or `bump` input to override.
 #   2. The tag is created and pushed (skipped if it already exists).
-#   3. A version-tagged Docker image is built and pushed to GHCR.
+#   3. A version-tagged Docker image is built and pushed to GHCR and Docker Hub.
 #   4. GoRelease builds all OS/arch binaries and creates the GitHub release
 #      (goreleaser action; changelog entries are generated from commits).
 #   5. The version bump is synced back to develop.
@@ -17,8 +17,9 @@
 # Re-runs are idempotent: a partial failure can be re-dispatched and the same
 # (already-existing) tag/release guards no-op or complete the work.
 #
-# No external services required: only git, docker, and goreleaser are used.
+# Uses git, docker, and goreleaser; publishes to GitHub and Docker Hub.
 # GITHUB_TOKEN is provided automatically (permissions: contents: write, packages: write).
+# Docker Hub requires repository secrets DOCKER_USERNAME and DOCKER_PASSWORD.
 
 name: Release
 
@@ -98,7 +99,7 @@ jobs:
                 LOG=$(git log --format=%B "${LATEST_TAG}..HEAD" 2>/dev/null || true)
                 if echo "$LOG" | grep -qE 'BREAKING CHANGE:|^[a-z]+(\([^)]*\))?!: '; then LEVEL=major
                 elif echo "$LOG" | grep -qE '^feat(\([^)]*\))?: '; then LEVEL=minor
-                else LEVEL=patch; fi
+                else LEVEL="patch"; fi
                 ;;
               patch|minor|major) LEVEL="$BUMP_INPUT" ;;
               *) echo "Invalid bump input: ${BUMP_INPUT} (auto|patch|minor|major)"; exit 1 ;;
@@ -138,15 +139,28 @@ jobs:
           VERSION="${{ steps.version.outputs.new_version }}"
           REGISTRY_IMAGE="ghcr.io/djdembeck/bragibooks"
 
-          # Idempotency guard: skip when the image already exists (e.g. rerun
-          # of a completed release).
+          HUB_IMAGE="djdembeck/bragibooks"
+
+          # Login to GHCR and Docker Hub (same secrets as the CI dual publish);
+          # Hub login is required for the registry reads in the idempotency
+          # guard below.
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login docker.io -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+          # Idempotency guard: skip when the image already exists on GHCR (e.g.
+          # rerun of a completed release). Hub is re-tagged from the same build
+          # push below, overwriting is not a concern because tags are versioned
+          # and the same build is pushed.
           if docker manifest inspect "${REGISTRY_IMAGE}:${VERSION}" >/dev/null 2>&1; then
-            echo "Image ${REGISTRY_IMAGE}:${VERSION} already exists - skipping"
+            echo "Image ${REGISTRY_IMAGE}:${VERSION} already exists - skipping build"
+            # Ensure the Hub tag exists and is identical; retag by digest if missing.
+            if ! docker manifest inspect "${HUB_IMAGE}:${VERSION}" >/dev/null 2>&1; then
+              digest=$(docker buildx imagetools inspect "${REGISTRY_IMAGE}:${VERSION}" --format '{{.Manifest.Digest}}')
+              [ -n "${digest}" ] || { echo "Cannot resolve existing GHCR digest - re-dispatch required" >&2; exit 1; }
+              docker buildx imagetools create --tag "${HUB_IMAGE}:${VERSION}" "${REGISTRY_IMAGE}:${VERSION}@${digest}"
+            fi
             exit 0
           fi
-
-          # Login to GHCR
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
           # Build and push the version-tagged image.
           # The Dockerfile should define `ARG VERSION=devel` and stamp the binary
@@ -157,8 +171,10 @@ jobs:
             -f docker/Dockerfile \
             --build-arg VERSION="${VERSION}" \
             -t "${REGISTRY_IMAGE}:${VERSION}" \
+            -t "${HUB_IMAGE}:${VERSION}" \
             .
           docker push "${REGISTRY_IMAGE}:${VERSION}"
+          docker push "${HUB_IMAGE}:${VERSION}"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
