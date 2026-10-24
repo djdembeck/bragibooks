@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { untrack } from 'svelte';
+	import { tick, untrack } from 'svelte';
 	import { get, put, del } from '$lib/api';
 	import { goto } from '$app/navigation';
 	import type {
@@ -45,6 +45,7 @@
 		seq: number;
 		manualPick: boolean;
 		removing: boolean;
+		removingConfirming: boolean;
 		descriptionOpen: boolean;
 		descriptionOverflow: boolean;
 		_removeSnapshot?: { bookId: number; srcPath: string; title: string };
@@ -192,6 +193,7 @@
 					seq: 0,
 					manualPick: false,
 					removing: false,
+					removingConfirming: false,
 					descriptionOpen: false,
 					descriptionOverflow: false
 				}));
@@ -563,10 +565,13 @@
 	async function confirmRemoveCandidate(candidate: MatchCandidate) {
 		if (!candidate._removeSnapshot) return;
 		const id = candidate._removeSnapshot.bookId;
+		candidate.removingConfirming = true;
 		try {
 			await del(`/books/${id}`);
 			const wasActive = activeId === id;
 			const removedIndex = candidates.findIndex((c) => c.bookId === id);
+			candidate.removing = false;
+			candidate.removingConfirming = false;
 			candidates = candidates.filter((c) => c.bookId !== id);
 			if (wasActive) {
 				activeId =
@@ -576,13 +581,42 @@
 		} catch (e) {
 			pageError = toCleanedError(e);
 			candidate.removing = false;
+			candidate.removingConfirming = false;
 			candidate._removeSnapshot = undefined;
+			void returnFocusToBatchRemove(id);
 		}
 	}
 
 	function cancelRemoveCandidate(candidate: MatchCandidate) {
 		candidate.removing = false;
 		candidate._removeSnapshot = undefined;
+	}
+
+	/** Batch rows: same two-step flow, with explicit focus handling. */
+	async function removeCandidateBatch(candidate: MatchCandidate) {
+		removeCandidate(candidate);
+		await tick();
+		// focus="visible" targets only the danger button if it is visible,
+		// which is not the case on narrow viewports where the band wraps —
+		// so query the band itself.
+		const band = document.querySelector(
+			`.batch__removal[data-book-id='${candidate.bookId}']`
+		);
+		(
+			band?.querySelector<HTMLButtonElement>('[data-yes]') ??
+			band?.querySelector<HTMLButtonElement>('button')
+		)
+			?.focus();
+	}
+
+	function cancelBatchRemove(candidate: MatchCandidate) {
+		cancelRemoveCandidate(candidate);
+		void returnFocusToBatchRemove(candidate.bookId);
+	}
+
+	async function returnFocusToBatchRemove(id: number) {
+		await tick();
+		document.getElementById(`batch-remove-${id}`)?.focus();
 	}
 
 	// ── People / metadata helpers ──────────────────────────────
@@ -1385,15 +1419,56 @@
 
 						<div class="batch__actions">
 							<span class="batch__status" data-kind={statusKind(c)}>{statusText(c)}</span>
-							<Button
-								variant="secondary"
-								class="batch__review"
-								aria-label="Review {sourceBase(c)}"
-								onclick={() => openFocused(c.bookId)}
-							>
-								Review
-							</Button>
+							<div class="batch__btns">
+								<Button
+									variant="secondary"
+									class="batch__review"
+									aria-label="Review {sourceBase(c)}"
+									onclick={() => openFocused(c.bookId)}
+								>
+									Review
+								</Button>
+								{#if !c.removing}
+									<Button
+										variant="ghost"
+										class="batch__remove"
+										id={`batch-remove-${c.bookId}`}
+										aria-label="Remove {sourceBase(c)} from the batch"
+										onclick={() => removeCandidateBatch(c)}
+									>
+										Remove
+									</Button>
+								{/if}
+							</div>
 						</div>
+
+						{#if c.removing}
+							<div class="batch__removal" data-book-id={c.bookId}>
+								<span id={`batch-removal-${c.bookId}`} tabindex="-1">
+									Remove “{stripExtension(c.title)}” from the batch? This deletes
+									the source record.
+								</span>
+								<span class="batch__removal-actions">
+									<Button
+										variant="danger"
+										data-yes
+										aria-describedby={`batch-removal-${c.bookId}`}
+										disabled={c.removingConfirming}
+										onclick={() => confirmRemoveCandidate(c)}
+									>
+										Yes, remove
+									</Button>
+									<Button
+										variant="ghost"
+										aria-describedby={`batch-removal-${c.bookId}`}
+										disabled={c.removingConfirming}
+										onclick={() => cancelBatchRemove(c)}
+									>
+										Cancel
+									</Button>
+								</span>
+							</div>
+						{/if}
 					</li>
 				{/each}
 			</ul>
@@ -2420,6 +2495,47 @@
 	.batch__actions :global(.batch__review) {
 		min-height: 36px;
 		padding: 0 12px;
+		font-size: 13px;
+	}
+
+	.batch__btns {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.batch__actions :global(.batch__remove) {
+		min-height: 36px;
+		padding: 0 12px;
+		font-size: 13px;
+	}
+
+	.batch__removal {
+		grid-column: 1 / -1;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		flex-wrap: wrap;
+		padding: 10px 18px;
+		background: var(--state-red-bg);
+		font-size: 13.5px;
+		font-weight: 600;
+		color: var(--m-ink);
+	}
+
+	.batch__removal span[tabindex='-1']:focus {
+		outline: 0;
+	}
+
+	.batch__removal-actions {
+		display: flex;
+		gap: 8px;
+	}
+
+	.batch__removal :global(.btn) {
+		min-height: 34px;
+		padding: 0 10px;
 		font-size: 13px;
 	}
 
@@ -3712,6 +3828,10 @@
 		.batch__actions {
 			justify-content: space-between;
 			padding-left: 30px;
+		}
+
+		.batch__removal {
+			padding: 10px 14px;
 		}
 
 		.batch__check {
