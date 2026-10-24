@@ -161,13 +161,9 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	h.svc.Processor.ApplyConfig(h.svc.Config.Config())
 	h.svc.AudiobookDB.Store(audiobookdb.NewClient(live.APIKey.APIKey, live.APIKey.BaseURL))
 
-	// Re-snapshot the m4b-merge version so a saved binary change does not
-	// display a stale value in the settings page.
-	if v, verr := h.svc.Processor.Version(); verr == nil {
-		h.svc.Processor.StoreVersion(v)
-	} else {
-		h.svc.Processor.StoreVersion("unknown")
-	}
+	// Atomically re-snapshot the m4b-merge version so a saved binary change
+	// (or an overlapping update) cannot display a stale value.
+	h.svc.Processor.UpdateVersion()
 
 	settings := map[string]any{
 		"m4b_merge_binary":     live.M4bMerge.Binary,

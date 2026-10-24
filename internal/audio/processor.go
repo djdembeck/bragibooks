@@ -315,6 +315,32 @@ func (p *Processor) StoreVersion(v string) {
 	p.version = v
 }
 
+// UpdateVersion re-snapshots and stores the m4b-merge version in a single
+// critical section, so an overlapping reconfiguration cannot interleave
+// between the binary snapshot and the store. It returns the stored
+// version ("unknown" when the binary cannot report one). ApplyConfig
+// takes the same write lock, so the two never overlap.
+func (p *Processor) UpdateVersion() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	binary := p.Binary
+	cmd := exec.Command(binary, "--version")
+	out, err := cmd.Output()
+	var reported string
+	if err == nil {
+		version := strings.Fields(strings.TrimSpace(string(out)))
+		if len(version) > 0 {
+			reported = version[len(version)-1] // last token is the version string
+		}
+	}
+	if reported == "" {
+		reported = "unknown"
+	}
+	p.version = reported
+	return p.version
+}
+
 // ReadVersion returns the last recorded m4b-merge version, or "" if none
 // has been stored.
 func (p *Processor) ReadVersion() string {
