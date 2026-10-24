@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -35,6 +36,14 @@ func main() {
 	dbPath := cfg.Database.Path
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		log.Fatalf("Failed to create database directory: %v", err)
+	}
+
+	// Absolute path so a container log reader can immediately tell
+	// persistent volume (/config/...) from writable layer (/app/...).
+	if absPath, absErr := filepath.Abs(dbPath); absErr == nil {
+		log.Printf("Database: %s", absPath)
+	} else {
+		log.Printf("Database: %s", dbPath)
 	}
 
 	database, err := db.Open(dbPath)
@@ -196,6 +205,55 @@ func autoMigrateLegacy(newDB *sql.DB, cfgMgr *config.ConfigManager) {
 		return // no legacy DB found
 	}
 
+	// Diagnostics: make a non-persistent database.path (new-DB
+	// mtime == boot time) visible in the boot log.
+	logDBFileDiag("New DB", cfgMgr.Config().Database.Path)
+	logDBFileDiag("Legacy DB", legacyPath)
+
+	if receipt, exists, rerr := api.ReadMigrationReceipt(legacyPath); rerr != nil {
+		log.Printf("Warning: could not read migration receipt for %s: %v (proceeding with migration)", legacyPath, rerr)
+	} else if exists && api.LegacyMatchesReceipt(legacyPath, receipt) {
+		// -1: target unknown (same as current DB, absent, or not checked);
+		// 0: empty; >0: data present.
+		targetBooks := -1
+		if t := receipt.TargetNewDB; t != "" && t != cfgMgr.Config().Database.Path {
+			if _, serr := os.Stat(t); serr == nil {
+				if n, ok := countBooksReadonly(t); ok {
+					targetBooks = n
+				} else {
+					log.Printf(
+						"WARNING: legacy DB %s was already auto-migrated to %s on %s (%d books),\n"+
+							"\tbut that database exists and could not be read — verify it is intact before re-migrating.\n"+
+							"\tOnce restored, set database.path back to %s, delete %s and restart to keep your data.",
+						legacyPath, t, receipt.MigratedAt, receipt.Books,
+						t, legacyPath+api.MigrationReceiptSuffix,
+					)
+					return
+				}
+			}
+		}
+		if targetBooks > 0 {
+			log.Printf(
+				"WARNING: legacy DB %s was already auto-migrated to %s on %s (%d books), and that database is still present with %d books,\n"+
+					"\tbut current database.path (%s) does not point there.\n"+
+					"\tSet database.path back to %s (or copy %s), then delete %s and restart.",
+				legacyPath, receipt.TargetNewDB, receipt.MigratedAt, receipt.Books, targetBooks,
+				cfgMgr.Config().Database.Path, receipt.TargetNewDB, receipt.TargetNewDB, legacyPath+api.MigrationReceiptSuffix,
+			)
+		} else {
+			log.Printf(
+				"WARNING: legacy DB %s was already auto-migrated on %s (%d books, %d people into %s),\n"+
+					"\tbut %s is empty — the merged data is gone, only the legacy file itself is intact.\n"+
+					"\tdatabase.path (%s) is probably not persistent. Fix the setting, delete %s and restart (or POST /api/migrate) to migrate fresh.",
+				legacyPath, receipt.MigratedAt, receipt.Books, receipt.People, receipt.TargetNewDB,
+				receipt.TargetNewDB, cfgMgr.Config().Database.Path, legacyPath+api.MigrationReceiptSuffix,
+			)
+		}
+		return
+	} else if exists {
+		log.Printf("Receipt found for %s but legacy DB changed since; proceeding with migration", legacyPath)
+	}
+
 	log.Printf("Legacy Django DB found at %s, starting auto-migration...", legacyPath)
 	// Carry the in-memory (YAML/env/DB) base URL into the settings merge
 	// so it survives the INSERT OR REPLACE (row 53).
@@ -204,7 +262,47 @@ func autoMigrateLegacy(newDB *sql.DB, cfgMgr *config.ConfigManager) {
 		log.Printf("Warning: auto-migration failed: %v (you can manually migrate via POST /api/migrate)", err)
 		return
 	}
+	if err := api.WriteMigrationReceipt(legacyPath, cfgMgr.Config().Database.Path, result.Books, result.People); err != nil {
+		log.Printf("Warning: failed to write migration receipt: %v", err)
+	}
 	log.Printf("Auto-migration complete: %d books, %d people migrated", result.Books, result.People)
+}
+
+// countBooksReadonly returns the number of books in the SQLite DB at path
+// (read-only open). ok is false when the file is missing/unreadable, so
+// callers can distinguish "empty" from "cannot tell".
+func countBooksReadonly(path string) (count int, ok bool) {
+	d, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro", path))
+	if err != nil {
+		return 0, false
+	}
+	defer d.Close()
+	var n int
+	if err := d.QueryRow("SELECT COUNT(*) FROM books").Scan(&n); err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// logDBFileDiag logs size and mtime of a SQLite DB file (plus its -wal
+// sidecar, which holds un-checkpointed data — the .db main file alone
+// understates size for a WAL-mode DB; the stat can race a checkpoint,
+// approximating size — that is acceptable for diagnostics). Emits
+// "not found" on stat error so a missing file is itself diagnostic.
+func logDBFileDiag(label, path string) {
+	if absPath, absErr := filepath.Abs(path); absErr == nil {
+		path = absPath
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		log.Printf("%s: %s (not found: %v)", label, path, err)
+		return
+	}
+	size := info.Size()
+	if wal, werr := os.Stat(path + "-wal"); werr == nil {
+		size += wal.Size()
+	}
+	log.Printf("%s: %s (size: %d bytes, mtime: %s)", label, path, size, info.ModTime().Format(time.RFC3339))
 }
 
 func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {

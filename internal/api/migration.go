@@ -1,14 +1,17 @@
 package api
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -125,6 +128,95 @@ func ShouldSkipMigration(db *sql.DB) bool {
 	return bookCount > 0
 }
 
+// MigrationReceiptSuffix is appended to the legacy DB path to name the
+// receipt written after a successful legacy migration into the new schema.
+const MigrationReceiptSuffix = ".bragi-migrated"
+
+// MigrationReceipt records a completed legacy migration so a later boot can
+// detect "new DB empty but this legacy DB was already migrated" (lost
+// database.path volume) and refuse to re-migrate into a fresh empty DB.
+type MigrationReceipt struct {
+	LegacySHA256 string `json:"legacy_sha256"`
+	LegacySize   int64  `json:"legacy_size"`
+	Books        int    `json:"books"`
+	People       int    `json:"people"`
+	MigratedAt   string `json:"migrated_at"` // time.Now().UTC().Format(time.RFC3339)
+	TargetNewDB  string `json:"target_new_db"`
+}
+
+// hashFileSHA256 returns the hex sha256 of the file at path.
+func hashFileSHA256(path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", 0, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return "", 0, err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), info.Size(), nil
+}
+
+// WriteMigrationReceipt writes %s%s for legacyDBPath with the legacy file's
+// sha256/size and the migration counts. Must only be called after the
+// migration transaction committed.
+func WriteMigrationReceipt(legacyDBPath, targetDBPath string, books, people int) error {
+	sha, size, err := hashFileSHA256(legacyDBPath)
+	if err != nil {
+		return fmt.Errorf("hash legacy DB: %w", err)
+	}
+	receipt := MigrationReceipt{
+		LegacySHA256: sha,
+		LegacySize:   size,
+		Books:        books,
+		People:       people,
+		MigratedAt:   time.Now().UTC().Format(time.RFC3339),
+		TargetNewDB:  targetDBPath,
+	}
+	data, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal receipt: %w", err)
+	}
+	return os.WriteFile(legacyDBPath+MigrationReceiptSuffix, data, 0644)
+}
+
+// ReadMigrationReceipt returns (nil, false, nil) when no receipt exists.
+// Other read/parse errors return (nil, true, err) — callers log and proceed
+// so a broken receipt never blocks a legitimate migration.
+func ReadMigrationReceipt(legacyDBPath string) (receipt *MigrationReceipt, exists bool, err error) {
+	data, rerr := os.ReadFile(legacyDBPath + MigrationReceiptSuffix)
+	if rerr != nil {
+		if os.IsNotExist(rerr) {
+			return nil, false, nil
+		}
+		return nil, true, rerr
+	}
+	var r MigrationReceipt
+	if jerr := json.Unmarshal(data, &r); jerr != nil {
+		return nil, true, fmt.Errorf("parse receipt: %w", jerr)
+	}
+	return &r, true, nil
+}
+
+// LegacyMatchesReceipt reports whether the legacy file at legacyDBPath still
+// hashes to receipt.LegacySHA256. Any read error → false (the subsequent
+// RunLegacyMigration produces its own explicit error).
+func LegacyMatchesReceipt(legacyDBPath string, r *MigrationReceipt) bool {
+	if r == nil || r.LegacySHA256 == "" {
+		return false
+	}
+	sha, _, err := hashFileSHA256(legacyDBPath)
+	if err != nil {
+		return false
+	}
+	return sha == r.LegacySHA256
+}
+
 // MigrateLegacyDB handles POST /api/migrate.
 // Reads the legacy Django db.sqlite3 and migrates data to the new schema.
 func (h *Handler) MigrateLegacyDB(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +255,10 @@ func (h *Handler) MigrateLegacyDB(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	if err := WriteMigrationReceipt(req.Path, h.svc.Config.Config().Database.Path, result.Books, result.People); err != nil {
+		log.Printf("Warning: failed to write migration receipt: %v", err)
 	}
 
 	writeJSON(w, http.StatusOK, MigrateLegacyDBResult{
