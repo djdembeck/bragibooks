@@ -116,8 +116,13 @@ func (h *Handler) ListBooks(w http.ResponseWriter, r *http.Request) {
 	page := parseIntQueryParam(r, "page", 0)
 	limit := parseIntQueryParam(r, "limit", 20)
 
-	if limit < 1 || limit > 100 {
+	if limit < 1 {
 		limit = 20
+	}
+	// Allow up to 500 per page (deep pages of large libraries); only clamp
+	// values above that, so legitimate pagination of big collections works.
+	if limit > 500 {
+		limit = 500
 	}
 	if page < 0 {
 		page = 0
@@ -389,6 +394,12 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 	book, err := h.getBook(bookID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("get updated book: %v", err))
+		return
+	}
+	if book == nil {
+		// The UPDATE above matched no rows (unknown id): report 404, not a
+		// 500 with a successful-looking response.
+		writeError(w, http.StatusNotFound, "book not found")
 		return
 	}
 

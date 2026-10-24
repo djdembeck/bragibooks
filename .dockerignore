@@ -18,5 +18,12 @@
 **/.impeccable
 **/.sisyphus
 **/tmp
+**/legacy.db*
+docker/books
+docker/config
+dev
+/bragibooks
+webfs/build
+web/build
 LICENSE
 README.md

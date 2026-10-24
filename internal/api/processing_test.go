@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -144,7 +145,9 @@ func TestCancelQueuedJob(t *testing.T) {
 	}
 
 	// Queue a job without starting workers, so it stays 'queued'.
-	// bookID 1 -> QueueJob flips the book to 'processing'.
+	// Queueing intentionally leaves the book in its pre-queue state ('matched'):
+	// the queued -> processing transition happens at worker start, so a queued
+	// cancel needs no status rollback.
 	id, err := h.svc.ProcessingSvc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
@@ -154,8 +157,8 @@ func TestCancelQueuedJob(t *testing.T) {
 	if err != nil || status != "queued" {
 		t.Fatalf("precondition: job status = %q, err = %v; want queued", status, err)
 	}
-	if got := bookStatusFromDB(t, h.svc.DB, 1); got != "processing" {
-		t.Fatalf("precondition: book status = %q; want processing", got)
+	if got := bookStatusFromDB(t, h.svc.DB, 1); got != "matched" {
+		t.Fatalf("precondition: book status = %q; want matched (pre-queue state preserved)", got)
 	}
 
 	w := doCancel(t, h, id)
@@ -485,5 +488,175 @@ func TestSweepOrphansOnStartup(t *testing.T) {
 		if got := bookStatusFromDB(t, db, int64(id)); got != want {
 			t.Errorf("book %d status = %q; want %q", id, got, want)
 		}
+	}
+}
+
+// TestStreamJobActiveJobPayload covers the NULL-scan fix: active jobs have
+// NULL output_file/started_at/completed_at, which must not kill the stream.
+func TestStreamJobActiveJobPayload(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+
+	// A queued job exactly as QueueJob would insert it: output_file,
+	// started_at and completed_at are NULL.
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status) VALUES ('active-1', 1, '{}', 'queued')",
+	); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Keys = append(rctx.URLParams.Keys, "id")
+	rctx.URLParams.Values = append(rctx.URLParams.Values, "active-1")
+	req := httptest.NewRequest("GET", "/api/jobs/active-1/stream", nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	w := httptest.NewRecorder()
+	h.StreamJob(w, req)
+
+	// The pre-fix scan error made the handler return silently; the active
+	// job must produce a payload its current state.
+	body := w.Body.String()
+	if !strings.Contains(body, `"status":"queued"`) {
+		t.Errorf("stream body = %q; want the queued status payload", body)
+	}
+}
+
+// fakeM4bBinary writes a shell script that exits 0 immediately and reports a
+// version, standing in for m4b-merge in pipeline tests.
+func fakeM4bBinary(t *testing.T, dir string) string {
+	t.Helper()
+	p := filepath.Join(dir, "fake-m4b")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.0.0; exit 0; fi\necho ran\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+	return p
+}
+
+// TestStreamJobProgressCloseEndsStream covers the row-16 fix: finalize closes
+// the progress channel, so the SSE loop terminates on its own (and the
+// trailing "done" line is written) without waiting for a client disconnect.
+func TestStreamJobProgressCloseEndsStream(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"})
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	st := svc.GetJob(id)
+	if st == nil {
+		t.Fatal("no in-memory state for queued job")
+	}
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Keys = append(rctx.URLParams.Keys, "id")
+	rctx.URLParams.Values = append(rctx.URLParams.Values, id)
+	req := httptest.NewRequest("GET", "/api/jobs/"+id+"/stream", nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	w := httptest.NewRecorder()
+	streamDone := make(chan struct{})
+	go func() {
+		defer close(streamDone)
+		h.StreamJob(w, req)
+	}()
+
+	// Give the stream a moment to connect, then finalize as a finished job
+	// would.
+	time.Sleep(100 * time.Millisecond)
+	st.finalize(`{"status":"done","message":"processing complete"}`, nil)
+
+	select {
+	case <-streamDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not terminate after progress channel close")
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, `"status":"done","message":"processing complete"`) {
+		t.Errorf("stream body = %q; want the terminal progress event", body)
+	}
+	if !strings.Contains(body, `{"status":"done"}`) {
+		t.Errorf("stream body = %q; want the trailing done line from the done channel", body)
+	}
+}
+
+// TestQueueJobDuplicateRejected covers the server-side 409 guard.
+func TestQueueJobDuplicateRejected(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (1, 'Book', 'matched')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+
+	first, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"})
+	if err != nil {
+		t.Fatalf("first queue: %v", err)
+	}
+	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}); err == nil {
+		t.Fatal("second queue for a book with a queued job: want error, got nil")
+	}
+
+	// A finished job frees the book for a new run.
+	setJobStatus(t, h.svc.DB, first, "done")
+	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}); err != nil {
+		t.Fatalf("queue after terminal job: %v", err)
+	}
+}
+
+// TestStartProcessingDuplicateBook409 exercises the same guard through the
+// handler: a repeated book_id in one request body is a 409, not a double run.
+func TestStartProcessingDuplicateBook409(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (1, 'Book', 'matched')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed audio: %v", err)
+	}
+
+	body, _ := json.Marshal(StartProcessingRequest{BookIDs: []int64{1, 1}, SrcDirs: []string{srcDir, srcDir}})
+	req := httptest.NewRequest("POST", "/api/process", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.StartProcessing(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("duplicate book status = %d; want 409 — body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestFinishedJobLeavesMap covers the terminal cleanup: after a job reaches a
+// terminal state its in-memory state is dropped, while the DB retains it.
+func TestFinishedJobLeavesMap(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	bin := fakeM4bBinary(t, t.TempDir())
+	svc.proc = &audio.Processor{Binary: bin, OutputDir: t.TempDir(), PathFormat: "{title}", LogLevel: "info"}
+
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (1, 'Book', 'matched')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+
+	ctx := t.Context()
+	svc.RunWorkers(ctx, 1)
+
+	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")})
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+
+	waitJobStatus(t, h.svc.DB, id, "done")
+
+	if st := svc.GetJob(id); st != nil {
+		t.Errorf("GetJob after terminal state = non-nil; want map entry removed")
+	}
+	if got := bookStatusFromDB(t, h.svc.DB, 1); got != "done" {
+		t.Errorf("book status = %q; want done", got)
 	}
 }

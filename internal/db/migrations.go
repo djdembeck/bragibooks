@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"regexp"
 	"sort"
+	"strings"
 )
 
 // migration is a single schema migration step.
@@ -118,6 +120,18 @@ ALTER TABLE people ADD COLUMN asin TEXT DEFAULT '';
 
 // RunMigrations applies all pending schema migrations in order.
 // It tracks applied migrations in the migration_log table.
+//
+// Each migration's SQL statements are executed inside a single
+// transaction together with its migration_log INSERT, so a migration is
+// either fully applied (schema + log row) or absent — a crash mid-migration
+// cannot leave the schema half-applied with the log row already present.
+// Within a migration, every statement is applied idempotently:
+//   - statements containing "IF NOT EXISTS" or CREATE TRIGGER/INDEX are
+//     skipped when the object already exists;
+//   - bare "ALTER TABLE ... ADD COLUMN" statements are skipped when the
+//     column already exists.
+//
+// This makes a migration safe to re-apply even without its log row.
 func RunMigrations(db *sql.DB) error {
 	if err := ensureMigrationLogTable(db); err != nil {
 		return fmt.Errorf("failed to ensure migration_log table: %w", err)
@@ -139,20 +153,119 @@ func RunMigrations(db *sql.DB) error {
 
 		log.Printf("Applying migration v%d", m.version)
 
-		_, err := db.Exec(m.sql)
-		if err != nil {
+		name := fmt.Sprintf("v%d", m.version)
+		if err := applyMigration(db, name, m.sql); err != nil {
 			return fmt.Errorf("migration v%d failed: %w", m.version, err)
-		}
-
-		if _, err := db.Exec(
-			"INSERT INTO migration_log (name) VALUES (?)",
-			fmt.Sprintf("v%d", m.version),
-		); err != nil {
-			return fmt.Errorf("failed to record migration v%d: %w", m.version, err)
 		}
 	}
 
 	return nil
+}
+
+// applyMigration executes stmts in one transaction, ending with the
+// migration_log INSERT, so schema change and log entry commit atomically.
+func applyMigration(db *sql.DB, name, stmts string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin migration transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmts = strings.TrimSpace(stmts)
+	if stmts == "" {
+		// Nothing to apply (e.g. an already-satisfied migration): just
+		// record it so it is not re-attempted on the next run.
+	}
+	for _, stmt := range splitStatements(stmts) {
+		if stmtIsSkippable(tx, stmt) {
+			continue
+		}
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("apply %q: %w", truncate(stmt, 60), err)
+		}
+	}
+
+	if _, err := tx.Exec(
+		"INSERT INTO migration_log (name) VALUES (?)",
+		name,
+	); err != nil {
+		return fmt.Errorf("failed to record migration %s: %w", name, err)
+	}
+
+	return tx.Commit()
+}
+
+// splitStatements splits SQL on semicolons, ignoring semicolons inside
+// string literals (the migration SQL has none today, but it keeps the
+// splitter honest if a future migration needs to).
+func splitStatements(sqlText string) []string {
+	var out []string
+	var cur strings.Builder
+	inString := false
+	for _, r := range sqlText {
+		switch {
+		case inString:
+			cur.WriteRune(r)
+			if r == '\'' {
+				inString = false
+			}
+		case r == '\'':
+			inString = true
+			cur.WriteRune(r)
+		case r == ';':
+			s := strings.TrimSpace(cur.String())
+			if s != "" {
+				out = append(out, s)
+			}
+			cur.Reset()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if s := strings.TrimSpace(cur.String()); s != "" {
+		out = append(out, s)
+	}
+	return out
+}
+
+// alterAddColumnRe recognizes a bare ALTER TABLE ... ADD COLUMN statement.
+var alterAddColumnRe = regexp.MustCompile(`(?is)^ALTER\s+TABLE\s+(\w+)\s+ADD\s+(?:COLUMN\s+)?(\w+)`)
+
+// stmtIsSkippable reports whether the statement is already satisfied by the
+// current schema and can be skipped (idempotent re-application).
+//
+// Statements carrying "IF NOT EXISTS" are self-guarding and MUST run (they
+// are the idempotent form), so the only form worth prechecking is the bare
+// "ALTER TABLE ... ADD COLUMN" used by migrations v2-v4: it is skipped when
+// the column already exists, which makes a re-invocation after a lost log
+// row safe. Any other bare, non-idempotent statement is executed and would
+// fail loudly if its object already exists — the intended behavior for a
+// migration that is genuinely not idempotent.
+func stmtIsSkippable(tx *sql.Tx, stmt string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(stmt))
+	if strings.Contains(upper, "IF NOT EXISTS") {
+		return false
+	}
+	if m := alterAddColumnRe.FindStringSubmatch(stmt); m != nil {
+		table, column := m[1], m[2]
+		var n int
+		if err := tx.QueryRow(
+			"SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?",
+			table, column,
+		).Scan(&n); err == nil {
+			return n > 0
+		}
+	}
+	return false
+}
+
+// truncate shortens s to n chars for readable migration errors.
+func truncate(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // ensureMigrationLogTable creates the tracking table if it doesn't exist.

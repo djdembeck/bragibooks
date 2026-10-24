@@ -16,13 +16,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
 
 	"github.com/bragibooks/bragibooks/internal/api"
 	"github.com/bragibooks/bragibooks/internal/audio"
 	"github.com/bragibooks/bragibooks/internal/audiobookdb"
 	"github.com/bragibooks/bragibooks/internal/config"
 	"github.com/bragibooks/bragibooks/internal/db"
+	"github.com/bragibooks/bragibooks/internal/server"
 	"github.com/bragibooks/bragibooks/webfs"
 )
 
@@ -48,6 +48,12 @@ func main() {
 		log.Fatalf("Failed to run migrations: %v", err)
 	}
 
+	// Load settings from DB into config struct FIRST so the legacy
+	// auto-migration can carry the live base URL / API key through a
+	// settings merge (row 53) — a DB row or YAML value written before the
+	// migration must survive it.
+	loadSettingsFromDB(database, cfgMgr)
+
 	// Auto-migrate from legacy Django DB if present and new DB is empty
 	autoMigrateLegacy(database, cfgMgr)
 
@@ -56,7 +62,8 @@ func main() {
 		log.Fatalf("Failed to ensure default settings: %v", err)
 	}
 
-	// Load settings from DB into config struct (DB values fill in gaps not covered by YAML/env)
+	// Re-load (idempotent) so the config reflects the merged settings row
+	// the migration may have just written.
 	loadSettingsFromDB(database, cfgMgr)
 	// Refresh cfg after potential DB-loaded overrides
 	cfg = cfgMgr.Config()
@@ -98,42 +105,67 @@ func main() {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
-		AllowCredentials: true,
-	}))
+	// The SPA is served same-origin from this server, so the API does not
+	// need CORS at all; the old wildcard-credentials combo was invalid and
+	// opened the admin API to any origin (finding: CORS). No CORS handler
+	// is mounted — cross-origin requests simply get no CORS headers and
+	// the browser blocks them.
 
-	handler.RegisterRoutes(r)
+	// Health check lives OUTSIDE the gated /api subtree so container
+	// orchestrators and the CLI can probe liveness without credentials.
+	r.Get("/api/health", server.HealthCheck)
 
-	// SPA handler — serve embedded frontend for non-API routes
-	// In dev mode (without webui tag), this returns a 404 fallback
+	// Admin auth (finding: unauthenticated API): token mode when
+	// BRAGIBOOKS_ADMIN_TOKEN is set, loopback-LAN-only local mode when not.
+	// Applied to the /api subtree only; the embedded SPA (served same
+	// origin below) stays reachable for the UI to load.
+	handler.RegisterRoutes(r, api.RequireAdmin(os.Getenv("BRAGIBOOKS_ADMIN_TOKEN")))
+
+	// SPA handler — serve embedded frontend for non-API routes.
 	r.HandleFunc("/*", webfs.Handler().ServeHTTP)
 
 	addr := net.JoinHostPort(cfg.Server.Host, strconv.Itoa(cfg.Server.Port))
 	log.Printf("Bragi Books listening on %s", addr)
 
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      r,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 5 * time.Minute,
+		Addr:    addr,
+		Handler: r,
+		// Read-side timeouts keep the process responsive and keep
+		// half-open connections from pinning workers (liveness).
+		ReadHeaderTimeout: 15 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		// WriteTimeout MUST stay 0: job-stream (SSE) and directory-stream
+		// handlers stay open for the lifetime of a multi-hour job; a 5m
+		// write timeout killed them (finding).
+		WriteTimeout: 0,
 	}
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+		}
+	}()
+
+	// Block until a fatal server error or SIGINT/SIGTERM, then drain.
+	select {
+	case err := <-errCh:
 		log.Fatalf("HTTP server error: %v", err)
+	case <-ctx.Done():
+		log.Printf("shutdown signal received, draining in-flight requests")
+	}
+
+	shutdownCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+	defer stop()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("graceful shutdown failed: %v", err)
 	}
 }
 
 func autoMigrateLegacy(newDB *sql.DB, cfgMgr *config.ConfigManager) {
-	// Check if new DB already has books (skip if non-empty)
-	var bookCount int
-	if err := newDB.QueryRow("SELECT COUNT(*) FROM books").Scan(&bookCount); err != nil {
-		log.Printf("Warning: could not check book count for auto-migration: %v", err)
-		return
-	}
-	if bookCount > 0 {
+	// Refuse to migrate into a populated DB (same guard the manual
+	// POST /api/migrate path uses — single source of truth).
+	if api.ShouldSkipMigration(newDB) {
 		return // new DB already populated, no migration needed
 	}
 
@@ -165,7 +197,9 @@ func autoMigrateLegacy(newDB *sql.DB, cfgMgr *config.ConfigManager) {
 	}
 
 	log.Printf("Legacy Django DB found at %s, starting auto-migration...", legacyPath)
-	result, err := api.RunLegacyMigration(legacyPath, newDB)
+	// Carry the in-memory (YAML/env/DB) base URL into the settings merge
+	// so it survives the INSERT OR REPLACE (row 53).
+	result, err := api.RunLegacyMigration(legacyPath, newDB, cfgMgr.Config().APIKey.BaseURL)
 	if err != nil {
 		log.Printf("Warning: auto-migration failed: %v (you can manually migrate via POST /api/migrate)", err)
 		return

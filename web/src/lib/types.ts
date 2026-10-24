@@ -1,9 +1,35 @@
+/**
+ * Wire shape of Go's `sql.NullString` fields: a plain string for valid
+ * values, or the serialized struct `{String, Valid}` (with `Valid: false`
+ * for an unset value). Field stays camelCase from JSON; `undefined` also
+ * covers absent keys on some envelopes.
+ */
+export type NullString = string | { String: string; Valid: boolean } | null | undefined;
+
+/** Coerce a `NullString` wire value to a plain display string ('' when unset). */
+export function normStr(value: NullString): string {
+	if (value == null) return '';
+	if (typeof value === 'string') return value;
+	return value.Valid ? value.String : '';
+}
+
+/** Decode the named/numeric HTML entities stored descriptions carry. */
+export function decodeHtmlEntities(value: string): string {
+	return value
+		.replace(/&nbsp;/gi, ' ')
+		.replace(/&quot;/gi, '"')
+		.replace(/&#39;|&apos;/gi, "'")
+		.replace(/&lt;/gi, '<')
+		.replace(/&gt;/gi, '>')
+		.replace(/&amp;/gi, '&');
+}
+
 export interface Book {
 	id: number;
 	title: string;
-	asin: string | null;
-	audiobookdb_book_id: string | null;
-	audiobookdb_release_id: string | null;
+	asin: NullString;
+	audiobookdb_book_id: NullString;
+	audiobookdb_release_id: NullString;
 	description: string;
 	release_date: string;
 	series: string;
@@ -26,16 +52,16 @@ export interface Person {
 	book_id: number;
 	name: string;
 	role: 'author' | 'narrator';
-	audiobookdb_person_id: string | null;
+	audiobookdb_person_id: NullString;
 	created_at: string;
 }
 
 export interface BookWithPeople {
 	id: number;
 	title: string;
-	asin: string | null;
-	audiobookdb_book_id: string | null;
-	audiobookdb_release_id: string | null;
+	asin: NullString;
+	audiobookdb_book_id: NullString;
+	audiobookdb_release_id: NullString;
 	description: string;
 	release_date: string;
 	series: string;

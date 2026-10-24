@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -248,6 +247,3 @@ func sortDir(entries []DirectoryEntry) []DirectoryEntry {
 	}
 	return entries
 }
-
-// unused import guard for fs
-var _ fs.FileInfo

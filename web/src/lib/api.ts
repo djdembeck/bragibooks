@@ -20,10 +20,31 @@ export class ApiError extends Error {
 	}
 }
 
+// Optional admin token (set when the server runs with BRAGIBOOKS_ADMIN_TOKEN);
+// absent (no header) when the token is not stored.
+function authHeaders(): Record<string, string> {
+	try {
+		const token = window.localStorage.getItem('bragibooks_token');
+		if (token) {
+			// EventSource cannot send headers; mirror the token into a cookie so
+			// SSE streams authenticate against the server-side cookie check.
+			// No Secure flag: local HTTP must work. The cookie persists after
+			// log-out, which is acceptable for a local-first admin tool.
+			// Written verbatim (the server percent-decodes before comparing), so
+			// base64 chars like +/= match; cookie-breaking tokens are skipped
+			// and SSE degrades to polling while fetches keep using the header.
+			if (!/[;\s]/.test(token)) document.cookie = `bragibooks_token=${token}; path=/`;
+		}
+		return token ? { Authorization: `Bearer ${token}` } : {};
+	} catch {
+		return {};
+	}
+}
+
 export async function get<T>(path: string, init?: RequestInit): Promise<T> {
 	const res = await fetch(`${API_BASE}/api${path}`, {
 		...init,
-		headers: { Accept: 'application/json', ...(init?.headers ?? {}) }
+		headers: { Accept: 'application/json', ...authHeaders(), ...(init?.headers ?? {}) }
 	});
 	if (!res.ok) {
 		const text = await res.text();
@@ -60,26 +81,3 @@ export function streamEvents(url: string, onMessage: (data: string) => void, onD
 	return () => evtSource.close();
 }
 
-export function streamNDJSON(url: string, onLine: (line: string) => void, onDone: (err?: Error) => void) {
-	const abort = new AbortController();
-	fetch(url, { signal: abort.signal })
-		.then(async (res) => {
-			const reader = res.body!.getReader();
-			const decoder = new TextDecoder();
-			let buffer = '';
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split('\n');
-				buffer = lines.pop()!;
-				for (const line of lines) {
-					if (line.trim()) onLine(line.trim());
-				}
-			}
-			if (buffer.trim()) onLine(buffer.trim());
-		})
-		.catch((err) => onDone(err))
-		.finally(() => onDone());
-	return () => abort.abort();
-}

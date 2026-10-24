@@ -13,4 +13,3 @@ run:
 
 test:
 	go test ./internal/...
-	cd web && bun run test

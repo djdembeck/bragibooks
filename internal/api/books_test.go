@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -110,6 +111,65 @@ func TestUpdateBookMultiFieldSQLConstruction(t *testing.T) {
 	}
 	if status != newStatus {
 		t.Errorf("status = %q; want %q", status, newStatus)
+	}
+}
+
+func TestUpdateBookMissingReturns404(t *testing.T) {
+	h := newTestHandler(t)
+
+	newTitle := "Ghost Title"
+	reqBody, err := json.Marshal(UpdateBookRequest{Title: &newTitle})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	ctx := chi.NewRouteContext()
+	ctx.URLParams.Keys = append(ctx.URLParams.Keys, "id")
+	ctx.URLParams.Values = append(ctx.URLParams.Values, "9999")
+	req := httptest.NewRequest("PUT", "/api/books/9999", bytes.NewReader(reqBody))
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, ctx))
+
+	w := httptest.NewRecorder()
+	h.UpdateBook(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("update missing book status = %d, want 404 — body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestListBooksLimitClamp(t *testing.T) {
+	h := newTestHandler(t)
+	for i := range 3 {
+		if _, err := h.svc.DB.Exec("INSERT INTO books (title) VALUES (?)", fmt.Sprintf("Title %d", i)); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	// 500 is the new maximum and must be honored, not reset.
+	req := httptest.NewRequest("GET", "/api/books?limit=500", nil)
+	w := httptest.NewRecorder()
+	h.ListBooks(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	var resp ListBooksResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Limit != 500 {
+		t.Errorf("limit=500 -> resp limit %d; want 500", resp.Limit)
+	}
+
+	// Above 500 is clamped down, not reset to the default.
+	req = httptest.NewRequest("GET", "/api/books?limit=5000", nil)
+	w = httptest.NewRecorder()
+	h.ListBooks(w, req)
+	var resp2 ListBooksResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp2); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp2.Limit != 500 {
+		t.Errorf("limit=5000 -> resp limit %d; want 500", resp2.Limit)
 	}
 }
 

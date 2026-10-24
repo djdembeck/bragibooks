@@ -19,9 +19,18 @@ RUN CGO_ENABLED=0 go build -tags webui -ldflags="-s -w" -o bragibooks ./cmd/brag
 
 # Stage 2: Runtime
 FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    useradd -u 1000 app && \
+    mkdir -p /config /input /output && \
+    chown -R app:app /config /input /output
 WORKDIR /app
 COPY --from=builder /build/bragibooks /usr/local/bin/
 COPY --from=ghcr.io/djdembeck/m4b-merge:main-amd64 /usr/local/bin/m4b-merge /usr/local/bin/
+COPY docker/entrypoint.sh /usr/local/bin/bragibooks-entrypoint
+RUN chmod 0755 /usr/local/bin/bragibooks-entrypoint
+ENV PUID=1000 PGID=1000
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/bragibooks"]
+USER app
+ENTRYPOINT ["/usr/local/bin/bragibooks-entrypoint"]

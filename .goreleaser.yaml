@@ -2,6 +2,8 @@ version: 2
 
 project_name: bragibooks
 
+# before: build the SPA so the Go binary can embed it (webfs).
+# bun is provided by oven-sh/setup-bun in .github/workflows/release.yml.
 before:
   hooks:
     - cd web && bun install --frozen-lockfile
@@ -22,7 +24,6 @@ builds:
     goos:
       - linux
       - darwin
-      - windows
     goarch:
       - amd64
       - arm64
@@ -34,10 +35,7 @@ archives:
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "arm64" }}arm64
-      {{- end }}
-    format_overrides:
-      - goos: windows
-        format: zip
+      {{ end }}
 
 changelog:
   use: github

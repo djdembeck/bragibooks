@@ -1,11 +1,15 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
@@ -59,110 +63,76 @@ type ProcessingConfig struct {
 }
 
 // ConfigManager manages thread-safe config updates and persistence.
-// Wrap a *Config with ConfigManager when the config needs to be
-// mutable at runtime (e.g., via PUT /api/settings).
+// The live config is stored in an atomic.Pointer: Config() returns the
+// current immutable snapshot and UpdateSettings swaps in a new one, so
+// readers and writers never observe a half-mutated struct.
 type ConfigManager struct {
 	mu         *sync.Mutex
 	configPath string
-	cfg        *Config
+	cfg        atomic.Pointer[Config]
 	yamlKeys   map[string]bool
 }
 
 // NewConfigManager creates a ConfigManager with default configuration.
 // If config/config.yaml exists, it loads values from there.
+// A load failure is logged (with the reason) and the manager degrades to
+// defaults gracefully; it never aborts startup.
 func NewConfigManager() *ConfigManager {
-	cfg, configPath, err := Load()
-	if err != nil {
-		// If loading fails, fall back to defaults
-		setDefaultsOnConfig(&cfg)
-	}
-
-	// Compute yamlKeys from the config file.
-	yamlKeys := make(map[string]bool)
-	if configPath != "" {
-		if raw, readErr := os.ReadFile(configPath); readErr == nil {
-			var rawMap map[string]any
-			if yaml.Unmarshal(raw, &rawMap) == nil {
-				for _, k := range flattenYAMLKeys(rawMap, "") {
-					yamlKeys[k] = true
-				}
-			}
+	cfg, configPath, _ := loadWith("")
+	var yamlKeys map[string]bool
+	if configPath == "" {
+		// No file read (defaults or silent not-found): log once if there
+		// was a real parse error.
+		if err := checkLoadError(); err != nil {
+			log.Printf("Warning: failed to load configuration (%v); falling back to built-in defaults, no YAML config keys trusted", err)
+			setDefaultsOnConfig(&cfg)
 		}
+		yamlKeys = make(map[string]bool)
+	} else {
+		// Compute yamlKeys from the config file.
+		yamlKeys = yamlKeysFromFile(configPath)
 	}
 
-	return &ConfigManager{
+	cm := &ConfigManager{
 		mu:         &sync.Mutex{},
-		cfg:        &cfg,
 		configPath: configPath,
 		yamlKeys:   yamlKeys,
 	}
+	cm.cfg.Store(&cfg)
+	return cm
 }
 
-// Config returns the current Config.
-func (cm *ConfigManager) Config() *Config {
-	return cm.cfg
+// lastLoadError holds the reason the most recent loadWith failed to
+// resolve a file, so degraded mode can be reported with the cause.
+var lastLoadErrorMu sync.Mutex
+var lastLoadError error
+
+func checkLoadError() error {
+	lastLoadErrorMu.Lock()
+	defer lastLoadErrorMu.Unlock()
+	e := lastLoadError
+	lastLoadError = nil
+	return e
 }
 
-// Lock acquires the config mutex. Used by the API handler to ensure
-// atomicity across apply-validate-save sequences.
-func (cm *ConfigManager) Lock() {
-	cm.mu.Lock()
-}
-
-// Unlock releases the config mutex.
-func (cm *ConfigManager) Unlock() {
-	cm.mu.Unlock()
-}
-
-// Snapshot returns a copy of the config for later restoration via Restore.
-func (cm *ConfigManager) Snapshot() Config {
-	return *cm.cfg
-}
-
-// Restore replaces the current config with the provided snapshot.
-func (cm *ConfigManager) Restore(snap Config) {
-	*cm.cfg = snap
-}
-
-// Save persists the current config to the YAML file using atomic writes.
-// If no config file was loaded (configPath is empty), defaults to config/config.yaml.
-// The caller MUST hold ConfigManager.Lock() before calling Save.
-func (cm *ConfigManager) Save() error {
-	path := cm.configPath
-	if path == "" {
-		path = "config/config.yaml"
-	}
-	data, err := yaml.Marshal(cm.cfg)
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
-	}
-	return atomicWriteFile(path, data, 0o644)
-}
-
-// ConfigPath returns the path to the loaded config file, or "" if no file was found.
-func (cm *ConfigManager) ConfigPath() string {
-	return cm.configPath
-}
-
-// YAMLKeys returns the set of dotted keys present in the loaded YAML config file.
-// Returns an empty map if no YAML file was loaded.
-func (cm *ConfigManager) YAMLKeys() map[string]bool {
-	return cm.yamlKeys
-}
-
-// Load loads configuration: YAML file takes precedence over environment variables.
-// If a key exists in config/config.yaml, it overrides any env var for that key.
-// Returns the loaded Config and the path to the config file (or "" if no file found).
-func Load() (Config, string, error) {
+// loadWith implements the shared viper-based config load. explicitPath
+// empty uses the conventional search paths (Load's behavior). Mirrors the
+// original Load() exactly: env keys win over YAML only for keys forced by
+// hasEnv (see overrideKey).
+func loadWith(explicitPath string) (Config, string, error) {
 	v := viper.New()
 
 	// Set config file name and paths.
-	v.SetConfigName("config")
 	v.SetConfigType("yaml")
-	v.AddConfigPath("config")
-	v.AddConfigPath(".")
-	v.AddConfigPath("/app/data")
-	v.AddConfigPath("/config")
+	if explicitPath != "" {
+		v.SetConfigFile(explicitPath)
+	} else {
+		v.SetConfigName("config")
+		v.AddConfigPath("config")
+		v.AddConfigPath(".")
+		v.AddConfigPath("/app/data")
+		v.AddConfigPath("/config")
+	}
 
 	// Enable environment variable support.
 	v.AutomaticEnv()
@@ -177,57 +147,333 @@ func Load() (Config, string, error) {
 	// Read config file.
 	configFileNotFound := false
 	if err := v.ReadInConfig(); err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+		notFound := false
+		var nfe viper.ConfigFileNotFoundError
+		if errors.As(err, &nfe) || (explicitPath != "" && os.IsNotExist(err)) {
+			notFound = true
+		}
+		if notFound {
 			configFileNotFound = true
 		} else {
+			setLoadError(fmt.Errorf("failed to read config file: %w", err))
 			return Config{}, "", fmt.Errorf("failed to read config file: %w", err)
 		}
 	}
 
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
+		setLoadError(fmt.Errorf("failed to unmarshal config: %w", err))
 		return Config{}, "", fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
 	var configPath string
-
-	// YAML overrides env vars: re-read the YAML directly and overwrite any
-	// values that were explicitly set in the config file.
 	if !configFileNotFound {
 		configPath = v.ConfigFileUsed()
 
-		var yamlOnly Config
 		raw, err := os.ReadFile(configPath)
 		if err != nil {
+			setLoadError(fmt.Errorf("failed to re-read config file for overrides: %w", err))
 			return Config{}, "", fmt.Errorf("failed to re-read config file for overrides: %w", err)
 		}
+		var yamlOnly Config
 		if err := yaml.Unmarshal(raw, &yamlOnly); err != nil {
+			setLoadError(fmt.Errorf("failed to parse config file for overrides: %w", err))
 			return Config{}, "", fmt.Errorf("failed to parse config file for overrides: %w", err)
 		}
-		if err := applyYAMLOverrides(&cfg, &yamlOnly, configPath); err != nil {
-			return Config{}, "", fmt.Errorf("failed to apply YAML overrides: %w", err)
+		for _, key := range flattenYAMLKeys(parseYAMLMap(raw), "") {
+			overrideKey(&cfg, &yamlOnly, key)
 		}
 	}
 
+	// Env vars keep priority over the YAML file for every key the env
+	// mechanism knows (row 13): re-assert them after the override pass.
+	applyEnvPriority(&cfg)
+	expandUserPaths(&cfg)
 	return cfg, configPath, nil
 }
 
-// applyYAMLOverrides copies non-zero values from yamlOnly into target for
-// every field that was explicitly set in the YAML file.
-func applyYAMLOverrides(target *Config, yamlOnly *Config, configPath string) error {
-	raw, err := os.ReadFile(configPath)
+func setLoadError(err error) {
+	lastLoadErrorMu.Lock()
+	lastLoadError = err
+	lastLoadErrorMu.Unlock()
+}
+
+// Load loads configuration from the conventional search paths.
+// Returns the loaded Config and the path to the config file (or "" if none).
+func Load() (Config, string, error) {
+	return loadWith("")
+}
+
+// yamlKeysFromFile returns the set of dotted keys present in the YAML file
+// at path (empty map for a missing/unreadable file).
+func yamlKeysFromFile(configPath string) map[string]bool {
+	yamlKeys := make(map[string]bool)
+	if configPath == "" {
+		return yamlKeys
+	}
+	if raw, readErr := os.ReadFile(configPath); readErr == nil {
+		var rawMap map[string]any
+		if yaml.Unmarshal(raw, &rawMap) == nil {
+			for _, k := range flattenYAMLKeys(rawMap, "") {
+				yamlKeys[k] = true
+			}
+		}
+	}
+	return yamlKeys
+}
+
+// Config returns the current Config. The returned pointer is an immutable
+// snapshot; updates go through SaveKeys (and friends), which swap in a new
+// copy. Callers must not mutate the returned Config.
+func (cm *ConfigManager) Config() *Config {
+	return cm.cfg.Load()
+}
+
+// Store atomically replaces the current config with a new immutable copy.
+// Callers build the new full config (typically from Config() with a few
+// fields changed) and pass the pointer; readers of Config() never observe
+// a partially updated struct.
+func (cm *ConfigManager) Store(cfg *Config) {
+	cm.cfg.Store(cfg)
+}
+
+// AddYAMLKeys records that the given dotted keys are now explicitly present
+// in the config file (e.g. after a settings update wrote them), so future
+// loads treat file values as authoritative for those keys.
+func (cm *ConfigManager) AddYAMLKeys(keys ...string) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	for _, k := range keys {
+		cm.yamlKeys[k] = true
+	}
+}
+
+// Save persists the current config (all keys) to the YAML file using atomic
+// writes. If no config file was loaded (configPath is empty), defaults to
+// config/config.yaml.
+func (cm *ConfigManager) Save() error {
+	path := cm.configPath
+	if path == "" {
+		path = "config/config.yaml"
+	}
+	data, err := yaml.Marshal(cm.Config())
 	if err != nil {
-		return fmt.Errorf("failed to re-read config file for overrides: %w", err)
+		return fmt.Errorf("failed to marshal config: %w", err)
 	}
-	var rawMap map[string]any
-	if err := yaml.Unmarshal(raw, &rawMap); err != nil {
-		return fmt.Errorf("failed to parse config file for overrides: %w", err)
+	return atomicWriteFile(path, data, 0o644)
+}
+
+// SaveKeys persists ONLY the explicitly changed keys to the YAML file,
+// merged into the existing file content, preserving every previously written
+// key. This is the settings-update persistence path: writing the whole
+// struct (the old Save behavior) would freeze current values of all unedited
+// keys over their env-var values (finding: partial YAML save).
+func (cm *ConfigManager) SaveKeys(changed map[string]any) error {
+	path := cm.configPath
+	if path == "" {
+		path = "config/config.yaml"
 	}
-	keys := flattenYAMLKeys(rawMap, "")
-	for _, key := range keys {
-		overrideKey(target, yamlOnly, key)
+
+	// Changed keys serialized as a YAML map: top-level section maps get
+	// unmarshaled nested; scalar top-level keys map to the key itself.
+	var changedFlat map[string]any
+	{
+		data, err := yaml.Marshal(changed)
+		if err != nil {
+			return fmt.Errorf("failed to marshal changed keys: %w", err)
+		}
+		if err := yaml.Unmarshal(data, &changedFlat); err != nil {
+			return fmt.Errorf("failed to re-parse changed keys: %w", err)
+		}
+		if changedFlat == nil {
+			changedFlat = make(map[string]any)
+		}
 	}
-	return nil
+
+	existing := make(map[string]any)
+	if raw, err := os.ReadFile(path); err == nil {
+		if err := yaml.Unmarshal(raw, &existing); err != nil {
+			return fmt.Errorf("failed to parse existing config file: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read existing config file: %w", err)
+	}
+
+	for topKey, section := range changedFlat {
+		switch s := section.(type) {
+		case map[string]any:
+			cur, ok := existing[topKey].(map[string]any)
+			if !ok {
+				cur = make(map[string]any)
+			}
+			for k, v := range s {
+				cur[k] = v
+			}
+			existing[topKey] = cur
+		default:
+			existing[topKey] = section
+		}
+	}
+
+	// Preserve the conventional top-level section order for readable diffs.
+	ordered := make(map[string]any, len(existing))
+	for _, k := range []string{"server", "database", "m4b_merge", "api_key", "directories", "processing"} {
+		if v, ok := existing[k]; ok {
+			ordered[k] = v
+		}
+	}
+	for k, v := range existing {
+		if _, ok := ordered[k]; !ok {
+			ordered[k] = v
+		}
+	}
+
+	data, err := yaml.Marshal(ordered)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+	return atomicWriteFile(path, data, 0o644)
+}
+
+// SetConfigPath overrides the persisted path used by Save/SaveKeys.
+// Calling it after construction makes both the save target and the path
+// used by LoadFrom explicit.
+func (cm *ConfigManager) SetConfigPath(path string) {
+	cm.mu.Lock()
+	cm.configPath = path
+	cm.mu.Unlock()
+}
+
+// LoadFrom loads configuration from the explicit YAML file at path and
+// swaps it into the live config. A silently missing file leaves the live
+// config on defaults with ConfigPath() == ""; a genuine parse error
+// returns the error (row 23: load errors must be visible to the caller,
+// which decides degradation).
+func (cm *ConfigManager) LoadFrom(path string) (string, error) {
+	cfg, resolved, err := loadWith(path)
+	if err != nil {
+		return "", err
+	}
+	cm.mu.Lock()
+	cm.configPath = resolved
+	if resolved != "" {
+		cm.yamlKeys = yamlKeysFromFile(resolved)
+	}
+	cm.mu.Unlock()
+	cm.cfg.Store(&cfg)
+	return resolved, nil
+}
+
+// ConfigPath returns the path to the loaded config file, or "" if no file was found.
+func (cm *ConfigManager) ConfigPath() string {
+	return cm.configPath
+}
+
+// YAMLKeys returns the set of dotted keys present in the loaded YAML config file.
+// Returns an empty map if no YAML file was loaded.
+func (cm *ConfigManager) YAMLKeys() map[string]bool {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	out := make(map[string]bool, len(cm.yamlKeys))
+	for k, v := range cm.yamlKeys {
+		out[k] = v
+	}
+	return out
+}
+
+// isEnvTrue reports whether the named env var is set to a true-ish value.
+func isEnvTrue(key string) bool {
+	switch strings.TrimSpace(strings.ToLower(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// hasEnv reports whether the env var backing the dotted key is set to a
+// non-empty value. The loader's env names are the uppercase dot-replaced
+// form of the key (plus the REGION/PROCESSING_REGION aliases for
+// processing.region).
+func hasEnv(key string) bool {
+	if key == "processing.region" {
+		return os.Getenv("REGION") != "" || os.Getenv("PROCESSING_REGION") != ""
+	}
+	return os.Getenv(strings.ReplaceAll(strings.ToUpper(key), ".", "_")) != ""
+}
+
+// expandTilde expands a leading ~ in a path to the user's home directory.
+func expandTilde(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home + path[1:]
+		}
+	}
+	return path
+}
+
+// expandUserPaths expands ~ in directory keys once, at apply time, so the
+// live config converges on expanded form regardless of whether the values
+// came from the file, env vars, or the settings DB. The DB copy may store
+// the raw "~" form (it is what the UI sent), and the live config may need
+// the expanded form even when YAML outranked the DB — expanding here makes
+// all three sources interchangeable.
+func expandUserPaths(cfg *Config) {
+	cfg.Directories.InputDir = expandTilde(cfg.Directories.InputDir)
+	cfg.Directories.OutputDir = expandTilde(cfg.Directories.OutputDir)
+	cfg.Directories.CompletedDir = expandTilde(cfg.Directories.CompletedDir)
+}
+
+// Env-var precedence (row 13): effective precedence per key is env var >
+// YAML file > default. The YAML override pass (in loadWith, via overrideKey
+// + hasEnv) only applies a YAML key when its env var is unset, which keeps
+// deployment variables (e.g. API_KEY_API_KEY) authoritative even after a
+// settings save wrote a file copy. Viper's AutomaticEnv already layers env
+// over defaults at Unmarshal time, but that env value can be MISSING while
+// an explicit file key is present and vice versa; re-assert the same env
+// vars here, using the identical names hasEnv resolves, so the live config
+// unconditionally matches the documented precedence.
+func applyEnvPriority(cfg *Config) {
+	envVal := func(dotted string) string {
+		if dotted == "processing.region" {
+			if v := os.Getenv("REGION"); v != "" {
+				return v
+			}
+			return os.Getenv("PROCESSING_REGION")
+		}
+		return os.Getenv(strings.ReplaceAll(strings.ToUpper(dotted), ".", "_"))
+	}
+	if v := envVal("server.host"); v != "" {
+		cfg.Server.Host = v
+	}
+	if v := envVal("server.port"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			cfg.Server.Port = p
+		}
+	}
+	if v := envVal("database.path"); v != "" {
+		cfg.Database.Path = v
+	}
+	if v := envVal("m4b_merge.binary"); v != "" {
+		cfg.M4bMerge.Binary = v
+	}
+	if v := envVal("api_key.api_key"); v != "" {
+		cfg.APIKey.APIKey = v
+	}
+	if v := envVal("api_key.base_url"); v != "" {
+		cfg.APIKey.BaseURL = v
+	}
+	if v := envVal("processing.region"); v != "" {
+		cfg.Processing.Region = v
+	}
+}
+
+// parseYAMLMap unmarshals raw YAML bytes into a generic map (nil on error).
+func parseYAMLMap(raw []byte) map[string]any {
+	var m map[string]any
+	if err := yaml.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	return m
 }
 
 // flattenYAMLKeys returns all dotted keys present in a nested map.
@@ -248,8 +494,13 @@ func flattenYAMLKeys(m map[string]any, prefix string) []string {
 	return keys
 }
 
-// overrideKey copies a single dotted key from yamlOnly into target.
+// overrideKey copies a single dotted key from yamlOnly into target — but
+// only when the env var for that key is unset (env wins, so deployment
+// config is never silently frozen by a settings save).
 func overrideKey(target, yamlOnly *Config, key string) {
+	if hasEnv(key) {
+		return
+	}
 	switch key {
 	// Server
 	case "server.host":
@@ -262,7 +513,8 @@ func overrideKey(target, yamlOnly *Config, key string) {
 	// M4bMerge
 	case "m4b_merge.binary":
 		target.M4bMerge.Binary = yamlOnly.M4bMerge.Binary
-	// APIKey
+	// APIKey — the API key persists to the YAML file via settings saves,
+	// so it is honored here (env BRAGI_API_KEY_API_KEY keeps priority).
 	case "api_key.api_key":
 		target.APIKey.APIKey = yamlOnly.APIKey.APIKey
 	case "api_key.base_url":

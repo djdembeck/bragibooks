@@ -24,7 +24,7 @@
 	let jobs = $state<JobItem[]>([]);
 	let cancelling = $state<Set<string>>(new Set());
 	const cleanupMap = $state(new Map<string, () => void>());
-	const pollTimers = $state(new Map<string, ReturnType<typeof setInterval>>());
+	const pollTimers = $state(new Map<string, number>());
 
 	$effect(() => {
 		load();
@@ -38,8 +38,8 @@
 		loading = true;
 		await dl.run(async () => {
 			const [matched, pending, jobsResp] = await Promise.all([
-				get<BooksListResponse>('/books?status=matched&limit=200'),
-				get<BooksListResponse>('/books?status=pending&limit=200'),
+				get<BooksListResponse>('/books?status=matched&limit=100'),
+				get<BooksListResponse>('/books?status=pending&limit=100'),
 				get<JobsListResponse>('/jobs?limit=20'),
 			]);
 			books = [...(matched.books || []), ...(pending.books || [])];
@@ -51,8 +51,8 @@
 	async function loadBooks() {
 		try {
 			const [matched, pending] = await Promise.all([
-				get<BooksListResponse>('/books?status=matched&limit=200'),
-				get<BooksListResponse>('/books?status=pending&limit=200'),
+				get<BooksListResponse>('/books?status=matched&limit=100'),
+				get<BooksListResponse>('/books?status=pending&limit=100'),
 			]);
 			books = [...(matched.books || []), ...(pending.books || [])];
 		} catch {
@@ -97,19 +97,25 @@
 		}
 	}
 
+	// Heartbeats ("alive") and unknown payloads must not clobber the job
+	// status; only real lifecycle values are whitelisted.
+	const JOB_STATUSES = new Set(['queued', 'running', 'done', 'error', 'cancelled']);
+
 	function connectSSE(item: JobItem) {
 		const stop = streamEvents(
 			`/api/jobs/${item.id}/stream`,
 			(raw) => {
 				try {
 					const parsed = JSON.parse(raw);
-					if (parsed.status) item.status = parsed.status;
+					if (parsed.status && JOB_STATUSES.has(String(parsed.status).toLowerCase()))
+						item.status = String(parsed.status).toLowerCase();
 					if (parsed.output) item.output = parsed.output;
 					if (parsed.message && !parsed.output) item.output += parsed.message + '\n';
 					if (parsed.error) item.error = parsed.error;
-					if (parsed.status === 'done' || parsed.status === 'error') {
+					if (item.status === 'done' || item.status === 'error' || item.status === 'cancelled') {
 						stop();
 						cleanupMap.delete(item.id);
+						if (item.status === 'cancelled') stopPolling(item.id);
 						startPolling(item);
 						refreshAfterTerminal(item.id);
 					}
@@ -129,7 +135,7 @@
 
 	function startPolling(item: JobItem) {
 		stopPolling(item.id);
-		pollTimers.set(item.id, setInterval(() => pollJob(item), 3000));
+		pollTimers.set(item.id, window.setInterval(() => pollJob(item), 3000));
 	}
 
 	async function pollJob(item: JobItem) {

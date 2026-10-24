@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -35,7 +34,12 @@ type ProcessingService struct {
 type jobState struct {
 	job      models.ProcessingJob
 	progress chan string
-	done     chan error
+	// progressMu guards every progress send (including the one in
+	// finalize) so a send can never race the channel close in finalize.
+	progressMu sync.Mutex
+	// closed marks that finalize has closed the progress channel.
+	closed bool
+	done   chan error
 	// jobCtx/cancel let the API kill the job's m4b-merge process mid-run.
 	jobCtx context.Context
 	cancel context.CancelFunc
@@ -115,9 +119,12 @@ func (s *ProcessingService) RunWorkers(ctx context.Context, numWorkers int) {
 					}
 					// Skip jobs cancelled while still queued: the per-job
 					// context is already done and the cancel request set the
-					// terminal status. Finalize so any open stream closes.
+					// terminal status in the DB. Finalize so any open stream
+					// closes, then drop the in-memory state (terminal jobs are
+					// readable from the DB).
 					if st := s.GetJob(job.ID); st != nil && st.jobCtx != nil && st.jobCtx.Err() != nil {
 						st.finalize(cancelledProgressMsg, nil)
+						s.forgetJob(job.ID)
 						continue
 					}
 					s.processJob(ctx, job)
@@ -129,8 +136,16 @@ func (s *ProcessingService) RunWorkers(ctx context.Context, numWorkers int) {
 	}
 }
 
+// errActiveJobForBook is returned when the book already has a queued or
+// running job, so the client gets a 409 instead of a duplicate process.
+var errActiveJobForBook = errors.New("book already has an active job")
+
 // QueueJob creates a processing job, persists it to the DB, and enqueues it.
 func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths []string) (string, error) {
+	if bookID > 0 && s.hasActiveJobForBook(bookID) {
+		return "", errActiveJobForBook
+	}
+
 	id := uuid.New().String()
 
 	// Serialize src paths as JSON for storage
@@ -176,20 +191,34 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	}
 	s.mu.Unlock()
 
-	// Mark the book before enqueueing so a fast worker cannot finish before
-	// the request handler records the transitional state.
-	if bookID > 0 {
-		if _, err := s.db.Exec(
-			"UPDATE books SET status = 'processing', status_message = '' WHERE id = ?",
-			bookID,
-		); err != nil {
-			jobCancel() // the job will never run; release its context
-			return "", fmt.Errorf("mark book processing: %w", err)
-		}
-	}
-
+	// The book is intentionally NOT flipped to 'processing' here: the
+	// transition happens when a worker starts the job (processJob). A queued
+	// job is a promise, not work — cancelling it then requires no book
+	// status rollback, and the UI never shows a book as 'processing' while
+	// the job is still queued. (Pre-queued status 'matched'/'pending' is
+	// preserved as-is.)
 	s.workerCh <- job
 	return id, nil
+}
+
+// hasActiveJobForBook reports whether the book already has a job that has
+// not finished, guarding against duplicate queued runs of the same source.
+func (s *ProcessingService) hasActiveJobForBook(bookID int64) bool {
+	var n int
+	err := s.db.QueryRow(
+		"SELECT COUNT(*) FROM processing_jobs WHERE book_id = ? AND status IN (?, ?)",
+		bookID, jobStatusQueued, jobStatusRunning,
+	).Scan(&n)
+	return err == nil && n > 0
+}
+
+// forgetJob removes a job's in-memory state under the service mutex. Terminal
+// job state remains readable from the DB (ListJobs/GetJobStatus read SQL), so
+// dropping the map entry frees memory without losing information.
+func (s *ProcessingService) forgetJob(id string) {
+	s.mu.Lock()
+	delete(s.jobs, id)
+	s.mu.Unlock()
 }
 
 // GetJob returns the in-memory state for a job, or nil if not found.
@@ -215,15 +244,39 @@ var errJobTerminal = errors.New("job already finished")
 
 const cancelledProgressMsg = `{"status":"cancelled","message":"job cancelled"}`
 
-// finalize sends the terminal progress event and signals the done channel
-// exactly once, so that the SSE stream closes and the done receiver unblocks
-// regardless of which component (worker, timeout, or cancel request) won.
+// sendProgress delivers a progress event without ever panicking on a closed
+// channel: after finalize runs, late sends (e.g. a worker reaching the
+// "running" step milliseconds after a queued cancel) must be dropped.
+func (st *jobState) sendProgress(msg string) {
+	st.progressMu.Lock()
+	defer st.progressMu.Unlock()
+	if st.closed {
+		return
+	}
+	select {
+	case st.progress <- msg:
+	default:
+	}
+}
+
+// finalize sends the terminal progress event, closes the progress channel,
+// and signals the done channel — exactly once, so the SSE stream detects
+// termination (a closed progress channel ends its loop; without the close it
+// would keep heartbeating after the terminal event) and the done receiver
+// unblocks, regardless of which component (worker, timeout, or cancel
+// request) won.
 func (st *jobState) finalize(msg string, doneErr error) {
 	st.finalized.Do(func() {
-		select {
-		case st.progress <- msg:
-		default:
+		st.progressMu.Lock()
+		if !st.closed {
+			select {
+			case st.progress <- msg:
+			default:
+			}
+			close(st.progress)
+			st.closed = true
 		}
+		st.progressMu.Unlock()
 		select {
 		case st.done <- doneErr:
 		default:
@@ -234,8 +287,11 @@ func (st *jobState) finalize(msg string, doneErr error) {
 // CancelJob cancels a processing job and returns the job's book_id.
 //
 // Behavior by current DB status:
-//   - queued:  the job is marked 'cancelled' in the DB immediately and the
-//     book is reset to 'matched'; the worker will dequeue the job and skip it.
+//   - queued:  the job is marked 'cancelled' in the DB immediately; the
+//     book is left untouched because queueing no longer flips it to
+//     'processing' (that transition happens at worker start, so a queued
+//     job's book is still in its pre-queue state — 'matched'/'pending').
+//     The worker will dequeue the job and skip it.
 //   - running: the per-job context is cancelled so m4b-merge is killed via its
 //     context; the worker's finalizeCancelled then writes the terminal
 //     'cancelled' status and resets the book. CancelJob does not touch the
@@ -268,12 +324,6 @@ func (s *ProcessingService) CancelJob(jobID string) (sql.NullInt64, error) {
 			"UPDATE processing_jobs SET status = ?, completed_at = datetime('now') WHERE id = ?",
 			jobStatusCancelled, jobID,
 		)
-		if bookID.Valid {
-			s.db.Exec(
-				"UPDATE books SET status = 'matched', status_message = '' WHERE id = ? AND status = 'processing'",
-				bookID.Int64,
-			)
-		}
 		// Close any open progress stream; the worker's skip path finalizes
 		// idempotently via sync.Once.
 		if state != nil {
@@ -316,9 +366,14 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		// Cancelled between dequeue and here; the cancel request already set
 		// the terminal status.
 		state.finalize(cancelledProgressMsg, nil)
+		s.forgetJob(job.ID)
 		return
 	}
 
+	// The queued -> processing book transition (and job -> running) happens
+	// HERE, at worker start, not in QueueJob: keeping the book in its
+	// pre-queue state ('matched'/'pending') while the job waits in the queue
+	// is what lets a queued cancel need no status rollback.
 	if job.BookID.Valid {
 		s.db.Exec(
 			"UPDATE books SET status = 'processing', status_message = '' WHERE id = ?",
@@ -334,10 +389,7 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 	)
 
 	if state != nil {
-		select {
-		case state.progress <- `{"status":"running","message":"started processing"}`:
-		default:
-		}
+		state.sendProgress(`{"status":"running","message":"started processing"}`)
 	}
 
 	// Get ASIN from the matched book
@@ -381,10 +433,11 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		if state != nil {
 			state.finalize(`{"status":"error","message":"`+escapeJSON(argsErr.Error())+`"}`, argsErr)
 		}
+		s.forgetJob(job.ID)
 		return
 	}
 
-	result, err := s.proc.Run(runCtx, srcPaths, asin)
+	result, err := s.proc.Run(runCtx, job.ID, srcPaths, asin)
 	if err != nil {
 		// A cancellation during the run kills m4b-merge via its context;
 		// that is 'cancelled', not 'error'.
@@ -409,6 +462,7 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		if state != nil {
 			state.finalize(`{"status":"error","message":"`+escapeJSON(err.Error())+`"}`, err)
 		}
+		s.forgetJob(job.ID)
 		return
 	}
 
@@ -436,6 +490,7 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 	if state != nil {
 		state.finalize(`{"status":"done","message":"processing complete"}`, nil)
 	}
+	s.forgetJob(job.ID)
 }
 
 // finalizeCancelled marks a running job cancelled in the DB after its
@@ -464,6 +519,7 @@ func (s *ProcessingService) finalizeCancelled(job *models.ProcessingJob) {
 	if state := s.GetJob(job.ID); state != nil {
 		state.finalize(cancelledProgressMsg, nil)
 	}
+	s.forgetJob(job.ID)
 }
 
 // StartProcessingRequest is the JSON body for POST /api/process.
@@ -529,7 +585,13 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 		}
 
 		jobID, err := h.svc.ProcessingSvc.QueueJob(r.Context(), bookID, inputPaths)
-		if err != nil {
+		switch {
+		case errors.Is(err, errActiveJobForBook):
+			// The book already has a queued/running job: re-queuing would
+			// double-process the same source, so refuse.
+			writeError(w, http.StatusConflict, fmt.Sprintf("book %d already has an active processing job", bookID))
+			return
+		case err != nil:
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("queue job: %v", err))
 			return
 		}
@@ -691,22 +753,28 @@ func (h *Handler) StreamJob(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	// Send initial state from DB
+	// Send initial state from DB. Nullable columns scan into NullString:
+	// active jobs have NULL output_file/started_at/completed_at, which a
+	// plain string scan rejects (silently killing the stream previously).
 	row := h.svc.DB.QueryRow(
 		"SELECT status, output, error, output_file, started_at, completed_at FROM processing_jobs WHERE id = ?",
 		jobID,
 	)
-	var status, output, outputFile string
-	var errStr, startedAt, completedAt string
-	err := row.Scan(&status, &output, &errStr, &outputFile, &startedAt, &completedAt)
-	if err == sql.ErrNoRows {
-		fmt.Fprintf(w, "data: %s\n\n", json.RawMessage(`{"status":"error","message":"job not found"}`))
-		flusher.Flush()
+	var status, output string
+	var dbErr, dbOutputFile sql.NullString
+	var dbStartedAt, dbCompletedAt sql.NullString
+	if err := row.Scan(&status, &output, &dbErr, &dbOutputFile, &dbStartedAt, &dbCompletedAt); err != nil {
+		if err == sql.ErrNoRows {
+			fmt.Fprintf(w, "data: %s\n\n", json.RawMessage(`{"status":"error","message":"job not found"}`))
+			flusher.Flush()
+			return
+		}
+		log.Printf("stream job %s initial state: %v", jobID, err)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("query job: %v", err))
 		return
 	}
-	if err != nil {
-		return
-	}
+	errStr := dbErr.String
+	outputFile := dbOutputFile.String
 
 	// Check if already done
 	if status == "done" || status == "error" || status == "cancelled" {
@@ -822,6 +890,3 @@ func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
-
-// Ensure io import is used
-var _ = io.EOF

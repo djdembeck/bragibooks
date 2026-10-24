@@ -14,7 +14,6 @@ import (
 	"github.com/bragibooks/bragibooks/internal/audio"
 	"github.com/bragibooks/bragibooks/internal/audiobookdb"
 	"github.com/bragibooks/bragibooks/internal/config"
-	"github.com/bragibooks/bragibooks/internal/server"
 )
 
 // Services holds all dependencies needed by API handlers.
@@ -41,11 +40,14 @@ func (h *Handler) getAudiobookDB() *audiobookdb.Client {
 	return h.svc.AudiobookDB.Load().(*audiobookdb.Client)
 }
 
-// RegisterRoutes mounts all API routes on the given chi router.
-func (h *Handler) RegisterRoutes(r chi.Router) {
+// RegisterRoutes mounts all API routes on the given chi router behind the
+// auth middleware (token or loopback-LAN, see auth.go). The /api/health
+// route is intentionally NOT mounted here: the caller serves it at the
+// router root, outside the gated subtree, so liveness probes stay
+// unauthenticated.
+func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Handler) {
 	r.Route("/api", func(r chi.Router) {
-		// Health
-		r.Get("/health", server.HealthCheck)
+		r.Use(auth)
 
 		// Books CRUD
 		r.Get("/books", h.ListBooks)

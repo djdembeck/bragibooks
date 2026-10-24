@@ -3,7 +3,7 @@
 	import { get, put, post } from '$lib/api';
 	import type { PageData } from './$types';
 	import type { BookWithPeople, ProcessingJob, JobsListResponse, AudiobookDBBook, AudiobookDBRelease } from '$lib/types';
-	import { formatRuntime, peopleByRole } from '$lib/types';
+	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities } from '$lib/types';
 	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '$lib/adbError';
 	import { StatusBadge, AbdTag, EmptyState, Button, Alert, ErrorDetail, Skeleton, CoverArt } from '$lib/components';
 	import { ExternalLink, ArrowLeft } from '@lucide/svelte';
@@ -15,7 +15,9 @@
 	const authorNames = $derived(book ? book.authors.map((a) => a.name).join(', ') : '');
 	const narratorNames = $derived(book ? book.narrators.map((n) => n.name).join(', ') : '');
 
-	const abdHref = $derived(book?.audiobookdb_book_id ? `https://audiobookdb.org/books/${book.audiobookdb_book_id}` : null);
+	const abdBookId = $derived(normStr(book?.audiobookdb_book_id));
+	const abdHref = $derived(abdBookId ? `https://audiobookdb.org/books/${abdBookId}` : null);
+	const asinStr = $derived(normStr(book?.asin));
 
 	/* ── Job history ─────────────────────────────────────────────
 	 * Newest-first from the queue API, filtered server-side by book_id.
@@ -31,7 +33,7 @@
 		const id = book?.id;
 		if (!id) return;
 		let cancelled = false;
-		let t: ReturnType<typeof setInterval> | null = null;
+		let t: number | null = null;
 		const stop = () => {
 			if (t) clearInterval(t);
 			t = null;
@@ -50,7 +52,7 @@
 			}
 			// Poll only while this book has an in-flight job; otherwise stop.
 			if (!cancelled && book?.id === id) {
-				if (inFlightJob && !t) t = setInterval(load, 8000);
+				if (inFlightJob && !t) t = window.setInterval(load, 8000);
 				else if (!inFlightJob) stop();
 			}
 		};
@@ -143,7 +145,7 @@
 	let abdError = $state<CleanedAdbError | null>(null);
 
 	async function loadAbd() {
-		const id = book?.audiobookdb_book_id;
+		const id = normStr(book?.audiobookdb_book_id);
 		if (!id) return;
 		abdLoading = true;
 		abdError = null;
@@ -154,7 +156,7 @@
 			// Runtime, release date and publisher live on the release.
 			const rid = b.releases?.[0]?.id;
 			const r = rid ? await get<AudiobookDBRelease>(`/search/releases/${rid}`) : null;
-			if (book?.audiobookdb_book_id === id) {
+			if (normStr(book?.audiobookdb_book_id) === id) {
 				abdBook = b;
 				abdRelease = r;
 			}
@@ -173,7 +175,7 @@
 
 	$effect(() => {
 		// Fetch once per expansion; retry re-invokes the same loader.
-		if (abdExpanded && book?.audiobookdb_book_id) loadAbd();
+		if (abdExpanded && normStr(book?.audiobookdb_book_id)) loadAbd();
 	});
 
 	interface DiffRow {
@@ -229,12 +231,14 @@
 	const descriptionHasMarkup = $derived(Boolean(book?.description?.match(/<[a-zA-Z/][^>]*>/)));
 	const cleanDescription = $derived(
 		book?.description
-			? book.description
-					.replace(/<br\s*\/?>/gi, '\n')
-					.replace(/<\/p>/gi, '\n\n')
-					.replace(/<[^>]+>/g, '')
-					.replace(/\n{3,}/g, '\n\n')
-					.trim()
+			? decodeHtmlEntities(
+					book.description
+						.replace(/<br\s*\/?>/gi, '\n')
+						.replace(/<\/p>/gi, '\n\n')
+						.replace(/<[^>]+>/g, '')
+						.replace(/\n{3,}/g, '\n\n')
+						.trim()
+				)
 			: ''
 	);
 
@@ -292,7 +296,7 @@
 			<div class="detail__status">
 				<div class="detail__badges">
 					<StatusBadge status={book.status} />
-					{#if book.audiobookdb_book_id}
+					{#if abdBookId}
 						<!-- Single provenance mark — clickable, links to the record -->
 						<AbdTag withLabel href={abdHref ?? undefined} />
 					{/if}
@@ -358,10 +362,10 @@
 						<dd class="detail__meta-value font-mono">{book.format_type}</dd>
 					</div>
 				{/if}
-				{#if book.asin}
+				{#if asinStr}
 					<div class="detail__meta-row">
 						<dt class="detail__meta-label">ASIN</dt>
-						<dd class="detail__meta-value font-mono">{book.asin}</dd>
+						<dd class="detail__meta-value font-mono">{asinStr}</dd>
 					</div>
 				{/if}
 			</dl>
@@ -469,7 +473,7 @@
 			{/if}
 		</div>
 
-		{#if !book.audiobookdb_book_id}
+		{#if !abdBookId}
 			<p class="record-section__note">Not matched to AudiobookDB. Use <a class="record-section__inline-link" href="/match">Re-match</a> below to link it.</p>
 		{:else}
 			{#if !abdExpanded}

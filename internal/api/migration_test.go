@@ -106,6 +106,7 @@ func setupNewSchema(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS settings (
 			id INTEGER PRIMARY KEY CHECK(id = 1),
 			audiobookdb_api_key TEXT DEFAULT '',
+			audiobookdb_base_url TEXT DEFAULT 'https://audiobookdb.org/api',
 			m4b_merge_binary TEXT DEFAULT 'm4b-merge',
 			input_dir TEXT DEFAULT '',
 			output_dir TEXT DEFAULT '',
@@ -190,7 +191,10 @@ func TestMigrateBooks(t *testing.T) {
 	}
 	wants := []bookWant{
 		{title: "Book One", asin: sql.NullString{String: "B001", Valid: true}, desc: "short1 long1", publisher: "PubA", status: "done", converted: true},
-		{title: "Book Two", asin: sql.NullString{String: "B002", Valid: true}, desc: "short2 long2", publisher: "PubB", status: "processing", converted: false},
+		// "Processing" maps to "pending" (the new design keeps a
+		// processing_jobs row per processing state; none is created for
+		// migrated books, so "processing" would leave them stuck).
+		{title: "Book Two", asin: sql.NullString{String: "B002", Valid: true}, desc: "short2 long2", publisher: "PubB", status: "pending", converted: false},
 		{title: "Book Three", asin: sql.NullString{Valid: false}, desc: "short3", publisher: "PubC", status: "error", converted: true},
 	}
 
@@ -379,7 +383,7 @@ func TestMigrateSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = migrateSettings(legacy, newDB)
+	err = migrateSettings(legacy, newDB, "")
 	if err != nil {
 		t.Fatalf("migrateSettings error: %v", err)
 	}
@@ -426,10 +430,84 @@ func TestMigrateSettingsNoRows(t *testing.T) {
 	}
 
 	// No importer_setting row inserted
-	err := migrateSettings(legacy, newDB)
+	err := migrateSettings(legacy, newDB, "")
 	if err != nil {
 		t.Fatalf("migrateSettings with no rows returned error: %v", err)
 	}
+}
+
+// --- TestMigrateSettingsCarriesLiveCredentialValues (row 53) ---
+
+// The new DB must arrive carrying an audiobookdb_api_key / base URL (DB row
+// or live YAML/env value) and a settings migration must NOT wipe them:
+// the existing row wins, and the live base URL is used when the row is
+// empty.
+func TestMigrateSettingsCarriesLiveCredentialValues(t *testing.T) {
+	t.Run("existing row wins", func(t *testing.T) {
+		legacy := newLegacyDB(t)
+		t.Cleanup(func() { legacy.Close() })
+		newDB := newEmptyDB(t)
+		t.Cleanup(func() { newDB.Close() })
+		if err := setupNewSchema(newDB); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := legacy.Exec(`INSERT INTO importer_setting (id, input_directory, output_directory,
+			completed_directory, num_cpus, output_scheme)
+			VALUES (1, '/legacy/in', '/legacy/out', '/legacy/done', 2, '{author}/{title}')`); err != nil {
+			t.Fatal(err)
+		}
+		// Row already present with the user's credentials.
+		if _, err := newDB.Exec(`INSERT INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary)
+			VALUES (1, 'db-key', 'https://audiobookdb.org/api', 'm4b-merge')`); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := migrateSettings(legacy, newDB, "https://live.example/api"); err != nil {
+			t.Fatalf("migrateSettings: %v", err)
+		}
+		var apiKey, baseURL, inputDir string
+		if err := newDB.QueryRow("SELECT audiobookdb_api_key, audiobookdb_base_url, input_dir FROM settings WHERE id = 1").
+			Scan(&apiKey, &baseURL, &inputDir); err != nil {
+			t.Fatal(err)
+		}
+		if apiKey != "db-key" {
+			t.Errorf("api key = %q, want db-key (carried through)", apiKey)
+		}
+		if baseURL != "https://audiobookdb.org/api" {
+			t.Errorf("base URL = %q, want existing row value (row wins over live)", baseURL)
+		}
+		if inputDir != "/legacy/in" {
+			t.Errorf("input_dir = %q, want /legacy/in (legacy value migrated)", inputDir)
+		}
+	})
+
+	t.Run("live base URL fills empty row", func(t *testing.T) {
+		legacy := newLegacyDB(t)
+		t.Cleanup(func() { legacy.Close() })
+		newDB := newEmptyDB(t)
+		t.Cleanup(func() { newDB.Close() })
+		if err := setupNewSchema(newDB); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := legacy.Exec(`INSERT INTO importer_setting (id, input_directory, output_directory,
+			completed_directory, num_cpus, output_scheme)
+			VALUES (1, '/legacy/in', '/legacy/out', '/legacy/done', 2, '{author}/{title}')`); err != nil {
+			t.Fatal(err)
+		}
+
+		// No existing row → live base URL (YAML/env) is carried into the
+		// merged row instead of the hard-coded default.
+		if err := migrateSettings(legacy, newDB, "https://audiobookdb.org/api"); err != nil {
+			t.Fatalf("migrateSettings: %v", err)
+		}
+		var baseURL string
+		if err := newDB.QueryRow("SELECT audiobookdb_base_url FROM settings WHERE id = 1").Scan(&baseURL); err != nil {
+			t.Fatal(err)
+		}
+		if baseURL != "https://audiobookdb.org/api" {
+			t.Errorf("base URL = %q, want the live value", baseURL)
+		}
+	})
 }
 
 // --- TestCheckLegacyTables ---
@@ -545,7 +623,7 @@ func TestRunLegacyMigration(t *testing.T) {
 	newDB, _ := newFileDB(t)
 	t.Cleanup(func() { newDB.Close() })
 
-	result, err := RunLegacyMigration(legacyPath, newDB)
+	result, err := RunLegacyMigration(legacyPath, newDB, "")
 	if err != nil {
 		t.Fatalf("RunLegacyMigration error: %v", err)
 	}
@@ -659,7 +737,7 @@ func TestRunLegacyMigration_EmptyLegacy(t *testing.T) {
 	newDB, _ := newFileDB(t)
 	t.Cleanup(func() { newDB.Close() })
 
-	result, err := RunLegacyMigration(legacyPath, newDB)
+	result, err := RunLegacyMigration(legacyPath, newDB, "")
 	if err != nil {
 		t.Fatalf("RunLegacyMigration on empty legacy: %v", err)
 	}
@@ -685,7 +763,7 @@ func TestRunLegacyMigration_InvalidLegacyPath(t *testing.T) {
 	t.Cleanup(func() { newDB.Close() })
 
 	// Non-existent file — sql.Open succeeds but checkLegacyTables should fail
-	_, err := RunLegacyMigration("/nonexistent/path/db.sqlite3", newDB)
+	_, err := RunLegacyMigration("/nonexistent/path/db.sqlite3", newDB, "")
 	if err == nil {
 		t.Fatal("expected error for non-existent legacy DB path, got nil")
 	}
@@ -708,7 +786,7 @@ func TestRunLegacyMigration_NotALegacyDB(t *testing.T) {
 	newDB, _ := newFileDB(t)
 	t.Cleanup(func() { newDB.Close() })
 
-	_, err = RunLegacyMigration(path, newDB)
+	_, err = RunLegacyMigration(path, newDB, "")
 	if err == nil {
 		t.Fatal("expected error for non-legacy DB, got nil")
 	}
@@ -729,7 +807,7 @@ func TestRunLegacyMigration_LegacyDBUntouched(t *testing.T) {
 	newDB, _ := newFileDB(t)
 	t.Cleanup(func() { newDB.Close() })
 
-	_, err = RunLegacyMigration(legacyPath, newDB)
+	_, err = RunLegacyMigration(legacyPath, newDB, "")
 	if err != nil {
 		t.Fatalf("RunLegacyMigration error: %v", err)
 	}

@@ -63,7 +63,6 @@ docker run --rm -d --name bragibooks \
   --env DIRECTORIES_INPUT_DIR=/input \
   --env DIRECTORIES_OUTPUT_DIR=/output \
   --env DIRECTORIES_COMPLETED_DIR=/input/done \
-  --env PROCESSING_REGION=us \
   ghcr.io/djdembeck/bragibooks:main
 ```
 
@@ -102,7 +101,6 @@ The normal work is deliberately linear: **select, match, queue, finish**.
      -e DIRECTORIES_OUTPUT_DIR=/output \
      -e DIRECTORIES_COMPLETED_DIR=/input/done \
      -e PROCESSING_NUM_CPUS=1 \
-     -e PROCESSING_REGION=us \
      -e API_KEY_API_KEY="${AUDIOBOOKDB_API_KEY:-}" \
      ghcr.io/djdembeck/bragibooks:main
    ```
@@ -118,7 +116,7 @@ The normal work is deliberately linear: **select, match, queue, finish**.
 5. **Queue:** submit the matched batch. Bragibooks invokes `m4b-merge` to merge, convert, clean, tag, and repackage the source files.
 6. **Finish:** follow live processing output in the browser, then review completed books and any errors. Jobs can take from seconds to hours depending on the number and type of files.
 
-Set `PROCESSING_REGION` to the Audible region you use for metadata lookup, such as `us`, `uk`, `de`, or `fr`. Bragibooks also accepts the legacy `REGION` environment variable as an alias.
+`PROCESSING_REGION` (and the legacy `REGION` alias) is accepted for compatibility with older setups; it has no effect on processing.
 
 ## Configuration
 
@@ -134,12 +132,12 @@ The key environment variables are:
 | `M4B_MERGE_BINARY` | `m4b-merge` executable name or path | `m4b-merge` |
 | `API_KEY_API_KEY` | Optional AudiobookDB API key | empty |
 | `API_KEY_BASE_URL` | AudiobookDB API base URL | `https://audiobookdb.org/api` |
-| `DIRECTORIES_INPUT_DIR` | Source audiobook directory | `/input` |
-| `DIRECTORIES_OUTPUT_DIR` | Destination directory for processed books | `/output` |
-| `DIRECTORIES_COMPLETED_DIR` | Directory for completed source files | `/input/done` |
+| `DIRECTORIES_INPUT_DIR` | Source audiobook directory | unset; Compose sets `/input` |
+| `DIRECTORIES_OUTPUT_DIR` | Destination directory for processed books | unset; Compose sets `/output` |
+| `DIRECTORIES_COMPLETED_DIR` | Directory for completed source files | unset; Compose sets `/input/done` |
 | `PROCESSING_NUM_CPUS` | Number of processing workers | `1` |
 | `PROCESSING_PATH_FORMAT` | Output path format | `{author}/{title}` |
-| `PROCESSING_REGION` | Audible metadata region (`us`, `uk`, `de`, `fr`, and others) | `us` |
+| `PROCESSING_REGION` | Accepted for compatibility with older setups; no effect | — |
 | `PROCESSING_LOG_LEVEL` | Processing log level | `info` |
 
 For a YAML-based setup, create `config/config.yaml` in the mounted config directory:
@@ -163,7 +161,7 @@ processing:
 <details>
 <summary>All configuration keys and precedence details</summary>
 
-Environment variables use the uppercase, prefixed form of the YAML path: `server.port` becomes `SERVER_PORT`, `directories.input_dir` becomes `DIRECTORIES_INPUT_DIR`, and so on. The remaining supported keys are `database.path`, `m4b_merge.binary`, `api_key.api_key`, `api_key.base_url`, `processing.log_level`, and `processing.path_format`.
+Environment variables use the uppercase, prefixed form of the YAML path: `server.port` becomes `SERVER_PORT`, `directories.input_dir` becomes `DIRECTORIES_INPUT_DIR`, and so on. The remaining supported keys are `database.path`, `m4b_merge.binary`, `api_key.api_key`, `api_key.base_url`, `processing.log_level`, `processing.path_format`, and `processing.region`.
 
 The configuration file is normally `config/config.yaml`; the loader also searches the working directory, `/app/data`, and `/config`. A value explicitly written in YAML overrides its environment-variable counterpart. If no YAML file exists, environment variables and defaults are used.
 

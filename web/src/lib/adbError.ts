@@ -90,24 +90,31 @@ function backendMessage(working: string): string | null {
 	return null;
 }
 
+/**
+ * The proxy's `audiobookdb 429:` frame and the JSON:API "rate limit" body
+ * title are the two signals that the upstream limiter fired. A bare "429"
+ * elsewhere (a path, a count, a timestamp) is not.
+ */
+function isAdbRateLimited(text: string): boolean {
+	const body = extractJson(text);
+	const walk = (value: string) => {
+		if (/rate limit/i.test(value) || /audiobookdb\s+429\b/i.test(value)) return true;
+		const inner = extractJson(value);
+		if (inner) {
+			const msg = jsonApiMessage(inner);
+			if (msg && walk(msg)) return true;
+			const detail = inner.error ?? inner.detail ?? inner.message;
+			if (typeof detail === 'string' && detail && walk(detail)) return true;
+		}
+		return false;
+	};
+	if (walk(text)) return true;
+	return body ? walk(JSON.stringify(body)) : false;
+}
+
 export function cleanAdbError(message: string): CleanedAdbError {
 	const raw = message;
 	let working = message;
-
-	const rateLimited =
-		/429|rate limit/i.test(working) || ((): boolean => {
-			const body = extractJson(working);
-			return body ? /429|rate limit/i.test(JSON.stringify(body)) : false;
-		})();
-
-	if (rateLimited) {
-		return {
-			message:
-				'AudiobookDB rate limit reached — wait a minute and retry, or add an API key in Settings for higher limits (free account).',
-			rateLimited: true,
-			raw
-		};
-	}
 
 	// Nested bodies: the proxy wraps upstream text in {"error": "<text>"},
 	// and that text may itself carry a JSON:API body.
@@ -132,9 +139,20 @@ export function cleanAdbError(message: string): CleanedAdbError {
 	working = working.replace(/^audiobookdb [^:]+:\s*/, '');
 
 	// Backend-native Go errors (os/exec) from the API's {"error": "..."} envelope.
+	// Checked before the rate limit: an ENOENT/permission path that merely
+	// contains "429" is a missing directory, not an upstream limit.
 	const backend = backendMessage(working);
 	if (backend) {
 		return { message: backend, rateLimited: false, needsSettings: true, raw };
+	}
+
+	if (isAdbRateLimited(raw)) {
+		return {
+			message:
+				'AudiobookDB rate limit reached — wait a minute and retry, or add an API key in Settings for higher limits (free account).',
+			rateLimited: true,
+			raw
+		};
 	}
 
 	if (/cannot unmarshal|json: /i.test(working)) {

@@ -29,17 +29,14 @@ export interface DelayedLoadState {
 export function delayedLoad(options: DelayedLoadOptions = {}): DelayedLoadState {
 	let showSkeleton = $state(false);
 	let error = $state<CleanedAdbError | null>(null);
-	let timer: number | null = null;
 	let generation = 0;
 	const delay = options.delay ?? 200;
 
 	async function run(fn: () => Promise<void>) {
 		const g = ++generation;
-		if (timer !== null) {
-			clearTimeout(timer);
-			timer = null;
-		}
-		timer = window.setTimeout(() => {
+		// Per-call timer id: a stale load only clears its own timer, so an
+		// earlier in-flight run can't cancel the skeleton of a newer one.
+		const timer = window.setTimeout(() => {
 			if (g === generation) {
 				showSkeleton = true;
 			}
@@ -55,10 +52,7 @@ export function delayedLoad(options: DelayedLoadOptions = {}): DelayedLoadState 
 				error = toCleanedError(e);
 			}
 		} finally {
-			if (timer !== null) {
-				clearTimeout(timer);
-				timer = null;
-			}
+			clearTimeout(timer);
 			if (g === generation) {
 				showSkeleton = false;
 			}

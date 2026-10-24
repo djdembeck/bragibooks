@@ -12,6 +12,7 @@ config/*.db-wal
 config/*.db-shm
 config/*.sqlite3*
 config/secret_key.txt
+config/config.yaml
 # Playwright CLI debug artifacts
 /.playwright-cli/
 # Scratch build output

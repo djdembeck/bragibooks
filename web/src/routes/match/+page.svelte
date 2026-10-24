@@ -12,7 +12,7 @@
 		Settings,
 		UpdateBookRequest
 	} from '$lib/types';
-	import { extractAsin, pickCover, hitCoverUrl, bookCoverUrl } from '$lib/types';
+	import { extractAsin, pickCover, hitCoverUrl, bookCoverUrl, decodeHtmlEntities } from '$lib/types';
 	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, AbdTag } from '$lib/components';
 	import { toCleanedError, type CleanedAdbError } from '$lib/adbError';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
@@ -174,7 +174,7 @@
 				} catch {
 					// Settings unavailable — previews stay visibly unresolved
 				}
-				const response = await get<BooksListResponse>('/books?status=pending&limit=200');
+				const response = await get<BooksListResponse>('/books?status=pending&limit=100');
 				candidates = (response.books || []).map((book) => ({
 					bookId: book.id,
 					srcPath: book.src_path,
@@ -659,16 +659,7 @@
 
 	function plainText(value: string | null | undefined): string {
 		if (!value) return '';
-		return value
-			.replace(/<[^>]*>/g, ' ')
-			.replace(/&nbsp;/gi, ' ')
-			.replace(/&amp;/gi, '&')
-			.replace(/&quot;/gi, '"')
-			.replace(/&#39;|&apos;/gi, "'")
-			.replace(/&lt;/gi, '<')
-			.replace(/&gt;/gi, '>')
-			.replace(/\s+/g, ' ')
-			.trim();
+		return decodeHtmlEntities(value.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
 	}
 
 	/** Series records carry IDs and positions only. A display name is used

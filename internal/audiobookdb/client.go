@@ -25,17 +25,62 @@ type Client struct {
 }
 
 // NewClient creates an audiobookdb client. An empty apiKey is valid for
+// keyless/Guest requests; a non-empty one is sent as X-API-Key. If baseURL
+// does not conform to the trusted-origin policy (https://audiobookdb.org or
+// a subdomain; localhost dev targets only behind BRAGIBOOKS_ALLOW_LOCAL_ADB)
+// the request and every subsequent request it built is treated as
+// untrusted and fails client-side.
 func NewClient(apiKey string, baseURL string) *Client {
 	jar, _ := cookiejar.New(nil)
-	return &Client{
+	c := &Client{
 		APIKey:  apiKey,
 		baseURL: baseURL,
-		http:    &http.Client{Timeout: 30 * time.Second, Jar: jar},
 	}
+	c.http = &http.Client{
+		Timeout: 30 * time.Second,
+		Jar:     jar,
+		// Defense-in-depth (finding: SSRF): every redirect hop must stay
+		// on a trusted origin, refusing a same-origin server that
+		// redirects to an exfiltration sink.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if err := c.validateTarget(req.URL.String()); err != nil {
+				return fmt.Errorf("refused audiobookdb redirect to untrusted target: %w", err)
+			}
+			return nil
+		},
+	}
+	if err := c.validateTarget(baseURL); err != nil {
+		// Blank the base URL so all requests fail with the same clear
+		// trusted-origin error; never attempt the network.
+		c.baseURL = ""
+	}
+	return c
 }
 
-// do executes a request and decodes the JSON response into v.
+// validateTarget enforces the trusted-origin policy for the target URL
+// (finding: SSRF defense-in-depth). The settings endpoint validates the
+// same thing at update time; this is the second line at request time, so a
+// configured-out-of-band base URL (env/YAML) cannot become an exfiltration
+// sink either. localhost dev targets are allowed only behind
+// BRAGIBOOKS_ALLOW_LOCAL_ADB=1. The policy itself lives in TrustedBaseURL,
+// shared with the settings validator.
+func (c *Client) validateTarget(baseURL string) error {
+	_, err := TrustedBaseURL(baseURL)
+	return err
+}
+
+// do executes a request and decodes the JSON response into v. The request
+// target is re-validated here (defense-in-depth against SSRF) so that even
+// a request built against a non-conforming base URL (e.g. after a redirect
+// to an attacker-controlled origin, or an out-of-band base URL) is refused.
 func (c *Client) do(ctx context.Context, req *http.Request, v interface{}) error {
+	// Defense-in-depth SSRF gate: refuse any request whose target does not
+	// conform to the same trusted-origin policy the base URL was checked
+	// against at construction. This also fails closed when a request
+	// somehow carries an untrusted origin (e.g. a redirect target).
+	if err := c.validateTarget(req.URL.String()); err != nil {
+		return fmt.Errorf("refused audiobookdb request to untrusted target: %w", err)
+	}
 	if c.APIKey != "" {
 		req.Header.Set("X-API-Key", c.APIKey)
 	} else if !safeMethod(req.Method) {
@@ -137,12 +182,30 @@ func (c *Client) jarToken() string {
 	return ""
 }
 
+// searchTakeCap bounds the number of documents fetched from upstream.
+// The upstream API has no reliable paged-search contract; capping the take
+// keeps a large UI request from pulling the full index.
+const searchTakeCap = 500
+
 // Search calls POST /search and returns matching results.
 // The upstream API accepts {"q": "..."} and returns a bare array of
 // search documents with a "collection" field indicating the entity type.
 // The "type" parameter is optional and causes 500s on some deployments,
-// so we omit it and filter client-side instead.
+// so it is omitted and the results are filtered client-side instead.
+// skip/take are honored client-side after the type filter: negative values
+// are treated as zero and take is clamped to searchTakeCap.
 func (c *Client) Search(ctx context.Context, query string, types []string, skip, take int) (*SearchResponse, error) {
+	if skip < 0 {
+		skip = 0
+	}
+	// take <= 0 means "no explicit cap" — bounded by searchTakeCap so an
+	// unbounded request can never pull the full index.
+	if take < 0 {
+		take = 0
+	}
+	if take == 0 || take > searchTakeCap {
+		take = searchTakeCap
+	}
 	body, _ := json.Marshal(map[string]any{
 		"q": query,
 	})
@@ -163,7 +226,7 @@ func (c *Client) Search(ctx context.Context, query string, types []string, skip,
 	for _, t := range types {
 		wantTypes[strings.TrimSpace(t)] = true
 	}
-	hits := make([]SearchHit, 0, len(docs))
+	hits := make([]SearchHit, 0, take)
 	for _, doc := range docs {
 		hit := SearchHit{Data: json.RawMessage("{}")}
 		if rawID, ok := doc["id"]; ok {
@@ -176,11 +239,20 @@ func (c *Client) Search(ctx context.Context, query string, types []string, skip,
 		if len(wantTypes) > 0 && !wantTypes[hit.Type] {
 			continue
 		}
-		// Re-marshal the full doc as Data
+		// Pagination: skip-leading, take-capped.
+		if skip > 0 {
+			skip--
+			continue
+		}
+		// Re-marshal the full doc as Data (take == 0 means unbounded, so
+		// the cap only applies once the first hit lands).
 		if full, err := json.Marshal(doc); err == nil {
 			hit.Data = full
 		}
 		hits = append(hits, hit)
+		if take > 0 && len(hits) >= take {
+			break
+		}
 	}
 	return &SearchResponse{Results: hits}, nil
 }

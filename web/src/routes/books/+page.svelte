@@ -2,7 +2,7 @@
 	import { get, post } from '$lib/api';
 import { goto } from '$app/navigation';
 import { page as pageStore } from '$app/stores';
-	import type { BooksListResponse, Settings } from '$lib/types';
+	import type { BooksListResponse, BookWithPeople } from '$lib/types';
 	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt } from '$lib/components';
 	import { formatRuntime } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
@@ -89,6 +89,7 @@ import { page as pageStore } from '$app/stores';
 	function setFilter(value: string) {
 		filter = normalizedFilter(value);
 		currentPage = 0;
+		clearSelection(); // A new filter redefines "all matching" — the old selection is stale.
 		updateUrl(filter, 0);
 	}
 
@@ -108,6 +109,7 @@ import { page as pageStore } from '$app/stores';
 			if (next === q) return;
 			q = next;
 			currentPage = 0;
+			clearSelection(); // A new query redefines "all matching" — the old selection is stale.
 			updateUrl(filter, 0, next);
 		}, 300);
 	}
@@ -147,12 +149,13 @@ import { page as pageStore } from '$app/stores';
 		bulkRequeueing = true;
 		bulkError = null;
 		try {
-			const settings = await get<Settings>('/settings');
-			if (!settings?.input_dir) throw new Error('Source directory is not configured. Open Settings to set input_dir.');
-			// One POST: the backend wraps src_dirs around each book id, so a
-			// single common input_dir (the readable root) covers the whole set.
 			const ids = [...allMatchedIds];
-			await post(`/process`, { book_ids: ids, src_dirs: [settings.input_dir] });
+			// One POST whose src_dirs are parallel to book_ids: each book
+			// requeues from its own recorded source path, fetched per book.
+			const books = await Promise.all(
+				ids.map((id) => get<BookWithPeople>(`/books/${id}`)),
+			);
+			await post(`/process`, { book_ids: ids, src_dirs: books.map((b) => b.src_path) });
 			await goto('/process');
 		} catch (e) {
 			bulkError = toCleanedError(e);

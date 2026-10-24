@@ -12,7 +12,6 @@
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
 	},
 	"devDependencies": {
-		"@sveltejs/adapter-auto": "^7.0.1",
 		"@sveltejs/kit": "^2.63.0",
 		"@sveltejs/vite-plugin-svelte": "^7.1.2",
 		"@types/node": "^26.1.1",
@@ -25,8 +24,6 @@
 		"@lucide/svelte": "^1.24.0",
 		"@sveltejs/adapter-static": "^3.0.10",
 		"@tailwindcss/vite": "^4.3.2",
-		"bits-ui": "^2.18.1",
-		"mode-watcher": "^1.1.0",
 		"tailwindcss": "^4.3.2"
 	}
 }

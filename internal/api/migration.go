@@ -41,9 +41,12 @@ type MigratePeopleResult struct {
 }
 
 // migrateStatusMap maps legacy Django status strings to new status values.
+// "Processing" maps to "pending": the new design keeps a processing_jobs
+// row for every processing state, and no job row is created for migrated
+// books — a book with status "processing" and no job would be stuck.
 var migrateStatusMap = map[string]string{
 	"Done":       "done",
-	"Processing": "processing",
+	"Processing": "pending",
 	"Error":      "error",
 }
 
@@ -61,10 +64,12 @@ type sqlExecer interface {
 	QueryRow(query string, args ...any) *sql.Row
 }
 
-// RunLegacyMigration migrates data from a legacy Django DB into the new schema.
-// It does NOT modify or rename the legacy DB file — reads it in place.
-// All writes are wrapped in a single transaction for performance and atomicity.
-func RunLegacyMigration(legacyDBPath string, newDB *sql.DB) (*LegacyMigrationResult, error) {
+// RunLegacyMigration migrates data from a legacy Django DB into the new
+// schema. It does NOT modify or rename the legacy DB file — reads it in
+// place. All writes are wrapped in a single transaction for performance
+// and atomicity. liveBaseURL is the in-memory config's audiobookdb base
+// URL, carried through the settings merge (row 53).
+func RunLegacyMigration(legacyDBPath string, newDB *sql.DB, liveBaseURL string) (*LegacyMigrationResult, error) {
 	expandedPath := expandTildePath(legacyDBPath)
 
 	legacyDB, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro", expandedPath))
@@ -93,7 +98,7 @@ func RunLegacyMigration(legacyDBPath string, newDB *sql.DB) (*LegacyMigrationRes
 		return nil, fmt.Errorf("migrate people: %w", err)
 	}
 
-	if err := migrateSettings(legacyDB, tx); err != nil {
+	if err := migrateSettings(legacyDB, tx, liveBaseURL); err != nil {
 		return nil, fmt.Errorf("migrate settings: %w", err)
 	}
 
@@ -105,6 +110,19 @@ func RunLegacyMigration(legacyDBPath string, newDB *sql.DB) (*LegacyMigrationRes
 		Books:  booksMigrated,
 		People: peopleMigrated,
 	}, nil
+}
+
+// ShouldSkipMigration reports whether the new DB is already populated, so a
+// migration (manual or auto at startup) must not run. Single source of
+// truth shared by POST /api/migrate and the startup auto-migration.
+func ShouldSkipMigration(db *sql.DB) bool {
+	var bookCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM books").Scan(&bookCount); err != nil {
+		// On a query error, fail safe: do not skip — a populated-but-unreadable
+		// DB is rarer than an empty one, and migration errors are visible.
+		return false
+	}
+	return bookCount > 0
 }
 
 // MigrateLegacyDB handles POST /api/migrate.
@@ -121,6 +139,13 @@ func (h *Handler) MigrateLegacyDB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Refuse to migrate into a populated DB: re-running an already-completed
+	// migration would insert every legacy book a second time.
+	if ShouldSkipMigration(h.svc.DB) {
+		writeError(w, http.StatusConflict, "new database already contains books; migration refused to avoid duplicates")
+		return
+	}
+
 	// Expand ~ in path
 	req.Path = expandTildePath(req.Path)
 
@@ -134,7 +159,7 @@ func (h *Handler) MigrateLegacyDB(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Warning: failed to read legacy DB for backup: %v", readErr)
 	}
 
-	result, err := RunLegacyMigration(req.Path, h.svc.DB)
+	result, err := RunLegacyMigration(req.Path, h.svc.DB, h.svc.Config.Config().APIKey.BaseURL)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -234,6 +259,16 @@ func checkLegacyTables(db *sql.DB) error {
 	return nil
 }
 
+// legacyColumnPresent reports whether table has a column named col.
+func legacyColumnPresent(db *sql.DB, table, col string) bool {
+	var n int
+	err := db.QueryRow(
+		"SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?",
+		table, col,
+	).Scan(&n)
+	return err == nil && n > 0
+}
+
 // migrateBooks reads importer_book rows and inserts them into the new books table.
 func migrateBooks(legacyDB *sql.DB, newDB sqlExecer) (int, error) {
 	// Get status mapping from importer_status table
@@ -250,9 +285,23 @@ func migrateBooks(legacyDB *sql.DB, newDB sqlExecer) (int, error) {
 		}
 	}
 
+	// Older legacy DBs may predate the status_id / cover_image_link columns;
+	// guard with PRAGMA table_info and substitute 0 / '' so the migration
+	// works on both schemas.
+	hasStatusID := legacyColumnPresent(legacyDB, "importer_book", "status_id")
+	hasCover := legacyColumnPresent(legacyDB, "importer_book", "cover_image_link")
+	statusSQL := "0"
+	if hasStatusID {
+		statusSQL = "status_id"
+	}
+	coverSQL := "''"
+	if hasCover {
+		coverSQL = "cover_image_link"
+	}
+
 	// Read all books from legacy DB
 	bookRows, err := legacyDB.Query(`
-		SELECT id, title, asin, short_desc, long_desc, release_date, series, publisher, lang, runtime_length_minutes, format_type, src_path, dest_path, status_id, cover_image_link, created_at, updated_at, converted
+		SELECT id, title, asin, short_desc, long_desc, release_date, series, publisher, lang, runtime_length_minutes, format_type, src_path, dest_path, ` + statusSQL + `, ` + coverSQL + `, created_at, updated_at, converted
 		FROM importer_book
 	`)
 	if err != nil {
@@ -510,8 +559,17 @@ func loadLegacyBooks(db *sql.DB) (map[int]legacyBookInfo, error) {
 	return m, nil
 }
 
-// migrateSettings reads the legacy importer_setting row and inserts it into the new settings table.
-func migrateSettings(legacyDB *sql.DB, newDB sqlExecer) error {
+// migrateSettings reads the legacy importer_setting row and merges it into
+// the new settings table. However the new DB is reached (fresh, or a DB
+// that already carries an audiobookdb_api_key / audiobookdb_base_url from a
+// previous partial state or the running config), INSERT OR REPLACE would
+// wipe those — so when a settings row already exists, the live key/base URL
+// (and binary) are read first and carried through into the merged row.
+// liveBaseURL is the in-memory config's audiobookdb base URL (from
+// YAML/env via loadSettingsFromDB): it is used when the new DB row is
+// empty, so a key/base-url written to the YAML file after the DB was
+// created still survives migration (row 53).
+func migrateSettings(legacyDB *sql.DB, newDB sqlExecer, liveBaseURL string) error {
 	// Read the legacy setting row (there should be exactly one)
 	row := legacyDB.QueryRow(`
 		SELECT input_directory, output_directory, completed_directory, num_cpus, output_scheme
@@ -528,11 +586,33 @@ func migrateSettings(legacyDB *sql.DB, newDB sqlExecer) error {
 		return nil // no settings to migrate
 	}
 
+	// Carry through any values the new DB already has, so a merge never
+	// discards the user's API key / base URL / binary.
+	existingAPIKey, existingBaseURL, existingBinary := "", "", ""
+	if err := newDB.QueryRow(
+		"SELECT audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary FROM settings WHERE id = 1",
+	).Scan(&existingAPIKey, &existingBaseURL, &existingBinary); err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("read existing settings for merge: %w", err)
+	}
+
+	// The legacy directory values are the point of the migration, but the
+	// live credential values survive the INSERT OR REPLACE.
 	_, err = newDB.Exec(`
-		INSERT OR REPLACE INTO settings (id, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, updated_at)
-		VALUES (1, 'm4b-merge', ?, ?, ?, ?, ?, 'us', datetime('now'))
-	`, inputDir, outputDir, completedDir, numCPUs, outputScheme)
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, updated_at)
+	VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 'us', datetime('now'))
+`, existingAPIKey,
+		nonEmptyOr(existingBaseURL, nonEmptyOr(liveBaseURL, "https://audiobookdb.org/api")),
+		nonEmptyOr(existingBinary, "m4b-merge"),
+		inputDir, outputDir, completedDir, numCPUs, outputScheme)
 	return err
+}
+
+// nonEmptyOr returns s if non-empty, else fallback.
+func nonEmptyOr(s, fallback string) string {
+	if s != "" {
+		return s
+	}
+	return fallback
 }
 
 // expandTildePath expands ~ in a path to the user's home directory.

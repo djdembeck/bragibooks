@@ -10,13 +10,14 @@
 #      with a `version` or `bump` input to override.
 #   2. The tag is created and pushed (skipped if it already exists).
 #   3. A version-tagged Docker image is built and pushed to GHCR.
-#   4. The version bump is synced back to develop.
-#   5. The release is created via the gh CLI (fill_after mode — no notes).
+#   4. GoRelease builds all OS/arch binaries and creates the GitHub release
+#      (goreleaser action; changelog entries are generated from commits).
+#   5. The version bump is synced back to develop.
 #
 # Re-runs are idempotent: a partial failure can be re-dispatched and the same
 # (already-existing) tag/release guards no-op or complete the work.
 #
-# No external services required: only git, gh, and docker are used.
+# No external services required: only git, docker, and goreleaser are used.
 # GITHUB_TOKEN is provided automatically (permissions: contents: write, packages: write).
 
 name: Release
@@ -159,6 +160,17 @@ jobs:
             .
           docker push "${REGISTRY_IMAGE}:${VERSION}"
 
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Create release with goreleaser
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
       - name: Sync version bump back to develop
         if: steps.tag.outputs.created == 'true'
         run: |
@@ -174,19 +186,3 @@ jobs:
           git push origin develop
           # if develop is protected, replace with a peter-evans/create-pull-request sync PR
 
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          VERSION="${{ steps.version.outputs.new_version }}"
-
-          # Already released?
-          if gh release view "${VERSION}" >/dev/null 2>&1; then
-            echo "Release ${VERSION} already exists — nothing to do"
-            exit 0
-          fi
-
-          # fill_after mode: create the release without notes.
-          gh release create "${VERSION}" --title "Release ${VERSION}"
-          echo "Release ${VERSION} created"
