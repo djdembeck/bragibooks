@@ -1,0 +1,882 @@
+@import 'tailwindcss';
+
+/* ── Self-hosted display face ────────────────────────────────
+ * Public Sans 700 (Latin subset, SIL OFL 1.1). Served from
+ * /fonts so the app never requests hosted CSS or fonts at
+ * runtime. License: /fonts/PublicSans-LICENSE.txt.           */
+@font-face {
+	font-family: 'Public Sans';
+	font-style: normal;
+	font-weight: 700;
+	font-display: swap;
+	src: url('/fonts/public-sans-latin-700.woff2') format('woff2');
+	unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@layer base {
+	:root {
+		--bg: #f5f5f4;
+		--bg-panel: #ffffff;
+		--surface: #f8f8f6;
+		--surface-hover: #efefec;
+		--surface-pressed: #e7e7e2;
+		--elevated: #eeeee9;
+
+		--border: #d7d7d0;
+		--border-subtle: #e3e3dc;
+		--border-strong: #92928a;
+
+		--text: #292923;
+		--text-secondary: #4c4c43;
+		--text-muted: #65655a;
+		--text-placeholder: #727267;
+		--enamel: var(--text);
+
+		--state-red: #b3261e;
+		--state-red-bg: #fdecea;
+		--state-red-border: #e7b9b5;
+		--state-amber: #80530b;
+		--state-amber-bg: #fff4d6;
+		--state-amber-border: #dfc58d;
+		--state-green: #286442;
+		--state-green-bg: #eaf3eb;
+		--state-green-border: #b6d0bc;
+		--state-blue: #4c5155;
+		--state-blue-bg: #f0f1ef;
+		--state-blue-border: #c9cdc6;
+
+		--brand-gold: #ffe08a;
+		--accent: var(--brand-gold);
+		--accent-hover: #ffda70;
+		--accent-pressed: #f4cd62;
+		--accent-text: #302609;
+		--accent-wash: #fff4d3;
+		--provenance: #8a286d;
+		--provenance-bg: #f8edf5;
+		--provenance-border: #dcc2d5;
+		--focus-ring: #705413;
+
+		--radius-sm: 0.375rem;
+		--radius-md: 0.625rem;
+		--radius-lg: 0.75rem;
+		--ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+		--duration-fast: 100ms;
+		--duration-normal: 150ms;
+		--nav-height: calc(4.25rem + 1px);
+
+		--workspace-panel: var(--bg-panel);
+		--workspace-ink: var(--text);
+		--workspace-selected: #fff4d3;
+		--workspace-action: #705413;
+		--workspace-header: var(--brand-gold);
+	}
+
+	* {
+		margin: 0;
+		padding: 0;
+		box-sizing: border-box;
+	}
+
+	dialog {
+		margin: auto;
+		border: 1px solid var(--border);
+		border-radius: var(--radius-md);
+	}
+
+	html,
+	body,
+	#app {
+		min-height: 100vh;
+	}
+
+	body {
+		background: var(--bg);
+		color: var(--text);
+		font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+		font-size: 16px;
+		line-height: 1.5;
+		font-optical-sizing: auto;
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+	}
+
+	/* Monospace for paths, job IDs, output */
+	code,
+	kbd,
+	samp,
+	pre,
+	.font-mono,
+	[style*='font-family: monospace'] {
+		font-family: ui-monospace, 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace;
+	}
+
+	a {
+		color: var(--text);
+		text-decoration: none;
+	}
+
+	a:hover {
+		text-decoration: underline;
+	}
+
+	h1,
+	h2,
+	h3,
+	h4 {
+		color: var(--enamel);
+		font-weight: 700;
+		line-height: 1.25;
+		letter-spacing: -0.01em;
+		text-wrap: balance;
+	}
+
+	p {
+		color: var(--text);
+	}
+
+	input,
+	select,
+	textarea,
+	button {
+		font: inherit;
+	}
+
+	input,
+	select,
+	textarea {
+		appearance: none;
+		display: block;
+		width: 100%;
+		background: var(--surface);
+		color: var(--text);
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius-sm);
+		padding: 0.5rem 0.75rem;
+		outline: none;
+		transition: border-color var(--duration-fast) var(--ease-out), box-shadow var(--duration-fast) var(--ease-out);
+	}
+
+	input[type="checkbox"],
+	input[type="radio"] {
+		appearance: none;
+		display: inline-block;
+		width: 1rem;
+		height: 1rem;
+		padding: 0;
+		background: var(--surface);
+		border: 1.5px solid var(--border-strong);
+		border-radius: var(--radius-sm);
+		cursor: pointer;
+		vertical-align: middle;
+		position: relative;
+		flex-shrink: 0;
+		transition: background var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out);
+	}
+
+	input[type="checkbox"]:checked {
+		background: var(--accent);
+		border-color: var(--accent);
+	}
+
+	input[type="checkbox"]:checked::before {
+		content: '';
+		position: absolute;
+		left: 50%;
+		top: 45%;
+		width: 0.35rem;
+		height: 0.65rem;
+		border: solid currentColor;
+		border-width: 0 2px 2px 0;
+		color: var(--accent-text);
+		transform: translate(-50%, -50%) rotate(45deg);
+	}
+
+	input[type="checkbox"]:indeterminate {
+		background: var(--workspace-action);
+		border-color: var(--workspace-action);
+	}
+
+	input[type="checkbox"]:indeterminate::before {
+		content: '';
+		position: absolute;
+		left: 50%;
+		top: 50%;
+		width: 0.65rem;
+		height: 2px;
+		background: #fff;
+		transform: translate(-50%, -50%);
+	}
+
+	input[type="checkbox"]:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+
+	input[type="checkbox"]:focus-visible {
+		outline: 2px solid var(--focus-ring);
+		outline-offset: 2px;
+	}
+
+	input[type="radio"] {
+		border-radius: 9999px;
+	}
+
+	input[type="radio"]:checked::before {
+		content: '';
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		width: 0.4rem;
+		height: 0.4rem;
+		background: var(--accent-text);
+		border-radius: 9999px;
+		transform: translate(-50%, -50%);
+	}
+
+	input[type="radio"]:checked {
+		background: var(--accent);
+		border-color: var(--accent);
+	}
+
+	input::placeholder,
+	textarea::placeholder {
+		color: var(--text-placeholder);
+	}
+
+	input:hover,
+	select:hover,
+	textarea:hover {
+		border-color: var(--text-muted);
+	}
+
+	input:focus-visible,
+	select:focus-visible,
+	textarea:focus-visible {
+		border-color: var(--text);
+	}
+
+	select {
+		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2365655a' stroke-width='2.5' stroke-linecap='square' stroke-linejoin='miter'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+		background-repeat: no-repeat;
+		background-position: right 0.625rem center;
+		padding-right: 2.25rem;
+	}
+
+	button {
+		cursor: pointer;
+	}
+
+	/* ── Focus-visible — always visible, graphite outline ──────── */
+	:focus-visible {
+		outline: 2px solid var(--text);
+		outline-offset: 2px;
+		border-radius: var(--radius-sm);
+	}
+
+	button:focus-visible,
+	a:focus-visible {
+		outline: 2px solid var(--text);
+		outline-offset: 2px;
+		border-radius: var(--radius-sm);
+	}
+
+	/* ── Reduced motion ───────────────────────────────────────── */
+	@media (prefers-reduced-motion: reduce) {
+		*,
+		*::before,
+		*::after {
+			animation-duration: 0.01ms !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: 0.01ms !important;
+		}
+	}
+}
+
+@layer components {
+	/* ── Skip Link ────────────────────────────────────────────── */
+	.skip-link {
+		position: absolute;
+		top: -100%;
+		left: 0.5rem;
+		z-index: 50;
+		padding: 0.75rem 1rem;
+		background: var(--accent);
+		color: var(--accent-text);
+		font-weight: 600;
+		font-size: 0.875rem;
+		border-radius: var(--radius-sm);
+		text-decoration: none;
+		transition: top var(--duration-fast) var(--ease-out);
+	}
+
+	.skip-link:focus-visible {
+		top: 0.5rem;
+		outline: 2px solid var(--text);
+		outline-offset: 2px;
+	}
+
+	/* ── Page header ──────────────────────────────────────────── */
+	.page-header {
+		margin-bottom: 1.75rem;
+		padding-bottom: 1rem;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.page-header__title {
+		font-size: clamp(1.5rem, 1.35rem + 0.6vw, 2rem);
+		font-weight: 700;
+		letter-spacing: -0.02em;
+		color: var(--enamel);
+	}
+
+	.page-header__description {
+		max-width: 65ch;
+		margin-top: 0.35rem;
+		color: var(--text-secondary);
+		font-size: 0.9375rem;
+		text-wrap: pretty;
+	}
+
+	/* Shared panel — quiet containment for route-level work surfaces */
+	.panel {
+		background: var(--surface);
+		border: 1.5px solid var(--border);
+		border-radius: var(--radius-md);
+		overflow: hidden;
+	}
+
+	/* ── Buttons ───────────────────────────────────────────────── */
+	.btn {
+		@apply inline-flex items-center justify-center gap-2 font-semibold text-sm;
+		padding: 0.5rem 1rem;
+		min-height: 2.75rem;
+		border-radius: var(--radius-sm);
+		transition: background-color var(--duration-fast) var(--ease-out),
+					border-color var(--duration-fast) var(--ease-out);
+		border: 1.5px solid transparent;
+		text-decoration: none;
+		white-space: nowrap;
+	}
+
+	.btn:hover {
+		text-decoration: none;
+	}
+
+	.btn-primary {
+		background: var(--accent);
+		color: var(--accent-text);
+		border-color: var(--accent);
+	}
+
+	.btn-primary:hover {
+		background: var(--accent-hover);
+		border-color: var(--accent-hover);
+	}
+
+	.btn-primary:active {
+		background: var(--accent-pressed);
+		border-color: var(--accent-pressed);
+	}
+
+	.btn-primary:disabled,
+	.btn-primary[aria-disabled='true'] {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+
+	.btn-secondary {
+		background: var(--surface);
+		color: var(--text);
+		border: 1.5px solid var(--border);
+	}
+
+	.btn-secondary:hover {
+		background: var(--surface-hover);
+		border-color: var(--border-strong);
+	}
+
+	.btn-ghost {
+		background: transparent;
+		color: var(--text-secondary);
+		border-color: transparent;
+	}
+
+	.btn-ghost:hover {
+		background: var(--surface-hover);
+		color: var(--text);
+	}
+
+	/* ── Touch-friendly interactive minimums ─────────────────────
+	 * 44px touch target for mobile. Inputs, selects, and buttons
+	 * meet the threshold. Nav links use padding to reach height.   */
+
+	input,
+	select,
+	textarea {
+		min-height: 2.75rem;
+	}
+
+	input[type="checkbox"],
+	input[type="radio"] {
+		min-width: 1.5rem;
+		min-height: 1.5rem;
+	}
+
+	/* ── Card / Panel — compact, bordered, orthogonal ─────────── */
+	.card {
+		background: var(--bg-panel);
+		border: 1.5px solid var(--border-subtle);
+		border-radius: var(--radius-md);
+		padding: 1rem;
+	}
+
+	/* ── Badge — compact status tag ───────────────────────────── */
+	.badge {
+		@apply inline-flex items-center gap-1.5 rounded-sm px-2 py-0.5 font-semibold;
+		font-size: 0.6875rem;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		border: 1.5px solid;
+		white-space: nowrap;
+	}
+
+	/* Status states — ALWAYS text + shape + color */
+	.status-pending {
+		color: var(--text-secondary);
+		background: var(--surface);
+		border-color: var(--border);
+	}
+
+
+	.status-processing {
+		color: var(--state-amber);
+		background: var(--state-amber-bg);
+		border-color: var(--state-amber-border);
+	}
+
+
+	.status-done {
+		color: var(--state-green);
+		background: var(--state-green-bg);
+		border-color: var(--state-green-border);
+	}
+
+
+	.status-error {
+		color: var(--state-red);
+		background: var(--state-red-bg);
+		border-color: var(--state-red-border);
+	}
+
+
+	.status-ready {
+		color: var(--text);
+		background: var(--accent-wash);
+		border-color: var(--border-strong);
+	}
+
+
+	/* ── Skeleton — static graphite bar ──────────────────────── */
+	.skeleton {
+		background: var(--elevated);
+		border-radius: var(--radius-sm);
+	}
+
+	.skeleton-animate {
+		background: linear-gradient(
+			90deg,
+			var(--surface) 0%,
+			var(--elevated) 50%,
+			var(--surface) 100%
+		);
+		background-size: 200% 100%;
+		animation: skeleton-shimmer 1.4s ease-in-out infinite;
+		border-radius: var(--radius-sm);
+	}
+
+	@keyframes skeleton-shimmer {
+		0% { background-position: 200% 0; }
+		100% { background-position: -200% 0; }
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.skeleton-animate {
+			animation: none;
+			background: var(--elevated);
+		}
+	}
+
+	/* ── ADB provenance tag — AudiobookDB data marks ────────────
+	 * Magenta provenance token; ALWAYS text + mark, never color
+	 * alone. Used on matched metadata, book records, ADB diff.  */
+	.abd-tag {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.375rem;
+		padding: 0.125rem 0.5rem;
+		border-radius: var(--radius-sm);
+		background: var(--provenance-bg);
+		border: 1px solid var(--provenance-border);
+		color: var(--provenance);
+		font-size: 0.75rem;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		text-decoration: none;
+		white-space: nowrap;
+	}
+
+	.abd-tag:hover {
+		text-decoration: none;
+		border-color: var(--provenance);
+	}
+
+	.abd-tag__mark {
+		font-weight: 700;
+	}
+
+	.abd-tag__label {
+		color: var(--text-secondary);
+		text-transform: none;
+		letter-spacing: normal;
+	}
+
+	/* Shared workspace shell; tokens are defined once at the root. */
+	.app-shell--workspace {
+		background: var(--bg);
+		color: var(--text);
+	}
+
+	/* Display face — workspace headings and brand only. Body
+	   copy keeps the system UI sans; sizes and ink unchanged. */
+	.app-shell--workspace :is(h1, h2, h3),
+	.workspace-brand__name {
+		font-family: 'Public Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+	}
+
+	/* Header — familiar topnav: brand, primary destinations, settings */
+	.workspace-header {
+		position: sticky;
+		top: 0;
+		z-index: 40;
+		background: var(--workspace-header);
+		border-bottom: 1px solid #d7b85f;
+	}
+
+	.workspace-header__inner {
+		display: flex;
+		align-items: center;
+		gap: 1.5rem;
+		padding: 0 2.5rem;
+		min-height: 4.25rem;
+	}
+
+	.workspace-brand {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		font-size: 1.25rem;
+		font-weight: 700;
+		letter-spacing: -0.025em;
+		white-space: nowrap;
+		color: var(--workspace-ink);
+		text-decoration: none;
+		min-height: 2.75rem;
+	}
+
+	.workspace-brand:hover {
+		text-decoration: none;
+	}
+
+	/* Original develop artwork, without a replacement badge. */
+	.workspace-brand__mark {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 3rem;
+		height: 2.75rem;
+		flex-shrink: 0;
+	}
+
+	.workspace-brand__mark > img {
+		width: 44px;
+		height: auto;
+	}
+
+	.workspace-brand__name {
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.workspace-nav {
+		display: flex;
+		align-self: stretch;
+		align-items: center;
+		gap: 0.25rem;
+	}
+
+	.workspace-nav__link {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		height: 2.75rem;
+		padding: 0 0.875rem;
+		border: 1px solid transparent;
+		border-radius: var(--radius-sm);
+		font-size: 0.875rem;
+		font-weight: 600;
+		color: var(--accent-text);
+		text-decoration: none;
+		white-space: nowrap;
+		transition: background-color var(--duration-fast) var(--ease-out),
+					color var(--duration-fast) var(--ease-out);
+	}
+
+	.workspace-nav__link:hover {
+		background: #f3cf73;
+		color: var(--workspace-ink);
+		text-decoration: none;
+	}
+
+	.workspace-nav__link[aria-current='page'] {
+		background: #fff;
+		color: var(--text);
+		border-color: var(--workspace-action);
+	}
+
+	.workspace-nav__link[aria-current='page']:hover {
+		background: #fff;
+		color: var(--text);
+	}
+
+	.workspace-settings {
+		margin-left: auto;
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		min-height: 2.75rem;
+		padding: 0 0.4375rem;
+		border: 1px solid transparent;
+		border-radius: var(--radius-sm);
+		font-size: 0.875rem;
+		font-weight: 600;
+		color: var(--accent-text);
+		text-decoration: none;
+		white-space: nowrap;
+		transition: background-color var(--duration-fast) var(--ease-out),
+					color var(--duration-fast) var(--ease-out);
+	}
+
+	.workspace-settings:hover {
+		background: #f3cf73;
+		color: var(--workspace-ink);
+		text-decoration: none;
+	}
+
+	.workspace-settings[aria-current='page'] {
+		background: #fff;
+		color: var(--text);
+		border-color: var(--workspace-action);
+	}
+
+	/* Content — full-width composition, no max-w-6xl there */
+	.workspace-main {
+		width: 100%;
+		max-width: 90rem;
+		margin-inline: auto;
+		padding: 2rem 2.5rem 3rem;
+		/* Skip-link target must land below the sticky header */
+		scroll-margin-top: calc(var(--nav-height) + 1rem);
+	}
+
+	/* Browser surfaces inside the workspace scope */
+	.app-shell--workspace ::selection {
+		background: var(--workspace-selected);
+		color: var(--workspace-ink);
+	}
+
+	.app-shell--workspace input,
+	.app-shell--workspace select,
+	.app-shell--workspace textarea {
+		border-radius: var(--radius-sm);
+	}
+
+	.app-shell--workspace input::selection,
+	.app-shell--workspace textarea::selection {
+		background: var(--workspace-selected);
+		color: var(--workspace-ink);
+	}
+
+	.app-shell--workspace input[type='checkbox'] {
+		border-radius: var(--radius-sm);
+	}
+
+	.app-shell--workspace input[type='checkbox']:checked,
+	.app-shell--workspace input[type='radio']:checked {
+		/* Dark controls stay distinct from gold primary actions. */
+		background: var(--workspace-action);
+		border-color: var(--workspace-action);
+	}
+
+	.app-shell--workspace input[type='checkbox']:checked::before {
+		color: #fff;
+	}
+
+	.app-shell--workspace input[type='radio']:checked {
+		background: #fff;
+		border-color: var(--workspace-action);
+	}
+
+	.app-shell--workspace input[type='radio']:checked::before {
+		background: var(--workspace-action);
+	}
+
+	/* Element-prefixed focus rules override base control styles. */
+	.app-shell--workspace :focus-visible,
+	.app-shell--workspace a:focus-visible,
+	.app-shell--workspace button:focus-visible,
+	.app-shell--workspace input:focus-visible,
+	.app-shell--workspace select:focus-visible,
+	.app-shell--workspace textarea:focus-visible,
+	.app-shell--workspace summary:focus-visible,
+	.app-shell--workspace [tabindex]:focus-visible {
+		outline: 3px solid var(--focus-ring);
+		outline-offset: 3px;
+	}
+
+	.app-shell--workspace ::-webkit-scrollbar {
+		width: 10px;
+		height: 10px;
+	}
+
+	.app-shell--workspace ::-webkit-scrollbar-track {
+		background: transparent;
+	}
+
+	.app-shell--workspace ::-webkit-scrollbar-thumb {
+		background: var(--border-strong);
+		border-radius: 999px;
+		border: 2px solid var(--bg);
+	}
+
+	.app-shell--workspace ::-webkit-scrollbar-thumb:hover {
+		background: var(--workspace-action);
+	}
+
+	.app-shell--workspace * {
+		scrollbar-color: var(--border-strong) transparent;
+		scrollbar-width: thin;
+	}
+
+	/* Existing components — restyled once, in this scope */
+	.app-shell--workspace .btn {
+		min-height: 2.75rem;
+	}
+
+	.app-shell--workspace .btn-primary {
+		/* Visible boundary on the light surface */
+		border: 1.5px solid #92701c;
+		box-shadow: 0 1px 2px #29292314;
+	}
+
+	.app-shell--workspace .btn-primary:hover {
+		border-color: #806115;
+	}
+
+	.app-shell--workspace .btn-primary:active {
+		border-color: #705413;
+	}
+
+	.app-shell--workspace .btn-secondary {
+		min-height: 2.75rem;
+	}
+
+	/* Loading — the spinner rides the button text color; the label
+	   stays visible, interaction is locked.                          */
+	.app-shell--workspace .btn[aria-busy='true'] {
+		cursor: progress;
+	}
+
+	.app-shell--workspace .btn:focus-visible {
+		outline: 3px solid var(--focus-ring);
+		outline-offset: 3px;
+	}
+
+	.app-shell--workspace .page-header {
+		margin-bottom: 1.5rem;
+	}
+
+	.app-shell--workspace .panel {
+		background: var(--workspace-panel);
+		border-width: 1px;
+	}
+
+	.app-shell--workspace .card {
+		border-width: 1px;
+	}
+
+	/* ── Narrow screens ─────────────────────────────────────────
+	 * 390px: the primary destinations move to a second, scrollable
+	 * row with full labels and ≥44px targets; Settings stays on
+	 * the brand row. Toolbars reach ≥44px targets.                 */
+	@media (max-width: 900px) {
+		.app-shell--workspace {
+			--nav-height: calc(6.5625rem + 1px);
+		}
+
+		.workspace-header__inner {
+			flex-wrap: wrap;
+			gap: 0;
+			padding: 0.75rem 1rem 0;
+			min-height: 0;
+			height: 6.5625rem;
+		}
+
+		.workspace-brand {
+			font-size: 1.125rem;
+			gap: 0.5625rem;
+			min-height: 2.75rem;
+		}
+
+		.workspace-brand__mark {
+			width: 2rem;
+			height: 2rem;
+		}
+
+		.workspace-brand__mark > img {
+			width: 32px;
+			height: auto;
+		}
+
+		.workspace-settings {
+			font-size: 0.8125rem;
+			padding: 0 0.375rem;
+		}
+
+		.workspace-nav {
+			flex-basis: 100%;
+			align-self: auto;
+			align-items: stretch;
+			gap: 0.0625rem;
+			margin-top: 0.125rem;
+			order: 3;
+			overflow-x: auto;
+			scrollbar-width: none;
+		}
+
+		.workspace-nav::-webkit-scrollbar {
+			display: none;
+		}
+
+		.workspace-nav__link {
+			height: 2.75rem;
+			padding: 0 0.5rem;
+			font-size: 0.8125rem;
+			flex-shrink: 0;
+		}
+
+		.workspace-main {
+			padding: 1.25rem 1rem 2rem;
+		}
+	}
+}

@@ -1,0 +1,153 @@
+package audiobookdb
+
+import (
+	"encoding/json"
+	"strconv"
+)
+
+// Book represents an audiobookdb book entity.
+type Book struct {
+	ID                    string               `json:"id"`
+	Title                 string               `json:"title"`
+	Description           *string              `json:"description"`
+	Disambiguation        *string              `json:"disambiguation"`
+	Type                  *string              `json:"type"`
+	OriginallyPublishedAt *string              `json:"originallyPublishedAt"`
+	Images                []Image              `json:"images"`
+	People                []PersonRoleRelation `json:"people"`
+	Releases              []IdTitle            `json:"releases"`
+	Series                []BookInSeries       `json:"series"`
+	External              []ExternalRelation   `json:"external"`
+	Genres                []IdTitle            `json:"genres"`
+	Tags                  []IdTitle            `json:"tags"`
+}
+
+// Release represents an audiobookdb release entity.
+type Release struct {
+	ID               string               `json:"id"`
+	Title            string               `json:"title"`
+	Duration         string               `json:"duration"`
+	RuntimeLengthMs  int                  `json:"runtimeLengthMs"`
+	RuntimeLengthSec int                  `json:"runtimeLengthSec"`
+	ISBN             *string              `json:"isbn"`
+	ReleaseDate      *string              `json:"releaseDate"`
+	ChapterDetail    *ChapterDetail       `json:"chapterDetail"`
+	People           []PersonRoleRelation `json:"people"`
+	Publisher        IdName               `json:"publisher"`
+	Language         IdTitle              `json:"language"`
+	Images           []Image              `json:"images"`
+}
+
+// ChapterDetail wraps the chapters array on a release.
+type ChapterDetail struct {
+	Chapters []Chapter `json:"chapters"`
+}
+
+// Chapter represents a single chapter within an audiobook release.
+type Chapter struct {
+	Title         string `json:"title"`
+	Ordinal       int    `json:"ordinal"`
+	StartOffsetMs int64  `json:"startOffsetMs"`
+	LengthMs      int64  `json:"lengthMs"`
+	LengthString  string `json:"lengthString"`
+}
+
+// PersonRoleRelation links a person to their role on a book or release.
+type PersonRoleRelation struct {
+	Role   RoleRef   `json:"role"`
+	Person PersonRef `json:"person"`
+}
+
+// RoleRef identifies a role by name (e.g. "Author", "Narrator").
+type RoleRef struct {
+	Name string `json:"name"`
+}
+
+// PersonRef identifies a person by name and audiobookdb ID.
+type PersonRef struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+}
+
+// Image represents a cover image or other media asset.
+type Image struct {
+	ID     string `json:"id"`
+	URL    string `json:"url"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+}
+
+// IdTitle is a lightweight reference with an ID and title.
+type IdTitle struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// IdName is a lightweight reference with an ID and name.
+type IdName struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// BookInSeries indicates a book's position within a series. Upstream
+// sends Position as either a plain integer or an object
+// ({"value":"1","label":"1",...}) depending on the record.
+type BookInSeries struct {
+	SeriesId string  `json:"seriesId"`
+	Position flexInt `json:"position"`
+}
+
+// flexInt accepts a JSON number or an object whose "value"/"label" field is
+// a number or string-encoded number, as upstream series positions vary.
+type flexInt int
+
+func (f *flexInt) UnmarshalJSON(data []byte) error {
+	var n int
+	if err := json.Unmarshal(data, &n); err == nil {
+		*f = flexInt(n)
+		return nil
+	}
+	var obj struct {
+		Value json.Number `json:"value"`
+		Label json.Number `json:"label"`
+	}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return err
+	}
+	for _, cand := range []json.Number{obj.Value, obj.Label} {
+		if cand == "" {
+			continue
+		}
+		if n, err := cand.Int64(); err == nil {
+			*f = flexInt(n)
+			return nil
+		}
+		if s := cand.String(); s != "" {
+			if n, err := strconv.Atoi(s); err == nil {
+				*f = flexInt(n)
+				return nil
+			}
+		}
+	}
+	*f = 0
+	return nil
+}
+
+// ExternalRelation links to an external resource (Goodreads, etc.).
+type ExternalRelation struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	URL  string `json:"url"`
+}
+
+// SearchResponse wraps the paginated search results.
+type SearchResponse struct {
+	Results []SearchHit `json:"results"`
+}
+
+// SearchHit is a single result row from a search query.
+type SearchHit struct {
+	ID   string          `json:"id"`
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
+}

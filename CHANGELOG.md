@@ -22,6 +22,15 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Features & Improvements
 
+- **Record workspace rollout**
+  - Restored the original gold palette, stacked-books logo, and favicon; applied the shared top navigation, neutral work surfaces, and self-hosted Public Sans headings across Overview, Import, Match, Queue, Books, book detail, and Settings.
+  - Added counted batch match approval with explicit inclusion and optional focused review. Source and proposed output names stay visible; the processor's actual output path remains distinct from the preview.
+  - Expanded selected metadata, responsive description disclosure, and catalog choices with author, narrator, runtime, and available release details. Preserved distinct credits that share a display name and the selected release when reselecting a record.
+  - Retained Queue's ready-work, active-processing, and history hierarchy; corrected partial Select all, reactive job updates, and book titles after reload.
+  - Preserved keyboard selection, source-removal confirmation, error recovery, and folder-picker cancellation. Added truthful loading/removal states, executed-search labels, and same-folder retry after a directory error.
+  - Kept catalog publication dates stable across time zones, made mobile Overview and Books titles readable on two lines, and rebalanced helper-text wrapping.
+  - Corrected AudiobookDB book links to `/books/{id}` and account-creation links to `/users/signup`.
+
 - **Loading States** (#409)
   - Added loading indicators to the import page for better UX
   - Users can now see when operations are in progress

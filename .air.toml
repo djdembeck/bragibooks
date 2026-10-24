@@ -1,0 +1,19 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  bin = "./tmp/main"
+  cmd = "go build -buildvcs=false -o ./tmp/main ./cmd/bragibooks"
+  delay = 200
+  exclude_dir = ["web/node_modules", "web/.svelte-kit", "web/build", "data", "storage", "tmp", "vendor", ".git"]
+  exclude_regex = ["_test\\.go$", ".*_test\\.go$"]
+  include_ext = ["go", "yaml", "yml", "toml", "html"]
+  kill_delay = "1s"
+  send_interrupt = true
+  stop_on_error = true
+
+[log]
+  time = true
+
+[misc]
+  clean_on_exit = true

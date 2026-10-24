@@ -1,17 +1,50 @@
-.python-version
 .vscode
-/static/
-__pycache__/
-config/
-env/
-venv/
-demo/
 .DS_Store
-admin/
 
 .opencode
 .sisyphus
-.chunkhound
-*.egg-info/
-egg-info/
-.impeccable/
+# .impeccable: shared artifacts (design.json, surfaces/*.md) stay tracked;
+# ignore only the ephemeral output block recommended by pbakaus/impeccable.
+# impeccable-ignore-start
+**/.impeccable/config.local.json
+**/.impeccable/hook.cache.json
+**/.impeccable/hook.pending.json
+**/.impeccable/*.png
+**/.impeccable/review/
+**/.impeccable/questions/
+**/.impeccable/live/server.json
+**/.impeccable/live/sessions/
+**/.impeccable/live/previews/
+**/.impeccable/live/annotations/
+**/.impeccable/live/cache/
+**/.impeccable/live/manual-edit-apply-transaction.json
+**/.impeccable/live/manual-edit-events.jsonl
+**/.impeccable/live/manual-edit-evidence/
+**/.impeccable/live/pending-manual-edits.json
+**/.impeccable/live/deferred-svelte-component-accepts.json
+**/.impeccable/live/*.png
+# impeccable-ignore-end
+/bragibooks
+/webfs/build/
+# Go runtime artifacts (databases, secrets)
+config/*.db
+config/*.db-wal
+config/*.db-shm
+config/*.sqlite3*
+config/secret_key.txt
+config/config.yaml
+# Playwright CLI debug artifacts
+/.playwright-cli/
+# Scratch build output
+/tmp/
+# Runtime databases under docker config
+docker/config/*.db
+docker/config/*.db-wal
+docker/config/*.db-shm
+# Local dev fixtures and runtime artifacts
+/dev/
+/web/static/covers/
+# Runtime databases and legacy backups under docker config
+docker/config/
+# Runtime book data under docker
+docker/books/
