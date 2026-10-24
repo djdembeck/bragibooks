@@ -1,5 +1,3 @@
-**/__pycache__
-**/.venv
 **/.env
 **/.git
 **/.gitignore
@@ -12,13 +10,10 @@
 **/*.db
 **/*.db-shm
 **/*.db-wal
-**/.ruff_cache
-**/.pytest_cache
 **/.playwright-cli
 **/.impeccable
 **/.sisyphus
 **/tmp
-**/legacy.db*
 docker/books
 docker/config
 dev

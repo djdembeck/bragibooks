@@ -234,10 +234,10 @@ go build -tags webui -ldflags="-s -w" -o bragibooks ./cmd/bragibooks
 
 ### Build a Docker image
 
-The root [Dockerfile](Dockerfile) builds the SvelteKit frontend, embeds it in a statically compiled Go binary, and creates a Debian runtime image with `ffmpeg` and `m4b-merge`:
+The [Dockerfile](docker/Dockerfile) builds the SvelteKit frontend, embeds it in a statically compiled Go binary, and creates a Debian runtime image with `ffmpeg` and `m4b-merge`:
 
 ```sh
-docker build -t bragibooks:local .
+docker build -f docker/Dockerfile -t bragibooks:local .
 docker run --rm -p 8888:8080 \
   -v "$PWD/config:/config" \
   -v /path/to/input:/input \
