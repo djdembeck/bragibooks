@@ -1,11 +1,14 @@
 # TEMPORARY helper workflow (delete after success): one-shot archiving retag.
-# Retag the pinned final-Python image index to :python-final on GHCR and
-# Docker Hub by digest, preserving the exact OCI index (linux/amd64 +
-# attestation). Dispatch-only, hardcoded pinned digest, idempotent.
+# Runs on PRs from the helper branch (no default-branch workflow files are
+# touched). Retags the pinned final-Python image index to :python-final on
+# GHCR and Docker Hub by digest, preserving the exact OCI index
+# (linux/amd64 + attestation). Hardcoded pinned digest, idempotent, no inputs.
 name: ArchivePythonFinal
 
 on:
-  workflow_dispatch: {}
+  pull_request: {}
+  repository_dispatch:
+    types: [bragi-archive-retag]
 
 permissions:
   contents: read
