@@ -23,6 +23,12 @@ type Services struct {
 	Processor     *audio.Processor
 	AudiobookDB   *atomic.Value
 	ProcessingSvc *ProcessingService
+	// CoversDir is the on-disk directory for cover art extracted from
+	// source media. Empty disables extraction; the UI keeps its placeholder.
+	CoversDir string
+	// FFmpeg is the ffmpeg binary used to read embedded art. Empty disables
+	// extraction (ffmpeg is not installed).
+	FFmpeg string
 }
 
 // Handler wraps services and registers routes.

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -77,6 +78,19 @@ func main() {
 	// Refresh cfg after potential DB-loaded overrides
 	cfg = cfgMgr.Config()
 
+	// Cover art extracted from source media lives beside the database, so
+	// the container's persistent /config volume keeps it across restarts.
+	coversDir := filepath.Join(filepath.Dir(dbPath), "covers")
+	if err := os.MkdirAll(coversDir, 0755); err != nil {
+		log.Printf("Warning: could not create covers directory %s: %v (source covers disabled)", coversDir, err)
+		coversDir = ""
+	}
+	ffmpegPath, ffmpegErr := exec.LookPath("ffmpeg")
+	if ffmpegErr != nil {
+		log.Printf("Warning: ffmpeg not found on PATH (%v) — source cover art will not be extracted", ffmpegErr)
+		ffmpegPath = ""
+	}
+
 	// Services
 	processor := audio.NewProcessor(
 		cfg.M4bMerge.Binary,
@@ -107,6 +121,8 @@ func main() {
 		Processor:     processor,
 		AudiobookDB:   audiobookDBVal,
 		ProcessingSvc: processingSvc,
+		CoversDir:     coversDir,
+		FFmpeg:        ffmpegPath,
 	})
 
 	// Router
@@ -129,6 +145,12 @@ func main() {
 	// Applied to the /api subtree only; the embedded SPA (served same
 	// origin below) stays reachable for the UI to load.
 	handler.RegisterRoutes(r, api.RequireAdmin(os.Getenv("BRAGIBOOKS_ADMIN_TOKEN")))
+
+	// Extracted source covers are rendered by <img> tags, which cannot send
+	// the admin bearer token, so — like the SPA and health probe — they are
+	// mounted outside the authed /api subtree. CoverHandler only serves the
+	// `<book id>.jpg` files the intake path writes.
+	r.Handle("/covers/*", api.CoverHandler(coversDir))
 
 	// SPA handler — serve embedded frontend for non-API routes.
 	r.HandleFunc("/*", webfs.Handler().ServeHTTP)
