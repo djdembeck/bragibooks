@@ -3,18 +3,22 @@ package api
 import (
 	"net/http"
 	"path/filepath"
+	"strings"
 )
 
 // CoverHandler serves the extracted source cover art kept in dir.
 //
-// The art is referenced from <img src="/covers/…"> tags, which cannot
-// attach the admin bearer token, so this route is mounted outside the
-// authed /api subtree — like the SPA it renders inside, and like the
-// health probe. Only the `<id>.jpg` files written by CreateBooks are
+// The art is schematic library content, so the caller mounts this handler
+// behind the same auth middleware as /api (see RegisterRoutes) — an
+// anonymous client must not be able to enumerate /covers/1.jpg, /covers/2.jpg.
+// It sits outside the /api prefix only because the `<img>` tags that render
+// it cannot attach the bearer header; the SPA mirrors its token into the
+// same-origin `bragibooks_token` cookie, which the browser sends with those
+// image requests. Only the `<id>.jpg` files written by CreateBooks are
 // served: no directory listings, no traversal, no other content types.
 func CoverHandler(dir string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		name := r.URL.Path[len("/covers/"):]
+		name := strings.TrimPrefix(r.URL.Path, "/covers/")
 		if dir == "" || !validCoverName(name) {
 			http.NotFound(w, r)
 			return

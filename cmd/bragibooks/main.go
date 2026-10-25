@@ -142,15 +142,11 @@ func main() {
 
 	// Admin auth (finding: unauthenticated API): token mode when
 	// BRAGIBOOKS_ADMIN_TOKEN is set, loopback-LAN-only local mode when not.
-	// Applied to the /api subtree only; the embedded SPA (served same
-	// origin below) stays reachable for the UI to load.
+	// Applied to the /api subtree and to the extracted source covers;
+	// the embedded SPA (served same origin below) stays reachable for the
+	// UI to load. Covers are mounted inside RegisterRoutes so they cannot
+	// drift outside this gate.
 	handler.RegisterRoutes(r, api.RequireAdmin(os.Getenv("BRAGIBOOKS_ADMIN_TOKEN")))
-
-	// Extracted source covers are rendered by <img> tags, which cannot send
-	// the admin bearer token, so — like the SPA and health probe — they are
-	// mounted outside the authed /api subtree. CoverHandler only serves the
-	// `<book id>.jpg` files the intake path writes.
-	r.Handle("/covers/*", api.CoverHandler(coversDir))
 
 	// SPA handler — serve embedded frontend for non-API routes.
 	r.HandleFunc("/*", webfs.Handler().ServeHTTP)

@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 )
 
 func TestCoverHandlerServesExtractedCoversOnly(t *testing.T) {
@@ -53,5 +55,42 @@ func TestCoverHandlerDisabledWithoutDirectory(t *testing.T) {
 	handler.ServeHTTP(w, httptest.NewRequest("GET", "/covers/7.jpg", nil))
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d; want 404", w.Code)
+	}
+}
+
+// The covers route is mounted inside RegisterRoutes behind the same gate as
+// /api: an anonymous remote client must not be able to enumerate library
+// art by book ID. The SPA authenticates these <img> requests with the
+// same-origin bragibooks_token cookie, which the server accepts.
+func TestRegisterRoutesCoversRequireAdmin(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "7.jpg"), []byte("\xff\xd8\xff\xe0jpeg"), 0o644); err != nil {
+		t.Fatalf("write cover: %v", err)
+	}
+	h := &Handler{svc: Services{DB: newTestDB(t), CoversDir: dir}}
+	const token = "s3cret"
+
+	r := chi.NewRouter()
+	h.RegisterRoutes(r, RequireAdmin(token))
+
+	req := func(remoteAddr, cookie string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/covers/7.jpg", nil)
+		req.RemoteAddr = remoteAddr
+		if cookie != "" {
+			req.AddCookie(&http.Cookie{Name: adminCookieName, Value: cookie})
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+
+	if w := req("203.0.113.9:5555", ""); w.Code != http.StatusUnauthorized {
+		t.Errorf("anonymous remote cover = %d; want 401", w.Code)
+	}
+	if w := req("203.0.113.9:5555", "wrong"); w.Code != http.StatusForbidden {
+		t.Errorf("wrong-token cover = %d; want 403", w.Code)
+	}
+	if w := req("203.0.113.9:5555", token); w.Code != http.StatusOK {
+		t.Errorf("token-cookie cover = %d; want 200 — an <img> in the SPA sends it", w.Code)
 	}
 }

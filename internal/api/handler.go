@@ -88,6 +88,18 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 		r.Post("/migrate", h.MigrateLegacyDB)
 		r.Post("/migrate/people", h.RecoverPeople)
 	})
+
+	// Extracted source covers are library content — the same art the book
+	// endpoints return — so they sit behind the same gate rather than being
+	// enumerable by book ID. They are mounted outside /api only because the
+	// `<img>` tags that render them cannot attach a bearer header: the SPA
+	// mirrors its token into the same-origin `bragibooks_token` cookie
+	// (web/src/lib/api.ts), which the browser sends with those requests, and
+	// local mode admits loopback/LAN clients exactly as it does for the API.
+	r.Group(func(r chi.Router) {
+		r.Use(auth)
+		r.Handle("/covers/*", CoverHandler(h.svc.CoversDir))
+	})
 }
 
 // writeJSON encodes v as JSON and writes it to w with the given status code.
