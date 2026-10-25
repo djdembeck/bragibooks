@@ -170,6 +170,8 @@ jobs:
         with:
           file: docker/Dockerfile
           context: .
+          build-args: |
+            VERSION=${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
           push: ${{ github.event_name != 'pull_request' || env.PR_IS_SAME_REPO == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
