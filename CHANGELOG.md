@@ -31,6 +31,10 @@ All notable changes to this project will be documented in this file. See [standa
   - Kept catalog publication dates stable across time zones, made mobile Overview and Books titles readable on two lines, and rebalanced helper-text wrapping.
   - Corrected AudiobookDB book links to `/books/{id}` and account-creation links to `/users/signup`.
 
+- **Match removal**
+  - Remove a single match from its row, or enter the removal pass, select several sources, and delete their records in one confirmed action. The confirmation lists every source name; only Bragi Books records are deleted and files on disk stay untouched.
+  - Failed deletions keep the survivors selected and report the count and cause, so a partial batch can be retried. The removal selection is separate from "included in this save" and never changes inclusion. On narrow screens the pass actions dock to the bottom of the viewport.
+
 - **Loading States** (#409)
   - Added loading indicators to the import page for better UX
   - Users can now see when operations are in progress

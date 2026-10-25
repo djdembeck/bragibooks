@@ -242,6 +242,9 @@ Title in the display face with an optional 15px secondary description (65ch) abo
 ### Mode Toggle
 Segmented pair (Batch / Focused) on Match: `#f8f8f6` track, 1px border, 6px outer / 4px inner radius; the pressed segment takes the pale gold `#fff4d3` fill with a 1px inset hairline.
 
+### Removal Pass (Match, Batch review)
+A deliberate mode entered from the batch bar's "Select to remove". The row checkbox stops meaning "include in this save" and becomes a removal selector: the bar takes the `#fdecea` state-red wash with a `#e7b9b5` bottom edge, checked boxes paint `#b3261e` with a white tick, and picked rows sit on the same red wash with "Selected for removal" in red 12px. The bar counts "N of M sources selected to remove", carries the files-stay sentence, and pairs a ghost Cancel with a red-wash "Remove N records" button. On wide screens the bar docks under the sticky page head while the list scrolls; under 761px the same actions dock to a fixed bottom bar (white panel, 1px `#e7b9b5` top edge) and the toolbar keeps only select-all and the count. Confirmation is a native dialog listing every source name plus its selected record title, with the files sentence in the footer and Cancel focused on open. Per-row Remove keeps its inline two-step band for single removals.
+
 ### Provenance Tag
 "AbDB" chip: `#f8edf5` fill, 1px `#dcc2d5` border, `#8a286d` 12px 600 uppercase; hover draws the full-provenance border; the full "AudiobookDB" label is secondary ink, un-cased. An anchor when a record URL exists.
 
@@ -257,6 +260,7 @@ Square always: 3rem row thumbnails (6px corner) and the 16rem record-page hero (
 - **Do** render StatusBadge as glyph + word + color (never color alone), and label absent state plainly ("No catalog match", "details unavailable") — never hidden.
 - **Do** collapse all animation under `prefers-reduced-motion` (shimmer, transitions, chase).
 - **Do** keep the original develop branding: the stacked-books mark at `/images/logo-small-black.svg`, `favicon.ico`, and the Public Sans OFL license living beside the font file.
+- **Do** keep destructive selection in its own mode: the include-in-save box never doubles as a removal selector, and a multi-record delete always lists the exact source names before it runs.
 
 ### Don't:
 - **Don't** reintroduce tape-editor framing — no station rail, equipment, meters, tape strips, or kickers/eyebrows; the Merge Bench vocabulary is retired.
