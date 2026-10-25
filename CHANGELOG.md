@@ -34,6 +34,7 @@ All notable changes to this project will be documented in this file. See [standa
 - **Selectable output path format**
   - Replaced the free-text output path format field in Settings with a token builder: token/text/separator parts, live example resolved against a real sample record, and keyboard reorder (Alt+Arrows) with wrap-around selection.
   - Warns when literal text joins an adjacent token in the same path segment, annotates the example when the format is invalid, and documents the keyboard model in a help line.
+  - Rejects settings updates with an invalid format server-side with an HTTP 400.
   - Mutes the non-substituted `{asin}` chip; on touch, parts show a persistent removal control and 40px minimum targets.
 
 - **Loading States** (#409)

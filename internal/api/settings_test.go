@@ -107,3 +107,66 @@ func TestUpdateSettingsSchemeRoundTrip(t *testing.T) {
 		t.Fatalf("GET output_scheme = %v, want %q", got["output_scheme"], "{author}/vol. {title}")
 	}
 }
+
+// TestUpdateSettingsOmittedOutputSchemeRetained pins the nil-optional-field
+// branch: a partial update that does not send output_scheme leaves the
+// stored path format untouched.
+func TestUpdateSettingsOmittedOutputSchemeRetained(t *testing.T) {
+	h := newTestSettingsHandler(t)
+	if rec := doPutSettings(t, h, `{"input_dir":"/i","output_dir":"/o","output_scheme":"{author}/vol. {title}"}`); rec.Code != http.StatusOK {
+		t.Fatalf("seed PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// No output_scheme in the body.
+	if rec := doPutSettings(t, h, `{"input_dir":"/in","output_dir":"/out"}`); rec.Code != http.StatusOK {
+		t.Fatalf("partial PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	rec := httptest.NewRecorder()
+	h.GetSettings(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET: status = %d, want 200", rec.Code)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("GET: decode: %v", err)
+	}
+	if got["output_scheme"] != "{author}/vol. {title}" {
+		t.Fatalf("GET output_scheme = %v, want retained %q", got["output_scheme"], "{author}/vol. {title}")
+	}
+}
+
+// TestUpdateSettingsRejectedRequestChangesNothing pins no-partial-persistence:
+// a 400 on one field must leave the other fields' stored values unchanged.
+func TestUpdateSettingsRejectedRequestChangesNothing(t *testing.T) {
+	h := newTestSettingsHandler(t)
+	if rec := doPutSettings(t, h, `{"input_dir":"/i","output_dir":"/o","output_scheme":"{author}/vol. {title}"}`); rec.Code != http.StatusOK {
+		t.Fatalf("seed PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	rec := doPutSettings(t, h, `{"input_dir":"/in","output_dir":"/out","output_scheme":`+`"`+`{con}`+"`")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("rejected PUT: status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	rec2 := httptest.NewRecorder()
+	h.GetSettings(rec2, req)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("GET: status = %d, want 200", rec2.Code)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec2.Body.Bytes(), &got); err != nil {
+		t.Fatalf("GET: decode: %v", err)
+	}
+	if got["input_dir"] != "/i" {
+		t.Fatalf("GET input_dir = %v, want %q (should be unchanged after rejection)", got["input_dir"], "/i")
+	}
+	if got["output_dir"] != "/o" {
+		t.Fatalf("GET output_dir = %v, want %q (should be unchanged after rejection)", got["output_dir"], "/o")
+	}
+	if got["output_scheme"] != "{author}/vol. {title}" {
+		t.Fatalf("GET output_scheme = %v, want %q (should be unchanged after rejection)", got["output_scheme"], "{author}/vol. {title}")
+	}
+}

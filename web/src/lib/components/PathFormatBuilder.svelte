@@ -54,8 +54,19 @@
 		void tick().then(() => focusPart(insertedAt));
 	}
 
-	function removeAt(i: number) {
-		mutate([...parts.slice(0, i), ...parts.slice(i + 1)], Math.min(i, parts.length - 2) >= 0 ? Math.min(i, parts.length - 2) : null);
+	function removeAt(i: number): number | null {
+		const nextSel = Math.min(i, parts.length - 2) >= 0 ? Math.min(i, parts.length - 2) : null;
+		mutate([...parts.slice(0, i), ...parts.slice(i + 1)], nextSel);
+		return nextSel;
+	}
+
+	function removePart(i: number) {
+		const nextSel = removeAt(i);
+		if (nextSel !== null) {
+			// Defer: the keyed list re-renders before the node is
+			// addressable — same post-render mechanism as reorder.
+			void tick().then(() => focusPart(nextSel));
+		}
 	}
 
 	function movePart(i: number, dir: -1 | 1) {
@@ -87,8 +98,11 @@
 			return; // native caret movement
 		}
 		const target = e.target as HTMLElement;
-		const inputIdx = target instanceof HTMLInputElement ? target.dataset.idx : undefined;
-		const active = inputIdx !== undefined ? Number(inputIdx) : sel;
+		// Every part control carries data-idx (button and input); the
+		// focused one is the active part. `sel` (kept in sync via part
+		// onfocus) covers only events with no part target.
+		const idxAttr = target.dataset?.idx;
+		const active = idxAttr !== undefined ? Number(idxAttr) : sel;
 		if (active === null || active === undefined || Number.isNaN(active)) return;
 
 		if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
@@ -109,9 +123,7 @@
 			const p = parts[active];
 			if (p.kind === 'text' && p.value !== '') return; // native caret edit
 			e.preventDefault();
-			const nextSel = active - 1 >= 0 ? Math.min(active - 1, parts.length - 2) : null;
-			removeAt(active);
-			if (nextSel !== null) focusPart(nextSel);
+			removePart(active);
 		}
 	}
 
@@ -141,12 +153,20 @@
 	<div class="pbf-strip" bind:this={stripEl} role="group" aria-label="Output path format" data-invalid={errors.length > 0 ? 'true' : 'false'} onkeydown={onStripKeydown}>
 		{#each parts as p, i (i)}
 			{#if p.kind === 'token'}
-				<button type="button" class="pbf-part pbf-token" data-idx={i} aria-pressed={sel === i} aria-label="{p.key} — Delete to remove, Alt+Arrows to move" onclick={() => (sel = i)}>
+				<button type="button" class="pbf-part pbf-token" data-idx={i} aria-pressed={sel === i} aria-label="{p.key} — Delete to remove, Alt+Arrows to move" onfocus={() => (sel = i)} onclick={() => (sel = i)}>
 					{p.key}
-					<span class="pbf-x" aria-hidden="true">×</span>
+					<!-- Pointer-only remove: role="button" span (a nested
+					     <button> is invalid inside a button), deliberately not a tab
+					     stop — the chip itself carries keyboard removal (Delete). -->
+					<!-- svelte-ignore a11y_interactive_supports_focus -->
+					<!-- svelte-ignore a11y_click_events_have_key_events -->
+					<span class="pbf-x" role="button" aria-label="Remove {p.key} part" onclick={(e) => { e.stopPropagation(); removePart(i); }}>×</span>
 				</button>{:else if p.kind === 'sep'}
-				<button type="button" class="pbf-part pbf-sep" data-idx={i} aria-pressed={sel === i} aria-label="Separator — Delete to remove, Alt+Arrows to move" onclick={() => (sel = i)}>
+				<button type="button" class="pbf-part pbf-sep" data-idx={i} aria-pressed={sel === i} aria-label="Separator — Delete to remove, Alt+Arrows to move" onfocus={() => (sel = i)} onclick={() => (sel = i)}>
 					/
+					<!-- svelte-ignore a11y_interactive_supports_focus -->
+					<!-- svelte-ignore a11y_click_events_have_key_events -->
+					<span class="pbf-x" role="button" aria-label="Remove separator" onclick={(e) => { e.stopPropagation(); removePart(i); }}>×</span>
 				</button>{:else}
 				<input
 					class="pbf-text"
@@ -292,14 +312,21 @@
 		line-height: 1;
 	}
 
+	.pbf-x:hover {
+		color: var(--text);
+	}
+
 	.pbf-token:hover .pbf-x,
-	.pbf-token:focus-within .pbf-x {
+	.pbf-token:focus-within .pbf-x,
+	.pbf-sep:hover .pbf-x,
+	.pbf-sep:focus-within .pbf-x {
 		opacity: 1;
 	}
 
 	/* No hover on touch: keep the removal affordance visible. */
 	@media (pointer: coarse) {
-		.pbf-token .pbf-x {
+		.pbf-token .pbf-x,
+		.pbf-sep .pbf-x {
 			opacity: 1;
 		}
 

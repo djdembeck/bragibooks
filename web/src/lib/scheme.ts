@@ -187,29 +187,42 @@ function splitTextPieces(value: string): TextPiece[] {
 	return pieces;
 }
 
+type Segment = { text: string; tokens: TokenKey[] };
+
 /**
- * Splits parts into "/"-separated segments: each segment accumulates the
- * literal text of its parts (token spellings stripped, other text kept
- * untrimmed) plus a flag for any recognized token, whether it is its own
- * part or typed inside text. Mirrors the engine's `/`-split.
+ * Splits parts into "/"-separated segments: each segment keeps its literal
+ * text (token spellings stripped, untrimmed) plus the recognized token keys
+ * in order of appearance, whether a token is its own part or typed inside
+ * text. Adjacent text parts are concatenated before the token scan — on the
+ * wire they are one run, so a spelling split across two parts (e.g. `{tit`
+ * + `le}`) is recognized as a token. Mirrors the engine's `/`-split.
  */
-function segments(parts: Part[]) {
-	const segs: { text: string; hasToken: boolean }[] = [{ text: '', hasToken: false }];
+function segments(parts: Part[]): Segment[] {
+	const segs: Segment[] = [{ text: '', tokens: [] }];
+	let buffered = '';
+	const flush = () => {
+		if (buffered === '') return;
+		const cur = segs[segs.length - 1];
+		for (const piece of splitTextPieces(buffered)) {
+			if ('token' in piece) cur.tokens.push(piece.token);
+			else cur.text += piece.lit;
+		}
+		buffered = '';
+	};
 	for (const p of parts) {
 		if (p.kind === 'sep') {
-			segs.push({ text: '', hasToken: false });
+			flush();
+			segs.push({ text: '', tokens: [] });
 			continue;
 		}
-		const cur = segs[segs.length - 1];
 		if (p.kind === 'token') {
-			cur.hasToken = true;
+			flush();
+			segs[segs.length - 1].tokens.push(p.key);
 		} else {
-			for (const piece of splitTextPieces(p.value)) {
-				if ('token' in piece) cur.hasToken = true;
-				else cur.text += piece.lit;
-			}
+			buffered += p.value;
 		}
 	}
+	flush();
 	return segs;
 }
 
@@ -223,7 +236,7 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 	const segs = segments(parts);
 
 	// E1: zero path elements after trimming.
-	if (segs.every((s) => trimSegment(s.text) === '' && !s.hasToken)) {
+	if (segs.every((s) => trimSegment(s.text) === '' && s.tokens.length === 0)) {
 		errors.push('Add at least one path element.');
 	}
 
@@ -251,7 +264,7 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 	// name before the first '.'). Adjacent text parts form one segment —
 	// the engine concatenates them before checking.
 	for (const seg of segs) {
-		if (seg.hasToken) continue;
+		if (seg.tokens.length > 0) continue;
 		const text = trimSegment(seg.text);
 		if (text === '') continue;
 		const base = trimSegment(text.split('.')[0]);
@@ -262,32 +275,19 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 	}
 
 	// E4: at least one substitutable (non-asin) token, in any spelling.
-	const hasSubstitutable = parts.some(
-		(p) =>
-			(p.kind === 'token' && p.key !== 'asin') ||
-			(p.kind === 'text' &&
-				splitTextPieces(p.value).some(
-					(piece) => 'token' in piece && piece.token !== 'asin'
-				))
-	);
+	const hasSubstitutable = segs.some((s) => s.tokens.some((t) => t !== 'asin'));
 	if (!hasSubstitutable) {
 		errors.push('Include at least one placeholder (e.g. {title}) so different books get different files.');
 	}
 
 	// W1: {asin} is not substituted by the engine.
-	if (parts.some(
-		(p) =>
-			(p.kind === 'token' && p.key === 'asin') ||
-			(p.kind === 'text' && splitTextPieces(p.value).some((piece) => 'token' in piece && piece.token === 'asin'))
-	)) {
+	if (segs.some((s) => s.tokens.includes('asin'))) {
 		warnings.push('{asin} is not substituted by m4b-merge — it would appear literally in the path. Remove it.');
 	}
 
 	// W2: every book should land in a distinct file. Skipped when E4 already
 	// fired — without any substitutable token, {title} cannot be present.
-	const hasTitle = parts.some((p) =>
-		p.kind === 'text' ? splitTextPieces(p.value).some((piece) => 'token' in piece && piece.token === 'title') : p.kind === 'token' && p.key === 'title'
-	);
+	const hasTitle = segs.some((s) => s.tokens.includes('title'));
 	if (hasSubstitutable && !hasTitle) {
 		warnings.push('This format can produce the same file for different books — include {title}.');
 	}
@@ -296,7 +296,7 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 	// the resolved value (the engine joins segments without separators),
 	// producing paths like The MartianFavorites.m4b.
 	for (const seg of segs) {
-		if (seg.hasToken && trimSegment(seg.text) !== '') {
+		if (seg.tokens.length > 0 && trimSegment(seg.text) !== '') {
 			warnings.push('Literal text joins an adjacent {token} — add a separator to keep them apart.');
 			break;
 		}
@@ -306,37 +306,42 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 }
 
 /**
- * Resolve the sample book through the scheme, mirroring the engine:
- * substitute tokens (wherever they appear in the raw string), split on `/`,
- * trim, drop empty segments, join, append `.m4b`. `{asin}` is NOT
- * substituted by m4b-merge, so it stays literal. Returns `''` when nothing
- * survives (the widget shows an em dash).
+ * Resolve a scheme string through value lookups, mirroring the engine:
+ * substitute recognized token spellings (wherever they appear in the raw
+ * string, including across part boundaries), split on `/`, trim per the
+ * Go rules, drop empty segments, and append `.m4b` only when the result
+ * does not already end in one (case-insensitive). `{asin}` is NOT
+ * substituted by m4b-merge, so it stays literal — engine-parity behavior
+ * kept deliberately (documented as such for consumers). Returns `''` when
+ * nothing survives (callers show an em dash).
+ */
+export function resolveScheme(raw: string, values: Record<TokenKey, string>): string {
+	let out = '';
+	for (const piece of splitTextPieces(raw)) {
+		out += 'token' in piece ? (piece.token === 'asin' ? '{asin}' : values[piece.token]) : piece.lit;
+	}
+	const rel = out
+		.split('/')
+		.map((s) => trimSegment(s))
+		.filter((s) => s !== '')
+		.join('/');
+	if (!rel) return '';
+	return /\.m4b$/i.test(rel) ? rel : rel + '.m4b';
+}
+
+/**
+ * Resolve the sample book through the parts, mirroring the engine:
+ * `resolveExample` = serialized parts + Go segment rules + `.m4b`
+ * suffix (no double-append). Returns `''` when nothing survives
+ * (the widget shows an em dash).
  */
 export function resolveExample(
 	parts: Part[],
 	values: Record<TokenKey, string>,
 	outputDir: string
 ): string {
-	const replaceToken = (key: TokenKey) => (key === 'asin' ? '{asin}' : values[key]);
-	const raw = parts
-		.map((p) => {
-			if (p.kind === 'sep') return '/';
-			if (p.kind === 'token') return replaceToken(p.key);
-			// Text: substitute recognized token spellings, keep the rest.
-			let out = '';
-			for (const piece of splitTextPieces(p.value)) {
-				out += 'token' in piece ? replaceToken(piece.token) : piece.lit;
-			}
-			return out;
-		})
-		.join('');
-	const rel = raw
-		.split('/')
-		.map((s) => trimSegment(s))
-		.filter((s) => s !== '')
-		.join('/');
-	if (!rel) return '';
-	const final = rel + '.m4b';
+	const final = resolveScheme(serializeParts(parts), values);
+	if (!final) return '';
 	if (!outputDir) return final;
 	return outputDir.replace(/\/+$/, '') + '/' + final;
 }

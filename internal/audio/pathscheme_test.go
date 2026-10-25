@@ -32,6 +32,11 @@ func TestValidatePathFormat(t *testing.T) {
 		{name: "year scheme is valid (warnings are UI-only)", template: "{author}/{year}"},
 		{name: "unicode text allowed", template: "{author}/{.Grüße} mídia"},
 		{name: "control char forbidden", template: "{title}/a\x07b", wantErrFr: `path text cannot contain U+0007`},
+		// E1/E2 boundary on control-only segments: "\t" is a unicode.IsSpace
+		// rune, so trimming empties the segment and no element survives;
+		// "\x07" is not, so the segment survives trimming and E2 fires.
+		{name: "tab-only segment trims to empty (E1)", template: "\t", wantErrFr: "produces no path elements"},
+		{name: "BEL-only segment survives trim (E2)", template: "\x07", wantErrFr: `path text cannot contain U+0007`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
