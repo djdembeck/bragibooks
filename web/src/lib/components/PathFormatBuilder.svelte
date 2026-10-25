@@ -96,7 +96,8 @@
 			if (e.altKey || e.metaKey) {
 				if (movePart(active, dir as -1 | 1)) {
 					e.preventDefault();
-					focusPart(active + dir);
+					// Defer: the keyed list swaps its nodes on re-render.
+					void tick().then(() => focusPart(active + dir));
 				}
 			} else {
 				e.preventDefault();

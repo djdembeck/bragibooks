@@ -107,10 +107,13 @@ func ValidatePathFormat(template string) error {
 	}
 
 	// E3: reserved Windows device name as a static (token-free) segment.
+	// plainSegs entries are already trimmed, so the base name matches the
+	// client's trimmed rule (parity: a "con .txt" segment is reserved on
+	// both sides).
 	for _, seg := range plainSegs {
 		base := seg
 		if dot := strings.IndexByte(seg, '.'); dot >= 0 {
-			base = seg[:dot]
+			base = strings.TrimSpace(seg[:dot])
 		}
 		if _, ok := pathFormatReservedNames[strings.ToLower(base)]; ok {
 			return fmt.Errorf("segment %q is a reserved device name on Windows", strings.ToLower(base))
