@@ -566,6 +566,16 @@
 		if (!candidate._removeSnapshot) return;
 		const id = candidate._removeSnapshot.bookId;
 		candidate.removingConfirming = true;
+		if (mode === 'batch') {
+			// Keep focus on the confirmation during the request, in case the
+			// disabled state drop it.
+			await tick();
+			document
+				.querySelector<HTMLButtonElement>(
+					`.batch__removal[data-book-id='${id}'] [data-yes]`
+				)
+				?.focus();
+		}
 		try {
 			await del(`/books/${id}`);
 			const wasActive = activeId === id;
@@ -577,6 +587,15 @@
 				activeId =
 					candidates[Math.min(Math.max(removedIndex, 0), candidates.length - 1)]?.bookId ??
 					null;
+			}
+			// The confirmation button is gone with the row; hand focus to a
+			// surviving control so the operator stays in the flow.
+			await tick();
+			if (mode === 'batch') {
+				const next = candidates[removedIndex] ?? candidates[candidates.length - 1];
+				if (next) document.getElementById(`batch-remove-${next.bookId}`)?.focus();
+			} else {
+				document.getElementById('focused-remove')?.focus();
 			}
 		} catch (e) {
 			pageError = toCleanedError(e);
@@ -590,6 +609,11 @@
 	function cancelRemoveCandidate(candidate: MatchCandidate) {
 		candidate.removing = false;
 		candidate._removeSnapshot = undefined;
+	}
+
+	/** Shared confirmation copy: the record goes, the files stay. */
+	function removeConfirmCopy(candidate: MatchCandidate): string {
+		return `Remove “${stripExtension(candidate.title)}” from the batch? This removes the book’s record from Bragi Books; files on disk are not touched.`;
 	}
 
 	/** Batch rows: same two-step flow, with explicit focus handling. */
@@ -908,7 +932,8 @@
 
 	/** Honest per-source status: the selection is real but not saved. */
 	function statusText(candidate: MatchCandidate): string {
-		if (candidate.removing) return 'Removal pending';
+		if (candidate.removing)
+			return candidate.removingConfirming ? 'Removing…' : 'Removal pending';
 		if (candidate.loading && !candidate.details.book && !candidate.error) return 'Loading record…';
 		if (candidate.error) return 'Catalog lookup failed';
 		if (candidate.releaseError) return 'Edition failed to load';
@@ -1443,20 +1468,24 @@
 						</div>
 
 						{#if c.removing}
-							<div class="batch__removal" data-book-id={c.bookId}>
+							<div
+								class="batch__removal"
+								data-book-id={c.bookId}
+								role="alert"
+								aria-busy={c.removingConfirming}
+							>
 								<span id={`batch-removal-${c.bookId}`} tabindex="-1">
-									Remove “{stripExtension(c.title)}” from the batch? This deletes
-									the source record.
+									{removeConfirmCopy(c)}
 								</span>
 								<span class="batch__removal-actions">
 									<Button
 										variant="danger"
 										data-yes
 										aria-describedby={`batch-removal-${c.bookId}`}
-										disabled={c.removingConfirming}
+										loading={c.removingConfirming}
 										onclick={() => confirmRemoveCandidate(c)}
 									>
-										Yes, remove
+										{c.removingConfirming ? 'Removing…' : 'Yes, remove'}
 									</Button>
 									<Button
 										variant="ghost"
@@ -1618,22 +1647,27 @@
 									<path d="m10 6 6 6-6 6" />
 								</svg>
 							</button>
-							<Button variant="ghost" onclick={() => removeCandidate(c)}>Remove</Button>
+							<Button
+								variant="ghost"
+								id="focused-remove"
+								onclick={() => removeCandidate(c)}
+							>
+								Remove
+							</Button>
 						</div>
 					</div>
 
 					{#if c.removing}
 						<!-- Explicit removal confirmation -->
-						<div class="match__removal" role="alert">
-							Remove “{stripExtension(c.title)}” from the batch? This deletes the source
-							record.
+						<div class="match__removal" role="alert" aria-busy={c.removingConfirming}>
+							{removeConfirmCopy(c)}
 							<span class="match__removal-actions">
 								<Button
 									variant="danger"
-									disabled={c.removingConfirming}
+									loading={c.removingConfirming}
 									onclick={() => confirmRemoveCandidate(c)}
 								>
-									Yes, remove
+									{c.removingConfirming ? 'Removing…' : 'Yes, remove'}
 								</Button>
 								<Button
 									variant="ghost"
@@ -2513,7 +2547,6 @@
 	}
 
 	.batch__actions :global(.batch__remove) {
-		min-height: 36px;
 		padding: 0 12px;
 		font-size: 13px;
 	}
@@ -2542,7 +2575,6 @@
 	}
 
 	.batch__removal :global(.btn) {
-		min-height: 34px;
 		padding: 0 10px;
 		font-size: 13px;
 	}
