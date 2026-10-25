@@ -21,6 +21,10 @@ func TestValidatePathFormat(t *testing.T) {
 		{name: "reserved base name with space before dot", template: "con .txt", wantErrFr: `reserved device name`},
 		{name: "reserved base name with NEL before extension", template: "con\u0085.txt", wantErrFr: `reserved device name`},
 		{name: "reserved base name with ideographic space", template: "con\u3000.txt", wantErrFr: `reserved device name`},
+		// U+FEFF is not whitespace per unicode.IsSpace, so the base name
+		// stays "con\uFEFF" and is not reserved — mirrors the client set.
+		// It still fails the no-placeholder check, which is expected.
+		{name: "FEFF is not trimmed", template: "con\uFEFF.txt", wantErrFr: "must include at least one placeholder"},
 		{name: "empty template", template: "", wantErrFr: "produces no path elements"},
 		{name: "separators only", template: "///", wantErrFr: "produces no path elements"},
 		{name: "whitespace only", template: "  / ", wantErrFr: "produces no path elements"},
