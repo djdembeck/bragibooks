@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { MARTIAN, parseParts, resolveExample, serializeParts, TOKEN_META, TOKEN_ORDER, validateScheme, type Part, type TokenKey } from '$lib/scheme';
 
 	let { value = $bindable(''), outputDir = '' }: { value?: string; outputDir?: string } = $props();
@@ -37,17 +38,20 @@
 
 	function insertText() {
 		insertPart({ kind: 'text', value: '' });
-		focusPart(parts.length - 1);
 	}
 
 	function insertSep() {
 		insertPart({ kind: 'sep' });
 	}
 
-	/** Insert after the selected part, or append. Selects the new part. */
+	/**
+	 * Insert after the selected part (or append), select the new part, and
+	 * move focus to it once the DOM has caught up.
+	 */
 	function insertPart(part: Part) {
-		const idx = sel === null ? parts.length - 1 : sel;
-		insertAfter(idx, part);
+		const insertedAt = (sel === null ? parts.length - 1 : sel) + 1;
+		insertAfter(sel === null ? parts.length - 1 : sel, part);
+		void tick().then(() => focusPart(insertedAt));
 	}
 
 	function removeAt(i: number) {

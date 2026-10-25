@@ -5,6 +5,11 @@
  * this module parses it into parts, validates it, and resolves a live example
  * against a pinned sample book. The builder is a view over the string —
  * serialization round-trips exactly.
+ *
+ * The engine substitutes `{key}` wherever it appears in the `-p` string, so
+ * recognized token spellings inside literal text are treated as tokens for
+ * validation and the example; the saved string is always whatever the user
+ * typed.
  */
 
 export type TokenKey =
@@ -111,27 +116,72 @@ export function serializeParts(parts: Part[]): string {
 		.join('');
 }
 
-/**
- * Segments of the path: consecutive parts between separators, empty text
- * parts dropped, text trimmed. Mirrors the engine's `/`-split semantics.
- */
-function segments(parts: Part[]): { text: string; hasToken: boolean }[][] {
-	const segs: { text: string; hasToken: boolean }[][] = [[], ];
-	for (const p of parts) {
-		if (p.kind === 'sep') {
-			segs.push([]);
-		} else if (p.kind === 'token') {
-			segs[segs.length - 1].push({ text: '', hasToken: true });
-		} else if (p.value.trim() !== '') {
-			segs[segs.length - 1].push({ text: p.value.trim(), hasToken: false });
-		}
-	}
-	return segs;
-}
-
 function isControl(ch: string): boolean {
 	const cp = ch.codePointAt(0)!;
 	return cp < 0x20 || cp === 0x7f;
+}
+
+type TextPiece = { lit: string } | { token: TokenKey };
+
+/**
+ * Splits a literal text run into literal pieces and recognized token
+ * spellings. The engine substitutes `{key}` wherever it appears in the
+ * template, so `{title}` typed inside a text part behaves like a token for
+ * validation and the example — the saved string is still what was typed.
+ */
+function splitTextPieces(value: string): TextPiece[] {
+	const pieces: TextPiece[] = [];
+	for (let i = 0; i < value.length; ) {
+		const c = value[i];
+		if (c === '{') {
+			const close = value.indexOf('}', i + 1);
+			if (close !== -1) {
+				const key = value.slice(i + 1, close);
+				if (TOKEN_KEYS.has(key)) {
+					pieces.push({ token: key as TokenKey });
+					i = close + 1;
+					continue;
+				}
+			}
+		}
+		let j = i + 1;
+		while (j < value.length) {
+			if (value[j] === '{') {
+				const close = value.indexOf('}', j + 1);
+				if (close !== -1 && TOKEN_KEYS.has(value.slice(j + 1, close))) break;
+			}
+			j++;
+		}
+		pieces.push({ lit: value.slice(i, j) });
+		i = j;
+	}
+	return pieces;
+}
+
+/**
+ * Splits parts into "/"-separated segments: each segment accumulates the
+ * literal text of its parts (token spellings stripped, other text kept
+ * untrimmed) plus a flag for any recognized token, whether it is its own
+ * part or typed inside text. Mirrors the engine's `/`-split.
+ */
+function segments(parts: Part[]) {
+	const segs: { text: string; hasToken: boolean }[] = [{ text: '', hasToken: false }];
+	for (const p of parts) {
+		if (p.kind === 'sep') {
+			segs.push({ text: '', hasToken: false });
+			continue;
+		}
+		const cur = segs[segs.length - 1];
+		if (p.kind === 'token') {
+			cur.hasToken = true;
+		} else {
+			for (const piece of splitTextPieces(p.value)) {
+				if ('token' in piece) cur.hasToken = true;
+				else cur.text += piece.lit;
+			}
+		}
+	}
+	return segs;
 }
 
 /**
@@ -141,53 +191,74 @@ function isControl(ch: string): boolean {
 export function validateScheme(parts: Part[]): { errors: string[]; warnings: string[] } {
 	const errors: string[] = [];
 	const warnings: string[] = [];
+	const segs = segments(parts);
 
 	// E1: zero path elements after trimming.
-	if (segments(parts).every((s) => s.length === 0)) {
+	if (segs.every((s) => s.text.trim() === '' && !s.hasToken)) {
 		errors.push('Add at least one path element.');
 	}
 
-	// E2: forbidden characters in text ( '\\' < > : " \\ | ? * and controls).
-	// One error naming the first offender.
+	// E2: forbidden characters in literal text (only the literal pieces —
+	// the braces of a recognized token are fine). One error naming the first
+	// offender.
 	for (const p of parts) {
 		if (p.kind !== 'text') continue;
-		for (const ch of p.value) {
-			if (isControl(ch)) {
-				errors.push(`Path text cannot contain 0x${ch.codePointAt(0)!.toString(16)}`);
-				return { errors, warnings };
-			}
-			if ((ILLEGAL_CHARS as readonly string[]).includes(ch)) {
-				errors.push(`Path text cannot contain "${ch}"`);
-				return { errors, warnings };
+		for (const piece of splitTextPieces(p.value)) {
+			if ('token' in piece) continue;
+			for (const ch of piece.lit) {
+				if (isControl(ch)) {
+					errors.push(`Path text cannot contain 0x${ch.codePointAt(0)!.toString(16)}`);
+					return { errors, warnings };
+				}
+				if ((ILLEGAL_CHARS as readonly string[]).includes(ch)) {
+					errors.push(`Path text cannot contain "${ch}"`);
+					return { errors, warnings };
+				}
 			}
 		}
 	}
 
-	// E3: reserved Windows device names as a whole segment (base name).
-	for (const seg of segments(parts)) {
-		if (seg.length !== 1) continue;
-		const [only] = seg;
-		if (only.hasToken) continue;
-		const base = only.text.split('.')[0].toLowerCase();
-		if (RESERVED_NAMES.has(base)) {
-			errors.push(`"${only.text.split('.')[0]}" is a reserved device name on Windows.`);
+	// E3: reserved Windows device names as a whole static segment (base
+	// name before the first '.'). Adjacent text parts form one segment —
+	// the engine concatenates them before checking.
+	for (const seg of segs) {
+		if (seg.hasToken) continue;
+		if (seg.text.trim() === '') continue;
+		const base = seg.text.trim().split('.')[0].trim();
+		if (RESERVED_NAMES.has(base.toLowerCase())) {
+			errors.push(`"${base}" is a reserved device name on Windows.`);
 			return { errors, warnings };
 		}
 	}
 
-	// E4: at least one substitutable (non-asin) token.
-	const hasSubstitutable = parts.some((p) => p.kind === 'token' && p.key !== 'asin');
+	// E4: at least one substitutable (non-asin) token, in any spelling.
+	const hasSubstitutable = parts.some(
+		(p) =>
+			(p.kind === 'token' && p.key !== 'asin') ||
+			(p.kind === 'text' &&
+				splitTextPieces(p.value).some(
+					(piece) => 'token' in piece && piece.token !== 'asin'
+				))
+	);
 	if (!hasSubstitutable) {
 		errors.push('Include at least one placeholder (e.g. {title}) so different books get different files.');
 	}
 
 	// W1: {asin} is not substituted by the engine.
-	if (parts.some((p) => p.kind === 'token' && p.key === 'asin')) {
+	if (parts.some(
+		(p) =>
+			(p.kind === 'token' && p.key === 'asin') ||
+			(p.kind === 'text' && splitTextPieces(p.value).some((piece) => 'token' in piece && piece.token === 'asin'))
+	)) {
 		warnings.push('{asin} is not substituted by m4b-merge — it would appear literally in the path. Remove it.');
 	}
 
 	// W2: every book should land in a distinct file.
-	if (!parts.some((p) => p.kind === 'token' && p.key === 'title')) {
+	if (!parts.some(
+		(p) =>
+			(p.kind === 'token' && p.key === 'title') ||
+			(p.kind === 'text' && splitTextPieces(p.value).some((piece) => 'token' in piece && piece.token === 'title'))
+	)) {
 		warnings.push('This format can produce the same file for different books — include {title}.');
 	}
 
@@ -196,17 +267,28 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 
 /**
  * Resolve the sample book through the scheme, mirroring the engine:
- * substitute tokens, split on `/`, trim, drop empty segments, join, append
- * `.m4b`. `{asin}` is NOT substituted by m4b-merge, so it stays literal.
- * Returns `''` when nothing survives (the widget shows an em dash).
+ * substitute tokens (wherever they appear in the raw string), split on `/`,
+ * trim, drop empty segments, join, append `.m4b`. `{asin}` is NOT
+ * substituted by m4b-merge, so it stays literal. Returns `''` when nothing
+ * survives (the widget shows an em dash).
  */
 export function resolveExample(
 	parts: Part[],
 	values: Record<TokenKey, string>,
 	outputDir: string
 ): string {
+	const replaceToken = (key: TokenKey) => (key === 'asin' ? '{asin}' : values[key]);
 	const raw = parts
-		.map((p) => (p.kind === 'sep' ? '/' : p.kind === 'token' ? (p.key === 'asin' ? '{asin}' : values[p.key]) : p.value))
+		.map((p) => {
+			if (p.kind === 'sep') return '/';
+			if (p.kind === 'token') return replaceToken(p.key);
+			// Text: substitute recognized token spellings, keep the rest.
+			let out = '';
+			for (const piece of splitTextPieces(p.value)) {
+				out += 'token' in piece ? replaceToken(piece.token) : piece.lit;
+			}
+			return out;
+		})
 		.join('');
 	const rel = raw
 		.split('/')
