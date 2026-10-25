@@ -220,3 +220,39 @@ func TestCreateBookWithNULLReleaseDate(t *testing.T) {
 		t.Errorf("db status = %q; want %q", dbStatus, "pending")
 	}
 }
+
+func TestDeriveTitleStripsOnlyAudioExtensions(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "author initial before title",
+			path: "/library/Ursula K. Le Guin - The Left Hand of Darkness",
+			want: "Ursula K Le Guin The Left Hand Of Darkness",
+		},
+		{
+			name: "author initial with audio extension",
+			path: "/library/Ursula K. Le Guin - The Left Hand of Darkness.m4b",
+			want: "Ursula K Le Guin The Left Hand Of Darkness",
+		},
+		{
+			name: "volume number",
+			path: "/library/Book Vol. 2",
+			want: "Book Vol 2",
+		},
+		{
+			name: "single audio file",
+			path: "/some/path/Author_Book_Title.m4b",
+			want: "Author Book Title",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deriveTitle(tc.path); got != tc.want {
+				t.Errorf("deriveTitle(%q) = %q; want %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}
