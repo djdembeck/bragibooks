@@ -4,7 +4,7 @@
 	import type { Settings } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 	import { toCleanedError, type CleanedAdbError } from '$lib/adbError';
-	import { Save, FolderOpen } from '@lucide/svelte';
+	import { Save, FolderOpen, Check, Copy, Plus } from '@lucide/svelte';
 
 	type PathField = 'input_dir' | 'output_dir' | 'completed_dir';
 
@@ -99,70 +99,197 @@
 
 	// External API (remote key auth). The key is server-generated and
 	// shown once in the modal; this page never stores it.
-	let apiBusy = $state(false);
+	type ApiAction = 'enable' | 'disable' | 'reissue';
+	type ApiEndpointResponse = { enabled: boolean; api_key: string };
+
+	let apiBusy = $state<ApiAction | null>(null);
 	let apiError = $state<CleanedAdbError | null>(null);
+	let lastApiAction = $state<ApiAction | null>(null);
+	let pendingApiAction = $state<'reissue' | 'disable' | null>(null);
 	let apiKeyModalKey = $state<string | null>(null);
 	let apiKeyModalOpen = $state(false);
+	let keyCopied = $state(false);
+	let closeWarning = $state(false);
+	let copyState = $state<'idle' | 'copied' | 'failed'>('idle');
+	let copyTimer: ReturnType<typeof setTimeout> | undefined;
+	let keyCodeEl = $state<HTMLElement | undefined>();
+	let wasApiKeyModalOpen = false;
+	// Same-origin API base; filled after mount because the origin is only
+	// known in the browser.
+	let apiBase = $state('/api');
 
-	type ApiEndpointResponse = { enabled: boolean; api_key: string };
+	$effect(() => {
+		apiBase = `${location.origin}/api`;
+	});
 
 	function applyApiEndpointState(enabled: boolean) {
 		if (!settings) return;
 		settings.api_endpoint_enabled = enabled;
 	}
 
-	async function enableExternalAPI() {
+	async function runApiAction(action: ApiAction) {
 		if (!settings) return;
-		apiBusy = true;
+		apiBusy = action;
 		apiError = null;
+		lastApiAction = action;
 		try {
-			const res = await post<ApiEndpointResponse>('/settings/api-endpoint/enable', {});
-			applyApiEndpointState(res.enabled);
-			showApiKey(res.api_key);
+			if (action === 'disable') {
+				const res = await post<{ enabled: boolean }>('/settings/api-endpoint/disable', {});
+				applyApiEndpointState(res.enabled);
+				requestAnimationFrame(() => {
+					(document.getElementById('api-enable') ?? document.getElementById('settings-external-api'))?.focus();
+				});
+			} else {
+				const path =
+					action === 'enable'
+						? '/settings/api-endpoint/enable'
+						: '/settings/api-endpoint/regenerate';
+				const res = await post<ApiEndpointResponse>(path, {});
+				applyApiEndpointState(res.enabled);
+				showApiKey(res.api_key);
+			}
+			pendingApiAction = null;
 		} catch (e) {
 			apiError = toCleanedError(e);
 		} finally {
-			apiBusy = false;
+			apiBusy = null;
 		}
 	}
 
-	async function regenerateExternalAPI() {
-		if (!settings) return;
-		apiBusy = true;
-		apiError = null;
-		try {
-			const res = await post<ApiEndpointResponse>('/settings/api-endpoint/regenerate', {});
-			applyApiEndpointState(res.enabled);
-			showApiKey(res.api_key);
-		} catch (e) {
-			apiError = toCleanedError(e);
-		} finally {
-			apiBusy = false;
-		}
+	function enableExternalAPI() {
+		void runApiAction('enable');
 	}
 
-	async function disableExternalAPI() {
-		if (!settings) return;
-		apiBusy = true;
-		apiError = null;
-		try {
-			const res = await post<{ enabled: boolean }>('/settings/api-endpoint/disable', {});
-			applyApiEndpointState(res.enabled);
-		} catch (e) {
-			apiError = toCleanedError(e);
-		} finally {
-			apiBusy = false;
-		}
+	function regenerateExternalAPI() {
+		void runApiAction('reissue');
 	}
+
+	function disableExternalAPI() {
+		void runApiAction('disable');
+	}
+
+	function retryApiAction() {
+		if (lastApiAction) void runApiAction(lastApiAction);
+	}
+
+	function cancelPendingApiAction() {
+		const previous = pendingApiAction;
+		pendingApiAction = null;
+		requestAnimationFrame(() => {
+			document
+				.getElementById(previous === 'disable' ? 'api-disable' : 'api-reissue')
+				?.focus();
+		});
+	}
+
+	// The clicked action button unmounts when the inline confirmation
+	// replaces it; move focus to the confirmation's primary action so
+	// keyboard users are not dropped back to the document.
+	$effect(() => {
+		if (!pendingApiAction) return;
+		const id = pendingApiAction === 'reissue' ? 'api-confirm-reissue' : 'api-confirm-disable';
+		requestAnimationFrame(() => document.getElementById(id)?.focus());
+	});
 
 	function showApiKey(key: string) {
 		apiKeyModalKey = key;
+		keyCopied = false;
+		closeWarning = false;
+		copyState = 'idle';
 		apiKeyModalOpen = true;
 	}
 
-	// Reveal-once: clear the on-screen key whenever the modal is not shown.
+	function selectKey() {
+		const el = keyCodeEl;
+		if (!el) return;
+		const range = document.createRange();
+		range.selectNodeContents(el);
+		const selection = window.getSelection();
+		selection?.removeAllRanges();
+		selection?.addRange(range);
+		el.focus({ preventScroll: true });
+	}
+
+	async function copyApiKey() {
+		const key = apiKeyModalKey;
+		if (!key) return;
+		clearTimeout(copyTimer);
+		try {
+			if (navigator.clipboard?.writeText) {
+				await navigator.clipboard.writeText(key);
+			} else {
+				// Plain-HTTP LAN origins have no Clipboard API. Fall back to
+				// a temporary textarea so the key is still captured.
+				const ta = document.createElement('textarea');
+				ta.value = key;
+				ta.setAttribute('readonly', '');
+				ta.style.position = 'fixed';
+				ta.style.top = '0';
+				ta.style.left = '0';
+				ta.style.opacity = '0';
+				document.body.appendChild(ta);
+				ta.select();
+				ta.setSelectionRange(0, key.length);
+				const ok = document.execCommand('copy');
+				ta.remove();
+				if (!ok) throw new Error('copy was rejected');
+			}
+			keyCopied = true;
+			copyState = 'copied';
+		} catch {
+			copyState = 'failed';
+			selectKey();
+		}
+		copyTimer = setTimeout(() => {
+			copyState = 'idle';
+		}, 4000);
+	}
+
+	// Closing is the only way to lose the key, so it is gated until the
+	// key has been copied (or the operator explicitly overrides).
+	function confirmKeyClose(): boolean {
+		if (keyCopied) return true;
+		closeWarning = true;
+		return false;
+	}
+
+	function closeKeyModal() {
+		if (!keyCopied) {
+			closeWarning = true;
+			return;
+		}
+		apiKeyModalOpen = false;
+	}
+
+	function forceCloseKeyModal() {
+		keyCopied = false;
+		closeWarning = false;
+		apiKeyModalOpen = false;
+	}
+
+	// Reveal-once: clear the on-screen key whenever the modal is not shown,
+	// and return focus to the control that issued it.
 	$effect(() => {
-		if (!apiKeyModalOpen) apiKeyModalKey = null;
+		if (apiKeyModalOpen) {
+			wasApiKeyModalOpen = true;
+			return;
+		}
+		apiKeyModalKey = null;
+		copyState = 'idle';
+		if (!wasApiKeyModalOpen) return;
+		wasApiKeyModalOpen = false;
+		requestAnimationFrame(() => {
+			(document.getElementById('api-reissue') ??
+				document.getElementById('api-enable') ??
+				document.getElementById('settings-external-api'))?.focus();
+		});
+	});
+
+	// Native dialog focuses its first focusable element (Close). Put focus
+	// on the safe action instead once the dialog is on screen.
+	$effect(() => {
+		if (!apiKeyModalOpen) return;
+		requestAnimationFrame(() => document.getElementById('api-key-copy')?.focus());
 	});
 
 	const apiEnabled = $derived(settings?.api_endpoint_enabled === true);
@@ -336,48 +463,125 @@
 
 		<!-- External API -->
 		<section class="settings-section" aria-labelledby="settings-external-api">
-			<h2 class="settings-section__title" id="settings-external-api">External API</h2>
+			<h2 class="settings-section__title" id="settings-external-api" tabindex="-1">External API</h2>
 			<div class="settings-field">
-				<p class="settings-help settings-help--status">
+				<p class="settings-help settings-help--status" role="status">
 					{#if apiEnvManaged}
-						Managed by the <code>SERVER_API_ENDPOINT_ENABLED</code> environment variable.
+						<strong>{apiEnabled ? 'On' : 'Off'}</strong> — fixed by the
+						<code>SERVER_API_ENDPOINT_ENABLED</code> environment variable. Unset it to manage
+						this setting here.
 					{:else if apiEnabled}
-						<strong>On</strong> — the API is reachable from any address with your API key.
+						<strong>On</strong> — other machines can use the API with the key. The web interface
+						keeps working on your local network.
 					{:else}
-						<strong>Off</strong> — the API is reachable from your LAN only.
+						<strong>Off</strong> — remote access is disabled; the web interface still works on
+						your local network.
 					{/if}
 				</p>
 				{#if apiError}
-					<div class="mb-3" role="alert">
-						<Alert variant="error">{apiError.message}</Alert>
+					<div class="mb-3">
+						<Alert variant="error" onretry={retryApiAction}>
+							<span class="font-medium">Could not update the external API.</span>
+							<span class="block text-xs opacity-80 mt-1">{apiError.message}</span>
+						</Alert>
 					</div>
 				{/if}
-				<div class="settings-input-row">
-					{#if apiEnabled}
-						<Button
-							variant="secondary"
-							loading={apiBusy}
-							disabled={apiBusy}
-							onclick={regenerateExternalAPI}
-						>
-							Reissue key
-						</Button>
-						{#if !apiEnvManaged}
-							<Button variant="ghost" loading={apiBusy} disabled={apiBusy} onclick={disableExternalAPI}>
-								Disable
+				{#if pendingApiAction === 'reissue'}
+					<div class="settings-confirm" role="alert">
+						<p class="settings-confirm__text">
+							Reissue the key? The current key stops working immediately; every external tool
+							using it will need the new one.
+						</p>
+						<div class="settings-confirm__actions">
+							<Button
+								id="api-confirm-reissue"
+								variant="danger"
+								loading={apiBusy === 'reissue'}
+								disabled={apiBusy !== null}
+								onclick={regenerateExternalAPI}
+							>
+								Yes, reissue key
+							</Button>
+							<Button
+								variant="ghost"
+								disabled={apiBusy !== null}
+								onclick={cancelPendingApiAction}
+							>
+								Cancel
+							</Button>
+						</div>
+					</div>
+				{:else if pendingApiAction === 'disable'}
+					<div class="settings-confirm" role="alert">
+						<p class="settings-confirm__text">
+							Disable remote access and delete the stored key? External tools lose access
+							until you enable the API and issue a new key.
+						</p>
+						<div class="settings-confirm__actions">
+							<Button
+								id="api-confirm-disable"
+								variant="danger"
+								loading={apiBusy === 'disable'}
+								disabled={apiBusy !== null}
+								onclick={disableExternalAPI}
+							>
+								Yes, disable
+							</Button>
+							<Button
+								variant="ghost"
+								disabled={apiBusy !== null}
+								onclick={cancelPendingApiAction}
+							>
+								Cancel
+							</Button>
+						</div>
+					</div>
+				{:else}
+					<div class="settings-input-row">
+						{#if apiEnabled}
+							<Button
+								id="api-reissue"
+								variant="secondary"
+								loading={apiBusy === 'reissue'}
+								disabled={apiBusy !== null}
+								onclick={() => (pendingApiAction = 'reissue')}
+							>
+								Reissue key
+							</Button>
+							{#if !apiEnvManaged}
+								<Button
+									id="api-disable"
+									variant="ghost"
+									disabled={apiBusy !== null}
+									onclick={() => (pendingApiAction = 'disable')}
+								>
+									Disable
+								</Button>
+							{/if}
+						{:else if !apiEnvManaged}
+							<Button
+								id="api-enable"
+								variant="secondary"
+								loading={apiBusy === 'enable'}
+								disabled={apiBusy !== null}
+								onclick={enableExternalAPI}
+							>
+								<Plus class="h-4 w-4" aria-hidden="true" />
+								Enable external API
 							</Button>
 						{/if}
-					{:else if !apiEnvManaged}
-						<Button variant="primary" loading={apiBusy} disabled={apiBusy} onclick={enableExternalAPI}>
-							Enable external API
-						</Button>
-					{/if}
-				</div>
+					</div>
+				{/if}
 				<p class="settings-help">
-					For scripts, automation, or tools on other machines: they authenticate with
-					<code>Authorization: Bearer &lt;key&gt;</code>. The web interface is unaffected and
-					never needs the key.
+					For scripts, automation, or tools on other machines: authenticate with
+					<code>Authorization: Bearer &lt;key&gt;</code> against <code>{apiBase}</code>.
+					The web interface never needs the key.
 				</p>
+				{#if !apiEnvManaged}
+					<p class="settings-help">
+						Changes here apply immediately; Save settings does not affect them.
+					</p>
+				{/if}
 			</div>
 		</section>
 
@@ -405,24 +609,62 @@
 		onselect={onPick}
 	/>
 
-	<Modal bind:open={apiKeyModalOpen} title="External API key">
+	{#snippet apiKeyFooter()}
+		<div class="flex justify-end">
+			<Button variant="secondary" onclick={closeKeyModal}>Done</Button>
+		</div>
+	{/snippet}
+
+	<Modal
+		bind:open={apiKeyModalOpen}
+		title="External API key"
+		beforeClose={confirmKeyClose}
+		footer={apiKeyFooter}
+	>
 		{#if apiKeyModalKey}
 			<p class="text-sm text-[var(--text-secondary)] mb-3">
 				Copy this key for your external tools. It is shown only once and cannot be
 				retrieved later.
 			</p>
 			<div class="flex items-center gap-2">
-				<code class="api-key-code">{apiKeyModalKey}</code>
-				<Button
-					variant="secondary"
-					class="shrink-0"
-					onclick={() => {
-						void navigator.clipboard?.writeText(apiKeyModalKey ?? '');
-					}}
+				<code
+					class="api-key-code"
+					bind:this={keyCodeEl}
+					tabindex="-1"
+					oncopy={() => {
+						keyCopied = true;
+						copyState = 'copied';
+					}}>{apiKeyModalKey}</code
 				>
-					Copy
+				<Button id="api-key-copy" variant="primary" class="shrink-0" onclick={copyApiKey}>
+					{#if copyState === 'copied'}
+						<Check class="h-4 w-4" aria-hidden="true" />
+						Copied
+					{:else}
+						<Copy class="h-4 w-4" aria-hidden="true" />
+						Copy key
+					{/if}
 				</Button>
 			</div>
+			<p class="api-key-feedback" role="status" aria-live="polite">
+				{#if copyState === 'copied'}
+					Key copied to the clipboard.
+				{:else if copyState === 'failed'}
+					Copy failed. The key is selected — press Control+C or Command+C.
+				{/if}
+			</p>
+			{#if closeWarning}
+				<div class="settings-confirm" role="alert">
+					<p class="settings-confirm__text">
+						This key has not been copied. Closing discards it; you would have to reissue a new
+						key.
+					</p>
+					<div class="settings-confirm__actions">
+						<Button variant="danger" onclick={forceCloseKeyModal}>Close anyway</Button>
+						<Button variant="ghost" onclick={() => (closeWarning = false)}>Keep key</Button>
+					</div>
+				</div>
+			{/if}
 		{/if}
 	</Modal>
 {/if}
@@ -525,6 +767,7 @@
 
 	.settings-input-row {
 		display: flex;
+		flex-wrap: wrap;
 		align-items: flex-start;
 		gap: 0.5rem;
 	}
@@ -549,6 +792,10 @@
 		text-wrap: pretty;
 	}
 
+	.settings-help code {
+		overflow-wrap: anywhere;
+	}
+
 	.settings-help--status {
 		margin-top: 0;
 		font-size: 0.875rem;
@@ -565,6 +812,39 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-sm);
 		font-size: 0.8125rem;
+		cursor: text;
+		user-select: all;
+	}
+
+	.api-key-feedback {
+		min-height: 1.25rem;
+		margin-top: 0.5rem;
+		font-size: 0.75rem;
+		line-height: 1.45;
+		color: var(--text-secondary);
+	}
+
+	/* Destructive confirmation — same two-step grammar as Match removal */
+	.settings-confirm {
+		margin-top: 0.75rem;
+		padding: 0.75rem;
+		background: var(--state-red-bg);
+		border: 1px solid var(--state-red-border);
+		border-radius: var(--radius-sm);
+	}
+
+	.settings-confirm__text {
+		font-size: 0.8125rem;
+		line-height: 1.5;
+		color: var(--text);
+		text-wrap: pretty;
+	}
+
+	.settings-confirm__actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
+		margin-top: 0.625rem;
 	}
 
 	#input_dir_desc {

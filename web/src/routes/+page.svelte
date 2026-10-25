@@ -8,10 +8,12 @@
 	// One-time notice pointing at the (default-off) external API key.
 	// localStorage here is the DISMISSAL marker only — never the key.
 	const API_NOTICE_KEY = 'bragibooks_api_notice_dismissed';
-	let apiEnabled = $state(false);
+	// "unknown" must never read as "off": a failed settings fetch is not
+	// evidence that remote access is disabled. A deployment-managed flag
+	// is also not actionable from Settings, so it gets no nudge.
+	let apiNotice = $state<'unknown' | 'off' | 'on' | 'managed'>('unknown');
 	let noticeDismissed = $state(false);
-	let settingsLoaded = $state(false);
-	const showApiNotice = $derived(settingsLoaded && !apiEnabled && !noticeDismissed);
+	const showApiNotice = $derived(apiNotice === 'off' && !noticeDismissed);
 	$effect(() => {
 		// Storage can be unavailable (private mode, blocked storage): a
 		// throwing read must not sink the settings fetch below it.
@@ -22,12 +24,16 @@
 		}
 		get<Settings>('/settings')
 			.then((s) => {
-				apiEnabled = s.api_endpoint_enabled === true;
-				settingsLoaded = true;
+				apiNotice = s.api_endpoint_env_managed
+					? 'managed'
+					: s.api_endpoint_enabled === true
+						? 'on'
+						: 'off';
 			})
 			.catch(() => {
-				// Decorative notice: a fetch error simply hides the banner.
-				settingsLoaded = true;
+				// Decorative notice: an unknown state hides the banner
+				// instead of claiming the API is off.
+				apiNotice = 'unknown';
 			});
 	});
 
@@ -123,13 +129,15 @@
 
 {#if showApiNotice}
 	<div class="mb-6">
-		<Alert variant="success" role="status">
+		<Alert role="status">
+			{#snippet actions()}
+				<Button variant="ghost" onclick={dismissApiNotice}>Dismiss</Button>
+			{/snippet}
 			<span>
 				External API is off. Enable it in
-				<a href="/settings" class="underline underline-offset-2">Settings</a> to get an
-				API key for remote tools.
+				<a href="/settings" class="underline underline-offset-2">Settings</a> to use the
+				API from other machines.
 			</span>
-			<Button variant="ghost" class="shrink-0" onclick={dismissApiNotice}>Dismiss</Button>
 		</Alert>
 	</div>
 {/if}
