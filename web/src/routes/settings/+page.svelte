@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { get, put } from '$lib/api';
-	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker } from '$lib/components';
+	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker, PathFormatBuilder } from '$lib/components';
+	import { parseParts, validateScheme } from '$lib/scheme';
 	import type { Settings } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 	import { toCleanedError, type CleanedAdbError } from '$lib/adbError';
@@ -74,6 +75,9 @@
 
 		const cpusErr = validateNonNegativeInt(settings.num_cpus);
 		if (cpusErr) { fieldErrors.num_cpus = cpusErr; valid = false; }
+
+		const schemeErr = validateScheme(parseParts(settings.output_scheme)).errors[0];
+		if (schemeErr) { fieldErrors.output_scheme = schemeErr; valid = false; }
 
 		return valid;
 	}
@@ -195,14 +199,13 @@
 					<p class="settings-help">Leave blank to keep original input files in place.</p>
 				</div>
 
-				<div class="settings-field">
-					<label for="output_scheme" class="settings-label">Output path format</label>
-					<input id="output_scheme" type="text" bind:value={settings.output_scheme} />
-					<div class="settings-ref">
-						<p class="settings-ref__title">Use <code>/</code> for subdirectories.</p>
-						<p class="settings-ref__text">Supported keywords:</p>
-						<p class="settings-ref__keywords">asin, author, narrator, series_name, series_position, subtitle, title, year</p>
-					</div>
+				<div class="settings-field" role="group" aria-labelledby="output_scheme_label">
+					<!-- svelte-ignore a11y_label_has_associated_control: labels the composite builder group via aria-labelledby -->
+					<label id="output_scheme_label" class="settings-label">Output path format <span class="text-[var(--state-red)]">*</span></label>
+					<PathFormatBuilder bind:value={settings.output_scheme} outputDir={settings.output_dir} />
+					{#if fieldErrors.output_scheme}
+						<p class="settings-field-error" role="alert">{fieldErrors.output_scheme}</p>
+					{/if}
 				</div>
 			</div>
 		</section>
@@ -412,42 +415,6 @@
 
 	#input_dir_desc {
 		text-wrap: balance;
-	}
-
-	/* Reference box for output scheme keywords */
-	.settings-ref {
-		margin-top: 0.5rem;
-		padding: 0.5rem 0.75rem;
-		background: var(--bg);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-sm);
-	}
-
-	.settings-ref__title {
-		font-size: 0.78rem;
-		font-weight: 500;
-		color: var(--text);
-	}
-
-	.settings-ref__title code {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.75rem;
-		padding: 0.05rem 0.3rem;
-		background: var(--elevated);
-		border-radius: 2px;
-	}
-
-	.settings-ref__text {
-		margin-top: 0.25rem;
-		font-size: 0.75rem;
-		color: var(--text-muted);
-	}
-
-	.settings-ref__keywords {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.75rem;
-		color: var(--text-muted);
-		line-height: 1.6;
 	}
 
 	/* Save bar — end of the form, reachable without scrolling */

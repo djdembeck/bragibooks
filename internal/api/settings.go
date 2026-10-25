@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/bragibooks/bragibooks/internal/audio"
 	"github.com/bragibooks/bragibooks/internal/audiobookdb"
 	"github.com/bragibooks/bragibooks/internal/config"
 )
@@ -75,6 +76,12 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.NumCPUs != nil && *req.NumCPUs < 0 {
 		writeError(w, http.StatusBadRequest, "CPU count must be zero or greater")
 		return
+	}
+	if req.OutputScheme != nil {
+		if verr := audio.ValidatePathFormat(*req.OutputScheme); verr != nil {
+			writeError(w, http.StatusBadRequest, "output scheme: "+verr.Error())
+			return
+		}
 	}
 	// SSRF guard (finding: base URL policy) — the proxy target must be a
 	// trusted origin; anything else can exfiltrate the API key.
