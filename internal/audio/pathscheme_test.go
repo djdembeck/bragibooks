@@ -19,6 +19,8 @@ func TestValidatePathFormat(t *testing.T) {
 		{name: "reserved com1 with extension", template: "Com1.txt", wantErrFr: `reserved device name`},
 		{name: "reserved check ignores mixed case and dot", template: "{title}/{author}/computer", wantErrFr: ``},
 		{name: "reserved base name with space before dot", template: "con .txt", wantErrFr: `reserved device name`},
+		{name: "reserved base name with NEL before extension", template: "con\u0085.txt", wantErrFr: `reserved device name`},
+		{name: "reserved base name with ideographic space", template: "con\u3000.txt", wantErrFr: `reserved device name`},
 		{name: "empty template", template: "", wantErrFr: "produces no path elements"},
 		{name: "separators only", template: "///", wantErrFr: "produces no path elements"},
 		{name: "whitespace only", template: "  / ", wantErrFr: "produces no path elements"},

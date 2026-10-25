@@ -121,6 +121,35 @@ function isControl(ch: string): boolean {
 	return cp < 0x20 || cp === 0x7f;
 }
 
+// Whitespace the engine (Rust str::trim) and the Go validator
+// (strings.TrimSpace) both treat as trimmable — the Unicode White_Space
+// set plus U+0085 NEL and the C0 controls. JS's String.prototype.trim uses
+// a narrower set (no U+0085), so it must not be used for segment trimming.
+function isGoSpace(ch: string): boolean {
+	const cp = ch.codePointAt(0)!;
+	return (
+		cp <= 0x20 ||
+		cp === 0x85 ||
+		cp === 0xa0 ||
+		cp === 0x1680 ||
+		(cp >= 0x2000 && cp <= 0x200a) ||
+		cp === 0x2028 ||
+		cp === 0x2029 ||
+		cp === 0x202f ||
+		cp === 0x205f ||
+		cp === 0x3000 ||
+		cp === 0xfeff
+	);
+}
+
+function trimSegment(s: string): string {
+	let a = 0;
+	let b = s.length;
+	while (a < b && isGoSpace(s[a])) a++;
+	while (b > a && isGoSpace(s[b - 1])) b--;
+	return s.slice(a, b);
+}
+
 type TextPiece = { lit: string } | { token: TokenKey };
 
 /**
@@ -194,7 +223,7 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 	const segs = segments(parts);
 
 	// E1: zero path elements after trimming.
-	if (segs.every((s) => s.text.trim() === '' && !s.hasToken)) {
+	if (segs.every((s) => trimSegment(s.text) === '' && !s.hasToken)) {
 		errors.push('Add at least one path element.');
 	}
 
@@ -223,8 +252,9 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 	// the engine concatenates them before checking.
 	for (const seg of segs) {
 		if (seg.hasToken) continue;
-		if (seg.text.trim() === '') continue;
-		const base = seg.text.trim().split('.')[0].trim();
+		const text = trimSegment(seg.text);
+		if (text === '') continue;
+		const base = trimSegment(text.split('.')[0]);
 		if (RESERVED_NAMES.has(base.toLowerCase())) {
 			errors.push(`"${base}" is a reserved device name on Windows.`);
 			return { errors, warnings };
@@ -292,7 +322,7 @@ export function resolveExample(
 		.join('');
 	const rel = raw
 		.split('/')
-		.map((s) => s.trim())
+		.map((s) => trimSegment(s))
 		.filter((s) => s !== '')
 		.join('/');
 	if (!rel) return '';
