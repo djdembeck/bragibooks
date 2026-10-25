@@ -68,7 +68,7 @@ func newTestDB(t *testing.T) *sql.DB {
 // newTestHandler returns a Handler backed by an in-memory SQLite DB.
 func newTestHandler(t *testing.T) *Handler {
 	t.Helper()
-	return &Handler{svc: Services{DB: newTestDB(t)}}
+	return &Handler{svc: &Services{DB: newTestDB(t)}}
 }
 
 func TestUpdateBookMultiFieldSQLConstruction(t *testing.T) {

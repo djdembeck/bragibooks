@@ -73,16 +73,30 @@ func (h *Handler) envManagedGuard(w http.ResponseWriter) bool {
 	return false
 }
 
-// persistAPIEndpointEnabled persists the external-API state (DB first, then
+// persistAPIEndpointState persists the external-API state (DB first, then
 // the YAML flag, rolling the DB back on a file failure) and — only after
 // both stores agree — swaps the live state. Returns the previous snapshot
 // for rollback and (for enable/reissue) the minted raw key.
+//
+// It runs the whole read-modify-write under h.svc.settingsMu, the same
+// lock UpdateSettings uses for the form save: both persist the entire
+// settings row, so unserialized they can interleave snapshot-read and
+// row-write and clobber each other (a form save landing after an enable
+// would clear the freshly stored key digest, and the returned key would
+// stop working after a restart).
 func (h *Handler) persistAPIEndpointState(w http.ResponseWriter, enabled bool, keyDigest string) bool {
+	h.svc.settingsMu.Lock()
+	defer h.svc.settingsMu.Unlock()
+
 	prev := h.svc.Config.Config()
 	snap := *prev
 	snap.Server.APIEndpoint = config.APIEndpointConfig{
 		Enabled:   enabled,
 		KeyDigest: keyDigest,
+	}
+
+	if h.svc.SettingsPersistDelay != nil {
+		h.svc.SettingsPersistDelay()
 	}
 
 	// 1. DB first — the settings row is the authoritative store (it is the
@@ -217,9 +231,19 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Serialize with the external-API state flows (same full-row
+	// read-modify-write; see persistAPIEndpointState). The lock covers
+	// snapshot-read through row-write, so a concurrent save cannot
+	// interleave its row write with this one.
+	h.svc.settingsMu.Lock()
+	defer h.svc.settingsMu.Unlock()
+
 	prev := h.svc.Config.Config()
 	snap := *prev
 	changed := make(map[string]any)
+	if h.svc.SettingsPersistDelay != nil {
+		h.svc.SettingsPersistDelay()
+	}
 
 	if req.AudiobookdbAPIKey != nil {
 		snap.APIKey.APIKey = *req.AudiobookdbAPIKey

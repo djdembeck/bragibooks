@@ -27,6 +27,7 @@
 /bragibooks
 /webfs/build/
 # Go runtime artifacts (databases, secrets)
+.env
 config/*.db
 config/*.db-wal
 config/*.db-shm

@@ -13,7 +13,13 @@
 	let settingsLoaded = $state(false);
 	const showApiNotice = $derived(settingsLoaded && !apiEnabled && !noticeDismissed);
 	$effect(() => {
-		noticeDismissed = localStorage.getItem(API_NOTICE_KEY) === '1';
+		// Storage can be unavailable (private mode, blocked storage): a
+		// throwing read must not sink the settings fetch below it.
+		try {
+			noticeDismissed = localStorage.getItem(API_NOTICE_KEY) === '1';
+		} catch {
+			noticeDismissed = false;
+		}
 		get<Settings>('/settings')
 			.then((s) => {
 				apiEnabled = s.api_endpoint_enabled === true;

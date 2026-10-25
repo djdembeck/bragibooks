@@ -58,7 +58,7 @@ func newTestJobsHandler(t *testing.T) (*Handler, *ProcessingService) {
 	}
 
 	svc := NewProcessingService(db, &audio.Processor{}, 1)
-	h := &Handler{svc: Services{DB: db, ProcessingSvc: svc}}
+	h := &Handler{svc: &Services{DB: db, ProcessingSvc: svc}}
 	return h, svc
 }
 

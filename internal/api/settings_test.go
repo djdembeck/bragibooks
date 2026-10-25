@@ -9,17 +9,29 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/bragibooks/bragibooks/internal/audio"
+	"github.com/bragibooks/bragibooks/internal/audiobookdb"
 	"github.com/bragibooks/bragibooks/internal/config"
 	_ "modernc.org/sqlite"
 )
 
-// newSettingsTestDB opens an in-memory SQLite DB with just the settings
-// table (the shape the enable/disable/regenerate endpoints touch).
+// newSettingsTestDB opens a file-backed SQLite DB (temp dir) with just
+// the settings table (the shape the enable/disable/regenerate endpoints
+// touch). A file DB, not an in-memory shared one: concurrent connections
+// (used by the serialized-row race test) each truncate the shared in-memory
+// cache on write, which drops the single row.
 func newSettingsTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file::memory:?cache=shared")
+	dsn := "file:" + filepath.Join(t.TempDir(), "test.db")
+	// _pragma wal / busy timeout: concurrent connections from the pool
+	// must not first-hit SQLITE_BUSY (the race test issues parallel
+	// writes); WAL is the documented companion to _pragma foreign_keys.
+	db, err := sql.Open("sqlite", dsn+"?_pragma=busy_timeout%3d5000&_pragma=journal_mode%3dWAL&_pragma=synchronous%3dNORMAL")
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
@@ -48,12 +60,22 @@ func newSettingsTestDB(t *testing.T) *sql.DB {
 
 // newSettingsTestService wires a Handler with a settings DB and a
 // ConfigManager whose save target is a throwaway file in a temp dir.
+// Processor and AudiobookDB are real instances: UpdateSettings (the form
+// save) applies the live config to both at the end.
 func newSettingsTestService(t *testing.T, db *sql.DB) *Handler {
 	t.Helper()
 	dir := t.TempDir()
 	cm := config.NewConfigManager()
 	cm.SetConfigPath(filepath.Join(dir, "config.yaml"))
-	return NewHandler(Services{DB: db, Config: cm})
+	cfg := cm.Config()
+	dbVal := new(atomic.Value)
+	dbVal.Store(audiobookdb.NewClient("", cfg.APIKey.BaseURL))
+	return NewHandler(&Services{
+		DB:          db,
+		Config:      cm,
+		Processor:   audio.NewProcessor(cfg.M4bMerge.Binary, cfg.Directories.OutputDir, cfg.Directories.CompletedDir, cfg.Processing.NumCPUs, cfg.Processing.PathFormat, "info"),
+		AudiobookDB: dbVal,
+	})
 }
 
 // buildSettingsRouter serves the external-API settings routes on an
@@ -255,5 +277,97 @@ func TestSettingsAPIEndpointEnvManaged(t *testing.T) {
 	code, _ = settingsRoundTrip(t, h, http.MethodPost, "/api/settings/api-endpoint/disable")
 	if code != http.StatusForbidden {
 		t.Fatalf("disable while env-managed = %d, want 403", code)
+	}
+}
+
+// TestSettingsRowWritesAreSerialized pins the settings row's mutual
+// exclusion. The form save (UpdateSettings) and the external-API
+// enable/disable/regenerate flows are each a full-row read-modify-write
+// (snapshot, INSERT OR REPLACE of the whole row, then — for state
+// flows — an atomic live-config swap). Without serialization they
+// interleave snapshot-read with row-write: a flow whose snapshot
+// predates another flow's live swap later rewrites the entire row from
+// that snapshot and clobbers the state the other flow persisted — the
+// row then disagrees with the live config, and a restart would load the
+// clobbered row and silently change what the API accepts.
+//
+// The invariant serialization provides: at every persistence flow's
+// snapshot-to-write window (widened via the SettingsPersistDelay test
+// hook) the row and the live config agree exactly on (api_enabled,
+// api_key_digest), because every row write happens paired with its live
+// swap, and each flow's snapshot is current at its write. A clobbering
+// stale write breaks that agreement, which the wide window makes an
+// in-window observation near-certain. The final state must agree as
+// well.
+func TestSettingsRowWritesAreSerialized(t *testing.T) {
+	db := newSettingsTestDB(t)
+	// Pre-seed the row: WAL readers use a snapshot from their txn start,
+	// so a SELECT in the hook that starts before the first concurrent
+	// INSERT OR REPLACE commits would see "no rows". With the row present
+	// from the start, every operation is an UPDATE and the count is stable.
+	if _, err := db.Exec(`INSERT INTO settings (id, api_enabled, api_key_digest) VALUES (1, 0, '')`); err != nil {
+		t.Fatal(err)
+	}
+	h := newSettingsTestService(t, db)
+	h.svc.SettingsPersistDelay = func() {
+		assertSettingsRowAgreesWithLive(t, db, h.svc.Config, "mid-window")
+		time.Sleep(50 * time.Millisecond)
+	}
+	router := buildSettingsRouter(h)
+
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			settingSave(t, router)
+		}()
+		go func() {
+			defer wg.Done()
+			enableAndDisable(t, router)
+		}()
+	}
+	wg.Wait()
+
+	assertSettingsRowAgreesWithLive(t, db, h.svc.Config, "final")
+}
+
+// assertSettingsRowAgreesWithLive checks the settings-row serialization
+// invariant: the row the persistence flows last wrote and the live
+// config carry the same external-API state (enabled flag and key
+// digest). Under unsynchronized interleaving, a late full-row write from
+// a stale snapshot breaks exactly this.
+func assertSettingsRowAgreesWithLive(t *testing.T, db *sql.DB, cm *config.ConfigManager, ctx string) {
+	t.Helper()
+	live := cm.Config()
+	var stored int
+	var digest string
+	if err := db.QueryRow("SELECT api_enabled, api_key_digest FROM settings WHERE id = 1").Scan(&stored, &digest); err != nil {
+		t.Fatalf("%s: read settings row: %v", ctx, err)
+	}
+	if live.Server.APIEndpoint.Enabled != (stored == 1) {
+		t.Errorf("%s: row api_enabled = %d, live = %v — a concurrent write clobbered the row", ctx, stored, live.Server.APIEndpoint.Enabled)
+	}
+	if live.Server.APIEndpoint.KeyDigest != digest {
+		t.Errorf("%s: row digest = %q, live = %q — the row is not the last flow's final write", ctx, digest, live.Server.APIEndpoint.KeyDigest)
+	}
+}
+
+// settingSave performs one full-row form save (PUT /api/settings).
+func settingSave(t *testing.T, router http.Handler) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"num_cpus":2}`))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(httptest.NewRecorder(), req)
+}
+
+// enableAndDisable performs the two external-API state transitions, one
+// full-row read-modify-write each.
+func enableAndDisable(t *testing.T, router http.Handler) {
+	t.Helper()
+	for _, p := range []string{"/api/settings/api-endpoint/enable", "/api/settings/api-endpoint/disable"} {
+		req := httptest.NewRequest(http.MethodPost, p, strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(httptest.NewRecorder(), req)
 	}
 }

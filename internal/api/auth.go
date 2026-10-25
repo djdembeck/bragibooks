@@ -51,7 +51,9 @@ import (
 // request, so runtime toggles apply without a restart):
 //
 //  1. A present, valid key (Bearer header or bragibooks_token cookie)
-//     allows from any address. A Bearer header is CSRF-exempt; the key is
+//     allows from any address — but only while the external API is
+//     enabled; a retained digest never authorizes remote access in the
+//     disabled state. A Bearer header is CSRF-exempt; the key is
 //     compared as its SHA-256 digest against the stored digest.
 //  2. No presented key (or none applicable) and the client is
 //     loopback/LAN: allow via the double-submit-CSRF guard, in BOTH the
@@ -86,12 +88,15 @@ func RequireAdminWithState(lazy func() config.AdminAuthState) func(http.Handler)
 			exempt := bearerHeaderPresent(r)
 
 			if hasToken {
-				// A presented credential is always treated as key auth: it
-				// must match the stored digest. Deliberately stricter than
-				// an old-code silent fallthrough — a presented-but-stale
-				// key is never accepted, and the web UI sends no stored
-				// key, so it is unaffected.
-				if st.KeyDigest == "" || !matchAPIKeyDigest(token, st.KeyDigest) {
+				// A presented credential is always treated as key auth and
+				// is only honored while the external API is enabled: a
+				// retained digest must not open remote access in the
+				// disabled state (the DB row and the flag can disagree,
+				// e.g. after an env/YAML pin to false). Deliberately
+				// stricter than an old-code silent fallthrough — a
+				// presented-but-stale key is never accepted, and the web
+				// UI sends no stored key, so it is unaffected.
+				if !st.Enabled || st.KeyDigest == "" || !matchAPIKeyDigest(token, st.KeyDigest) {
 					writeError(w, http.StatusForbidden, "invalid API key")
 					return
 				}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
@@ -23,15 +24,30 @@ type Services struct {
 	Processor     *audio.Processor
 	AudiobookDB   *atomic.Value
 	ProcessingSvc *ProcessingService
+
+	// settingsMu serializes every full settings-row read-modify-write
+	// (the form save and the external-API enable/disable/regenerate
+	// flows): both persist the whole row, and without this lock a
+	// concurrent pair can interleave snapshot-read and row-write so a
+	// later save clobbers what the earlier one persisted (e.g. a form
+	// save landing after an enable clears the freshly stored key digest).
+	settingsMu sync.Mutex
+
+	// SettingsPersistDelay is a test hook called, under the settings
+	// lock, between the snapshot read and the row write in the settings
+	// persistence flows. Production wiring leaves it nil; tests use it
+	// to widen the window between read and write so an unsynchronized
+	// interleaving becomes deterministic.
+	SettingsPersistDelay func()
 }
 
 // Handler wraps services and registers routes.
 type Handler struct {
-	svc Services
+	svc *Services
 }
 
 // NewHandler creates a new Handler with the given services.
-func NewHandler(svc Services) *Handler {
+func NewHandler(svc *Services) *Handler {
 	return &Handler{svc: svc}
 }
 

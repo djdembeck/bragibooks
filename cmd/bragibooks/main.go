@@ -112,7 +112,7 @@ func main() {
 	defer cancel()
 	go processingSvc.RunWorkers(ctx, cfg.Processing.NumCPUs)
 
-	handler := api.NewHandler(api.Services{
+	handler := api.NewHandler(&api.Services{
 		DB:            database,
 		Config:        cfgMgr,
 		Processor:     processor,

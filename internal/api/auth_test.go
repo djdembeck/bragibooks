@@ -370,6 +370,34 @@ func TestCSRFDisabledBearerKeyRejected(t *testing.T) {
 	}
 }
 
+// Disabled state with a RETAINED digest (the digest can survive in the DB
+// row after the flag is pinned off via env/YAML): the key must NOT open
+// remote access — a matching key is rejected as invalid. LAN keyless
+// access is untouched by the retained digest.
+func TestDisabledRetainedDigestDoesNotAuthorizeRemote(t *testing.T) {
+	// The key whose digest is retained.
+	key := "bk_live"
+	st := config.AdminAuthState{Enabled: false, KeyDigest: keyDigestOf(key)}
+	// Remote + matching key while disabled: 403, not 200.
+	rec := doAuthReq(t, sw(st),
+		"GET", "/api/books", "109.100.0.1:5555", "", "Bearer "+key, "")
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("disabled remote with retained-digest key = %d, want 403", rec.Code)
+	}
+	// Same via the cookie (non-LAN peer): 403.
+	rec = doAuthCookieReq(t, sw(st),
+		"GET", "/api/jobs/1/stream", "109.100.0.1:5555", key)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("disabled remote cookie with retained-digest key = %d, want 403", rec.Code)
+	}
+	// LAN keyless stays 200: the retained digest degrades nothing locally.
+	rec = doAuthReq(t, sw(st),
+		"GET", "/api/books", "127.0.0.1:1", "", "", "")
+	if rec.Code != http.StatusOK {
+		t.Errorf("disabled LAN keyless with retained digest = %d, want 200", rec.Code)
+	}
+}
+
 // Enabled + an invalid key: 403 regardless of the peer (rule 3 is
 // address-independent), with the deterministic "invalid API key" body.
 func TestCSRFEnabledInvalidKeyRejected(t *testing.T) {
