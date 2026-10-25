@@ -384,6 +384,26 @@ func TestStripEscapeSequences(t *testing.T) {
 			want: "beforeafter",
 		},
 		{
+			name: "VT100 charset designation",
+			in:   "before\x1b(Bafter",
+			want: "beforeafter",
+		},
+		{
+			name: "VT100 alternate charset designation",
+			in:   "before\x1b)0after",
+			want: "beforeafter",
+		},
+		{
+			name: "escape with intermediate byte",
+			in:   "a\x1b#8b",
+			want: "ab",
+		},
+		{
+			name: "truncated intermediate sequence",
+			in:   "abc\x1b(",
+			want: "abc",
+		},
+		{
 			name: "literal bracket text is not a sequence",
 			in:   "[32m INFO [0m\n",
 			want: "[32m INFO [0m\n",

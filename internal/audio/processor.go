@@ -121,8 +121,15 @@ func escapeSequenceEnd(s string, i int) int {
 			}
 		}
 		return len(s) - 1
-	default: // Two-byte escape.
-		return j
+	default: // Zero or more intermediate bytes, then one final byte.
+		// Non-CSI escapes may carry intermediates: VT100 charset
+		// designations such as ESC ( B and ESC ) 0, or ESC # 8.
+		for ; j < len(s); j++ {
+			if s[j] < 0x20 || s[j] > 0x2f {
+				return j
+			}
+		}
+		return len(s) - 1
 	}
 }
 
