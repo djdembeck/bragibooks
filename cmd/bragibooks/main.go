@@ -77,6 +77,17 @@ func main() {
 	// Refresh cfg after potential DB-loaded overrides
 	cfg = cfgMgr.Config()
 
+	// One startup line about the external API state (the auth middleware
+	// itself logs nothing).
+	switch {
+	case !cfg.Server.APIEndpoint.Enabled:
+		log.Printf("External API disabled — loopback/LAN access only.")
+	case cfg.Server.APIEndpoint.KeyDigest != "":
+		log.Printf("External API enabled — remote access authorized with API key; LAN access unchanged.")
+	default:
+		log.Printf("External API enabled via env but no key exists — open Settings → External API → Reissue key to mint one for remote clients.")
+	}
+
 	// Services
 	processor := audio.NewProcessor(
 		cfg.M4bMerge.Binary,
@@ -124,11 +135,14 @@ func main() {
 	// orchestrators and the CLI can probe liveness without credentials.
 	r.Get("/api/health", server.HealthCheck)
 
-	// Admin auth (finding: unauthenticated API): token mode when
-	// BRAGIBOOKS_ADMIN_TOKEN is set, loopback-LAN-only local mode when not.
-	// Applied to the /api subtree only; the embedded SPA (served same
-	// origin below) stays reachable for the UI to load.
-	handler.RegisterRoutes(r, api.RequireAdmin(os.Getenv("BRAGIBOOKS_ADMIN_TOKEN")))
+	// Admin auth (finding: unauthenticated API): loopback-LAN access is
+	// always available (the same-origin UI relies on it via CSRF); when
+	// the external API is enabled, a valid API key additionally allows
+	// any address. State is read per request from the config manager so
+	// Settings-page toggles apply without a restart. Applied to the /api
+	// subtree only; the embedded SPA (served same origin below) stays
+	// reachable for the UI to load.
+	handler.RegisterRoutes(r, api.RequireAdminWithState(cfgMgr.AdminAuthState))
 
 	// SPA handler — serve embedded frontend for non-API routes.
 	r.HandleFunc("/*", webfs.Handler().ServeHTTP)
@@ -309,13 +323,14 @@ func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {
 	cfg := cfgMgr.Config()
 	yamlKeys := cfgMgr.YAMLKeys()
 
-	var m4bBinary, inputDir, outputDir, completedDir, outputScheme, region, apiKey, baseURL string
+	var m4bBinary, inputDir, outputDir, completedDir, outputScheme, region, apiKey, baseURL, endpointKeyDigest string
 	var numCPUs int
+	var endpointEnabled int
 
 	err := database.QueryRow(`
-		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url
+		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url, api_enabled, api_key_digest
 		FROM settings WHERE id = 1
-	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL)
+	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &endpointEnabled, &endpointKeyDigest)
 	if err != nil {
 		log.Printf("Warning: could not load settings from DB: %v", err)
 		return
@@ -351,6 +366,14 @@ func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {
 	if !yamlKeys["api_key.base_url"] && os.Getenv("API_KEY_BASE_URL") == "" {
 		cfg.APIKey.BaseURL = baseURL
 	}
+	// The enabled flag follows the usual YAML/env gate (a deployment pin
+	// wins over a store save); the digest has no deployment source and
+	// always comes from the DB row — otherwise the key would die after a
+	// restart.
+	if !yamlKeys["server.api_endpoint.enabled"] && os.Getenv("SERVER_API_ENDPOINT_ENABLED") == "" {
+		cfg.Server.APIEndpoint.Enabled = endpointEnabled != 0
+	}
+	cfg.Server.APIEndpoint.KeyDigest = endpointKeyDigest
 }
 
 func ensureDefaultSettings(database *sql.DB) error {

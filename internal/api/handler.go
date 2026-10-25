@@ -72,6 +72,9 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 		// Settings
 		r.Get("/settings", h.GetSettings)
 		r.Put("/settings", h.UpdateSettings)
+		r.Post("/settings/api-endpoint/enable", h.EnableAPIEndpoint)
+		r.Post("/settings/api-endpoint/disable", h.DisableAPIEndpoint)
+		r.Post("/settings/api-endpoint/regenerate", h.RegenerateAPIEndpoint)
 
 		// Directory browsing
 		r.Get("/directories", h.ListDirectories)

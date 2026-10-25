@@ -683,23 +683,26 @@ func migrateSettings(legacyDB *sql.DB, newDB sqlExecer, liveBaseURL string) erro
 	}
 
 	// Carry through any values the new DB already has, so a merge never
-	// discards the user's API key / base URL / binary.
+	// discards the user's API key / base URL / binary / external-API
+	// state.
 	existingAPIKey, existingBaseURL, existingBinary := "", "", ""
+	existingAPIEnabled, existingAPIKeyDigest := 0, ""
 	if err := newDB.QueryRow(
-		"SELECT audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary FROM settings WHERE id = 1",
-	).Scan(&existingAPIKey, &existingBaseURL, &existingBinary); err != nil && err != sql.ErrNoRows {
+		"SELECT audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, api_enabled, api_key_digest FROM settings WHERE id = 1",
+	).Scan(&existingAPIKey, &existingBaseURL, &existingBinary, &existingAPIEnabled, &existingAPIKeyDigest); err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("read existing settings for merge: %w", err)
 	}
 
 	// The legacy directory values are the point of the migration, but the
 	// live credential values survive the INSERT OR REPLACE.
 	_, err = newDB.Exec(`
-		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, updated_at)
-	VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 'us', datetime('now'))
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 'us', ?, ?, datetime('now'))
 `, existingAPIKey,
 		nonEmptyOr(existingBaseURL, nonEmptyOr(liveBaseURL, "https://audiobookdb.org/api")),
 		nonEmptyOr(existingBinary, "m4b-merge"),
-		inputDir, outputDir, completedDir, numCPUs, outputScheme)
+		inputDir, outputDir, completedDir, numCPUs, outputScheme,
+		existingAPIEnabled, existingAPIKeyDigest)
 	return err
 }
 

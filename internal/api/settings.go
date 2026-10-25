@@ -1,6 +1,10 @@
 package api
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,23 +16,151 @@ import (
 	"github.com/bragibooks/bragibooks/internal/config"
 )
 
+// cryptoRand is the key-entropy source; a variable (not the package) so a
+// test can fault it for the generateAPIKey error path.
+var cryptoRand = rand.Reader
+
 // GetSettings handles GET /api/settings.
 // Returns the current settings without the API key.
 func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	cfg := h.svc.Config.Config()
 
+	// The API key digest is never exposed by any read path.
 	settings := map[string]any{
-		"m4b_merge_binary":     cfg.M4bMerge.Binary,
-		"input_dir":            cfg.Directories.InputDir,
-		"output_dir":           cfg.Directories.OutputDir,
-		"completed_dir":        cfg.Directories.CompletedDir,
-		"num_cpus":             cfg.Processing.NumCPUs,
-		"output_scheme":        cfg.Processing.PathFormat,
-		"region":               cfg.Processing.Region,
-		"audiobookdb_base_url": cfg.APIKey.BaseURL,
+		"m4b_merge_binary":         cfg.M4bMerge.Binary,
+		"input_dir":                cfg.Directories.InputDir,
+		"output_dir":               cfg.Directories.OutputDir,
+		"completed_dir":            cfg.Directories.CompletedDir,
+		"num_cpus":                 cfg.Processing.NumCPUs,
+		"output_scheme":            cfg.Processing.PathFormat,
+		"region":                   cfg.Processing.Region,
+		"audiobookdb_base_url":     cfg.APIKey.BaseURL,
+		"api_endpoint_enabled":     cfg.Server.APIEndpoint.Enabled,
+		"api_endpoint_env_managed": h.svc.Config.APIEndpointEnvManaged(),
 	}
 
 	writeJSON(w, http.StatusOK, settings)
+}
+
+// generateAPIKey mints a new external-API key: 32 random bytes, exposed to
+// the client as "bk_<64 hex>", stored only as its SHA-256 digest.
+func generateAPIKey() (raw string, digest string, err error) {
+	var b [32]byte
+	if _, err = cryptoRand.Read(b[:]); err != nil {
+		return "", "", err
+	}
+	raw = "bk_" + hex.EncodeToString(b[:])
+	sum := sha256.Sum256([]byte(raw))
+	return raw, hex.EncodeToString(sum[:]), nil
+}
+
+// matchAPIKeyDigest reports whether presented is the key whose digest is
+// stored (constant-time compare over the SHA-256 hex digest).
+func matchAPIKeyDigest(presented, storedDigest string) bool {
+	sum := sha256.Sum256([]byte(presented))
+	presentedHex := hex.EncodeToString(sum[:])
+	return subtle.ConstantTimeCompare([]byte(presentedHex), []byte(storedDigest)) == 1
+}
+
+// envManagedGuard rejects enable/disable when the env var
+// SERVER_API_ENDPOINT_ENABLED is set (deployment-managed state).
+// Returns true (and has written the 403 response) when managed.
+func (h *Handler) envManagedGuard(w http.ResponseWriter) bool {
+	if h.svc.Config.APIEndpointEnvManaged() {
+		writeError(w, http.StatusForbidden, "external API state is managed by the SERVER_API_ENDPOINT_ENABLED environment variable")
+		return true
+	}
+	return false
+}
+
+// persistAPIEndpointEnabled persists the external-API state (DB first, then
+// the YAML flag, rolling the DB back on a file failure) and — only after
+// both stores agree — swaps the live state. Returns the previous snapshot
+// for rollback and (for enable/reissue) the minted raw key.
+func (h *Handler) persistAPIEndpointState(w http.ResponseWriter, enabled bool, keyDigest string) bool {
+	prev := h.svc.Config.Config()
+	snap := *prev
+	snap.Server.APIEndpoint = config.APIEndpointConfig{
+		Enabled:   enabled,
+		KeyDigest: keyDigest,
+	}
+
+	// 1. DB first — the settings row is the authoritative store (it is the
+	//    only source a restart reads when no deployment pin exists).
+	if err := h.saveSettingsToDB(&snap); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("persist external API state to DB: %v", err))
+		return false
+	}
+
+	// 2. File second: the enabled flag only (the digest has no YAML path by
+	//    tag). Only reachable when not env-managed — the env guard already
+	//    rejected env-managed enable/disable, so this write is never frozen
+	//    by overrideKey's env gate.
+	if err := h.svc.Config.SaveKeys(map[string]any{"server": map[string]any{"api_endpoint": map[string]any{"enabled": enabled}}}); err != nil {
+		if rbErr := h.saveSettingsToDB(prev); rbErr != nil {
+			// Both stores now disagree and the rollback lost: report both,
+			// keep the live process on the previous state (it and the DB
+			// revert together on the next successful action), do NOT swap.
+			log.Printf("Warning: external API state file save failed and DB rollback also failed: %v (file error: %v)", rbErr, err)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("save external API state: %v", err))
+			return false
+		}
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("save external API state: %v", err))
+		return false
+	}
+
+	// 3. Both stores persisted: swap the live state so the next request sees
+	//    it without a restart.
+	h.svc.Config.SetAPIEndpointState(enabled, keyDigest)
+	h.svc.Config.AddYAMLKeys("server.api_endpoint.enabled")
+	return true
+}
+
+// EnableAPIEndpoint enables the external API and mints a new key. The raw
+// key is returned ONLY here — reveal-once by design.
+func (h *Handler) EnableAPIEndpoint(w http.ResponseWriter, r *http.Request) {
+	if h.envManagedGuard(w) {
+		return
+	}
+	raw, digest, err := generateAPIKey()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not generate API key")
+		return
+	}
+	if !h.persistAPIEndpointState(w, true, digest) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "api_key": raw})
+}
+
+// DisableAPIEndpoint disables the external API and wipes the stored key.
+func (h *Handler) DisableAPIEndpoint(w http.ResponseWriter, r *http.Request) {
+	if h.envManagedGuard(w) {
+		return
+	}
+	if !h.persistAPIEndpointState(w, false, "") {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+}
+
+// RegenerateAPIEndpoint mints a fresh key while the external API is
+// enabled, invalidating the previous one. Allowed in env-managed mode
+// (only the enabled flag is deployment-managed, not the key).
+func (h *Handler) RegenerateAPIEndpoint(w http.ResponseWriter, r *http.Request) {
+	if !h.svc.Config.Config().Server.APIEndpoint.Enabled {
+		writeError(w, http.StatusBadRequest, "enable the external API first")
+		return
+	}
+	raw, digest, err := generateAPIKey()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not generate API key")
+		return
+	}
+	if !h.persistAPIEndpointState(w, true, digest) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "api_key": raw})
 }
 
 // UpdateSettingsRequest is the JSON body accepted by PUT /api/settings.
@@ -213,9 +345,13 @@ func validateAudiobookdbBaseURL(raw string) error {
 // Uses INSERT OR REPLACE to handle both initial setup and updates.
 // Directory paths are stored in expanded (absolute) form.
 func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
+	apiEnabled := 0
+	if cfg.Server.APIEndpoint.Enabled {
+		apiEnabled = 1
+	}
 	_, err := h.svc.DB.Exec(`
-		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 	`,
 		cfg.APIKey.APIKey,
 		cfg.APIKey.BaseURL,
@@ -226,6 +362,8 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 		cfg.Processing.NumCPUs,
 		cfg.Processing.PathFormat,
 		cfg.Processing.Region,
+		apiEnabled,
+		cfg.Server.APIEndpoint.KeyDigest,
 	)
 	return err
 }

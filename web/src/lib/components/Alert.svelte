@@ -2,11 +2,15 @@
 	let {
 		variant = 'info',
 		children,
-		onretry
+		onretry,
+		// ARIA role of the root element. Defaults to "alert" (the prior
+		// hardcoded role); decorative/info banners pass role="status".
+		role = $bindable('alert')
 	}: {
 		variant?: 'info' | 'success' | 'warning' | 'error';
 		children: import('svelte').Snippet;
 		onretry?: () => void;
+		role?: string;
 	} = $props();
 
 	const styles = $derived.by(() => {
@@ -24,7 +28,7 @@
 
 </script>
 
-<div class="rounded-sm border border-2 p-3.5 {styles}" role="alert">
+<div class="rounded-sm border border-2 p-3.5 {styles}" role={role}>
 	<div class="flex items-start justify-between gap-4">
 		<div class="text-sm leading-relaxed">{@render children()}</div>
 		{#if onretry}

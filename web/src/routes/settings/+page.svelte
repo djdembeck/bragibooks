@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { get, put } from '$lib/api';
-	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker } from '$lib/components';
+	import { get, post, put } from '$lib/api';
+	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker, Modal } from '$lib/components';
 	import type { Settings } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 	import { toCleanedError, type CleanedAdbError } from '$lib/adbError';
@@ -96,6 +96,77 @@
 			saving = false;
 		}
 	}
+
+	// External API (remote key auth). The key is server-generated and
+	// shown once in the modal; this page never stores it.
+	let apiBusy = $state(false);
+	let apiError = $state<CleanedAdbError | null>(null);
+	let apiKeyModalKey = $state<string | null>(null);
+	let apiKeyModalOpen = $state(false);
+
+	type ApiEndpointResponse = { enabled: boolean; api_key: string };
+
+	function applyApiEndpointState(enabled: boolean) {
+		if (!settings) return;
+		settings.api_endpoint_enabled = enabled;
+	}
+
+	async function enableExternalAPI() {
+		if (!settings) return;
+		apiBusy = true;
+		apiError = null;
+		try {
+			const res = await post<ApiEndpointResponse>('/settings/api-endpoint/enable', {});
+			applyApiEndpointState(res.enabled);
+			showApiKey(res.api_key);
+		} catch (e) {
+			apiError = toCleanedError(e);
+		} finally {
+			apiBusy = false;
+		}
+	}
+
+	async function regenerateExternalAPI() {
+		if (!settings) return;
+		apiBusy = true;
+		apiError = null;
+		try {
+			const res = await post<ApiEndpointResponse>('/settings/api-endpoint/regenerate', {});
+			applyApiEndpointState(res.enabled);
+			showApiKey(res.api_key);
+		} catch (e) {
+			apiError = toCleanedError(e);
+		} finally {
+			apiBusy = false;
+		}
+	}
+
+	async function disableExternalAPI() {
+		if (!settings) return;
+		apiBusy = true;
+		apiError = null;
+		try {
+			const res = await post<{ enabled: boolean }>('/settings/api-endpoint/disable', {});
+			applyApiEndpointState(res.enabled);
+		} catch (e) {
+			apiError = toCleanedError(e);
+		} finally {
+			apiBusy = false;
+		}
+	}
+
+	function showApiKey(key: string) {
+		apiKeyModalKey = key;
+		apiKeyModalOpen = true;
+	}
+
+	// Reveal-once: clear the on-screen key whenever the modal is not shown.
+	$effect(() => {
+		if (!apiKeyModalOpen) apiKeyModalKey = null;
+	});
+
+	const apiEnabled = $derived(settings?.api_endpoint_enabled === true);
+	const apiEnvManaged = $derived(settings?.api_endpoint_env_managed === true);
 </script>
 
 <PageHeader
@@ -263,6 +334,53 @@
 			</div>
 		</section>
 
+		<!-- External API -->
+		<section class="settings-section" aria-labelledby="settings-external-api">
+			<h2 class="settings-section__title" id="settings-external-api">External API</h2>
+			<div class="settings-field">
+				<p class="settings-help settings-help--status">
+					{#if apiEnvManaged}
+						Managed by the <code>SERVER_API_ENDPOINT_ENABLED</code> environment variable.
+					{:else if apiEnabled}
+						<strong>On</strong> — the API is reachable from any address with your API key.
+					{:else}
+						<strong>Off</strong> — the API is reachable from your LAN only.
+					{/if}
+				</p>
+				{#if apiError}
+					<div class="mb-3" role="alert">
+						<Alert variant="error">{apiError.message}</Alert>
+					</div>
+				{/if}
+				<div class="settings-input-row">
+					{#if apiEnabled}
+						<Button
+							variant="secondary"
+							loading={apiBusy}
+							disabled={apiBusy}
+							onclick={regenerateExternalAPI}
+						>
+							Reissue key
+						</Button>
+						{#if !apiEnvManaged}
+							<Button variant="ghost" loading={apiBusy} disabled={apiBusy} onclick={disableExternalAPI}>
+								Disable
+							</Button>
+						{/if}
+					{:else if !apiEnvManaged}
+						<Button variant="primary" loading={apiBusy} disabled={apiBusy} onclick={enableExternalAPI}>
+							Enable external API
+						</Button>
+					{/if}
+				</div>
+				<p class="settings-help">
+					For scripts, automation, or tools on other machines: they authenticate with
+					<code>Authorization: Bearer &lt;key&gt;</code>. The web interface is unaffected and
+					never needs the key.
+				</p>
+			</div>
+		</section>
+
 		<!-- Save -->
 		<div class="settings-save">
 			{#if saving}
@@ -286,6 +404,27 @@
 		title={pickerTitles[pickerField]}
 		onselect={onPick}
 	/>
+
+	<Modal bind:open={apiKeyModalOpen} title="External API key">
+		{#if apiKeyModalKey}
+			<p class="text-sm text-[var(--text-secondary)] mb-3">
+				Copy this key for your external tools. It is shown only once and cannot be
+				retrieved later.
+			</p>
+			<div class="flex items-center gap-2">
+				<code class="api-key-code">{apiKeyModalKey}</code>
+				<Button
+					variant="secondary"
+					class="shrink-0"
+					onclick={() => {
+						void navigator.clipboard?.writeText(apiKeyModalKey ?? '');
+					}}
+				>
+					Copy
+				</Button>
+			</div>
+		{/if}
+	</Modal>
 {/if}
 
 <svelte:head>
@@ -408,6 +547,24 @@
 		color: var(--text-muted);
 		line-height: 1.45;
 		text-wrap: pretty;
+	}
+
+	.settings-help--status {
+		margin-top: 0;
+		font-size: 0.875rem;
+		color: var(--text-secondary);
+	}
+
+	.api-key-code {
+		display: block;
+		flex: 1 1 auto;
+		min-width: 0;
+		overflow-wrap: anywhere;
+		padding: 0.625rem 0.75rem;
+		background: var(--bg);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		font-size: 0.8125rem;
 	}
 
 	#input_dir_desc {

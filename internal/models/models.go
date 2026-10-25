@@ -68,6 +68,8 @@ type Settings struct {
 	NumCPUs            int    `db:"num_cpus" json:"num_cpus"`
 	OutputScheme       string `db:"output_scheme" json:"output_scheme"`
 	Region             string `db:"region" json:"region"`
+	APIEndpointEnabled bool   `db:"api_enabled" json:"-"`
+	APIKeyDigest       string `db:"api_key_digest" json:"-"`
 	CreatedAt          string `db:"created_at" json:"created_at"`
 	UpdatedAt          string `db:"updated_at" json:"updated_at"`
 }

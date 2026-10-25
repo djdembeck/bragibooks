@@ -30,6 +30,46 @@ var testMigrations = []migration{
 	},
 }
 
+// TestRunMigrationsRealShape runs the production migration list on a fresh
+// DB and asserts the resulting table shapes, so a schema change always has
+// to be reflected here. It runs BEFORE the two tests below that permanently
+// mutate the package's `migrations` var (in-file order), so it must not be
+// moved after them.
+func TestRunMigrationsRealShape(t *testing.T) {
+	if len(migrations) < 5 {
+		t.Fatalf("migrations = %d entries, want the 5 production migrations (run before the test var mutations)", len(migrations))
+	}
+	db := openTestDB(t)
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	if n := appliedCount(t, db); n != len(migrations) {
+		t.Errorf("applied migrations = %d, want all %d", n, len(migrations))
+	}
+	if !hasColumn(t, db, "settings", "api_enabled") {
+		t.Error("settings.api_enabled missing after v5")
+	}
+	if !hasColumn(t, db, "settings", "api_key_digest") {
+		t.Error("settings.api_key_digest missing after v5")
+	}
+	if !hasColumn(t, db, "settings", "audiobookdb_base_url") {
+		t.Error("settings.audiobookdb_base_url missing (v3 regression)")
+	}
+	if !hasColumn(t, db, "books", "converted") {
+		t.Error("books.converted missing (v2 regression)")
+	}
+	if !hasColumn(t, db, "people", "asin") {
+		t.Error("people.asin missing (v4 regression)")
+	}
+	// Re-applying is a no-op (columns are idempotently skipped).
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations re-apply: %v", err)
+	}
+	if n := appliedCount(t, db); n != len(migrations) {
+		t.Errorf("applied after re-apply = %d, want no new rows (%d)", n, len(migrations))
+	}
+}
+
 // captureMigrations temporarily swaps the package's migration list so a
 // failing migration can be injected. Returns a restore function.
 func captureMigrations(t *testing.T) func() {

@@ -42,12 +42,12 @@ It is an operations board for a personal audiobook pipeline, not a cloud library
 
 ## Security
 
-Bragibooks is designed for one operator on a private network, and the API routes are protected by admin authentication with two modes:
+Bragibooks is designed for one operator on a private network, and the API routes are protected by address and credential checks:
 
-- **Local mode** (no token set): requests are accepted only from loopback and private LAN addresses (`127.0/8`, `10/8`, `172.16/12`, `192.168/16`). Everything else is refused. This mode starts with a logged warning.
-- **Token mode**: set `BRAGIBOOKS_ADMIN_TOKEN` to allow access from any address to clients that present the token (browser cookie or `Authorization: Bearer` header).
+- **Off (default):** requests are accepted only from loopback and private LAN addresses (`127.0/8`, `10/8`, `172.16/12`, `192.168/16`). Everything else is refused.
+- **On (enabled in Settings → External API):** the API is *additionally* reachable from any address by clients that present the server-generated API key as `Authorization: Bearer <key>` (or the `bragibooks_token` cookie). The key is minted server-side, shown once in a modal for copying into external tools, and then only its SHA-256 digest is stored. LAN/browser access is unchanged in either state.
 
-The web interface itself has no login screen; it relies on the boundary above. Do not expose the port directly to the public internet — keep it on a trusted network and, when you need wider access, set `BRAGIBOOKS_ADMIN_TOKEN` and put an authenticated reverse proxy in front of the app.
+The web interface itself has no login screen; it relies on the boundary above and the server-set CSRF double-submit cookie. Do not expose the port directly to the public internet — keep it on a trusted network, and for wider first access put an authenticated reverse proxy in front of the app. When you need machine access from elsewhere, enable the External API in Settings and use the printed `bk_…` key.
 
 ## Background
 

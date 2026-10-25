@@ -114,6 +114,8 @@ func setupNewSchema(db *sql.DB) error {
 			num_cpus INTEGER DEFAULT 1,
 			output_scheme TEXT DEFAULT '{author}/{title}',
 			region TEXT DEFAULT 'us',
+			api_enabled BOOLEAN NOT NULL DEFAULT 0,
+			api_key_digest TEXT NOT NULL DEFAULT '',
 			created_at TEXT DEFAULT (datetime('now')),
 			updated_at TEXT DEFAULT (datetime('now'))
 		)
@@ -456,19 +458,27 @@ func TestMigrateSettingsCarriesLiveCredentialValues(t *testing.T) {
 			VALUES (1, '/legacy/in', '/legacy/out', '/legacy/done', 2, '{author}/{title}')`); err != nil {
 			t.Fatal(err)
 		}
-		// Row already present with the user's credentials.
-		if _, err := newDB.Exec(`INSERT INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary)
-			VALUES (1, 'db-key', 'https://audiobookdb.org/api', 'm4b-merge')`); err != nil {
+		// Row already present with the user's credentials and a live
+		// external-API key (enabled + digest) that must survive the merge.
+		if _, err := newDB.Exec(`INSERT INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, api_enabled, api_key_digest)
+			VALUES (1, 'db-key', 'https://audiobookdb.org/api', 'm4b-merge', 1, 'aabbccdd')`); err != nil {
 			t.Fatal(err)
 		}
 
 		if err := migrateSettings(legacy, newDB, "https://live.example/api"); err != nil {
 			t.Fatalf("migrateSettings: %v", err)
 		}
-		var apiKey, baseURL, inputDir string
-		if err := newDB.QueryRow("SELECT audiobookdb_api_key, audiobookdb_base_url, input_dir FROM settings WHERE id = 1").
-			Scan(&apiKey, &baseURL, &inputDir); err != nil {
+		var apiKey, baseURL, inputDir, apiDigest string
+		var apiEnabled int
+		if err := newDB.QueryRow("SELECT audiobookdb_api_key, audiobookdb_base_url, input_dir, api_enabled, api_key_digest FROM settings WHERE id = 1").
+			Scan(&apiKey, &baseURL, &inputDir, &apiEnabled, &apiDigest); err != nil {
 			t.Fatal(err)
+		}
+		if apiEnabled != 1 {
+			t.Errorf("api_enabled = %d, want 1 (external API key survived the merge)", apiEnabled)
+		}
+		if apiDigest != "aabbccdd" {
+			t.Errorf("api_key_digest = %q, want aabbccdd (survived the merge)", apiDigest)
 		}
 		if apiKey != "db-key" {
 			t.Errorf("api key = %q, want db-key (carried through)", apiKey)
