@@ -283,13 +283,23 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 		warnings.push('{asin} is not substituted by m4b-merge — it would appear literally in the path. Remove it.');
 	}
 
-	// W2: every book should land in a distinct file.
-	if (!parts.some(
-		(p) =>
-			(p.kind === 'token' && p.key === 'title') ||
-			(p.kind === 'text' && splitTextPieces(p.value).some((piece) => 'token' in piece && piece.token === 'title'))
-	)) {
+	// W2: every book should land in a distinct file. Skipped when E4 already
+	// fired — without any substitutable token, {title} cannot be present.
+	const hasTitle = parts.some((p) =>
+		p.kind === 'text' ? splitTextPieces(p.value).some((piece) => 'token' in piece && piece.token === 'title') : p.kind === 'token' && p.key === 'title'
+	);
+	if (hasSubstitutable && !hasTitle) {
 		warnings.push('This format can produce the same file for different books — include {title}.');
+	}
+
+	// W3: literal text sharing a segment with a token concatenates against
+	// the resolved value (the engine joins segments without separators),
+	// producing paths like The MartianFavorites.m4b.
+	for (const seg of segs) {
+		if (seg.hasToken && trimSegment(seg.text) !== '') {
+			warnings.push('Literal text joins an adjacent {token} — add a separator to keep them apart.');
+			break;
+		}
 	}
 
 	return { errors, warnings };

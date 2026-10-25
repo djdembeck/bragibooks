@@ -203,6 +203,7 @@
 					<!-- svelte-ignore a11y_label_has_associated_control: labels the composite builder group via aria-labelledby -->
 					<label id="output_scheme_label" class="settings-label">Output path format <span class="text-[var(--state-red)]">*</span></label>
 					<PathFormatBuilder bind:value={settings.output_scheme} outputDir={settings.output_dir} />
+					<p class="settings-help">Tap a part above to add it. Within a part, Arrows move, Delete removes, Alt+Arrows reorders.</p>
 					{#if fieldErrors.output_scheme}
 						<p class="settings-field-error" role="alert">{fieldErrors.output_scheme}</p>
 					{/if}

@@ -129,7 +129,7 @@
 <div class="pbf">
 	<div class="pbf-palette" role="group" aria-label="Insert path parts">
 		{#each TOKEN_ORDER as key}
-			<button type="button" class="pbf-chip pbf-chip--token" title={TOKEN_META[key].desc} aria-label={`Insert ${TOKEN_META[key].label}`} onclick={() => insertToken(key)}>
+			<button type="button" class="pbf-chip pbf-chip--token" class:pbf-chip--muted={key === 'asin'} title={TOKEN_META[key].desc} aria-label={`Insert ${TOKEN_META[key].label}`} onclick={() => insertToken(key)}>
 				{key}
 			</button>
 		{/each}
@@ -153,7 +153,7 @@
 					type="text"
 					data-idx={i}
 					value={p.value}
-					aria-label="Path text"
+					aria-label={`Path text ${i + 1} of ${parts.length}`}
 					oninput={textInput(i)}
 					onfocus={() => (sel = i)}
 				/>
@@ -172,7 +172,7 @@
 	{/each}
 
 	<p class="pbf-preview-label">
-		Example — {MARTIAN.label} · <a href={MARTIAN.link} target="_blank" rel="noopener noreferrer">release page</a>{outputDir ? '' : ' — output folder not set'}:
+		Example — {MARTIAN.label} · <a href={MARTIAN.link} target="_blank" rel="noopener noreferrer">release page</a>{errors.length > 0 ? ' — format is invalid, not applied' : outputDir ? '' : ' — output folder not set'}:
 	</p>
 	<code class="pbf-preview">{example || '—'}</code>
 </div>
@@ -214,6 +214,14 @@
 	.pbf-chip--token {
 		background: var(--accent-wash);
 		color: var(--accent-text);
+	}
+
+	/* {asin} is not substituted by m4b-merge — it must not read as a
+	   working choice, so it sits out of the endorsement wash. */
+	.pbf-chip--muted {
+		background: var(--surface);
+		border-color: var(--border);
+		color: var(--text-muted);
 	}
 
 	.pbf-strip {
@@ -287,6 +295,26 @@
 	.pbf-token:hover .pbf-x,
 	.pbf-token:focus-within .pbf-x {
 		opacity: 1;
+	}
+
+	/* No hover on touch: keep the removal affordance visible. */
+	@media (pointer: coarse) {
+		.pbf-token .pbf-x {
+			opacity: 1;
+		}
+
+		/* Larger touch geometry on phone-class screens (system 44px floor for
+		   the primary input controls). */
+		.pbf-chip,
+		.pbf-part,
+		.pbf-text {
+			min-height: 2.5rem;
+		}
+
+		.pbf-palette,
+		.pbf-strip {
+			gap: 0.5rem;
+		}
 	}
 
 	.pbf-text {
