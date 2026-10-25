@@ -3,7 +3,7 @@
 	import { get, put, post } from '$lib/api';
 	import type { PageData } from './$types';
 	import type { BookWithPeople, ProcessingJob, JobsListResponse, AudiobookDBBook, AudiobookDBRelease } from '$lib/types';
-	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities } from '$lib/types';
+	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '$lib/types';
 	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '$lib/adbError';
 	import { StatusBadge, AbdTag, EmptyState, Button, Alert, ErrorDetail, Skeleton, CoverArt } from '$lib/components';
 	import { ExternalLink, ArrowLeft } from '@lucide/svelte';
@@ -70,7 +70,6 @@
 	// mergeable source directory — re-process it from the Queue instead.
 	// Anything else (including an empty path) is treated as a directory;
 	// the processor surfaces the real error if that turns out to be wrong.
-	const AUDIO_FILE_EXTS = /\.(m4b|m4a|mp3|mp4|aac|flac|wav|ogg|oga|opus|mka)$/i;
 	const isFileBacked = $derived(Boolean(book) && AUDIO_FILE_EXTS.test(book?.src_path ?? ''));
 
 	// While any job for this book is queued or running, both actions
