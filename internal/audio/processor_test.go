@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bragibooks/bragibooks/internal/config"
 )
 
 func TestCheckSemver(t *testing.T) {
@@ -342,4 +344,98 @@ func TestRunMergeFailureCleansJobSubtree(t *testing.T) {
 	if _, serr := os.Stat(workDir); !os.IsNotExist(serr) {
 		t.Errorf("per-job subtree mer1.tmp not cleaned up (stat err = %v)", serr)
 	}
+}
+
+// writeVersionFake writes an executable shell script that answers
+// "--version" by printing a line whose last token is the given version.
+func writeVersionFake(t *testing.T, dir, version string) string {
+	t.Helper()
+	p := filepath.Join(dir, "fake-version")
+	script := "#!/bin/sh\necho m4b-merge " + version + "\n"
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake version binary: %v", err)
+	}
+	return p
+}
+
+func TestUpdateVersionContract(t *testing.T) {
+	t.Parallel()
+
+	t.Run("parses reported version", func(t *testing.T) {
+		t.Parallel()
+		bin := writeVersionFake(t, t.TempDir(), "2.4.1")
+		proc := NewProcessor(bin, "", "", 1, "{author}/{title}", "info")
+
+		got := proc.UpdateVersion()
+		if got != "2.4.1" {
+			t.Errorf("UpdateVersion = %q, want %q", got, "2.4.1")
+		}
+		if r := proc.ReadVersion(); r != "2.4.1" {
+			t.Errorf("ReadVersion = %q, want %q", r, "2.4.1")
+		}
+	})
+
+	t.Run("missing binary reports unknown", func(t *testing.T) {
+		t.Parallel()
+		missing := filepath.Join(t.TempDir(), "does-not-exist")
+		proc := NewProcessor(missing, "", "", 1, "{author}/{title}", "info")
+
+		got := proc.UpdateVersion()
+		if got != "unknown" {
+			t.Errorf("UpdateVersion = %q, want %q", got, "unknown")
+		}
+		if r := proc.ReadVersion(); r != "unknown" {
+			t.Errorf("ReadVersion = %q, want %q", r, "unknown")
+		}
+	})
+
+	t.Run("failing binary reports unknown", func(t *testing.T) {
+		t.Parallel()
+		p := filepath.Join(t.TempDir(), "fail-version")
+		script := "#!/bin/sh\necho oops >&2\nexit 1\n"
+		if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+			t.Fatalf("write failing binary: %v", err)
+		}
+		proc := NewProcessor(p, "", "", 1, "{author}/{title}", "info")
+
+		if got := proc.UpdateVersion(); got != "unknown" {
+			t.Errorf("UpdateVersion = %q, want %q", got, "unknown")
+		}
+	})
+
+	t.Run("refresh after binary change", func(t *testing.T) {
+		t.Parallel()
+		oldBin := writeVersionFake(t, t.TempDir(), "1.0.0")
+		newBin := writeVersionFake(t, t.TempDir(), "2.0.0")
+
+		proc := NewProcessor(oldBin, "", "", 1, "{author}/{title}", "info")
+		cfg := &config.Config{}
+		cfg.M4bMerge.Binary = oldBin
+		proc.ApplyConfig(cfg)
+		if got := proc.UpdateVersion(); got != "1.0.0" {
+			t.Fatalf("UpdateVersion (old binary) = %q, want %q", got, "1.0.0")
+		}
+
+		// Reconfigure to the new binary, then refresh through the same
+		// path the settings handler uses: ApplyConfig, UpdateVersion.
+		cfg = &config.Config{}
+		cfg.M4bMerge.Binary = newBin
+		proc.ApplyConfig(cfg)
+		got := proc.UpdateVersion()
+		if got != "2.0.0" {
+			t.Errorf("UpdateVersion (new binary) = %q, want %q", got, "2.0.0")
+		}
+		if r := proc.ReadVersion(); r != "2.0.0" {
+			t.Errorf("ReadVersion after refresh = %q, want %q", r, "2.0.0")
+		}
+	})
+
+	t.Run("storeVersion records value", func(t *testing.T) {
+		t.Parallel()
+		proc := NewProcessor("", "", "", 1, "{author}/{title}", "info")
+		proc.StoreVersion("9.9.9")
+		if r := proc.ReadVersion(); r != "9.9.9" {
+			t.Errorf("ReadVersion after StoreVersion = %q, want %q", r, "9.9.9")
+		}
+	})
 }

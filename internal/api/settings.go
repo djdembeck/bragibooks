@@ -161,9 +161,10 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	h.svc.Processor.ApplyConfig(h.svc.Config.Config())
 	h.svc.AudiobookDB.Store(audiobookdb.NewClient(live.APIKey.APIKey, live.APIKey.BaseURL))
 
-	// Atomically re-snapshot the m4b-merge version so a saved binary change
-	// (or an overlapping update) cannot display a stale value.
-	h.svc.Processor.UpdateVersion()
+	// Re-snapshot the m4b-merge version and pair its result with the live
+	// binary in the response: a second read here could observe the value
+	// stored by an overlapping update.
+	m4bMergeVersion := h.svc.Processor.UpdateVersion()
 
 	settings := map[string]any{
 		"m4b_merge_binary":     live.M4bMerge.Binary,
@@ -175,7 +176,7 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		"region":               live.Processing.Region,
 		"audiobookdb_base_url": live.APIKey.BaseURL,
 		"bragibooks_version":   server.Version,
-		"m4b_merge_version":    h.svc.Processor.ReadVersion(),
+		"m4b_merge_version":    m4bMergeVersion,
 	}
 
 	writeJSON(w, http.StatusOK, settings)

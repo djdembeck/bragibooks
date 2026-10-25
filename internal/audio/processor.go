@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -315,29 +316,77 @@ func (p *Processor) StoreVersion(v string) {
 	p.version = v
 }
 
-// UpdateVersion re-snapshots and stores the m4b-merge version in a single
-// critical section, so an overlapping reconfiguration cannot interleave
-// between the binary snapshot and the store. It returns the stored
-// version ("unknown" when the binary cannot report one). ApplyConfig
-// takes the same write lock, so the two never overlap.
-func (p *Processor) UpdateVersion() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// versionProbeTimeout bounds a single "--version" probe: a hanging binary
+// must not stall the caller.
+const versionProbeTimeout = 5 * time.Second
 
+// UpdateVersion re-snapshots and stores the m4b-merge version. The binary
+// is probed with "--version" OUTSIDE the write lock (a subprocess running
+// under p.mu would block every run, ApplyConfig, and version reader for
+// the whole probe; the timeout above guarantees it always finishes). The
+// store is a compare-and-update under the write lock: it only applies the
+// result if Binary still matches the binary that was executed, so an
+// interleaved reconfiguration can never pair a stale version with a new
+// binary. It returns the version that resulted from the probe
+// ("unknown" when the binary cannot report one), which the caller pairs
+// with its own binary snapshot.
+func (p *Processor) UpdateVersion() string {
+	p.mu.RLock()
 	binary := p.Binary
-	cmd := exec.Command(binary, "--version")
-	out, err := cmd.Output()
-	var reported string
+	p.mu.RUnlock()
+
+	if binary == "" {
+		// Nothing to execute; never spawn the bare "" command.
+		return p.storeLinkedVersion(binary, "unknown")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), versionProbeTimeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, binary, "--version").Output()
+	reported := ""
 	if err == nil {
 		version := strings.Fields(strings.TrimSpace(string(out)))
 		if len(version) > 0 {
 			reported = version[len(version)-1] // last token is the version string
 		}
+	} else {
+		// Missing binary, permission denied, nonzero exit, timeout,
+		// or empty output: record why the probe produced no version.
+		exitErr, _ := err.(*exec.ExitError)
+		stderr := ""
+		if exitErr != nil {
+			stderr = strings.TrimSpace(string(exitErr.Stderr))
+		}
+		log.Printf("Warning: m4b-merge version probe for binary %s failed: %v%s",
+			binary, err, formattedStderr(stderr))
 	}
 	if reported == "" {
 		reported = "unknown"
 	}
-	p.version = reported
+	return p.storeLinkedVersion(binary, reported)
+}
+
+// formattedStderr appends the child's stderr as a suffix to a log line.
+func formattedStderr(stderr string) string {
+	if stderr == "" {
+		return ""
+	}
+	return "; stderr: " + stderr
+}
+
+// storeLinkedVersion stores version under the write lock only if the
+// binary field still matches the value the version was captured from,
+// so a reconfiguration that landed while the probe ran is never
+// shadowed by a result taken against the previous binary. It returns
+// the version now in effect (which may be a concurrent writer's) so
+// the result always corresponds to a consistent binary/version pair.
+func (p *Processor) storeLinkedVersion(snapshotBinary, version string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.Binary != snapshotBinary {
+		return p.version
+	}
+	p.version = version
 	return p.version
 }
 
