@@ -17,6 +17,8 @@
 		startedAt: string | null;
 		completedAt: string | null;
 		createdAt: string | null;
+		/** Local cancellation in flight: badge is optimistic until the backend terminal state lands. */
+		cancelRequested: boolean;
 	}
 
 	let books: BookWithPeople[] = $state([]);
@@ -83,6 +85,7 @@
 				startedAt: j.started_at,
 				completedAt: j.completed_at,
 				createdAt: j.created_at ?? null,
+				cancelRequested: false,
 			});
 			items.push(item);
 			if (item.bookId !== null && !item.bookTitle) {
@@ -107,6 +110,7 @@
 	// Heartbeats ("alive") and unknown payloads must not clobber the job
 	// status; only real lifecycle values are whitelisted.
 	const JOB_STATUSES = new Set(['queued', 'running', 'done', 'error', 'cancelled']);
+	const TERMINAL_STATUSES = new Set(['done', 'error', 'cancelled']);
 
 	function connectSSE(item: JobItem) {
 		const stop = streamEvents(
@@ -125,12 +129,14 @@
 					if (parsed.output) item.output = parsed.output;
 					if (parsed.message && !parsed.output) item.output += parsed.message + '\n';
 					if (parsed.error) item.error = parsed.error;
-					if (item.status === 'done' || item.status === 'error' || item.status === 'cancelled') {
+					if (TERMINAL_STATUSES.has(item.status)) {
 						stop();
 						cleanupMap.delete(item.id);
-						if (item.status === 'cancelled') stopPolling(item.id);
+						// The SSE payload carries no clock fields and a running cancel
+						// persists its terminal row from the worker; keep polling until
+						// the canonical job row (with completed_at) arrives.
 						startPolling(item);
-						refreshAfterTerminal(item.id);
+						void pollJob(item);
 					}
 				} catch {
 					item.output += raw + '\n';
@@ -154,18 +160,28 @@
 	async function pollJob(item: JobItem) {
 		try {
 			const job = await get<ProcessingJob>(`/jobs/${item.id}`);
-			if (job.status !== item.status || job.error !== item.error || (job.output && job.output !== item.output)) {
-				item.status = job.status;
-				item.error = job.error;
-				if (job.output) item.output = job.output;
+			const backendTerminal = TERMINAL_STATUSES.has(job.status.toLowerCase());
+			// A cancel request made here keeps the optimistic 'cancelled' badge
+			// until the backend row itself is terminal; otherwise the badge would
+			// flip back to 'running' while the worker reaps the killed process.
+			if (!(item.cancelRequested && !backendTerminal)) {
+				if (job.status !== item.status || job.error !== item.error || (job.output && job.output !== item.output)) {
+					item.status = job.status;
+					item.error = job.error;
+					if (job.output) item.output = job.output;
+				}
 			}
 			item.startedAt = job.started_at;
 			item.completedAt = job.completed_at;
 			item.createdAt = job.created_at ?? null;
-			if (job.status === 'done' || job.status === 'error' || job.status === 'cancelled') {
-				stopPolling(item.id);
-				refreshAfterTerminal(item.id);
+			if (!backendTerminal) {
+				// Still running (e.g. a cancelled process the worker has not reaped
+				// yet): keep the poll loop so the terminal row lands eventually.
+				return;
 			}
+			item.cancelRequested = false;
+			stopPolling(item.id);
+			refreshAfterTerminal(item.id);
 		} catch {
 			/* The next scheduled poll can restore the live job state. */
 		}
@@ -217,6 +233,7 @@
 					startedAt: null,
 					completedAt: null,
 					createdAt: null,
+					cancelRequested: false,
 				});
 				jobs = [item, ...jobs];
 				connectSSE(item);
@@ -272,16 +289,26 @@
 		cancelling = next;
 		try {
 			await post(`/jobs/${job.id}/cancel`, {});
+			// Optimistic badge only: the terminal row (and its completed_at) is
+			// written by the API for queued jobs and by the worker for running
+			// ones, so keep refreshing until that canonical row arrives.
 			job.status = 'cancelled';
 			job.error = null;
-			stopPolling(job.id);
+			job.cancelRequested = true;
 			const existing = cleanupMap.get(job.id);
 			if (existing) {
 				existing();
 				cleanupMap.delete(job.id);
 			}
 			jobs = [...jobs];
-			await loadBooks();
+			await pollJob(job);
+			// pollJob clears cancelRequested once the canonical row (with
+			// completed_at) is in hand and refreshes the book list itself;
+			// until then keep polling for the worker's terminal write.
+			if (job.cancelRequested) {
+				startPolling(job);
+				await loadBooks();
+			}
 		} catch (e) {
 			job.error = e instanceof Error ? e.message : 'Failed to cancel job';
 		} finally {
