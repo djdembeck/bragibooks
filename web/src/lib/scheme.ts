@@ -121,15 +121,15 @@ function isControl(ch: string): boolean {
 	return cp < 0x20 || cp === 0x7f;
 }
 
-// Whitespace the engine and the Go validator (unicode.IsSpace) both treat
-// as trimmable: the Unicode White_Space set minus U+FEFF (explicitly
-// excluded by Go), U+0085 NEL, and the C0 controls. JS's
-// String.prototype.trim uses a different set (no U+0085), so it must not
-// be used for segment trimming.
+// Whitespace the Go validator (unicode.IsSpace) treats as trimmable:
+// tab/LF/VT/FF/CR/space, U+0085 NEL, and the remaining White_Space set.
+// Notably NOT all C0 controls, and NOT U+FEFF — both differ from
+// String.prototype.trim, which is why this set is explicit.
 function isGoSpace(ch: string): boolean {
 	const cp = ch.codePointAt(0)!;
 	return (
-		cp <= 0x20 ||
+		(cp >= 0x09 && cp <= 0x0d) ||
+		cp === 0x20 ||
 		cp === 0x85 ||
 		cp === 0xa0 ||
 		cp === 0x1680 ||
