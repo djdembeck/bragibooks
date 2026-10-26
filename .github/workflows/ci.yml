@@ -163,6 +163,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=sha,enable=${{ github.event_name != 'pull_request' }}
+            type=raw,value=pr-${{ steps.pr-number.outputs.number }},enable=${{ github.event_name == 'workflow_dispatch' && steps.pr-number.outputs.number != '' }}
 
       - name: Build and push Docker image
         id: docker_build
