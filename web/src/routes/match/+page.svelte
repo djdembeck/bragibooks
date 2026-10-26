@@ -20,7 +20,7 @@
 		decodeHtmlEntities,
 		AUDIO_FILE_EXTS
 	} from '#lib/types.js';
-	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, AbdTag, Modal } from '#lib/components/index.js';
+	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, AbdTag, Modal, DirPicker } from '#lib/components/index.js';
 	import { toCleanedError, cleanAdbError, type CleanedAdbError } from '#lib/adbError.js';
 	import { resolveScheme, validateScheme, parseParts } from '#lib/scheme.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
@@ -39,6 +39,8 @@
 		/** Per-book overrides carried in from the import; '' = follow global. */
 		outputDirOverride: string;
 		pathFormatOverride: string;
+		initialOutputDirOverride: string;
+		initialPathFormatOverride: string;
 		/** Local cover assigned at intake — never confused with catalog art. */
 		coverUrl: string;
 		searchResults: AudiobookDBBook[];
@@ -143,6 +145,11 @@
 	let outputDir = $state('');
 	let outputScheme = $state('');
 	let settingsLoaded = $state(false);
+	let outputPickerOpen = $state(false);
+	let outputPickerCandidateId = $state<number | null>(null);
+	const outputPickerCandidate = $derived(
+		candidates.find((c) => c.bookId === outputPickerCandidateId) ?? null
+	);
 
 	// Hydrated catalog options — only populated for choices the operator can
 	// actually see (open picker / rendered search results). Cached per page.
@@ -242,6 +249,8 @@
 					title: book.title,
 					outputDirOverride: book.output_dir_override || '',
 					pathFormatOverride: book.path_format_override || '',
+					initialOutputDirOverride: book.output_dir_override || '',
+					initialPathFormatOverride: book.path_format_override || '',
 					coverUrl: book.cover_image_url || '',
 					searchResults: [],
 					selectedBookId: null,
@@ -1071,6 +1080,13 @@
 		return '/' + out.join('/');
 	}
 
+	function overridesChanged(candidate: MatchCandidate): boolean {
+		return (
+			candidate.outputDirOverride !== candidate.initialOutputDirOverride ||
+			candidate.pathFormatOverride !== candidate.initialPathFormatOverride
+		);
+	}
+
 	function effectiveOutputDir(candidate: MatchCandidate): string {
 		const o = (candidate.outputDirOverride || '').trim();
 		return o ? cleanAbsDir(o) : outputDir;
@@ -1779,9 +1795,9 @@
 							<div class="batch__name">
 								<span class="batch__name-head">
 									<span class="batch__name-label">Proposed output</span>
-									{#if c.outputDirOverride || c.pathFormatOverride}
-										<span class="batch__override-chip" title="Per-book output override from the import">
-											per-book
+									{#if c.outputDirOverride.trim() || c.pathFormatOverride.trim() || overridesChanged(c)}
+										<span class="batch__override-chip">
+											{overridesChanged(c) ? 'per-book · pending' : 'per-book'}
 										</span>
 									{/if}
 								</span>
@@ -1806,6 +1822,12 @@
 									<span class="batch__name-value batch__name-value--empty">
 										Select a record
 									</span>
+								{/if}
+								{#if c.outputDirOverride.trim() || c.pathFormatOverride.trim() || overridesChanged(c)}
+									<div class="batch__override-summary">
+										<span>Directory: {#if c.outputDirOverride.trim()}<code>{c.outputDirOverride.trim()}</code>{:else}Settings{/if}</span>
+										<span>Format: {#if c.pathFormatOverride.trim()}<code>{c.pathFormatOverride.trim()}</code>{:else}Settings{/if}</span>
+									</div>
 								{/if}
 							</div>
 						</div>
@@ -2099,19 +2121,47 @@
 							</Button>
 						</div>
 						<div class="match__override-edit">
+							<p class="match__override-state" id="override-save-state" aria-live="polite">
+								<strong>{overridesChanged(c) ? 'Pending output edits.' : 'Output overrides unchanged.'}</strong>
+								{#if !isReady(c)}
+									{overridesChanged(c)
+										? 'These edits will save only after this source has a ready catalog match and is included in the batch.'
+										: 'Output changes can be saved only after this source has a ready catalog match and is included in the batch.'}
+								{:else if !c.included}
+									{overridesChanged(c)
+										? 'This source is excluded. Include it to save these edits with the batch.'
+										: 'This source is excluded. Include it before saving output changes.'}
+								{:else if outputDirIssue(c.outputDirOverride.trim()) || outputFormatIssue(c.pathFormatOverride.trim())}
+									This match is included. Fix the output errors before saving the batch.
+								{:else}
+									{overridesChanged(c)
+										? 'These edits will save with Save matches → Queue.'
+										: 'Output changes save with Save matches → Queue.'}
+								{/if}
+							</p>
 							<label for="override-dir-input">
 								Output directory override
 								<code class="match__override-inherit">empty = Settings</code>
 							</label>
-							<input
-								id="override-dir-input"
-								type="text"
-								bind:value={c.outputDirOverride}
-								aria-invalid={outputDirIssue(c.outputDirOverride.trim()) ? true : undefined}
-								aria-describedby={
-									outputDirIssue(c.outputDirOverride.trim()) ? 'override-dir-error' : undefined
-								}
-							/>
+							<div class="match__override-controls">
+								<input
+									id="override-dir-input"
+									type="text"
+									bind:value={c.outputDirOverride}
+									placeholder={outputDir || 'Inherit Settings'}
+									aria-invalid={outputDirIssue(c.outputDirOverride.trim()) ? true : undefined}
+									aria-describedby={
+										outputDirIssue(c.outputDirOverride.trim()) ? 'override-save-state override-dir-error' : 'override-save-state'
+									}
+								/>
+								<Button variant="ghost" onclick={() => {
+									outputPickerCandidateId = c.bookId;
+									outputPickerOpen = true;
+								}} aria-label="Browse output directory for {sourceBase(c)}">Browse</Button>
+								{#if c.outputDirOverride}
+									<Button variant="ghost" onclick={() => (c.outputDirOverride = '')} aria-label="Clear output directory override to inherit Settings">Clear</Button>
+								{/if}
+							</div>
 							{#if outputDirIssue(c.outputDirOverride.trim())}
 								<p id="override-dir-error" class="match__override-error" role="alert">
 									{outputDirIssue(c.outputDirOverride.trim())}
@@ -2127,7 +2177,7 @@
 								bind:value={c.pathFormatOverride}
 								aria-invalid={outputFormatIssue(c.pathFormatOverride.trim()) ? true : undefined}
 								aria-describedby={
-									outputFormatIssue(c.pathFormatOverride.trim()) ? 'override-fmt-error' : undefined
+									outputFormatIssue(c.pathFormatOverride.trim()) ? 'override-save-state override-fmt-error' : 'override-save-state'
 								}
 							/>
 							{#if outputFormatIssue(c.pathFormatOverride.trim())}
@@ -2667,6 +2717,14 @@
 			</div>
 		{/snippet}
 	</Modal>
+	<DirPicker
+		bind:open={outputPickerOpen}
+		title="Choose output folder"
+		startPath={outputPickerCandidate?.outputDirOverride.trim() || outputDir}
+		onselect={(path) => {
+			if (outputPickerCandidate) outputPickerCandidate.outputDirOverride = path;
+		}}
+	/>
 </div>
 
 <style>
@@ -3067,6 +3125,7 @@
 
 	.batch__name-head {
 		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
 		gap: 6px;
 		min-width: 0;
@@ -3076,10 +3135,29 @@
 		padding: 0 6px;
 		border: 1px solid var(--m-border);
 		border-radius: var(--m-r-sm);
-		font-size: 10.5px;
+		font-size: 11px;
 		font-weight: 600;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
 		line-height: 1.5;
 		color: var(--m-ink-2);
+	}
+
+	.batch__override-summary {
+		display: grid;
+		gap: 2px;
+		min-width: 0;
+		margin-top: 3px;
+		font-size: 12px;
+		line-height: 1.4;
+		color: var(--m-muted);
+		overflow-wrap: anywhere;
+	}
+
+	.batch__override-summary code {
+		font-size: 12px;
+		color: var(--m-ink-2);
+		white-space: normal;
 	}
 
 	.batch__name-value {
@@ -3535,6 +3613,7 @@
 
 	.match__source {
 		display: flex;
+		flex-wrap: wrap;
 		justify-content: space-between;
 		align-items: flex-start;
 		gap: 16px;
@@ -3606,40 +3685,73 @@
 	}
 
 	.match__override-edit {
+		flex-basis: 100%;
+		width: 100%;
+		min-width: 0;
 		margin-top: 10px;
 		padding-top: 10px;
 		border-top: 1px solid var(--m-border-soft);
 		display: grid;
 		gap: 8px;
-		font-size: 12px;
+		font-size: 14px;
+	}
+
+	.match__override-state {
+		margin: 0 0 4px;
+		max-width: 65ch;
+		color: var(--m-ink-2);
+		line-height: 1.5;
+	}
+
+	.match__override-state strong {
+		font-weight: 600;
+	}
+
+	.match__override-controls {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		min-width: 0;
+	}
+
+	.match__override-controls input {
+		flex: 1 1 12rem;
 	}
 
 	.match__override-edit label {
-		color: var(--m-muted);
-		font-weight: 500;
+		color: var(--m-ink-2);
+		font-size: 14px;
+		font-weight: 600;
 	}
 
 	.match__override-inherit {
 		margin-left: 6px;
 		font-weight: 400;
-		font-size: 11px;
+		font-size: 12px;
 		color: var(--m-muted);
 	}
 
 	.match__override-edit input {
-		min-height: 32px;
-		padding: 4px 8px;
-		border: 1px solid var(--m-border);
+		width: 100%;
+		min-width: 0;
+		min-height: 44px;
+		padding: 8px 12px;
+		border: 1px solid var(--border-strong);
 		border-radius: var(--m-r-sm);
 		background: var(--m-surface);
 		color: var(--m-ink);
-		font-size: 12px;
+		font-size: 14px;
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	}
 
+	.match__override-edit input:hover {
+		border-color: var(--m-muted);
+	}
+
 	.match__override-edit input:focus-visible {
-		outline: 2px solid var(--m-ink-2);
-		outline-offset: 1px;
+		border-color: var(--m-ink);
+		outline: 3px solid var(--focus-ring);
+		outline-offset: 3px;
 	}
 
 	.match__override-edit input[aria-invalid='true'] {

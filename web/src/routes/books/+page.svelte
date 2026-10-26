@@ -314,7 +314,17 @@
 			: `Showing ${startIndex} to ${endIndex} of ${response.total} ${activeFilterLabel.toLowerCase()} books.`}
 	</p>
 {/if}
-{#if !dl.hasLoaded || dl.showSkeleton}
+{#if !dl.hasLoaded && !dl.showSkeleton}
+	<!-- 200 ms delay window: announce pending, sized like the settled rows. -->
+	<div
+		class="flex h-[23.5rem] items-center justify-center overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]"
+		role="status"
+		aria-live="polite"
+		aria-label="Catalog loading"
+	>
+		<span class="sr-only">Loading the book catalog…</span>
+	</div>
+{:else if dl.showSkeleton}
 	<div class="overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]" aria-label="Catalog loading">
 		{#each Array(5) as _}
 			<div class="flex items-center gap-4 border-b border-[var(--border-subtle)] px-4 py-3 last:border-b-0">

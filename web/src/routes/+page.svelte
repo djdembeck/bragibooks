@@ -152,7 +152,14 @@
 {/if}
 
 <!-- ── Workflow summary ──────────────────────────────────────── -->
-{#if !dl.hasLoaded || dl.showSkeleton}
+{#if !dl.hasLoaded && !dl.showSkeleton}
+	<!-- 200 ms delay window: announce pending, no skeleton, no zeroed rows. -->
+	<div class="mb-6" aria-label="Workflow loading" role="status" aria-live="polite">
+		<div class="flex h-[13.25rem] items-center justify-center overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]">
+			<span class="sr-only">Loading the library workflow…</span>
+		</div>
+	</div>
+{:else if dl.showSkeleton}
 	<div class="mb-6" aria-label="Workflow loading">
 		<div class="overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]">
 			{#each Array(4) as _}
@@ -218,7 +225,16 @@
 <div class="mb-3">
 	<h2 class="text-lg font-semibold text-[var(--enamel)]">Recent books</h2>
 </div>
-{#if !dl.hasLoaded || dl.showSkeleton}
+{#if !dl.hasLoaded && !dl.showSkeleton}
+	<!-- 200 ms delay window: announce pending; sized like the settled rows. -->
+	<div class="space-y-2" aria-label="Recent books loading" role="status" aria-live="polite">
+		{#each Array(3) as _}
+			<div class="card h-[4.25rem]">
+				<span class="sr-only">Loading recent books…</span>
+			</div>
+		{/each}
+	</div>
+{:else if dl.showSkeleton}
 	<div class="space-y-2" aria-label="Recent books loading">
 		{#each Array(3) as _}
 			<div class="card flex items-center gap-4">

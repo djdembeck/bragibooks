@@ -93,19 +93,30 @@
 
 	async function initPath() {
 		loading = true;
-		try {
-			const settings = await get<Settings>('/settings', {});
+		// One delayed-load window spans the settings fetch and the first
+		// directory fetch, so the 200 ms skeleton delay covers both requests.
+		await dl.run(async () => {
+			let settings: Settings;
+			try {
+				settings = await get<Settings>('/settings', {});
+			} catch (e) {
+				// Settings failures keep their own alert (with the Settings
+				// link); directory failures surface through dl.error.
+				settingsError = toCleanedError(e);
+				return;
+			}
 			if (!settings?.input_dir) {
 				settingsError = toCleanedError('Source directory is not configured.');
-				loading = false;
 				return;
 			}
 			globalOutputDir = settings.output_dir || '';
-			await loadDirectory(settings.input_dir);
-		} catch (e) {
-			settingsError = toCleanedError(e);
-			loading = false;
-		}
+			const response = await get<DirectoriesResponse>(
+				`/directories?path=${encodeURIComponent(settings.input_dir)}`
+			);
+			entries = validEntries(response.entries || []);
+			currentPath = response.path || settings.input_dir;
+		});
+		loading = false;
 	}
 
 	function validEntries(list: DirectoryEntry[]): DirectoryEntry[] {
@@ -314,7 +325,13 @@
 
 	<!-- Content area -->
 	{#if entries.length === 0}
-		{#if loading || !dl.hasLoaded || dl.showSkeleton}
+		{#if !dl.hasLoaded && !dl.showSkeleton}
+			<!-- 200 ms delay window spanning the settings + first directory
+			     fetch: announce pending; no skeleton, no empty state. -->
+			<div class="flex h-[25rem] items-center justify-center" role="status" aria-live="polite">
+				<span class="sr-only">Loading source directory…</span>
+			</div>
+		{:else if loading || dl.showSkeleton}
 			<div class="p-3 space-y-2" aria-label="Directory loading">
 				{#each Array(8) as _}
 					<Skeleton height="2.5rem" />
@@ -492,15 +509,14 @@
 				</div>
 			{/if}
 			<div class="flex flex-col-reverse items-center justify-end gap-3 sm:flex-row">
-				<button
-					type="button"
+				<Button
+					variant="ghost"
 					disabled={creating}
 					onclick={() => (showOverrides = !showOverrides)}
-					class="text-sm text-[var(--text-muted)] transition-colors hover:text-[var(--text)]"
 					aria-expanded={showOverrides}
 				>
 					{showOverrides ? 'Hide per-import output override' : 'Per-import output override (optional)'}
-				</button>
+				</Button>
 				<p class="text-sm text-[var(--text-muted)]">
 					<span class="font-mono text-[var(--text-secondary)]">{selectedCount}</span>
 					<span class="ml-1">{selectedCount === 1 ? 'item selected' : 'items selected'} for match</span>
