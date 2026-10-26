@@ -3,6 +3,7 @@ package audio
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -406,48 +407,69 @@ func (p *Processor) UpdateVersion() string {
 	ctx, cancel := context.WithTimeout(context.Background(), versionProbeTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binary, "--version")
-	// Own process group: ctx cancellation must kill the whole tree, not
-	// just the direct child. m4b_merge_binary is user-settable and may be
-	// a script wrapper that spawns children in general; a grandchild that
-	// inherits the stdout pipe would otherwise hold the probe open long
-	// after the child itself is killed, stalling the settings request past
-	// the deadline.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if err == syscall.ESRCH {
-				// Already gone: nothing for os/exec to do.
-				return os.ErrProcessDone
+	// Execute, retrying the transient ETXTBSY: Linux refuses to exec a
+	// file while ANY fd in the process is open for writing it, so a
+	// sibling thread's fork can carry the writer's O_CLOEXEC fd past the
+	// writer's close and tax a freshly written binary until that
+	// inherited fd dies (golang/go#22315). Each attempt is a fresh cmd,
+	// because a failed Start marks the cmd consumed; the probe's context
+	// deadline bounds the whole retry sequence.
+	var (
+		reported  string
+		stdoutBuf bytes.Buffer
+	)
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(50*attempt) * time.Millisecond)
+		}
+		cmd := exec.CommandContext(ctx, binary, "--version")
+		// Own process group: ctx cancellation must kill the whole tree,
+		// not just the direct child. m4b_merge_binary is user-settable
+		// and may be a script wrapper that spawns children in general; a
+		// grandchild that inherits the stdout pipe would otherwise hold
+		// the probe open long after the child itself is killed, stalling
+		// the settings request past the deadline.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+				if err == syscall.ESRCH {
+					// Already gone: nothing for os/exec to do.
+					return os.ErrProcessDone
+				}
+				return err
 			}
-			return err
+			return nil
 		}
-		return nil
-	}
-	// Guard against any writer we could not kill: force Wait to return
-	// shortly after cancel instead of blocking on inherited pipes.
-	cmd.WaitDelay = 5 * time.Second
+		// Guard against any writer we could not kill: force Wait to
+		// return shortly after cancel instead of blocking on inherited
+		// pipes.
+		cmd.WaitDelay = 5 * time.Second
+		// os/exec owns the drain: with buffers wired directly as the
+		// child's stdout/stderr, exec internally reads both streams
+		// concurrently and guarantees they are fully drained (and the
+		// buffers valid) once Run returns.
+		stdoutBuf.Reset()
+		var stderrBuf bytes.Buffer
+		cmd.Stdout = &stdoutBuf
+		cmd.Stderr = &stderrBuf
 
-	// os/exec owns the drain: with buffers wired directly as the child's
-	// stdout/stderr, exec internally reads both streams concurrently and
-	// guarantees they are fully drained (and the buffers valid) once
-	// Run returns.
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
-
-	err := cmd.Run()
-	reported := ""
-	if err == nil {
-		version := strings.Fields(strings.TrimSpace(stdoutBuf.String()))
-		if len(version) > 0 {
-			reported = version[len(version)-1] // last token is the version string
+		err := cmd.Run()
+		switch {
+		case err == nil:
+			version := strings.Fields(strings.TrimSpace(stdoutBuf.String()))
+			if len(version) > 0 {
+				reported = version[len(version)-1] // last token is the version string
+			}
+		case !errors.Is(err, syscall.ETXTBSY) || attempt >= 2:
+			// Missing binary, permission denied, nonzero exit,
+			// timeout, or empty output: record why the probe
+			// produced no version.
+			log.Printf("Warning: m4b-merge version probe for binary %s failed: %v%s",
+				binary, err, formattedStderr(strings.TrimSpace(stderrBuf.String())))
+		default:
+			continue // transient ETXTBSY: let a later attempt retry
 		}
-	} else {
-		// Missing binary, permission denied, nonzero exit, timeout,
-		// or empty output: record why the probe produced no version.
-		log.Printf("Warning: m4b-merge version probe for binary %s failed: %v%s",
-			binary, err, formattedStderr(strings.TrimSpace(stderrBuf.String())))
+		break
 	}
 	if reported == "" {
 		reported = "unknown"

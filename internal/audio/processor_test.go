@@ -434,6 +434,39 @@ func TestUpdateVersionContract(t *testing.T) {
 		}
 	})
 
+	t.Run("recovers transient text-file busy on probe", func(t *testing.T) {
+		t.Parallel()
+		// Linux refuses to exec a file while ANY fd is open for writing
+		// it, process-wide (golang/go#22315): in a multithreaded process
+		// a sibling fork's inherited writer fd can outlive the writer's
+		// own close and tax a freshly written binary with ETXTBSY. The
+		// writer fd held here while the first probe attempt fires stands
+		// in for that leaked fd; it is dropped midway through the probe's
+		// retry window (3 attempts over ~150ms), so the first attempt
+		// hits ETXTBSY and a later attempt must succeed.
+		p := filepath.Join(t.TempDir(), "etxtbusy-version")
+		script := "#!/bin/sh\necho m4b-merge 4.5.6\n"
+		if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+			t.Fatalf("write fake version binary: %v", err)
+		}
+		f, err := os.OpenFile(p, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatalf("open binary for writing: %v", err)
+		}
+		defer f.Close()
+		// Drop the writer soon after the first attempt, well inside the
+		// retry budget (first retry lands ~50ms later; last at ~150ms).
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			f.Close()
+		}()
+		proc := NewProcessor(p, "", "", 1, "{author}/{title}", "info")
+		got := proc.UpdateVersion()
+		if got != "4.5.6" {
+			t.Errorf("UpdateVersion = %q, want %q (transient ETXTBSY must be rescued by the probe retry)", got, "4.5.6")
+		}
+	})
+
 	t.Run("storeVersion records value", func(t *testing.T) {
 		t.Parallel()
 		proc := NewProcessor("", "", "", 1, "{author}/{title}", "info")
