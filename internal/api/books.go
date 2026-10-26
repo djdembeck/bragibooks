@@ -1,13 +1,20 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/bragibooks/bragibooks/internal/audio"
 	"github.com/bragibooks/bragibooks/internal/models"
 )
 
@@ -451,6 +458,10 @@ func (h *Handler) CreateBooks(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("last insert id: %v", err))
 			return
 		}
+		// Intake is the only moment the source is known to exist untouched:
+		// read its own art now so Match can show the original cover beside
+		// catalog candidates instead of an empty placeholder.
+		h.attachSourceCover(r.Context(), id, entry.SrcPath)
 		book, err := h.getBook(id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("get created book: %v", err))
@@ -468,15 +479,67 @@ func (h *Handler) CreateBooks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, CreateBooksResponse{Books: enriched})
 }
 
+// sourceCoverTimeout bounds the ffmpeg run per ingested book: cover art is
+// cosmetic and must not hold the intake request open on a slow mount.
+const sourceCoverTimeout = 30 * time.Second
+
+// attachSourceCover extracts the art the source already carries into the
+// covers directory and records its served URL on the book. Best-effort:
+// sources without art keep the empty placeholder, and an extraction failure
+// never fails intake.
+func (h *Handler) attachSourceCover(ctx context.Context, bookID int64, srcPath string) {
+	if h.svc.CoversDir == "" || h.svc.FFmpeg == "" {
+		return
+	}
+	name := strconv.FormatInt(bookID, 10) + ".jpg"
+	dest := filepath.Join(h.svc.CoversDir, name)
+	extractCtx, cancel := context.WithTimeout(ctx, sourceCoverTimeout)
+	defer cancel()
+	if err := audio.ExtractCover(extractCtx, h.svc.FFmpeg, srcPath, dest); err != nil {
+		if !errors.Is(err, audio.ErrNoCover) {
+			log.Printf("extract source cover for book %d: %v", bookID, err)
+		}
+		os.Remove(dest)
+		return
+	}
+	if _, err := h.svc.DB.Exec(
+		"UPDATE books SET cover_image_url = ?, updated_at = datetime('now') WHERE id = ?",
+		"/covers/"+name, bookID,
+	); err != nil {
+		log.Printf("record source cover for book %d: %v", bookID, err)
+		os.Remove(dest)
+	}
+}
+
+// audioExtensions are the containers a single-file source may use. Only these
+// suffixes are stripped when deriving a title: a period anywhere else in the
+// name (author initials like "Ursula K. Le Guin", "Vol. 2", "Dr.") is part of
+// the title, not an extension.
+var audioExtensions = map[string]bool{
+	".mp3":  true,
+	".m4a":  true,
+	".m4b":  true,
+	".mp4":  true,
+	".aac":  true,
+	".ogg":  true,
+	".oga":  true,
+	".opus": true,
+	".flac": true,
+	".wav":  true,
+	".wma":  true,
+	".mka":  true,
+}
+
 func deriveTitle(path string) string {
 	base := filepath.Base(path)
-	ext := filepath.Ext(base)
-	name := strings.TrimSuffix(base, ext)
-	name = strings.TrimSpace(name)
-	name = strings.ReplaceAll(name, "_", " ")
+	if ext := filepath.Ext(base); audioExtensions[strings.ToLower(ext)] {
+		base = strings.TrimSuffix(base, ext)
+	}
+	name := strings.ReplaceAll(base, "_", " ")
 	name = strings.ReplaceAll(name, ".", " ")
 	name = strings.ReplaceAll(name, "-", " ")
-	name = strings.TrimSpace(name)
+	// Collapse the whitespace left behind by those separators.
+	name = strings.Join(strings.Fields(name), " ")
 	if name == "" {
 		name = "Untitled"
 	}
@@ -540,6 +603,12 @@ func (h *Handler) DeleteBook(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("delete book: %v", err))
 		return
+	}
+
+	// The extracted cover is keyed by book ID; leaving it behind would leak
+	// an orphan and let a later book reuse the slot's art.
+	if h.svc.CoversDir != "" {
+		os.Remove(filepath.Join(h.svc.CoversDir, strconv.FormatInt(bookID, 10)+".jpg"))
 	}
 
 	w.WriteHeader(http.StatusNoContent)

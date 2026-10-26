@@ -4,6 +4,7 @@
 	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, StatusBadge, CoverArt } from '$lib/components';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 	import { cleanAdbError, toCleanedError } from '$lib/adbError';
+	import { formatJobTime } from '$lib/datetime';
 	import { CheckCircle, Clock, ArrowRight, FileText } from '@lucide/svelte';
 
 	interface JobItem {
@@ -13,6 +14,11 @@
 		status: string;
 		output: string;
 		error: string | null;
+		startedAt: string | null;
+		completedAt: string | null;
+		createdAt: string | null;
+		/** Local cancellation in flight: badge is optimistic until the backend terminal state lands. */
+		cancelRequested: boolean;
 	}
 
 	let books: BookWithPeople[] = $state([]);
@@ -76,6 +82,10 @@
 				status: j.status,
 				output: j.output || '',
 				error: j.error || null,
+				startedAt: j.started_at,
+				completedAt: j.completed_at,
+				createdAt: j.created_at ?? null,
+				cancelRequested: false,
 			});
 			items.push(item);
 			if (item.bookId !== null && !item.bookTitle) {
@@ -100,6 +110,7 @@
 	// Heartbeats ("alive") and unknown payloads must not clobber the job
 	// status; only real lifecycle values are whitelisted.
 	const JOB_STATUSES = new Set(['queued', 'running', 'done', 'error', 'cancelled']);
+	const TERMINAL_STATUSES = new Set(['done', 'error', 'cancelled']);
 
 	function connectSSE(item: JobItem) {
 		const stop = streamEvents(
@@ -107,17 +118,25 @@
 			(raw) => {
 				try {
 					const parsed = JSON.parse(raw);
-					if (parsed.status && JOB_STATUSES.has(String(parsed.status).toLowerCase()))
-						item.status = String(parsed.status).toLowerCase();
+					if (parsed.status && JOB_STATUSES.has(String(parsed.status).toLowerCase())) {
+						const next = String(parsed.status).toLowerCase();
+						if (next !== item.status) {
+							item.status = next;
+							// SSE events carry no clock fields; pull the canonical timestamps.
+							void pollJob(item);
+						}
+					}
 					if (parsed.output) item.output = parsed.output;
 					if (parsed.message && !parsed.output) item.output += parsed.message + '\n';
 					if (parsed.error) item.error = parsed.error;
-					if (item.status === 'done' || item.status === 'error' || item.status === 'cancelled') {
+					if (TERMINAL_STATUSES.has(item.status)) {
 						stop();
 						cleanupMap.delete(item.id);
-						if (item.status === 'cancelled') stopPolling(item.id);
+						// The SSE payload carries no clock fields and a running cancel
+						// persists its terminal row from the worker; keep polling until
+						// the canonical job row (with completed_at) arrives.
 						startPolling(item);
-						refreshAfterTerminal(item.id);
+						void pollJob(item);
 					}
 				} catch {
 					item.output += raw + '\n';
@@ -141,15 +160,28 @@
 	async function pollJob(item: JobItem) {
 		try {
 			const job = await get<ProcessingJob>(`/jobs/${item.id}`);
-			if (job.status !== item.status || job.error !== item.error || (job.output && job.output !== item.output)) {
-				item.status = job.status;
-				item.error = job.error;
-				if (job.output) item.output = job.output;
+			const backendTerminal = TERMINAL_STATUSES.has(job.status.toLowerCase());
+			// A cancel request made here keeps the optimistic 'cancelled' badge
+			// until the backend row itself is terminal; otherwise the badge would
+			// flip back to 'running' while the worker reaps the killed process.
+			if (!(item.cancelRequested && !backendTerminal)) {
+				if (job.status !== item.status || job.error !== item.error || (job.output && job.output !== item.output)) {
+					item.status = job.status;
+					item.error = job.error;
+					if (job.output) item.output = job.output;
+				}
 			}
-			if (job.status === 'done' || job.status === 'error' || job.status === 'cancelled') {
-				stopPolling(item.id);
-				refreshAfterTerminal(item.id);
+			item.startedAt = job.started_at;
+			item.completedAt = job.completed_at;
+			item.createdAt = job.created_at ?? null;
+			if (!backendTerminal) {
+				// Still running (e.g. a cancelled process the worker has not reaped
+				// yet): keep the poll loop so the terminal row lands eventually.
+				return;
 			}
+			item.cancelRequested = false;
+			stopPolling(item.id);
+			refreshAfterTerminal(item.id);
 		} catch {
 			/* The next scheduled poll can restore the live job state. */
 		}
@@ -198,9 +230,14 @@
 					status: 'queued',
 					output: '',
 					error: null,
+					startedAt: null,
+					completedAt: null,
+					createdAt: null,
+					cancelRequested: false,
 				});
 				jobs = [item, ...jobs];
 				connectSSE(item);
+				void pollJob(item);
 			}
 			selectedIds = new Set();
 			await loadBooks();
@@ -252,16 +289,26 @@
 		cancelling = next;
 		try {
 			await post(`/jobs/${job.id}/cancel`, {});
+			// Optimistic badge only: the terminal row (and its completed_at) is
+			// written by the API for queued jobs and by the worker for running
+			// ones, so keep refreshing until that canonical row arrives.
 			job.status = 'cancelled';
 			job.error = null;
-			stopPolling(job.id);
+			job.cancelRequested = true;
 			const existing = cleanupMap.get(job.id);
 			if (existing) {
 				existing();
 				cleanupMap.delete(job.id);
 			}
 			jobs = [...jobs];
-			await loadBooks();
+			await pollJob(job);
+			// pollJob clears cancelRequested once the canonical row (with
+			// completed_at) is in hand and refreshes the book list itself;
+			// until then keep polling for the worker's terminal write.
+			if (job.cancelRequested) {
+				startPolling(job);
+				await loadBooks();
+			}
 		} catch (e) {
 			job.error = e instanceof Error ? e.message : 'Failed to cancel job';
 		} finally {
@@ -349,6 +396,17 @@
 	<article class="job-record">
 		<div class="job-record__heading"><div class="job-identity">{#if job.bookId}<a href="/books/{job.bookId}">{job.bookTitle || `Book #${job.bookId}`}</a>{:else}<strong>Unlinked job</strong>{/if}<code title={job.id}>{job.id.slice(0, 8)}</code></div><StatusBadge status={job.status} /></div>
 		<p class="job-description">{jobStatusLabel(job.status)}</p>
+		<dl class="job-timestamps">
+			{#if job.startedAt}
+				<div class="job-timestamp"><dt>Started</dt><dd>{formatJobTime(job.startedAt)}</dd></div>
+			{/if}
+			{#if job.completedAt}
+				<div class="job-timestamp"><dt>Done</dt><dd>{formatJobTime(job.completedAt)}</dd></div>
+			{/if}
+			{#if !job.startedAt && !job.completedAt && job.createdAt}
+				<div class="job-timestamp"><dt>Created</dt><dd>{formatJobTime(job.createdAt)}</dd></div>
+			{/if}
+		</dl>
 		{#if job.error}
 			{@const error = cleanAdbError(job.error)}
 			<div class="job-message" class:job-message--error={job.status !== 'cancelled'} role={job.status === 'cancelled' ? 'note' : 'alert'}>{error.message}</div>
@@ -418,6 +476,10 @@
 	.job-identity a, .job-identity strong { font-size: 0.875rem; font-weight: 600; overflow-wrap: anywhere; }
 	.job-identity code { font-size: 0.75rem; color: var(--text-muted); }
 	.job-description { color: var(--text-muted); font-size: 0.75rem; margin-top: 0.65rem; }
+	.job-timestamps { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin-top: 0.35rem; font-size: 0.75rem; color: var(--text-secondary); }
+	.job-timestamp { display: flex; align-items: baseline; gap: 0.35rem; }
+	.job-timestamp dt { font-size: 0.65rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
+	.job-timestamp dd { margin: 0; font-variant-numeric: tabular-nums; }
 	.job-message { overflow-wrap: anywhere; font-size: 0.8125rem; line-height: 1.55; margin: 0.75rem 0; color: var(--text-secondary); }
 	.job-message--error { color: var(--state-red); }
 	.job-output { margin-top: 0.5rem; }

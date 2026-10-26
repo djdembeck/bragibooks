@@ -17,6 +17,9 @@ export default defineConfig(({ mode }) => {
 					host: '0.0.0.0',
 					proxy: {
 						'/api': proxyTarget,
+						// Extracted source covers are written by the Go server
+						// beside its database; Vite must forward them in dev.
+						'/covers': proxyTarget
 					},
 				}
 			: undefined,

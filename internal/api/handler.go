@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
@@ -23,15 +24,40 @@ type Services struct {
 	Processor     *audio.Processor
 	AudiobookDB   *atomic.Value
 	ProcessingSvc *ProcessingService
+
+	// settingsMu serializes every full settings-row read-modify-write
+	// (the form save and the external-API enable/disable/regenerate
+	// flows): both persist the whole row, and without this lock a
+	// concurrent pair can interleave snapshot-read and row-write so a
+	// later save clobbers what the earlier one persisted (e.g. a form
+	// save landing after an enable clears the freshly stored key digest).
+	settingsMu sync.Mutex
+
+	// SettingsPersistDelay is a test hook called, under the settings
+	// lock, inside the pre-commit window of the settings persistence
+	// flows — between the flow's boundaries, either just before the
+	// snapshot read (the external-API state flows: the write must be
+	// built from the state as it exists at commit time) or after the
+	// snapshot read (the form save). Production wiring leaves it nil;
+	// tests use it to widen the window so an unsynchronized
+	// interleaving becomes deterministic.
+	SettingsPersistDelay func()
+
+	// CoversDir is the on-disk directory for cover art extracted from
+	// source media. Empty disables extraction; the UI keeps its placeholder.
+	CoversDir string
+	// FFmpeg is the ffmpeg binary used to read embedded art. Empty disables
+	// extraction (ffmpeg is not installed).
+	FFmpeg string
 }
 
 // Handler wraps services and registers routes.
 type Handler struct {
-	svc Services
+	svc *Services
 }
 
 // NewHandler creates a new Handler with the given services.
-func NewHandler(svc Services) *Handler {
+func NewHandler(svc *Services) *Handler {
 	return &Handler{svc: svc}
 }
 
@@ -72,6 +98,9 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 		// Settings
 		r.Get("/settings", h.GetSettings)
 		r.Put("/settings", h.UpdateSettings)
+		r.Post("/settings/api-endpoint/enable", h.EnableAPIEndpoint)
+		r.Post("/settings/api-endpoint/disable", h.DisableAPIEndpoint)
+		r.Post("/settings/api-endpoint/regenerate", h.RegenerateAPIEndpoint)
 
 		// Directory browsing
 		r.Get("/directories", h.ListDirectories)
@@ -81,6 +110,18 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 		// Migration
 		r.Post("/migrate", h.MigrateLegacyDB)
 		r.Post("/migrate/people", h.RecoverPeople)
+	})
+
+	// Extracted source covers are library content — the same art the book
+	// endpoints return — so they sit behind the same gate rather than being
+	// enumerable by book ID. They are mounted outside /api only because the
+	// `<img>` tags that render them cannot attach a bearer header: the SPA
+	// mirrors its token into the same-origin `bragibooks_token` cookie
+	// (web/src/lib/api.ts), which the browser sends with those requests, and
+	// local mode admits loopback/LAN clients exactly as it does for the API.
+	r.Group(func(r chi.Router) {
+		r.Use(auth)
+		r.Handle("/covers/*", CoverHandler(h.svc.CoversDir))
 	})
 }
 

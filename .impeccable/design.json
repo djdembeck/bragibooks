@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-23T20:05:00-05:00",
+  "generatedAt": "2026-10-25T18:38:37-05:00",
   "title": "Design System: Bragi Books",
   "extensions": {
     "colorMeta": {
@@ -518,7 +518,7 @@
     "typographyMeta": {
       "display": {
         "displayName": "Display",
-        "purpose": "Public Sans 700, self-hosted woff2 (SIL OFL 1.1, /fonts/PublicSans-LICENSE.txt). Page titles; Public Sans scopes to h1–h3 app-wide, so record titles (h3) carry it too."
+        "purpose": "Public Sans 700, self-hosted woff2 (SIL OFL 1.1, /fonts/PublicSans-LICENSE.txt). Page titles; Public Sans scopes to h1\u2013h3 app-wide, so record titles (h3) carry it too."
       },
       "title": {
         "displayName": "Title",
@@ -683,19 +683,27 @@
       "name": "Provenance Tag",
       "kind": "chip",
       "refersTo": null,
-      "description": "AudiobookDB data mark — the only magenta.",
+      "description": "AudiobookDB data mark \u2014 the only magenta.",
       "html": "<a class=\"ds-abd\" href=\"#\" target=\"_blank\" rel=\"noopener\"><span class=\"ds-abd__mark\" aria-hidden=\"true\">AbDB</span><span class=\"ds-abd__label\">AudiobookDB</span></a>",
       "css": ".ds-abd { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.125rem 0.5rem; border-radius: var(--radius-sm, 6px); background: var(--provenance-bg, #f8edf5); border: 1px solid var(--provenance-border, #dcc2d5); color: var(--provenance, #8a286d); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; text-decoration: none; white-space: nowrap; } .ds-abd__mark { font-weight: 700; } .ds-abd__label { color: var(--text-secondary, #4c4c43); text-transform: none; letter-spacing: normal; } .ds-abd:hover { border-color: var(--provenance, #8a286d); } .ds-abd:focus-visible { outline: 3px solid var(--focus-ring, #705413); outline-offset: 3px; }"
+    },
+    {
+      "name": "Removal Pass",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "Match batch review's destructive selection mode \u2014 select sources, then confirm against a dialog that names every record.",
+      "html": "<div class=\"ds-removal\"><div class=\"ds-removal__bar\"><label class=\"ds-removal__all\"><input class=\"ds-removal__check\" type=\"checkbox\" /> Select all sources</label><span class=\"ds-removal__count\">3 of 11 sources selected to remove</span><span class=\"ds-removal__hint\">Files on disk are not touched.</span><button class=\"ds-removal__commit\" type=\"button\">Remove 3 records</button></div><p class=\"ds-removal__title\">Remove 3 records?</p><ul class=\"ds-removal__list\"><li>Andy Weir - Project Hail Mary</li><li>Frank Herbert - Dune</li></ul></div>",
+      "css": ".ds-removal { overflow: hidden; border: 1px solid var(--border, #d7d7d0); border-radius: var(--radius-md, 10px); background: var(--bg-panel, #fff); color: var(--text, #292923); } .ds-removal__bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 14px 18px; background: var(--state-red-bg, #fdecea); border-bottom: 1px solid var(--state-red-border, #e7b9b5); font-size: 13px; font-weight: 600; } .ds-removal__all { display: inline-flex; align-items: center; gap: 9px; } .ds-removal__check { width: 18px; height: 18px; appearance: none; border: 1.5px solid var(--border-strong, #92928a); border-radius: var(--radius-sm, 6px); background: var(--surface, #f8f8f6); } .ds-removal__check:checked { background: var(--state-red, #b3261e); border-color: var(--state-red, #b3261e); } .ds-removal__count { color: var(--state-red, #b3261e); font-variant-numeric: tabular-nums; } .ds-removal__hint { color: var(--text-muted, #65655a); font-size: 12.5px; font-weight: 400; } .ds-removal__commit { min-height: 36px; padding: 0 12px; border-radius: var(--radius-sm, 6px); background: var(--state-red-bg, #fdecea); border: 2px solid var(--state-red-border, #e7b9b5); color: var(--state-red, #b3261e); font-size: 13px; font-weight: 600; } .ds-removal__title { margin: 16px 16px 8px; font-size: 16px; font-weight: 700; } .ds-removal__list { margin: 0 16px 16px; padding: 0; list-style: none; border: 1px solid var(--border, #d7d7d0); border-radius: var(--radius-sm, 6px); } .ds-removal__list li { padding: 8px 12px; border-bottom: 1px solid var(--border-subtle, #e3e3dc); font-size: 14px; } .ds-removal__list li:last-child { border-bottom: 0; }"
     }
   ],
   "narrative": {
     "northStar": "The Record Workspace",
-    "overview": "Bragi Books is a work surface for its operator. Neutral white and graphite panels carry the work — import lists, match rows, the queue, the finished library — while the original develop gold is the chrome and the action: the sticky top bar, the primary buttons, the pale selection wash. The app runs in Operate mode: a batch of sources is reviewed at a glance, exceptions go to a focused record inspector, and the included books are approved in one counted save. Density comes from honest rows, hairline borders, and state that reads at 16px — not from ornament.\n\nThe earlier dark tape-editor world (Merge Bench, station rail, splice meters) is retired and replaced by this neutral/gold app-wide rollout. What did not change is the brand: the exact original stacked-books mark and favicon restored from develop, Public Sans 700 headings, and the unchanged system body face.",
+    "overview": "Bragi Books is a work surface for its operator. Neutral white and graphite panels carry the work \u2014 import lists, match rows, the queue, the finished library \u2014 while the original develop gold is the chrome and the action: the sticky top bar, the primary buttons, the pale selection wash. The app runs in Operate mode: a batch of sources is reviewed at a glance, exceptions go to a focused record inspector, and the included books are approved in one counted save. Density comes from honest rows, hairline borders, and state that reads at 16px \u2014 not from ornament.\n\nThe earlier dark tape-editor world (Merge Bench, station rail, splice meters) is retired and replaced by this neutral/gold app-wide rollout. What did not change is the brand: the exact original stacked-books mark and favicon restored from develop, Public Sans 700 headings, and the unchanged system body face.",
     "keyCharacteristics": [
       "Neutral white/graphite work surfaces; gold reserved for the header, primary actions, and selection wash",
       "Pale-gold selection (#fff4d3); dark gold/graphite (#705413) for secondary actions and focus, not blue",
       "Public Sans 700 (self-hosted, OFL-licensed) headings; system sans body; mono for paths, IDs, output",
-      "Flat panels: 4–12px radii by role, 1px hairlines; shadows reserved for their roles (button seat, picker, modal)",
+      "Flat panels: 4\u201312px radii by role, 1px hairlines; shadows reserved for their roles (button seat, picker, modal)",
       "Honest state: absent values labeled plainly; StatusBadge is glyph + word + color; reduced motion collapses all animation",
       "Original develop branding: stacked-books logo and favicon, unmodified"
     ],
@@ -717,29 +725,30 @@
       },
       {
         "name": "The Two-Voice Rule",
-        "body": "Public Sans carries the headings (h1–h3, including record titles) and the wordmark; body, labels, and row content stay on the system face, and mono is reserved for paths, IDs, and output.",
+        "body": "Public Sans carries the headings (h1\u2013h3, including record titles) and the wordmark; body, labels, and row content stay on the system face, and mono is reserved for paths, IDs, and output.",
         "section": "typography"
       },
       {
         "name": "The Flat-Panel Rule",
-        "body": "Surfaces are flat at rest; depth arrives as tone, hairline, and state — shadow only for its named roles above.",
+        "body": "Surfaces are flat at rest; depth arrives as tone, hairline, and state \u2014 shadow only for its named roles above.",
         "section": "elevation"
       }
     ],
     "dos": [
       "Do keep the chrome gold: top bar and primary actions on #ffe08a with #302609 ink; selection in the pale wash #fff4d3.",
       "Do draw secondary actions and keyboard focus from the dark gold/graphite family (#705413, 3px outline, 3px offset).",
-      "Do build work surfaces neutral: #ffffff panels on the #f5f5f4 ground, 1px #d7d7d0 hairlines, radii within the 4–12px scale by role.",
-      "Do render StatusBadge as glyph + word + color (never color alone), and label absent state plainly (\"No catalog match\", \"details unavailable\") — never hidden.",
+      "Do build work surfaces neutral: #ffffff panels on the #f5f5f4 ground, 1px #d7d7d0 hairlines, radii within the 4\u201312px scale by role.",
+      "Do render StatusBadge as glyph + word + color (never color alone), and label absent state plainly (\"No catalog match\", \"details unavailable\") \u2014 never hidden.",
       "Do collapse all animation under prefers-reduced-motion (shimmer, transitions, chase).",
-      "Do keep the original develop branding: the stacked-books mark at /images/logo-small-black.svg, favicon.ico, and the Public Sans OFL license living beside the font file."
+      "Do keep the original develop branding: the stacked-books mark at /images/logo-small-black.svg, favicon.ico, and the Public Sans OFL license living beside the font file.",
+      "Do keep destructive selection in its own mode: the include-in-save box never doubles as a removal selector, and a multi-record delete always lists the exact source names before it runs."
     ],
     "donts": [
-      "Don't reintroduce tape-editor framing — no station rail, equipment, meters, tape strips, or kickers/eyebrows; the Merge Bench vocabulary is retired.",
+      "Don't reintroduce tape-editor framing \u2014 no station rail, equipment, meters, tape strips, or kickers/eyebrows; the Merge Bench vocabulary is retired.",
       "Don't style focus, selection, or secondary state blue or cobalt.",
-      "Don't use shadow for decorative depth — it has named roles (button seat, picker, modal, inset selection outline); and keep radii to the 4-step scale.",
+      "Don't use shadow for decorative depth \u2014 it has named roles (button seat, picker, modal, inset selection outline); and keep radii to the 4-step scale.",
       "Don't redraw, replace, or invent the logo or favicon.",
-      "Don't render raw JSON in operator-facing errors — the sentence walks the payload; the raw data stays under the ErrorDetail expander."
+      "Don't render raw JSON in operator-facing errors \u2014 the sentence walks the payload; the raw data stays under the ErrorDetail expander."
     ]
   }
 }

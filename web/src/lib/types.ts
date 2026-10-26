@@ -152,8 +152,12 @@ export interface Settings {
 	num_cpus: number;
 	output_scheme: string;
 	region: string;
+	api_endpoint_enabled?: boolean;
+	api_endpoint_env_managed?: boolean;
 	created_at?: string;
 	updated_at?: string;
+	bragibooks_version?: string;
+	m4b_merge_version?: string;
 }
 
 export interface DirectoryEntry {
@@ -249,6 +253,16 @@ export interface MigrationResult {
 	migrated: { books: number; people: number };
 	backup: string;
 }
+
+/**
+ * Audio container extensions a single-file source may use. Kept in sync with
+ * `audioExtensions` in `internal/api/books.go` so the title shown here matches
+ * the title the API derived at intake. A period that is not one of these
+ * belongs to the name — author initials ("Ursula K. Le Guin"), abbreviations
+ * ("Dr."), or volume numbers ("Vol. 2") must survive, otherwise catalog
+ * searches run against a truncated title.
+ */
+export const AUDIO_FILE_EXTS = /\.(mp3|m4a|m4b|mp4|aac|ogg|oga|opus|flac|wav|wma|mka)$/i;
 
 export function formatRuntime(minutes: number): string {
 	if (!minutes || minutes <= 0) return '';

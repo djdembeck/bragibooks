@@ -58,7 +58,7 @@ func newTestJobsHandler(t *testing.T) (*Handler, *ProcessingService) {
 	}
 
 	svc := NewProcessingService(db, &audio.Processor{}, 1)
-	h := &Handler{svc: Services{DB: db, ProcessingSvc: svc}}
+	h := &Handler{svc: &Services{DB: db, ProcessingSvc: svc}}
 	return h, svc
 }
 
@@ -627,6 +627,66 @@ func TestStartProcessingDuplicateBook409(t *testing.T) {
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("duplicate book status = %d; want 409 — body: %s", w.Code, w.Body.String())
+	}
+}
+
+// writeMergingBinary writes an executable shell script that mimics a
+// successful m4b-merge run: it honors -o <dir> and creates
+// <dir>/Author/Title.m4b.
+func writeMergingBinary(t *testing.T, dir string) string {
+	t.Helper()
+	p := filepath.Join(dir, "merging-bin")
+	script := `#!/bin/sh
+out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift; fi
+  shift
+done
+mkdir -p "$out/Author"
+printf 'book' > "$out/Author/Title.m4b"
+echo merged
+`
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatalf("write merging binary: %v", err)
+	}
+	return p
+}
+
+// TestProcessJobRecordsOutputFormat is the regression test for #438: the run
+// that discovers the produced .m4b knows its format, so the success write
+// must persist it alongside dest_path. Without it the book page's FILE PATHS
+// card falls back to "Unknown" forever.
+func TestProcessJobRecordsOutputFormat(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	bin := writeMergingBinary(t, t.TempDir())
+	svc.proc = &audio.Processor{Binary: bin, OutputDir: t.TempDir(), PathFormat: "{title}", LogLevel: "info"}
+
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (1, 'Book', 'matched')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+
+	ctx := t.Context()
+	svc.RunWorkers(ctx, 1)
+
+	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")})
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	waitJobStatus(t, h.svc.DB, id, "done")
+
+	var format, dest string
+	if err := h.svc.DB.QueryRow(
+		"SELECT format_type, dest_path FROM books WHERE id = 1",
+	).Scan(&format, &dest); err != nil {
+		t.Fatalf("book format query: %v", err)
+	}
+	if format != "m4b" {
+		t.Errorf("format_type = %q; want m4b for the discovered .m4b output", format)
+	}
+	if dest == "" {
+		t.Error("dest_path = empty; want the discovered output path")
 	}
 }
 

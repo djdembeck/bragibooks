@@ -39,7 +39,7 @@ Success means a reliable, low-friction batch workflow where users trust the stat
 **Capabilities:**
 - Browse and navigate local source directories, select folders and files for import.
 - Match imported books against AudiobookDB metadata with candidate selection and custom search.
-- Change, re-search, or remove a match before committing to processing.
+- Change, re-search, or remove one match or several at once before committing to processing.
 - Queue matched books for batch processing via `m4b-merge`.
 - Monitor active processing jobs with live output logs (SSE).
 - Browse, filter, and paginate the completed book library.

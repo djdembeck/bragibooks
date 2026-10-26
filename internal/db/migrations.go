@@ -116,6 +116,21 @@ ALTER TABLE people ADD COLUMN asin TEXT DEFAULT '';
 
 `,
 	},
+	{
+		version: 5,
+		sql: `
+ALTER TABLE settings ADD COLUMN api_enabled BOOLEAN NOT NULL DEFAULT 0;
+ALTER TABLE settings ADD COLUMN api_key_digest TEXT NOT NULL DEFAULT '';
+
+`,
+	},
+	{
+		version: 6,
+		sql: `
+ALTER TABLE settings ADD COLUMN legacy_token_migrated BOOLEAN NOT NULL DEFAULT 0;
+
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

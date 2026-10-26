@@ -68,6 +68,11 @@ type Settings struct {
 	NumCPUs            int    `db:"num_cpus" json:"num_cpus"`
 	OutputScheme       string `db:"output_scheme" json:"output_scheme"`
 	Region             string `db:"region" json:"region"`
-	CreatedAt          string `db:"created_at" json:"created_at"`
-	UpdatedAt          string `db:"updated_at" json:"updated_at"`
+	APIEndpointEnabled bool   `db:"api_enabled" json:"-"`
+	APIKeyDigest       string `db:"api_key_digest" json:"-"`
+	// LegacyTokenMigrated marks that the one-time BRAGIBOOKS_ADMIN_TOKEN
+	// migration has run; it never changes again (finding: one-shot marker).
+	LegacyTokenMigrated bool   `db:"legacy_token_migrated" json:"-"`
+	CreatedAt           string `db:"created_at" json:"created_at"`
+	UpdatedAt           string `db:"updated_at" json:"updated_at"`
 }

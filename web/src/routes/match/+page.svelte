@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { untrack } from 'svelte';
+	import { tick, untrack } from 'svelte';
 	import { get, put, del } from '$lib/api';
 	import { goto } from '$app/navigation';
 	import type {
@@ -12,9 +12,17 @@
 		Settings,
 		UpdateBookRequest
 	} from '$lib/types';
-	import { extractAsin, pickCover, hitCoverUrl, bookCoverUrl, decodeHtmlEntities } from '$lib/types';
-	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, AbdTag } from '$lib/components';
+	import {
+		extractAsin,
+		pickCover,
+		hitCoverUrl,
+		bookCoverUrl,
+		decodeHtmlEntities,
+		AUDIO_FILE_EXTS
+	} from '$lib/types';
+	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, AbdTag, Modal } from '$lib/components';
 	import { toCleanedError, type CleanedAdbError } from '$lib/adbError';
+	import { resolveScheme } from '$lib/scheme';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
 	type ReviewMode = 'batch' | 'focused';
@@ -45,6 +53,7 @@
 		seq: number;
 		manualPick: boolean;
 		removing: boolean;
+		removingConfirming: boolean;
 		descriptionOpen: boolean;
 		descriptionOverflow: boolean;
 		_removeSnapshot?: { bookId: number; srcPath: string; title: string };
@@ -79,6 +88,37 @@
 	// Focused review — one source is active at a time; its inspector is shown
 	// right. Switching sources never discards any candidate's state.
 	let activeId = $state<number | null>(null);
+
+	// Batch removal pass — a selection dimension of its own. Entering the pass
+	// turns the row checkboxes into removal selectors, so a destructive set is
+	// never built out of “included in this save”.
+	let removeMode = $state(false);
+	let removeSelection = $state<Set<number>>(new Set());
+	let removeDialogOpen = $state(false);
+	/** What the open confirmation dialog is about to remove (a snapshot). */
+	let removeTargets = $state<MatchCandidate[]>([]);
+	let removingMany = $state(false);
+	let removingNow = $state<number | null>(null);
+	let removeFailure = $state<{ failed: number; attempted: number; error: CleanedAdbError } | null>(
+		null
+	);
+	/** Transient completion sentence for the polite live region. */
+	let removalNotice = $state('');
+
+	// The removal toolbar docks directly under the sticky page head, whose
+	// height changes with wrapping and breakpoints.
+	let headEl = $state<HTMLElement>();
+	let headHeight = $state(0);
+
+	$effect(() => {
+		const node = headEl;
+		if (!node) return;
+		const measure = () => (headHeight = node.getBoundingClientRect().height);
+		measure();
+		const observer = new ResizeObserver(measure);
+		observer.observe(node);
+		return () => observer.disconnect();
+	});
 
 	// Candidate picker — which source's listbox is open + keyboard cursor
 	let pickerCandidateId = $state<number | null>(null);
@@ -121,7 +161,22 @@
 		readyCandidates.length > 0 && readyCandidates.every((c) => c.included)
 	);
 	const someReadyIncluded = $derived(readyCandidates.some((c) => c.included));
+
+	// Removal selection stays independent of readiness: any source in the batch
+	// can be removed, including failed lookups and sources with no match.
+	const removeSelected = $derived(candidates.filter((c) => removeSelection.has(c.bookId)));
+	const removeSelectedCount = $derived(removeSelected.length);
+	const allSourcesPicked = $derived(
+		candidates.length > 0 && candidates.every((c) => removeSelection.has(c.bookId))
+	);
+	const someSourcesPicked = $derived(removeSelectedCount > 0);
+	/** A per-row delete is already committing; the pass waits for it. */
+	const removalInFlight = $derived(candidates.some((c) => c.removingConfirming));
+
 	const announcements = $derived.by(() => {
+		if (removeMode) {
+			return `${removeSelectedCount} of ${candidates.length} sources selected to remove.`;
+		}
 		if (mode === 'batch') {
 			return `${includedReadyCount} of ${candidates.length} included in this save.`;
 		}
@@ -132,9 +187,11 @@
 	});
 
 	function setMode(next: ReviewMode) {
-		if (mode === next) return;
+		if (mode === next || removingMany) return;
+		if (removeMode) endRemovePass({ focus: false });
 		mode = next;
 		closePicker();
+		removalNotice = '';
 		if (next === 'focused' && activeId == null && candidates.length > 0) {
 			activeId = candidates[0].bookId;
 		}
@@ -162,6 +219,7 @@
 
 	async function loadPending() {
 		initialLoadComplete = false;
+		resetRemovePass();
 		await dl.run(async () => {
 			pageError = null;
 			try {
@@ -192,6 +250,7 @@
 					seq: 0,
 					manualPick: false,
 					removing: false,
+					removingConfirming: false,
 					descriptionOpen: false,
 					descriptionOverflow: false
 				}));
@@ -563,26 +622,225 @@
 	async function confirmRemoveCandidate(candidate: MatchCandidate) {
 		if (!candidate._removeSnapshot) return;
 		const id = candidate._removeSnapshot.bookId;
+		candidate.removingConfirming = true;
+		if (mode === 'batch') {
+			// Keep focus on the confirmation during the request, in case the
+			// disabled state drop it.
+			await tick();
+			document
+				.querySelector<HTMLButtonElement>(
+					`.batch__removal[data-book-id='${id}'] [data-yes]`
+				)
+				?.focus();
+		}
 		try {
 			await del(`/books/${id}`);
 			const wasActive = activeId === id;
 			const removedIndex = candidates.findIndex((c) => c.bookId === id);
+			candidate.removing = false;
+			candidate.removingConfirming = false;
 			candidates = candidates.filter((c) => c.bookId !== id);
 			if (wasActive) {
 				activeId =
 					candidates[Math.min(Math.max(removedIndex, 0), candidates.length - 1)]?.bookId ??
 					null;
 			}
+			// The confirmation button is gone with the row; hand focus to a
+			// surviving control so the operator stays in the flow.
+			await tick();
+			if (mode === 'batch') {
+				const next = candidates[removedIndex] ?? candidates[candidates.length - 1];
+				if (next) document.getElementById(`batch-remove-${next.bookId}`)?.focus();
+			} else {
+				document.getElementById('focused-remove')?.focus();
+			}
 		} catch (e) {
 			pageError = toCleanedError(e);
 			candidate.removing = false;
+			candidate.removingConfirming = false;
 			candidate._removeSnapshot = undefined;
+			if (mode === 'batch') void returnFocusToBatchRemove(id);
 		}
 	}
 
 	function cancelRemoveCandidate(candidate: MatchCandidate) {
 		candidate.removing = false;
 		candidate._removeSnapshot = undefined;
+	}
+
+	/** Shared confirmation copy: the record goes, the files stay. */
+	function removeConfirmCopy(candidate: MatchCandidate): string {
+		return `Remove “${stripExtension(candidate.title)}” from the batch? This removes the book’s record from Bragi Books; files on disk are not touched.`;
+	}
+
+	/** Batch rows: same two-step flow, with explicit focus handling. */
+	async function removeCandidateBatch(candidate: MatchCandidate) {
+		removeCandidate(candidate);
+		await tick();
+		// focus="visible" targets only the danger button if it is visible,
+		// which is not the case on narrow viewports where the band wraps —
+		// so query the band itself.
+		const band = document.querySelector(
+			`.batch__removal[data-book-id='${candidate.bookId}']`
+		);
+		(
+			band?.querySelector<HTMLButtonElement>('[data-yes]') ??
+			band?.querySelector<HTMLButtonElement>('button')
+		)
+			?.focus();
+	}
+
+	function cancelBatchRemove(candidate: MatchCandidate) {
+		cancelRemoveCandidate(candidate);
+		void returnFocusToBatchRemove(candidate.bookId);
+	}
+
+	async function returnFocusToBatchRemove(id: number) {
+		await tick();
+		document.getElementById(`batch-remove-${id}`)?.focus();
+	}
+
+	// ── Batch removal pass ─────────────────────────────────────
+	// A deliberate mode: the row checkbox stops meaning “include in save” and
+	// starts meaning “remove this record”. It cannot be entered or left while a
+	// batch delete is in flight.
+
+	function resetRemovePass() {
+		removeMode = false;
+		removeSelection = new Set();
+		removeDialogOpen = false;
+		removeTargets = [];
+		removeFailure = null;
+		removalNotice = '';
+	}
+
+	async function beginRemovePass() {
+		if (removingMany || saving || removalInFlight) return;
+		// Retire any per-row confirmation so two removal flows never share a row.
+		for (const candidate of candidates) {
+			if (candidate.removing) cancelRemoveCandidate(candidate);
+		}
+		removeMode = true;
+		removeSelection = new Set();
+		removeFailure = null;
+		removalNotice = '';
+		await tick();
+		const first = candidates[0];
+		(
+			first
+				? document.getElementById(`batch-pick-${first.bookId}`)
+				: document.getElementById('batch-pick-all')
+		)?.focus();
+	}
+
+	function endRemovePass({ focus = true }: { focus?: boolean } = {}) {
+		if (removingMany) return;
+		removeMode = false;
+		removeSelection = new Set();
+		removeDialogOpen = false;
+		removeTargets = [];
+		removeFailure = null;
+		if (focus) void focusAfterRemovePass();
+	}
+
+	async function focusAfterRemovePass() {
+		await tick();
+		(
+			document.getElementById('batch-select-remove') ??
+			document.getElementById('match-title')
+		)?.focus();
+	}
+
+	function toggleRemovePick(candidate: MatchCandidate) {
+		if (removingMany) return;
+		const next = new Set(removeSelection);
+		if (next.has(candidate.bookId)) next.delete(candidate.bookId);
+		else next.add(candidate.bookId);
+		removeSelection = next;
+		removeFailure = null;
+		removalNotice = '';
+	}
+
+	function toggleAllRemovePicks(event: Event) {
+		if (removingMany) return;
+		const input = event.currentTarget as HTMLInputElement;
+		removeSelection = input.checked ? new Set(candidates.map((c) => c.bookId)) : new Set();
+		removeFailure = null;
+		removalNotice = '';
+	}
+
+	async function openRemoveDialog() {
+		if (removingMany || removeSelectedCount === 0) return;
+		removeTargets = removeSelected;
+		removeDialogOpen = true;
+		await tick();
+		// A destructive dialog opens with the safe action focused.
+		document.getElementById('batch-remove-cancel')?.focus();
+	}
+
+	function cancelRemoveDialog() {
+		if (removingMany) return;
+		removeDialogOpen = false;
+		removeTargets = [];
+		void tick().then(focusCommitControl);
+	}
+
+	/** The commit control differs by breakpoint; focus whichever is rendered. */
+	function focusCommitControl() {
+		for (const button of document.querySelectorAll<HTMLButtonElement>(
+			'[data-commit-removal]'
+		)) {
+			if (button.getClientRects().length > 0) {
+				button.focus();
+				return;
+			}
+		}
+	}
+
+	/** Delete the confirmed set one record at a time. A failure never hides the
+	 *  records that did not go: only the survivors stay selected, ready to retry. */
+	async function confirmRemoveMany() {
+		if (removingMany || removeTargets.length === 0) return;
+		const targets = removeTargets;
+		removingMany = true;
+		removeFailure = null;
+		removalNotice = '';
+		let removed = 0;
+		let failed = 0;
+		let failure: CleanedAdbError | null = null;
+		const survivors = new Set(removeSelection);
+		for (const target of targets) {
+			removingNow = target.bookId;
+			try {
+				await del(`/books/${target.bookId}`);
+				removed += 1;
+				survivors.delete(target.bookId);
+				candidates = candidates.filter((c) => c.bookId !== target.bookId);
+			} catch (e) {
+				failed += 1;
+				failure ??= toCleanedError(e);
+			}
+		}
+		removingNow = null;
+		removingMany = false;
+		removeDialogOpen = false;
+		removeTargets = [];
+		removeSelection = survivors;
+		if (removed > 0) {
+			removalNotice = `Removed ${removed} ${removed === 1 ? 'record' : 'records'}.`;
+		}
+		if (failed > 0 && failure) {
+			removeFailure = { failed, attempted: targets.length, error: failure };
+			await tick();
+			// The alert carries the retry action; bring the cause and the recovery
+			// below the docked toolbar before focusing it.
+			document.querySelector<HTMLElement>('.batch__alert')?.scrollIntoView({ block: 'start' });
+			document
+				.querySelector<HTMLButtonElement>('.batch__alert button')
+				?.focus({ preventScroll: true });
+			return;
+		}
+		endRemovePass();
 	}
 
 	// ── People / metadata helpers ──────────────────────────────
@@ -745,8 +1003,11 @@
 		return parts.join(' · ');
 	}
 
+	// Only a real audio extension is an extension: a period that is part of the
+	// name (author initials, "Dr.", "Vol. 2") must survive, or auto-match
+	// searches the catalog for a truncated title.
 	function stripExtension(name: string): string {
-		return name.replace(/\.[^/.]+$/, '');
+		return name.replace(AUDIO_FILE_EXTS, '');
 	}
 
 	function pathLast(name: string): string {
@@ -761,7 +1022,11 @@
 
 	// ── Proposed output naming ─────────────────────────────────
 	// Preview only: the processor writes ASIN + scheme and reports the actual
-	// final path. Unknown placeholders stay visible rather than being guessed.
+	// final path. Resolved through the shared scheme resolver, so this
+	// preview agrees with the Settings example (Go segment rules, no
+	// double `.m4b`). As with that resolver, unknown placeholders stay
+	// visible (unrecognized spellings are literal), and `{asin}` stays
+	// literal — m4b-merge does not substitute it (engine parity).
 
 	function schemeValues(candidate: MatchCandidate): Record<string, string> {
 		const book = candidate.details.book;
@@ -769,7 +1034,6 @@
 		const series = book?.series?.[0];
 		const releaseDate = release?.releaseDate || book?.originallyPublishedAt || '';
 		return {
-			asin: extractAsin(book?.external) || '',
 			author: roleNames(book, release, 'author'),
 			narrator: roleNames(book, release, 'narrator'),
 			series_name: seriesRecordName(series),
@@ -780,20 +1044,9 @@
 		};
 	}
 
-	function resolveScheme(candidate: MatchCandidate): string {
-		if (!outputScheme) return '';
-		const values = schemeValues(candidate);
-		return outputScheme.replace(/\{(\w+)\}/g, (raw, key: string) => {
-			const value = values[key.toLowerCase()];
-			return value ? value : raw;
-		});
-	}
-
 	function proposedRelativeName(candidate: MatchCandidate): string {
-		if (!candidate.details.book) return '';
-		const resolved = resolveScheme(candidate).trim();
-		if (!resolved) return '';
-		return /\.m4b$/i.test(resolved) ? resolved : `${resolved}.m4b`;
+		if (!outputScheme || !candidate.details.book) return '';
+		return resolveScheme(outputScheme, schemeValues(candidate));
 	}
 
 	function fullOutputPath(candidate: MatchCandidate): string {
@@ -831,6 +1084,14 @@
 		for (const candidate of candidates) {
 			if (isReady(candidate)) candidate.included = include;
 		}
+		removalNotice = '';
+	}
+
+	/** Inclusion is the save set; changing it re-arms the live region so a
+	 *  stale removal sentence never narrates the new count. */
+	function setIncluded(candidate: MatchCandidate, included: boolean) {
+		candidate.included = included;
+		removalNotice = '';
 	}
 
 	function measureDescriptionOverflow(
@@ -874,7 +1135,8 @@
 
 	/** Honest per-source status: the selection is real but not saved. */
 	function statusText(candidate: MatchCandidate): string {
-		if (candidate.removing) return 'Removal pending';
+		if (candidate.removing)
+			return candidate.removingConfirming ? 'Removing…' : 'Removal pending';
 		if (candidate.loading && !candidate.details.book && !candidate.error) return 'Loading record…';
 		if (candidate.error) return 'Catalog lookup failed';
 		if (candidate.releaseError) return 'Edition failed to load';
@@ -1057,6 +1319,7 @@
 	// ── Batch save ─────────────────────────────────────────────
 
 	async function saveMatches() {
+		if (removingMany) return;
 		const ready = candidates.filter(isSavable);
 		if (ready.length === 0) return;
 		saving = true;
@@ -1124,26 +1387,34 @@
 			closePicker();
 		}
 	}}
+	onkeydown={(e) => {
+		// Escape leaves the removal pass. While the confirmation dialog is open,
+		// its own dismissal runs first and this stays out of the way.
+		if (e.key === 'Escape' && removeMode && !removeDialogOpen && !removingMany) {
+			endRemovePass();
+		}
+	}}
 />
 
-<div class="match">
-	<div class="match__head">
+<div class="match" style="--head-h: {headHeight}px">
+	<p class="sr-only" aria-live="polite">{removalNotice || announcements}</p>
+	<div class="match__head" class:match__head--pass={removeMode} bind:this={headEl}>
 		<div class="match__head-in">
 			<div class="match__intro">
-				<h1 class="match__title">Match metadata</h1>
+				<h1 class="match__title" id="match-title" tabindex="-1">Match metadata</h1>
 				<p class="match__sub">
 					Scan each source’s proposed record, include the ready matches, and approve them
 					together.
 				</p>
 			</div>
 			{#if candidates.length > 0}
-				<p class="sr-only" aria-live="polite">{announcements}</p>
 				<div class="match__head-actions">
 					<div class="match__modes" role="group" aria-label="Review mode">
 						<button
 							type="button"
 							class="match__mode"
 							aria-pressed={mode === 'batch'}
+							disabled={removingMany}
 							onclick={() => setMode('batch')}
 						>
 							Batch review
@@ -1152,23 +1423,41 @@
 							type="button"
 							class="match__mode"
 							aria-pressed={mode === 'focused'}
+							disabled={removingMany}
 							onclick={() => setMode('focused')}
 						>
 							Focused review
 						</button>
 					</div>
-					<Button
-						class="match__save"
-						loading={saving}
-						disabled={includedReadyCount === 0}
-						onclick={saveMatches}
-					>
-						{saving
-							? 'Saving…'
-							: `Save ${includedReadyCount} ${
-									includedReadyCount === 1 ? 'match' : 'matches'
-								} → Queue`}
-					</Button>
+					{#if removeMode}
+						<div class="match__pass-head">
+							<span class="match__pass-count">
+								{removeSelectedCount} of {candidates.length}
+								{candidates.length === 1 ? 'source' : 'sources'} selected to remove
+							</span>
+							<Button
+								variant="ghost"
+								class="match__pass-cancel"
+								disabled={removingMany}
+								onclick={() => endRemovePass()}
+							>
+								Cancel
+							</Button>
+						</div>
+					{:else}
+						<Button
+							class="match__save"
+							loading={saving}
+							disabled={includedReadyCount === 0 || removingMany}
+							onclick={saveMatches}
+						>
+							{saving
+								? 'Saving…'
+								: `Save ${includedReadyCount} ${
+										includedReadyCount === 1 ? 'match' : 'matches'
+									} → Queue`}
+						</Button>
+					{/if}
 				</div>
 			{:else if !initialLoadComplete}
 				<div class="match__head-actions" aria-hidden="true">
@@ -1266,29 +1555,99 @@
 		/>
 	{:else if mode === 'batch'}
 		<!-- ── Batch review — every source, one approval ──────── -->
-		<section class="batch" aria-label="Batch review">
-			<div class="batch__bar">
-				<div class="batch__bar-main">
-					<label class="batch__all">
-						<input
-							type="checkbox"
-							checked={allReadyIncluded}
-							use:setIndeterminate={someReadyIncluded && !allReadyIncluded}
-							disabled={readyCandidates.length === 0}
-							onchange={toggleAllReady}
-						/>
-						<span>Select all ready</span>
-					</label>
-					<span class="batch__count">
-						{readyCandidates.length} ready · {includedReadyCount} of {candidates.length}
-						{candidates.length === 1 ? 'book' : 'books'} included
-					</span>
+		<section class="batch" aria-label="Batch review" aria-busy={removingMany}>
+			{#if removeMode}
+				<!-- Removal pass: the checkbox column now selects records to delete. -->
+				<div class="batch__bar batch__bar--removal">
+					<div class="batch__bar-main">
+						<label class="batch__all">
+							<input
+								id="batch-pick-all"
+								type="checkbox"
+								checked={allSourcesPicked}
+								use:setIndeterminate={someSourcesPicked && !allSourcesPicked}
+								disabled={removingMany || candidates.length === 0}
+								onchange={toggleAllRemovePicks}
+								aria-label="Select all sources for removal"
+							/>
+							<span>Select all sources</span>
+						</label>
+					</div>
+					<div class="batch__bar-side">
+						<p class="batch__hint">
+							Removing deletes the book’s record from Bragi Books. Files on disk are not
+							touched.
+						</p>
+						<Button
+							variant="danger"
+							id="batch-remove-commit"
+							data-commit-removal
+							disabled={removeSelectedCount === 0 || removingMany}
+							onclick={openRemoveDialog}
+						>
+							{removeSelectedCount === 0
+								? 'Select sources to remove'
+								: `Remove ${removeSelectedCount} ${
+										removeSelectedCount === 1 ? 'record' : 'records'
+									}`}
+						</Button>
+					</div>
 				</div>
-				<p class="batch__hint">
-					Only included, ready matches are saved. Excluded sources stay excluded when you
-					switch modes.
-				</p>
-			</div>
+				{#if removeFailure}
+					<div class="batch__alert">
+						<Alert variant="error" onretry={openRemoveDialog}>
+							<p class="batch__alert-lead">
+								{#if removeFailure.failed === removeFailure.attempted}
+									No records were removed.
+								{:else}
+									{removeFailure.failed} of {removeFailure.attempted} records were not
+									removed.
+								{/if}
+								They stay selected; remove them again to retry.
+							</p>
+							<p>{removeFailure.error.message}</p>
+							<ErrorDetail
+								raw={removeFailure.error.raw}
+								needsSettings={removeFailure.error.needsSettings}
+							/>
+						</Alert>
+					</div>
+				{/if}
+			{:else}
+				<div class="batch__bar">
+					<div class="batch__bar-main">
+						<label class="batch__all">
+							<input
+								type="checkbox"
+								checked={allReadyIncluded}
+								use:setIndeterminate={someReadyIncluded && !allReadyIncluded}
+								disabled={readyCandidates.length === 0}
+								onchange={toggleAllReady}
+							/>
+							<span>Select all ready</span>
+						</label>
+						<span class="batch__count">
+							{readyCandidates.length} ready · {includedReadyCount} of {candidates.length}
+							{candidates.length === 1 ? 'book' : 'books'} included
+						</span>
+					</div>
+					<div class="batch__bar-side">
+						<p class="batch__hint">
+							Only included, ready matches are saved. Excluded sources stay excluded
+							when you switch modes.
+						</p>
+						<Button
+							variant="secondary"
+							id="batch-select-remove"
+							class="batch__pick-enter"
+							disabled={saving || removalInFlight}
+							onclick={beginRemovePass}
+						>
+							Select to remove
+						</Button>
+					</div>
+				</div>
+			{/if}
 
 			<ul class="batch__list">
 				{#each candidates as c (c.bookId)}
@@ -1297,16 +1656,30 @@
 					{@const proposed = proposedRelativeName(c)}
 					<li
 						class="batch__row"
-						class:batch__row--excluded={ready && !c.included}
+						class:batch__row--excluded={!removeMode && ready && !c.included}
+						class:batch__row--removal={removeMode}
+						class:batch__row--picked={removeMode && removeSelection.has(c.bookId)}
+						aria-busy={removingNow === c.bookId}
 					>
 						<label class="batch__check">
-							<input
-								type="checkbox"
-								checked={c.included && ready}
-								disabled={!ready}
-								onchange={(e) => (c.included = e.currentTarget.checked)}
-								aria-label="Include {sourceBase(c)} in this save"
-							/>
+							{#if removeMode}
+								<input
+									id={`batch-pick-${c.bookId}`}
+									type="checkbox"
+									checked={removeSelection.has(c.bookId)}
+									disabled={removingMany}
+									onchange={() => toggleRemovePick(c)}
+									aria-label="Select {sourceBase(c)} for removal"
+								/>
+							{:else}
+								<input
+									type="checkbox"
+									checked={c.included && ready}
+									disabled={!ready}
+									onchange={(e) => setIncluded(c, e.currentTarget.checked)}
+									aria-label="Include {sourceBase(c)} in this save"
+								/>
+							{/if}
 						</label>
 
 						{#if c.coverUrl}
@@ -1324,7 +1697,10 @@
 						<div class="batch__names">
 							<div class="batch__name">
 								<span class="batch__name-label">Before</span>
-								<span class="batch__name-value" title={c.srcPath}>{sourceBase(c)}</span>
+								<span
+									class="batch__name-value batch__name-value--source"
+									title={c.srcPath}>{sourceBase(c)}</span
+								>
 							</div>
 							<svg class="batch__arrow" viewBox="0 0 24 24" aria-hidden="true">
 								<path d="M5 12h13m-5-5 5 5-5 5" />
@@ -1384,26 +1760,113 @@
 						</div>
 
 						<div class="batch__actions">
-							<span class="batch__status" data-kind={statusKind(c)}>{statusText(c)}</span>
-							<Button
-								variant="secondary"
-								class="batch__review"
-								aria-label="Review {sourceBase(c)}"
-								onclick={() => openFocused(c.bookId)}
-							>
-								Review
-							</Button>
+							{#if removeMode}
+								<span
+									class="batch__status"
+									data-kind={removingNow === c.bookId
+										? 'error'
+										: removeSelection.has(c.bookId)
+											? 'picked'
+											: statusKind(c)}
+								>
+									{removingNow === c.bookId
+										? 'Removing…'
+										: removeSelection.has(c.bookId)
+											? 'Selected for removal'
+											: statusText(c)}
+								</span>
+							{:else}
+								<span class="batch__status" data-kind={statusKind(c)}>{statusText(c)}</span>
+								<div class="batch__btns">
+									<Button
+										variant="secondary"
+										class="batch__review"
+										aria-label="Review {sourceBase(c)}"
+										onclick={() => openFocused(c.bookId)}
+									>
+										Review
+									</Button>
+									{#if !c.removing}
+										<Button
+											variant="ghost"
+											class="batch__remove"
+											id={`batch-remove-${c.bookId}`}
+											aria-label="Remove {sourceBase(c)} from the batch"
+											onclick={() => removeCandidateBatch(c)}
+										>
+											Remove
+										</Button>
+									{/if}
+								</div>
+							{/if}
 						</div>
+
+						{#if c.removing && !removeMode}
+							<div
+								class="batch__removal"
+								data-book-id={c.bookId}
+								role="alert"
+								aria-busy={c.removingConfirming}
+							>
+								<span id={`batch-removal-${c.bookId}`} tabindex="-1">
+									{removeConfirmCopy(c)}
+								</span>
+								<span class="batch__removal-actions">
+									<Button
+										variant="danger"
+										data-yes
+										aria-describedby={`batch-removal-${c.bookId}`}
+										loading={c.removingConfirming}
+										onclick={() => confirmRemoveCandidate(c)}
+									>
+										{c.removingConfirming ? 'Removing…' : 'Yes, remove'}
+									</Button>
+									<Button
+										variant="ghost"
+										aria-describedby={`batch-removal-${c.bookId}`}
+										disabled={c.removingConfirming}
+										onclick={() => cancelBatchRemove(c)}
+									>
+										Cancel
+									</Button>
+								</span>
+							</div>
+						{/if}
 					</li>
 				{/each}
 			</ul>
 
-			<p class="batch__foot">
-				Approval saves every included ready match and opens the Queue. Proposed names use
-				the output scheme and known metadata; unresolved <code>{'{placeholders}'}</code>
-				stay visible. The processor builds the final name from the ASIN and scheme and
-				reports the actual output path.
-			</p>
+			{#if !removeMode}
+				<p class="batch__foot">
+					Approval saves every included ready match and opens the Queue. Proposed names
+					use the output scheme and known metadata; unresolved
+					<code>{'{placeholders}'}</code>
+					stay visible. The processor builds the final name from the ASIN and scheme and
+					reports the actual output path.
+				</p>
+			{/if}
+
+			{#if removeMode}
+				<!-- Narrow viewports dock the pass actions at the bottom, clear of the
+				     tall sticky page head. -->
+				<div class="batch__commitbar">
+					<Button variant="ghost" disabled={removingMany} onclick={() => endRemovePass()}>
+						Cancel
+					</Button>
+					<Button
+						variant="danger"
+						data-commit-removal
+						disabled={removeSelectedCount === 0 || removingMany}
+						onclick={openRemoveDialog}
+					>
+						{removeSelectedCount === 0
+							? 'Select sources to remove'
+							: `Remove ${removeSelectedCount} ${
+									removeSelectedCount === 1 ? 'record' : 'records'
+								}`}
+					</Button>
+				</div>
+			{/if}
 		</section>
 	{:else}
 		<!-- ── Focused review — index + inspector ─────────────── -->
@@ -1515,7 +1978,7 @@
 									type="checkbox"
 									checked={isSavable(c)}
 									disabled={!isReady(c)}
-									onchange={(e) => (c.included = e.currentTarget.checked)}
+									onchange={(e) => setIncluded(c, e.currentTarget.checked)}
 									aria-label="Include {sourceBase(c)} in this save"
 								/>
 								<span>Include in save</span>
@@ -1543,20 +2006,33 @@
 									<path d="m10 6 6 6-6 6" />
 								</svg>
 							</button>
-							<Button variant="ghost" onclick={() => removeCandidate(c)}>Remove</Button>
+							<Button
+								variant="ghost"
+								id="focused-remove"
+								onclick={() => removeCandidate(c)}
+							>
+								Remove
+							</Button>
 						</div>
 					</div>
 
 					{#if c.removing}
 						<!-- Explicit removal confirmation -->
-						<div class="match__removal" role="alert">
-							Remove “{stripExtension(c.title)}” from the batch? This deletes the source
-							record.
+						<div class="match__removal" role="alert" aria-busy={c.removingConfirming}>
+							{removeConfirmCopy(c)}
 							<span class="match__removal-actions">
-								<Button variant="danger" onclick={() => confirmRemoveCandidate(c)}>
-									Yes, remove
+								<Button
+									variant="danger"
+									loading={c.removingConfirming}
+									onclick={() => confirmRemoveCandidate(c)}
+								>
+									{c.removingConfirming ? 'Removing…' : 'Yes, remove'}
 								</Button>
-								<Button variant="ghost" onclick={() => cancelRemoveCandidate(c)}>
+								<Button
+									variant="ghost"
+									disabled={c.removingConfirming}
+									onclick={() => cancelRemoveCandidate(c)}
+								>
 									Cancel
 								</Button>
 							</span>
@@ -2023,6 +2499,52 @@
 			{/if}
 		</div>
 	{/if}
+
+	<Modal
+		bind:open={removeDialogOpen}
+		title={`Remove ${removeTargets.length} ${
+			removeTargets.length === 1 ? 'record' : 'records'
+		}?`}
+	>
+		<p class="batch-dialog__lead">
+			These sources leave the Match list and their book records are deleted from Bragi Books.
+		</p>
+		<p class="batch-dialog__list-label">
+			{removeTargets.length} {removeTargets.length === 1 ? 'source' : 'sources'}
+		</p>
+		<ul class="batch-dialog__list">
+			{#each removeTargets as target (target.bookId)}
+				<li class="batch-dialog__item">
+					<span class="batch-dialog__name" title={target.srcPath}>{sourceBase(target)}</span>
+					{#if target.details.book}
+						<span class="batch-dialog__record">{selectedTitle(target)}</span>
+					{/if}
+				</li>
+			{/each}
+		</ul>
+		{#snippet footer()}
+			<div class="batch-dialog__foot">
+				<p class="batch-dialog__hint">Files on disk are not touched.</p>
+				<div class="batch-dialog__actions">
+					<Button
+						variant="ghost"
+						id="batch-remove-cancel"
+						disabled={removingMany}
+						onclick={cancelRemoveDialog}
+					>
+						Cancel
+					</Button>
+					<Button variant="danger" loading={removingMany} onclick={confirmRemoveMany}>
+						{removingMany
+							? 'Removing…'
+							: `Remove ${removeTargets.length} ${
+									removeTargets.length === 1 ? 'record' : 'records'
+								}`}
+					</Button>
+				</div>
+			</div>
+		{/snippet}
+	</Modal>
 </div>
 
 <style>
@@ -2094,6 +2616,10 @@
 		max-width: 54ch;
 	}
 
+	.match__head--pass .match__sub {
+		display: none;
+	}
+
 	.match__head-actions {
 		display: flex;
 		align-items: center;
@@ -2128,6 +2654,16 @@
 		color: var(--m-ink);
 	}
 
+	.match__mode:disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+
+	.match__mode:disabled:hover {
+		background: transparent;
+		color: var(--m-ink-2);
+	}
+
 	.match__mode[aria-pressed='true'] {
 		background: var(--m-selected);
 		color: var(--m-ink);
@@ -2137,6 +2673,27 @@
 	.match__head :global(.match__save) {
 		flex-shrink: 0;
 		min-height: 44px;
+	}
+
+	.match__pass-head {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		flex-shrink: 0;
+	}
+
+	.match__pass-count {
+		font-size: 13px;
+		font-weight: 600;
+		line-height: 1.4;
+		color: var(--state-red);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.match__head :global(.match__pass-cancel) {
+		min-height: 36px;
+		padding: 0 12px;
+		font-size: 13px;
 	}
 
 	.match__alert {
@@ -2167,6 +2724,66 @@
 		align-items: center;
 		gap: 18px;
 		flex-wrap: wrap;
+	}
+
+	.batch__bar-side {
+		display: flex;
+		align-items: center;
+		gap: 14px;
+		flex-wrap: wrap;
+		margin-left: auto;
+	}
+
+	/* Removal pass: the bar takes the state-red wash the inline removal band
+	 * already uses, so the mode is unmistakable without a side stripe. */
+	.batch__bar--removal {
+		background: var(--state-red-bg);
+		border-bottom-color: var(--state-red-border);
+	}
+
+	/* The pass only has one commit control; keep it in reach while scrolling a
+	 * long batch. Stays below the sticky page head. */
+	@media (min-width: 761px) {
+		.batch__bar--removal {
+			position: sticky;
+			top: calc(var(--nav-height) + var(--head-h, 7rem));
+			z-index: 10;
+			background: var(--state-red-bg);
+		}
+	}
+
+	/* The app draws its own checkbox face (appearance: none), so the removal
+	 * pass paints the checked face red instead of accent-color. */
+	.batch__bar--removal .batch__all input:checked,
+	.batch__bar--removal .batch__all input:indeterminate,
+	.batch__row--removal .batch__check input:checked {
+		background: var(--state-red);
+		border-color: var(--state-red);
+	}
+
+	.batch__row--removal .batch__check input:checked::before {
+		color: #fff;
+	}
+
+	.batch__commitbar {
+		display: none;
+	}
+
+	.batch__bar :global(.batch__pick-enter) {
+		min-height: 36px;
+		padding: 0 12px;
+		font-size: 13px;
+	}
+
+	.batch__alert {
+		padding: 12px 18px;
+		border-bottom: 1px solid var(--m-border);
+		scroll-margin-top: calc(var(--nav-height) + var(--head-h, 7rem) + 5.5rem);
+	}
+
+	.batch__alert-lead {
+		margin: 0 0 4px;
+		font-weight: 600;
 	}
 
 	.batch__all {
@@ -2212,6 +2829,13 @@
 		padding: 0;
 	}
 
+	/* Programmatic focus (removal confirm/cancel, pass entry) must not land
+	 * underneath the sticky page head. */
+	.batch__bar,
+	.batch__row {
+		scroll-margin-top: calc(var(--nav-height) + 7rem);
+	}
+
 	.batch__row {
 		display: grid;
 		grid-template-columns: 20px 44px minmax(0, 1.1fr) minmax(0, 1.25fr) auto;
@@ -2243,13 +2867,31 @@
 		color: var(--m-ink-2);
 	}
 
+	.batch__row--picked,
+	.batch__row--picked:hover {
+		background: var(--state-red-bg);
+	}
+
+	.batch__row--picked .batch__names,
+	.batch__row--picked .batch__record {
+		color: var(--m-ink-2);
+	}
+
 	.batch__check {
 		grid-area: check;
+		position: relative;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
 		min-height: 44px;
 		cursor: pointer;
+	}
+
+	/* The grid cell is 20px; widen only the hit area to the 44px floor. */
+	.batch__check::before {
+		content: '';
+		position: absolute;
+		inset: 0 -12px;
 	}
 
 	.batch__check input {
@@ -2325,6 +2967,16 @@
 	.batch__name-value--empty {
 		color: var(--m-muted);
 		font-weight: 500;
+	}
+
+	/* Source identity wraps in both batch and removal review. */
+	.batch__name-value--source {
+		white-space: normal;
+		overflow-wrap: anywhere;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
 	}
 
 	.batch__name-link {
@@ -2417,9 +3069,53 @@
 		color: var(--state-red);
 	}
 
+	.batch__status[data-kind='picked'] {
+		color: var(--state-red);
+		font-weight: 600;
+	}
+
 	.batch__actions :global(.batch__review) {
 		min-height: 36px;
 		padding: 0 12px;
+		font-size: 13px;
+	}
+
+	.batch__btns {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.batch__actions :global(.batch__remove) {
+		padding: 0 12px;
+		font-size: 13px;
+	}
+
+	.batch__removal {
+		grid-column: 1 / -1;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		flex-wrap: wrap;
+		padding: 10px 18px;
+		background: var(--state-red-bg);
+		font-size: 13.5px;
+		font-weight: 600;
+		color: var(--m-ink);
+	}
+
+	.batch__removal span[tabindex='-1']:focus {
+		outline: 0;
+	}
+
+	.batch__removal-actions {
+		display: flex;
+		gap: 8px;
+	}
+
+	.batch__removal :global(.btn) {
+		padding: 0 10px;
 		font-size: 13px;
 	}
 
@@ -3508,6 +4204,82 @@
 		max-width: 52ch;
 	}
 
+	/* ── Batch removal confirmation ──────────────────────────── */
+	.batch-dialog__lead {
+		margin: 0 0 12px;
+		font-size: 13.5px;
+		line-height: 1.5;
+		color: var(--m-ink-2);
+		max-width: 58ch;
+	}
+
+	.batch-dialog__list-label {
+		margin: 0 0 6px;
+		font-size: 11.5px;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--m-muted);
+	}
+
+	.batch-dialog__list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		border: 1px solid var(--m-border);
+		border-radius: var(--m-r-sm);
+		max-height: 13.5rem;
+		overflow-y: auto;
+	}
+
+	.batch-dialog__item {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		padding: 8px 12px;
+		border-bottom: 1px solid var(--m-border-soft);
+		background: var(--m-panel);
+	}
+
+	.batch-dialog__item:last-child {
+		border-bottom: 0;
+	}
+
+	.batch-dialog__name {
+		font-size: 14px;
+		font-weight: 600;
+		line-height: 1.4;
+		color: var(--m-ink);
+		overflow-wrap: anywhere;
+	}
+
+	.batch-dialog__record {
+		font-size: 12.5px;
+		line-height: 1.4;
+		color: var(--m-muted);
+		overflow-wrap: anywhere;
+	}
+
+	.batch-dialog__foot {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		flex-wrap: wrap;
+	}
+
+	.batch-dialog__hint {
+		margin: 0;
+		font-size: 12.5px;
+		color: var(--m-muted);
+	}
+
+	.batch-dialog__actions {
+		display: flex;
+		gap: 8px;
+		margin-left: auto;
+	}
+
 	/* ── Screen-reader live region ───────────────────────────── */
 	.sr-only {
 		position: absolute;
@@ -3544,9 +4316,19 @@
 	}
 
 	@media (max-width: 900px) {
+		/* The page head scrolls with the list on phones; only the removal pass
+		 * keeps a compact sticky strip so its count and exit stay in reach. */
 		.match__head {
+			position: static;
 			margin: 0 -1rem 16px;
 			padding: 12px 1rem 12px;
+		}
+
+		.match__head--pass {
+			position: sticky;
+			top: calc(var(--nav-height) - 2px);
+			margin-bottom: 12px;
+			padding: 8px 1rem 10px;
 		}
 
 		.match__head-in {
@@ -3554,8 +4336,20 @@
 			gap: 12px;
 		}
 
+		.match__head--pass .match__head-in {
+			gap: 4px;
+		}
+
 		.match__title {
 			font-size: 24px;
+		}
+
+		.match__head--pass .match__title {
+			font-size: 20px;
+		}
+
+		.match__head--pass .match__modes {
+			display: none;
 		}
 
 		.match__head-actions {
@@ -3563,6 +4357,10 @@
 			flex-direction: column;
 			align-items: stretch;
 			gap: 10px;
+		}
+
+		.match__head--pass .match__head-actions {
+			gap: 0;
 		}
 
 		.match__modes {
@@ -3578,6 +4376,15 @@
 		.match__head :global(.match__save) {
 			width: 100%;
 			min-height: 46px;
+		}
+
+		.match__pass-head {
+			width: 100%;
+			justify-content: space-between;
+		}
+
+		.match__head :global(.match__pass-cancel) {
+			min-height: 44px;
 		}
 
 		.match__grid {
@@ -3667,6 +4474,58 @@
 			gap: 10px;
 		}
 
+		.batch__bar-side {
+			width: 100%;
+			justify-content: space-between;
+		}
+
+		.batch__bar--removal .batch__bar-side {
+			display: none;
+		}
+
+		.batch__commitbar {
+			position: fixed;
+			left: 0;
+			right: 0;
+			bottom: 0;
+			z-index: 25;
+			display: flex;
+			gap: 8px;
+			padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px));
+			background: var(--m-panel);
+			border-top: 1px solid var(--state-red-border);
+		}
+
+		.batch__commitbar :global(.btn) {
+			flex: 1;
+		}
+
+		.batch__bar--removal ~ .batch__list {
+			padding-bottom: 76px;
+		}
+
+		.batch__bar :global(.batch__pick-enter) {
+			width: 100%;
+			min-height: 44px;
+		}
+
+		.batch__alert {
+			padding: 12px 14px;
+		}
+
+		.batch-dialog__foot {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.batch-dialog__actions {
+			margin-left: 0;
+		}
+
+		.batch-dialog__actions :global(.btn) {
+			flex: 1;
+		}
+
 		.batch__hint {
 			max-width: 100%;
 		}
@@ -3712,6 +4571,10 @@
 		.batch__actions {
 			justify-content: space-between;
 			padding-left: 30px;
+		}
+
+		.batch__removal {
+			padding: 10px 14px;
 		}
 
 		.batch__check {
