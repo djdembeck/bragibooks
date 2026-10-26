@@ -10,6 +10,7 @@ import (
 
 	"github.com/bragibooks/bragibooks/internal/audiobookdb"
 	"github.com/bragibooks/bragibooks/internal/config"
+	"github.com/bragibooks/bragibooks/internal/server"
 )
 
 // GetSettings handles GET /api/settings.
@@ -26,6 +27,8 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 		"output_scheme":        cfg.Processing.PathFormat,
 		"region":               cfg.Processing.Region,
 		"audiobookdb_base_url": cfg.APIKey.BaseURL,
+		"bragibooks_version":   server.Version,
+		"m4b_merge_version":    h.svc.Processor.ReadVersion(),
 	}
 
 	writeJSON(w, http.StatusOK, settings)
@@ -158,6 +161,11 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	h.svc.Processor.ApplyConfig(h.svc.Config.Config())
 	h.svc.AudiobookDB.Store(audiobookdb.NewClient(live.APIKey.APIKey, live.APIKey.BaseURL))
 
+	// Re-snapshot the m4b-merge version and pair its result with the live
+	// binary in the response: a second read here could observe the value
+	// stored by an overlapping update.
+	m4bMergeVersion := h.svc.Processor.UpdateVersion()
+
 	settings := map[string]any{
 		"m4b_merge_binary":     live.M4bMerge.Binary,
 		"input_dir":            live.Directories.InputDir,
@@ -167,6 +175,8 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		"output_scheme":        live.Processing.PathFormat,
 		"region":               live.Processing.Region,
 		"audiobookdb_base_url": live.APIKey.BaseURL,
+		"bragibooks_version":   server.Version,
+		"m4b_merge_version":    m4bMergeVersion,
 	}
 
 	writeJSON(w, http.StatusOK, settings)

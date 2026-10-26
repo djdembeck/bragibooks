@@ -3,8 +3,10 @@ package audio
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +31,7 @@ type Processor struct {
 	NumCPUs      int
 	PathFormat   string
 	LogLevel     string
+	version      string
 }
 
 // snapshot returns a consistent copy of the mutable CLI settings (see the
@@ -335,30 +338,175 @@ func findNewestM4B(dir string, since time.Time) (string, error) {
 // MinimumM4bMergeVersion is the minimum required m4b-merge version.
 const MinimumM4bMergeVersion = "1.0.0"
 
-// CheckVersion runs the m4b-merge binary with --version and ensures it is
-// at least MinimumM4bMergeVersion. Returns an error if the binary cannot
-// be found, fails to report a version, or is too old.
-func (p *Processor) CheckVersion() error {
+// Version runs the m4b-merge binary with --version and returns the last
+// whitespace-separated token of its output as the reported version.
+func (p *Processor) Version() (string, error) {
 	binary, _, _, _, _, _ := p.snapshot()
 	cmd := exec.Command(binary, "--version")
 	out, err := cmd.Output()
 	if err != nil {
 		if ex, ok := err.(*exec.Error); ok {
-			return fmt.Errorf("m4b-merge binary not found (%s): %w", ex.Name, ex.Err)
+			return "", fmt.Errorf("m4b-merge binary not found (%s): %w", ex.Name, ex.Err)
 		}
-		return fmt.Errorf("m4b-merge --version failed: %w", err)
+		return "", fmt.Errorf("m4b-merge --version failed: %w", err)
 	}
 
 	version := strings.Fields(strings.TrimSpace(string(out)))
 	if len(version) == 0 {
-		return fmt.Errorf("m4b-merge --version produced empty output")
+		return "", fmt.Errorf("m4b-merge --version produced empty output")
 	}
-	reported := version[len(version)-1] // last token is the version string
+	return version[len(version)-1], nil // last token is the version string
+}
 
-	if err := checkSemver(reported, MinimumM4bMergeVersion); err != nil {
-		return fmt.Errorf("m4b-merge version %s is too old, need >= %s", reported, MinimumM4bMergeVersion)
+// CheckVersion runs the m4b-merge binary with --version and ensures it is
+// at least MinimumM4bMergeVersion. Returns the reported version and an
+// error if the binary cannot be found, fails to report a version, or is
+// too old.
+func (p *Processor) CheckVersion() (string, error) {
+	reported, err := p.Version()
+	if err != nil {
+		return "", err
 	}
-	return nil
+	if err := checkSemver(reported, MinimumM4bMergeVersion); err != nil {
+		return "", fmt.Errorf("m4b-merge version %s is too old, need >= %s", reported, MinimumM4bMergeVersion)
+	}
+	return reported, nil
+}
+
+// StoreVersion records the last successfully reported m4b-merge version
+// for display in the settings page.
+func (p *Processor) StoreVersion(v string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.version = v
+}
+
+// versionProbeTimeout bounds a single "--version" probe: a hanging binary
+// must not stall the caller.
+const versionProbeTimeout = 5 * time.Second
+
+// UpdateVersion re-snapshots and stores the m4b-merge version. The binary
+// is probed with "--version" OUTSIDE the write lock (a subprocess running
+// under p.mu would block every run, ApplyConfig, and version reader for
+// the whole probe; the timeout above guarantees it always finishes). The
+// store is a compare-and-update under the write lock: it only applies the
+// result if Binary still matches the binary that was executed, so an
+// interleaved reconfiguration can never pair a stale version with a new
+// binary. It returns the version that resulted from the probe
+// ("unknown" when the binary cannot report one), which the caller pairs
+// with its own binary snapshot.
+func (p *Processor) UpdateVersion() string {
+	p.mu.RLock()
+	binary := p.Binary
+	p.mu.RUnlock()
+
+	if binary == "" {
+		// Nothing to execute; never spawn the bare "" command.
+		return p.storeLinkedVersion(binary, "unknown")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), versionProbeTimeout)
+	defer cancel()
+
+	// Execute, retrying the transient ETXTBSY: Linux refuses to exec a
+	// file while ANY fd in the process is open for writing it, so a
+	// sibling thread's fork can carry the writer's O_CLOEXEC fd past the
+	// writer's close and tax a freshly written binary until that
+	// inherited fd dies (golang/go#22315). Each attempt is a fresh cmd,
+	// because a failed Start marks the cmd consumed; the probe's context
+	// deadline bounds the whole retry sequence.
+	var (
+		reported  string
+		stdoutBuf bytes.Buffer
+	)
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(50*attempt) * time.Millisecond)
+		}
+		cmd := exec.CommandContext(ctx, binary, "--version")
+		// Own process group: ctx cancellation must kill the whole tree,
+		// not just the direct child. m4b_merge_binary is user-settable
+		// and may be a script wrapper that spawns children in general; a
+		// grandchild that inherits the stdout pipe would otherwise hold
+		// the probe open long after the child itself is killed, stalling
+		// the settings request past the deadline.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+				if err == syscall.ESRCH {
+					// Already gone: nothing for os/exec to do.
+					return os.ErrProcessDone
+				}
+				return err
+			}
+			return nil
+		}
+		// Guard against any writer we could not kill: force Wait to
+		// return shortly after cancel instead of blocking on inherited
+		// pipes.
+		cmd.WaitDelay = 5 * time.Second
+		// os/exec owns the drain: with buffers wired directly as the
+		// child's stdout/stderr, exec internally reads both streams
+		// concurrently and guarantees they are fully drained (and the
+		// buffers valid) once Run returns.
+		stdoutBuf.Reset()
+		var stderrBuf bytes.Buffer
+		cmd.Stdout = &stdoutBuf
+		cmd.Stderr = &stderrBuf
+
+		err := cmd.Run()
+		switch {
+		case err == nil:
+			version := strings.Fields(strings.TrimSpace(stdoutBuf.String()))
+			if len(version) > 0 {
+				reported = version[len(version)-1] // last token is the version string
+			}
+		case !errors.Is(err, syscall.ETXTBSY) || attempt >= 2:
+			// Missing binary, permission denied, nonzero exit,
+			// timeout, or empty output: record why the probe
+			// produced no version.
+			log.Printf("Warning: m4b-merge version probe for binary %s failed: %v%s",
+				binary, err, formattedStderr(strings.TrimSpace(stderrBuf.String())))
+		default:
+			continue // transient ETXTBSY: let a later attempt retry
+		}
+		break
+	}
+	if reported == "" {
+		reported = "unknown"
+	}
+	return p.storeLinkedVersion(binary, reported)
+}
+
+// formattedStderr appends the child's stderr as a suffix to a log line.
+func formattedStderr(stderr string) string {
+	if stderr == "" {
+		return ""
+	}
+	return "; stderr: " + stderr
+}
+
+// storeLinkedVersion stores version under the write lock only if the
+// binary field still matches the value the version was captured from,
+// so a reconfiguration that landed while the probe ran is never
+// shadowed by a result taken against the previous binary. It returns
+// the version now in effect (which may be a concurrent writer's) so
+// the result always corresponds to a consistent binary/version pair.
+func (p *Processor) storeLinkedVersion(snapshotBinary, version string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.Binary != snapshotBinary {
+		return p.version
+	}
+	p.version = version
+	return p.version
+}
+
+// ReadVersion returns the last recorded m4b-merge version, or "" if none
+// has been stored.
+func (p *Processor) ReadVersion() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.version
 }
 
 // checkSemver returns nil if got >= want. Both are "MAJOR.MINOR.PATCH" strings.

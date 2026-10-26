@@ -154,6 +154,8 @@ export interface Settings {
 	region: string;
 	created_at?: string;
 	updated_at?: string;
+	bragibooks_version?: string;
+	m4b_merge_version?: string;
 }
 
 export interface DirectoryEntry {

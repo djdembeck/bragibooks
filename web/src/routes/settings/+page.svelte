@@ -87,7 +87,11 @@
 		saved = false;
 		saveError = null;
 		try {
-			await put<Settings>('/settings', settings);
+			const updated = await put<Settings>('/settings', settings);
+			if (updated) {
+				settings.bragibooks_version = updated.bragibooks_version;
+				settings.m4b_merge_version = updated.m4b_merge_version;
+			}
 			saved = true;
 			setTimeout(() => (saved = false), 3000);
 		} catch (e) {
@@ -263,6 +267,34 @@
 			</div>
 		</section>
 
+		<!-- Version -->
+		<section class="settings-section" aria-labelledby="settings-version">
+			<h2 class="settings-section__title" id="settings-version">Version</h2>
+			<div class="settings-grid">
+				<div class="settings-field">
+					<dl class="version-pair">
+						<dt class="settings-label">Bragi Books</dt>
+						<dd class="settings-value font-mono">{settings.bragibooks_version || 'unknown'}</dd>
+					</dl>
+					<p class="settings-help">The version of the running Bragi Books build.</p>
+				</div>
+				<div class="settings-field">
+					<dl class="version-pair">
+						<dt class="settings-label">m4b-merge</dt>
+						<dd class="settings-value font-mono">{settings.m4b_merge_version || 'unknown'}</dd>
+					</dl>
+					<p class="settings-help">
+						{#if settings.m4b_merge_version === 'unknown'}
+							The configured binary did not report a version — check the m4b-merge binary path in
+							Processing.
+						{:else}
+							The version of the m4b-merge binary set in Processing; updates after you save.
+						{/if}
+					</p>
+				</div>
+			</div>
+		</section>
+
 		<!-- Save -->
 		<div class="settings-save">
 			{#if saving}
@@ -367,13 +399,14 @@
 
 	@media (min-width: 640px) {
 		.settings-grid {
-			grid-template-columns: 1fr 1fr;
+			grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 		}
 	}
 
 	.settings-field {
 		padding: 1rem 1.25rem;
 		background: var(--bg-panel);
+		min-width: 0;
 	}
 
 	.settings-label {
@@ -408,6 +441,24 @@
 		color: var(--text-muted);
 		line-height: 1.45;
 		text-wrap: pretty;
+	}
+
+	.settings-value {
+		margin: 0;
+		font-size: 0.875rem;
+		line-height: 1.5;
+		color: var(--text);
+		overflow-wrap: anywhere;
+	}
+
+	/* Term/definition pair — the dl resets are needed because <dd>
+	   ships with a left margin by default */
+	.version-pair {
+		margin: 0;
+	}
+
+	.version-pair dd {
+		margin: 0;
 	}
 
 	#input_dir_desc {
