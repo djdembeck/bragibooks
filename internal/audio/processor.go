@@ -342,23 +342,48 @@ func (p *Processor) UpdateVersion() string {
 	ctx, cancel := context.WithTimeout(context.Background(), versionProbeTimeout)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, binary, "--version").Output()
+	cmd := exec.CommandContext(ctx, binary, "--version")
+	// Own process group: ctx cancellation must kill the whole tree, not
+	// just the direct child. m4b_merge_binary is user-settable and may be
+	// a script wrapper that spawns children in general; a grandchild that
+	// inherits the stdout pipe would otherwise hold the probe open long
+	// after the child itself is killed, stalling the settings request past
+	// the deadline.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if err == syscall.ESRCH {
+				// Already gone: nothing for os/exec to do.
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
+	// Guard against any writer we could not kill: force Wait to return
+	// shortly after cancel instead of blocking on inherited pipes.
+	cmd.WaitDelay = 5 * time.Second
+
+	// os/exec owns the drain: with buffers wired directly as the child's
+	// stdout/stderr, exec internally reads both streams concurrently and
+	// guarantees they are fully drained (and the buffers valid) once
+	// Run returns.
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	err := cmd.Run()
 	reported := ""
 	if err == nil {
-		version := strings.Fields(strings.TrimSpace(string(out)))
+		version := strings.Fields(strings.TrimSpace(stdoutBuf.String()))
 		if len(version) > 0 {
 			reported = version[len(version)-1] // last token is the version string
 		}
 	} else {
 		// Missing binary, permission denied, nonzero exit, timeout,
 		// or empty output: record why the probe produced no version.
-		exitErr, _ := err.(*exec.ExitError)
-		stderr := ""
-		if exitErr != nil {
-			stderr = strings.TrimSpace(string(exitErr.Stderr))
-		}
 		log.Printf("Warning: m4b-merge version probe for binary %s failed: %v%s",
-			binary, err, formattedStderr(stderr))
+			binary, err, formattedStderr(strings.TrimSpace(stderrBuf.String())))
 	}
 	if reported == "" {
 		reported = "unknown"

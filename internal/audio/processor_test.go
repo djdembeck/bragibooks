@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -438,4 +441,86 @@ func TestUpdateVersionContract(t *testing.T) {
 			t.Errorf("ReadVersion after StoreVersion = %q, want %q", r, "9.9.9")
 		}
 	})
+}
+
+// writeWrapperVersionFake writes an executable shell script that spawns a
+// background sleeper (which inherits stdout/stderr and outlives the
+// wrapper by sleepSeconds), records the sleeper's PID in pidFile, and
+// then waits wrapperSeconds before exiting — mimicking the wrapper
+// binaries that can be configured via the settings API. wrapperSeconds
+// must exceed versionProbeTimeout: os/exec fires Cmd.Cancel when the
+// context deadline fires, not when the direct child exits, so the
+// wrapper must still be alive at the deadline for the group kill to be
+// exercised (a dead wrapper leaves a dead process group, and the piped
+// grandchild only outlives the probe when a WaitDelay overrun kicks in).
+func writeWrapperVersionFake(t *testing.T, dir, pidFile, sleepSeconds, wrapperSeconds string) string {
+	t.Helper()
+	p := filepath.Join(dir, "wrapper-version")
+	script := "#!/bin/sh\nsleep " + sleepSeconds + " & echo $! > \"" +
+		pidFile + "\"\nsleep " + wrapperSeconds + "\n"
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatalf("write wrapper version binary: %v", err)
+	}
+	return p
+}
+
+// TestUpdateVersionKillsWrapperProcessGroup covers the process-group fix:
+// the probe's context deadline fires with the wrapper — and its sleeper
+// grandchild holding the stdout pipe — still alive. The cancel must
+// SIGKILL the whole process group, and the probe must return bounded by
+// versionProbeTimeout (+WaitDelay), not the sleeper's 30s lifetime, with
+// no surviving test processes.
+func TestUpdateVersionKillsWrapperProcessGroup(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("probe cancel uses POSIX process groups via Setpgid; runtime is %s", runtime.GOOS)
+	}
+
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "sleeper.pid")
+	bin := writeWrapperVersionFake(t, dir, pidFile, "30", "10")
+	proc := NewProcessor(bin, "", "", 1, "{author}/{title}", "info")
+
+	// Leak insurance: a failed or aborted run must not leave the 30s
+	// sleeper behind. Signal-0 probe first, so a dead/already-reaped
+	// PID is a no-op and cleanup never blocks.
+	t.Cleanup(func() {
+		raw, err := os.ReadFile(pidFile)
+		if err != nil {
+			return // sleeper PID unknown/unrecorded
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err != nil {
+			return
+		}
+		if p, _ := os.FindProcess(pid); p != nil && p.Signal(syscall.Signal(0)) == nil {
+			p.Kill()
+		}
+	})
+
+	start := time.Now()
+	if got := proc.UpdateVersion(); got != "unknown" {
+		t.Errorf("UpdateVersion = %q, want %q (killed wrapper produces no version)", got, "unknown")
+	}
+	elapsed := time.Since(start)
+
+	// Bounded by versionProbeTimeout (+WaitDelay), well under the
+	// sleeper's 30s lifetime.
+	if elapsed > 10*time.Second {
+		t.Fatalf("UpdateVersion took %v; probe stalled past versionProbeTimeout + WaitDelay", elapsed)
+	}
+
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("sleeper pid file missing: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("bad sleeper pid %q: %v", raw, err)
+	}
+
+	// Give the SIGKILL (and reaping) a beat to land.
+	time.Sleep(500 * time.Millisecond)
+	if p, _ := os.FindProcess(pid); p != nil && p.Signal(syscall.Signal(0)) == nil {
+		t.Errorf("process leak: wrapper sleeper %d survived the probe's process-group kill", pid)
+	}
 }
