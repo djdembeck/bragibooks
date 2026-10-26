@@ -230,6 +230,8 @@
 			</div>
 		{/each}
 	</div>
+{:else if dl.error && recent.length === 0}
+	<!-- The failure alert above owns this space; do not also claim "empty". -->
 {:else if recent.length === 0}
 	<EmptyState
 		title="No books yet"

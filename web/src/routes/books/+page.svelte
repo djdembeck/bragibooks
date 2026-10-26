@@ -326,6 +326,8 @@
 			</div>
 		{/each}
 	</div>
+{:else if dl.error && (!response || response.books.length === 0)}
+	<!-- The failure alert above owns this space; do not also claim "empty". -->
 {:else if !response || response.books.length === 0}
 	<EmptyState
 		title="No books found"

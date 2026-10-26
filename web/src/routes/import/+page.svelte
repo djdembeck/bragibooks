@@ -278,6 +278,8 @@
 					<Skeleton height="2.5rem" />
 				{/each}
 			</div>
+		{:else if dl.error}
+			<!-- The failure alert above owns this space; do not also claim "empty". -->
 		{:else}
 			<EmptyState
 				title="No source directories found"
