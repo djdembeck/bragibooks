@@ -24,10 +24,20 @@ var imageExtensions = map[string]bool{
 	".jpg": true, ".jpeg": true, ".png": true, ".webp": true, ".bmp": true,
 }
 
+// audioExtensions are the containers an audiobook source may use. This is
+// the single list behind IsAudioFile, so folder scanning for cover art and
+// processing's source discovery recognize the same files; deriveTitle keeps
+// its own copy of the suffixes it strips (a period elsewhere in a name is
+// part of the title, not an extension).
+var audioExtensions = []string{
+	".mp3", ".m4a", ".m4b", ".mp4", ".aac", ".ogg", ".oga", ".opus",
+	".flac", ".wav", ".wma", ".mka",
+}
+
 // IsAudioFile reports whether name carries an audiobook audio extension.
 func IsAudioFile(name string) bool {
 	ext := strings.ToLower(name)
-	for _, audioExt := range []string{".mp3", ".m4a", ".m4b", ".mp4", ".aac", ".ogg", ".flac", ".wma"} {
+	for _, audioExt := range audioExtensions {
 		if strings.HasSuffix(ext, audioExt) {
 			return true
 		}
