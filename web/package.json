@@ -22,7 +22,7 @@
 	},
 	"dependencies": {
 		"@lucide/svelte": "^1.24.0",
-		"@sveltejs/adapter-static": "^3.0.10",
+		"@sveltejs/adapter-static": "^4.0.0",
 		"@tailwindcss/vite": "^4.3.2",
 		"tailwindcss": "^4.3.2"
 	}
