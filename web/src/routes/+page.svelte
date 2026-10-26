@@ -152,7 +152,7 @@
 {/if}
 
 <!-- ── Workflow summary ──────────────────────────────────────── -->
-{#if dl.showSkeleton}
+{#if !dl.hasLoaded || dl.showSkeleton}
 	<div class="mb-6" aria-label="Workflow loading">
 		<div class="overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]">
 			{#each Array(4) as _}
@@ -198,7 +198,9 @@
 {/if}
 
 <!-- ── Primary next action ───────────────────────────────────── -->
-<div class="mb-6 flex flex-wrap items-center gap-2">
+<!-- Hidden until the first fetch settles: before that, the zeroed counts
+     would offer a stale "Import books" action and then shift. -->
+<div class="mb-6 flex flex-wrap items-center gap-2" class:invisible={!dl.hasLoaded}>
 	{#if safeErrors > 0}
 		<Button variant="primary" href="/books?status=error">Review {safeErrors} error{#if safeErrors !== 1}s{/if}</Button>
 	{/if}
@@ -216,7 +218,7 @@
 <div class="mb-3">
 	<h2 class="text-lg font-semibold text-[var(--enamel)]">Recent books</h2>
 </div>
-{#if dl.showSkeleton}
+{#if !dl.hasLoaded || dl.showSkeleton}
 	<div class="space-y-2" aria-label="Recent books loading">
 		{#each Array(3) as _}
 			<div class="card flex items-center gap-4">

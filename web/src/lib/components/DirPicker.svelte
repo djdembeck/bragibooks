@@ -140,7 +140,7 @@
 	</div>
 
 	<div class="listing">
-		{#if dl.showSkeleton}
+		{#if dl.showSkeleton || !dl.hasLoaded}
 			{#each Array(6) as _}
 				<Skeleton height="2.25rem" />
 			{/each}

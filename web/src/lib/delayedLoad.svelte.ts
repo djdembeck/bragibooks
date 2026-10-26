@@ -9,6 +9,13 @@ export interface DelayedLoadState {
 	/** True only after `delay` has elapsed while a load is in flight. */
 	readonly showSkeleton: boolean;
 
+	/**
+	 * True once the first load has settled. Empty-state branches must wait for
+	 * this: `showSkeleton` is only a delayed-skeleton flag, so a fast response
+	 * never sets it and the falsy initial state would render as "empty".
+	 */
+	readonly hasLoaded: boolean;
+
 	/** Cleaned error from the most recent failed load, or null. */
 	readonly error: CleanedAdbError | null;
 
@@ -28,6 +35,7 @@ export interface DelayedLoadState {
  */
 export function delayedLoad(options: DelayedLoadOptions = {}): DelayedLoadState {
 	let showSkeleton = $state(false);
+	let hasLoaded = $state(false);
 	let error = $state<CleanedAdbError | null>(null);
 	let generation = 0;
 	const delay = options.delay ?? 200;
@@ -55,6 +63,7 @@ export function delayedLoad(options: DelayedLoadOptions = {}): DelayedLoadState 
 			clearTimeout(timer);
 			if (g === generation) {
 				showSkeleton = false;
+				hasLoaded = true;
 			}
 		}
 	}
@@ -62,6 +71,9 @@ export function delayedLoad(options: DelayedLoadOptions = {}): DelayedLoadState 
 	return {
 		get showSkeleton() {
 			return showSkeleton;
+		},
+		get hasLoaded() {
+			return hasLoaded;
 		},
 		get error() {
 			return error;
