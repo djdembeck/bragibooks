@@ -6,8 +6,7 @@
 	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '#lib/types.js';
 	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { formatJobTime } from '#lib/datetime.js';
-	import { jobActionLabel } from '#lib/jobActions.js';
-	import { StatusBadge, AbdTag, EmptyState, Button, Alert, ErrorDetail, Skeleton, CoverArt } from '#lib/components/index.js';
+	import { StatusBadge, AbdTag, EmptyState, Button, Alert, ErrorDetail, Skeleton, CoverArt, JobActionLabel } from '#lib/components/index.js';
 	import { ExternalLink, ArrowLeft } from '@lucide/svelte';
 
 	let { data }: { data: PageData } = $props();
@@ -21,7 +20,7 @@
 	const abdHref = $derived(abdBookId ? `https://audiobookdb.org/books/${abdBookId}` : null);
 	const asinStr = $derived(normStr(book?.asin));
 
-	/* ── Job history ─────────────────────────────────────────────
+	/* ── Recorded activity ───────────────────────────────────────
 	 * Newest-first from the queue API, filtered server-side by book_id.
 	 * While any job is queued/running the list re-fetches every 8s so
 	 * the lock note and history stay live without a manual reload.  */
@@ -524,13 +523,13 @@
 		{/if}
 	</section>
 
-	<!-- ── Job history, newest first ───────────────────────────── -->
-	<section class="card record-section" aria-label="Job history">
-		<h2 class="detail__section-title">Job history</h2>
+	<!-- ── Recorded activity, newest first ─────────────────────── -->
+	<section class="card record-section" aria-label="Recorded activity">
+		<h2 class="detail__section-title">Recorded activity</h2>
 		{#if jobsError}
 			<div class="mb-3">
 				<Alert variant="error" onretry={() => (jobsReload += 1)}>
-					Could not load job history: {jobsError.message}
+					Could not load recorded activity: {jobsError.message}
 					<ErrorDetail raw={jobsError.raw} needsSettings={jobsError.needsSettings} />
 				</Alert>
 			</div>
@@ -543,8 +542,7 @@
 				{#each jobs as job}
 					<li class="joblist__item">
 						<div class="joblist__head">
-							<StatusBadge status={job.status} />
-							<span class="action-badge">{jobActionLabel(job.action)}</span>
+							<div class="joblist__state"><StatusBadge status={job.status} /><JobActionLabel action={job.action} /></div>
 							<code class="joblist__id">{job.id}</code>
 						</div>
 						<dl class="joblist__times">
@@ -828,7 +826,7 @@
 	}
 
 	/* One header class for every section title
-	 * (Actions / Compare / Job history / File paths / Description). */
+	 * (Actions / Compare / Recorded activity / File paths / Description). */
 	.detail__section-title {
 		margin: 0;
 		font-size: 0.8rem;
@@ -986,7 +984,7 @@
 		white-space: nowrap;
 	}
 
-	/* Job history — one entry per processing attempt */
+	/* Recorded activity — one entry per run or record change */
 	.joblist {
 		margin: 0.75rem 0 0;
 		padding: 0;
@@ -1010,16 +1008,11 @@
 		flex-wrap: wrap;
 	}
 
-	.action-badge {
-		font-size: 0.65rem;
-		font-weight: 600;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
-		color: var(--text-secondary);
-		background: var(--surface);
-		border: 1.5px solid var(--border-strong);
-		border-radius: var(--radius-sm);
-		padding: 0.125rem 0.5rem;
+	.joblist__state {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 0.5rem;
 	}
 
 	.joblist__id {

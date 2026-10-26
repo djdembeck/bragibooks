@@ -1,11 +1,10 @@
 <script lang="ts">
 	import { get, post, streamEvents } from '#lib/api.js';
 	import type { BookWithPeople, BooksListResponse, ProcessingResponse, ProcessingJob, JobsListResponse } from '#lib/types.js';
-	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, StatusBadge, CoverArt } from '#lib/components/index.js';
+	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, StatusBadge, CoverArt, JobActionLabel } from '#lib/components/index.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { cleanAdbError, toCleanedError } from '#lib/adbError.js';
 	import { formatJobTime } from '#lib/datetime.js';
-	import { jobActionLabel } from '#lib/jobActions.js';
 	import { CheckCircle, Clock, ArrowRight, FileText } from '@lucide/svelte';
 
 	interface JobItem {
@@ -13,7 +12,7 @@
 		bookId: number | null;
 		bookTitle?: string;
 		status: string;
-		action: string;
+		action: string | null;
 		output: string;
 		error: string | null;
 		startedAt: string | null;
@@ -82,7 +81,7 @@
 				bookId: j.book_id,
 				bookTitle: books.find((book) => book.id === j.book_id)?.title,
 				status: j.status,
-				action: j.action ?? 'merge',
+				action: j.action ?? null,
 				output: j.output || '',
 				error: j.error || null,
 				startedAt: j.started_at,
@@ -389,7 +388,7 @@
 					<section class="queue-idle"><Clock size={21} aria-hidden="true" /><h2 id="activity-title">Nothing processing</h2><p>Ready books stay in the list until you start a batch.</p></section>
 				{/if}
 				{#if pastJobs.length > 0}
-					<details class="job-history"><summary><span>Recent job history <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent completed, cancelled, and failed jobs. Open a job for output and technical details.</p>{#each pastJobs as job (job.id)}{@render JobRecord(job, false)}{/each}</details>
+					<details class="job-history"><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each pastJobs as job (job.id)}{@render JobRecord(job, false)}{/each}</details>
 				{/if}
 			</aside>
 		</div>
@@ -398,7 +397,7 @@
 
 {#snippet JobRecord(job: JobItem, active: boolean)}
 	<article class="job-record">
-		<div class="job-record__heading"><div class="job-identity">{#if job.bookId}<a href="/books/{job.bookId}">{job.bookTitle || `Book #${job.bookId}`}</a>{:else}<strong>Unlinked job</strong>{/if}<code title={job.id}>{job.id.slice(0, 8)}</code></div><StatusBadge status={job.status} /><span class="action-badge">{jobActionLabel(job.action)}</span></div>
+		<div class="job-record__heading"><div class="job-identity">{#if job.bookId}<a href="/books/{job.bookId}">{job.bookTitle || `Book #${job.bookId}`}</a>{:else}<strong>Unlinked job</strong>{/if}<code title={job.id}>{job.id.slice(0, 8)}</code></div><div class="job-record__state"><StatusBadge status={job.status} /><JobActionLabel action={job.action} /></div></div>
 		<p class="job-description">{jobStatusLabel(job.status)}</p>
 		<dl class="job-timestamps">
 			{#if job.startedAt}
@@ -416,7 +415,9 @@
 			<div class="job-message" class:job-message--error={job.status !== 'cancelled'} role={job.status === 'cancelled' ? 'note' : 'alert'}>{error.message}</div>
 			<ErrorDetail raw={job.error} needsSettings={error.needsSettings} />
 		{/if}
-		<details class="job-output" open={active && job.status === 'running'}><summary><FileText size={14} aria-hidden="true" />{active ? 'Live output' : 'Job output'}</summary>{#if job.output}<pre role="log" aria-label="Job {job.id.slice(0, 8)} output" aria-live={active ? 'polite' : 'off'}>{job.output}</pre>{:else}<p>No output recorded yet.</p>{/if}</details>
+		{#if job.action === 'merge' || job.output}
+			<details class="job-output" open={active && job.status === 'running'}><summary><FileText size={14} aria-hidden="true" />{active ? 'Live output' : 'Job output'}</summary>{#if job.output}<pre role="log" aria-label="Job {job.id.slice(0, 8)} output" aria-live={active ? 'polite' : 'off'}>{job.output}</pre>{:else}<p>No output recorded yet.</p>{/if}</details>
+		{/if}
 		{#if active}<Button variant="ghost" class="cancel-job" loading={cancelling.has(job.id)} disabled={cancelling.has(job.id)} aria-label="Cancel job {job.id}" onclick={() => cancelJob(job)}>{cancelling.has(job.id) ? 'Cancelling…' : 'Cancel job'}</Button>{/if}
 	</article>
 {/snippet}
@@ -476,7 +477,7 @@
 	.job-record { min-width: 0; padding: 1.25rem 1.5rem; border-top: 1px solid var(--border-subtle); }
 	.job-history .job-record { padding: 1rem 0; }
 	.job-record__heading { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 0.5rem; }
-	.action-badge { font-size: 0.65rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-secondary); background: var(--surface); border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm); padding: 0.125rem 0.5rem; }
+	.job-record__state { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
 	.job-identity { display: grid; gap: 0.35rem; min-width: 0; }
 	.job-identity a, .job-identity strong { font-size: 0.875rem; font-weight: 600; overflow-wrap: anywhere; }
 	.job-identity code { font-size: 0.75rem; color: var(--text-muted); }
