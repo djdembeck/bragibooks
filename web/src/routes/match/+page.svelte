@@ -22,6 +22,7 @@
 	} from '$lib/types';
 	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, AbdTag } from '$lib/components';
 	import { toCleanedError, type CleanedAdbError } from '$lib/adbError';
+	import { resolveScheme } from '$lib/scheme';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 
 	type ReviewMode = 'batch' | 'focused';
@@ -771,7 +772,11 @@
 
 	// ── Proposed output naming ─────────────────────────────────
 	// Preview only: the processor writes ASIN + scheme and reports the actual
-	// final path. Unknown placeholders stay visible rather than being guessed.
+	// final path. Resolved through the shared scheme resolver, so this
+	// preview agrees with the Settings example (Go segment rules, no
+	// double `.m4b`). As with that resolver, unknown placeholders stay
+	// visible (unrecognized spellings are literal), and `{asin}` stays
+	// literal — m4b-merge does not substitute it (engine parity).
 
 	function schemeValues(candidate: MatchCandidate): Record<string, string> {
 		const book = candidate.details.book;
@@ -779,7 +784,6 @@
 		const series = book?.series?.[0];
 		const releaseDate = release?.releaseDate || book?.originallyPublishedAt || '';
 		return {
-			asin: extractAsin(book?.external) || '',
 			author: roleNames(book, release, 'author'),
 			narrator: roleNames(book, release, 'narrator'),
 			series_name: seriesRecordName(series),
@@ -790,20 +794,9 @@
 		};
 	}
 
-	function resolveScheme(candidate: MatchCandidate): string {
-		if (!outputScheme) return '';
-		const values = schemeValues(candidate);
-		return outputScheme.replace(/\{(\w+)\}/g, (raw, key: string) => {
-			const value = values[key.toLowerCase()];
-			return value ? value : raw;
-		});
-	}
-
 	function proposedRelativeName(candidate: MatchCandidate): string {
-		if (!candidate.details.book) return '';
-		const resolved = resolveScheme(candidate).trim();
-		if (!resolved) return '';
-		return /\.m4b$/i.test(resolved) ? resolved : `${resolved}.m4b`;
+		if (!outputScheme || !candidate.details.book) return '';
+		return resolveScheme(outputScheme, schemeValues(candidate));
 	}
 
 	function fullOutputPath(candidate: MatchCandidate): string {
