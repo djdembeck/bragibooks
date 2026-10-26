@@ -4,7 +4,8 @@
 	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, StatusBadge, CoverArt } from '#lib/components/index.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { cleanAdbError, toCleanedError } from '#lib/adbError.js';
-	import { formatJobTime, formatElapsed } from '#lib/datetime.js';
+	import { formatJobTime, formatElapsed, elapsedLabel } from '#lib/datetime.js';
+	import { liveNow } from '#lib/liveNow.svelte.js';
 	import { CheckCircle, Clock, ArrowRight, FileText } from '@lucide/svelte';
 
 	interface JobItem {
@@ -265,14 +266,7 @@
 	const pendingBooks = $derived(books.filter((b) => b.status === 'pending'));
 	const activeJobs = $derived(jobs.filter(isActiveJob));
 	const pastJobs = $derived(jobs.filter((job) => !isActiveJob(job)));
-	let nowMs = $state(Date.now());
-	// 1s tick only while a live job is present, so an idle page costs nothing.
-	$effect(() => {
-		if (activeJobs.length === 0) return;
-		nowMs = Date.now();
-		const timer = window.setInterval(() => (nowMs = Date.now()), 1000);
-		return () => clearInterval(timer);
-	});
+	const clock = liveNow(() => activeJobs.length > 0);
 	const failedJobs = $derived(pastJobs.filter((job) => job.status === 'error' || job.status === 'failed').length);
 	const runningJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'running').length);
 	const queuedJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'queued').length);
@@ -412,7 +406,7 @@
 				<div class="job-timestamp"><dt>Done</dt><dd>{formatJobTime(job.completedAt)}</dd></div>
 			{/if}
 			{#if job.startedAt || job.createdAt}
-				<div class="job-timestamp"><dt>Elapsed</dt><dd>{formatElapsed(job.startedAt ?? job.createdAt, job.completedAt, nowMs)}</dd></div>
+				<div class="job-timestamp"><dt>{elapsedLabel(job.startedAt)}</dt><dd>{formatElapsed(job.startedAt ?? job.createdAt, job.completedAt, clock.now)}</dd></div>
 			{/if}
 			{#if !job.startedAt && !job.completedAt && job.createdAt}
 				<div class="job-timestamp"><dt>Created</dt><dd>{formatJobTime(job.createdAt)}</dd></div>
@@ -489,7 +483,7 @@
 	.job-description { color: var(--text-muted); font-size: 0.75rem; margin-top: 0.65rem; }
 	.job-timestamps { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin-top: 0.35rem; font-size: 0.75rem; color: var(--text-secondary); }
 	.job-timestamp { display: flex; align-items: baseline; gap: 0.35rem; }
-	.job-timestamp dt { font-size: 0.65rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
+	.job-timestamp dt { font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
 	.job-timestamp dd { margin: 0; font-variant-numeric: tabular-nums; }
 	.job-message { overflow-wrap: anywhere; font-size: 0.8125rem; line-height: 1.55; margin: 0.75rem 0; color: var(--text-secondary); }
 	.job-message--error { color: var(--state-red); }
