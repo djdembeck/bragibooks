@@ -27,8 +27,19 @@ type Config struct {
 
 // ServerConfig holds server-related configuration.
 type ServerConfig struct {
-	Host string `mapstructure:"host" yaml:"host" json:"host"`
-	Port int    `mapstructure:"port" yaml:"port" json:"port"`
+	Host        string            `mapstructure:"host" yaml:"host" json:"host"`
+	Port        int               `mapstructure:"port" yaml:"port" json:"port"`
+	APIEndpoint APIEndpointConfig `mapstructure:"api_endpoint" yaml:"api_endpoint" json:"api_endpoint"`
+}
+
+// APIEndpointConfig holds the external-API (remote key auth) state.
+type APIEndpointConfig struct {
+	Enabled bool `mapstructure:"enabled" yaml:"enabled" json:"enabled"`
+	// KeyDigest is the SHA-256 hex of the raw API key. It is populated from
+	// the settings DB row only and is deliberately excluded from every
+	// serialized/config-file path (the `-` tags keep it out of the full
+	// config YAML Save and viper/mapstructure decoding).
+	KeyDigest string `mapstructure:"-" yaml:"-" json:"-"`
 }
 
 // DatabaseConfig holds SQLite database configuration.
@@ -235,6 +246,14 @@ func (cm *ConfigManager) Config() *Config {
 // a partially updated struct.
 func (cm *ConfigManager) Store(cfg *Config) {
 	cm.cfg.Store(cfg)
+}
+
+// APIEndpointEnvManaged reports whether the SERVER_API_ENDPOINT_ENABLED
+// env var is set (to any non-empty value). When true the enabled flag is
+// deployment-managed: the UI enable/disable endpoints must refuse and the
+// UI renders the state read-only. This is the single source for that rule.
+func (cm *ConfigManager) APIEndpointEnvManaged() bool {
+	return os.Getenv("SERVER_API_ENDPOINT_ENABLED") != ""
 }
 
 // AddYAMLKeys records that the given dotted keys are now explicitly present
@@ -454,6 +473,9 @@ func applyEnvPriority(cfg *Config) {
 	if v := envVal("database.path"); v != "" {
 		cfg.Database.Path = v
 	}
+	if isEnvTrue("SERVER_API_ENDPOINT_ENABLED") {
+		cfg.Server.APIEndpoint.Enabled = true
+	}
 	if v := envVal("m4b_merge.binary"); v != "" {
 		cfg.M4bMerge.Binary = v
 	}
@@ -508,6 +530,8 @@ func overrideKey(target, yamlOnly *Config, key string) {
 		target.Server.Host = yamlOnly.Server.Host
 	case "server.port":
 		target.Server.Port = yamlOnly.Server.Port
+	case "server.api_endpoint.enabled":
+		target.Server.APIEndpoint.Enabled = yamlOnly.Server.APIEndpoint.Enabled
 	// Database
 	case "database.path":
 		target.Database.Path = yamlOnly.Database.Path
@@ -555,6 +579,7 @@ func defaultConfigPath() string {
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.host", "")
 	v.SetDefault("server.port", 8080)
+	v.SetDefault("server.api_endpoint.enabled", false)
 	v.SetDefault("database.path", "config/bragibooks.db")
 	v.SetDefault("m4b_merge.binary", "m4b-merge")
 	v.SetDefault("api_key.api_key", "")

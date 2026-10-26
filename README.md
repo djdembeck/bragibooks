@@ -42,12 +42,14 @@ It is an operations board for a personal audiobook pipeline, not a cloud library
 
 ## Security
 
-Bragibooks is designed for one operator on a private network, and the API routes are protected by admin authentication with two modes:
+Bragibooks is designed for one operator on a private network, and the API routes are protected by address and credential checks:
 
-- **Local mode** (no token set): requests are accepted only from loopback and private LAN addresses (`127.0/8`, `10/8`, `172.16/12`, `192.168/16`). Everything else is refused. This mode starts with a logged warning.
-- **Token mode**: set `BRAGIBOOKS_ADMIN_TOKEN` to allow access from any address to clients that present the token (browser cookie or `Authorization: Bearer` header).
+- **Off (default):** requests are accepted only from loopback and private LAN addresses (`127.0/8`, `10/8`, `172.16/12`, `192.168/16`). Everything else is refused.
+- **On (enabled in Settings → External API):** the API is *additionally* reachable from any address by clients that present the server-generated API key as `Authorization: Bearer <key>` (or the `bragibooks_token` cookie). The key is minted server-side, shown once in a modal for copying into external tools, and then only its SHA-256 digest is stored. LAN/browser access is unchanged in either state.
 
-The web interface itself has no login screen; it relies on the boundary above. Do not expose the port directly to the public internet — keep it on a trusted network and, when you need wider access, set `BRAGIBOOKS_ADMIN_TOKEN` and put an authenticated reverse proxy in front of the app.
+**Upgrading from the legacy `BRAGIBOOKS_ADMIN_TOKEN` env var:** on the first startup after an upgrade, if `BRAGIBOOKS_ADMIN_TOKEN` is set, the `SERVER_API_ENDPOINT_ENABLED` pin is absent, the external API has no state in the database yet (disabled, no key), and the migration has not run before, the token is migrated *once* into the external API key — the API is enabled with the token's SHA-256 digest stored (the raw key is never stored). The run is marked in the settings row and never repeats: disabling the API later does not re-migrate it, and `BRAGIBOOKS_ADMIN_TOKEN` is ignored from then on (change the key via Settings → External API). If the pin is present, the token is not migrated: its first observation writes a single mark and logs one line, later startups with the pin are silent, and removing the pin later does not re-run the migration. In the other situations — the migration already ran, or the external API already has state — startup logs a warning naming the ignored variable.
+
+The web interface itself has no login screen; it relies on the boundary above and the server-set CSRF double-submit cookie. Do not expose the port directly to the public internet — keep it on a trusted network, and for wider first access put an authenticated reverse proxy in front of the app; configure the proxy's egress address in `BRAGIBOOKS_TRUSTED_PROXIES`, because a request carrying a forwarding header (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`) that arrives from a peer not configured there fails closed — it is not treated as LAN (403 while the API is off, 401 demanding a key while it is on). When you need machine access from elsewhere, enable the External API in Settings and use the printed `bk_…` key — remote (non-LAN) access always requires that key as `Authorization: Bearer <key>`.
 
 ## Background
 

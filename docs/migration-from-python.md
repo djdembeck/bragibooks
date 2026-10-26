@@ -103,7 +103,7 @@ The Python app's environment variables no longer apply. Mapping of what changed:
 | `REGION` | `PROCESSING_REGION` (`REGION` is still accepted as an alias) |
 | *(none — port 8000)* | `SERVER_PORT` (default `8080`) and `SERVER_HOST` |
 | *(none — the Python app had no AudiobookDB credential setting)* | `API_KEY_API_KEY` (optional) and `API_KEY_BASE_URL` (default `https://audiobookdb.org/api`) |
-| *(directories came from the DB setting row)* | `DATABASE_PATH`, `M4B_MERGE_BINARY`, `DIRECTORIES_*`, `PROCESSING_NUM_CPUS`, `PROCESSING_PATH_FORMAT`, plus `LEGACY_DB_PATH` for migration only and `BRAGIBOOKS_ADMIN_TOKEN` for API auth |
+| *(directories came from the DB setting row)* | `DATABASE_PATH`, `M4B_MERGE_BINARY`, `DIRECTORIES_*`, `PROCESSING_NUM_CPUS`, `PROCESSING_PATH_FORMAT`, plus `LEGACY_DB_PATH` for migration only. Remote API access is no longer an env var: it is the Settings → External API key (optional `SERVER_API_ENDPOINT_ENABLED` pins the on/off flag at deployment level) |
 
 Go settings precedence is **environment variable > YAML file > default**, with the database settings row (where the migration writes the legacy settings) loaded below YAML and env.
 
@@ -116,11 +116,10 @@ One binding detail to be aware of: `SERVER_HOST` defaults to *empty*, and an emp
 3. Compare the book count in the app, or:
 
    ```sh
-   curl -s -H "Authorization: Bearer $BRAGIBOOKS_ADMIN_TOKEN" \
-     http://localhost:8888/api/books | head
+   curl -s http://localhost:8888/api/books | head
    ```
 
-   The response has a `"total"` field; it should match the legacy book count. If `BRAGIBOOKS_ADMIN_TOKEN` is set, the Bearer token is required; without a token (local mode), requests are accepted only from loopback/private-LAN sources — a call issued from the Docker host passes that test, since the container's bridge network is private-LAN.
+   The response has a `"total"` field; it should match the legacy book count. With the External API off (the default), requests are accepted only from loopback/private-LAN sources — a call issued from the Docker host passes that test, since the container's bridge network is private-LAN. From elsewhere, first enable the External API in Settings and use the printed `bk_…` key as `Authorization: Bearer <key>`.
 4. Spot-check the Books screen: titles, processed output paths, and cover images should match what the Python app showed.
 5. Confirm the new files exist on the host in the config volume: `bragibooks.db` (plus its `-wal`/`-shm` sidecars) and `db.sqlite3.bragi-migrated` (the migration receipt — see below).
 
@@ -141,7 +140,6 @@ If the automatic migration did not find your legacy database (set `LEGACY_DB_PAT
 
 ```sh
 curl -s -X POST http://localhost:8888/api/migrate \
-  -H "Authorization: Bearer $BRAGIBOOKS_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"path": "/config/db.sqlite3"}'
 ```
@@ -163,7 +161,7 @@ There is also `POST /api/migrate/people` with the same body, which migrates only
 | `WARNING: legacy DB … already auto-migrated … but that database is still present … but current database.path does not point there` | Your new DB is on a persistent volume but `DATABASE_PATH` now points elsewhere. Set `database.path` back to the recorded path (or copy that DB file), delete `db.sqlite3.bragi-migrated`, restart. |
 | `WARNING: legacy DB … but … is empty — the merged data is gone` | The migrated database was lost because `database.path` was not persistent. Restore `bragibooks.db` from backup into the mount, fix the setting, delete the receipt, restart. |
 | Migration never appears in the log and the library is empty | The guard only refuses when it can confirm books already exist in the new DB, so with an empty new DB and a found legacy DB it always attempts. With zero books and no candidate path the app starts empty by design (see "No `Legacy Django DB found…` line"). If startup died before the migration ran — an earlier database-open or schema-migration failure — fix that first; the `m4b-merge` version check occurs after the migration and cannot block it. |
-| API calls return `401`/`403` in this flow | `BRAGIBOOKS_ADMIN_TOKEN` is set and the request lacks the Bearer token / does not pass local-mode rules. See the [Security](../README.md#security) section. |
+| API calls return `401`/`403` in this flow | The call comes from outside loopback/private-LAN with the External API off (`403`), on with no key (`401`), or with a key that does not match the stored one (`403`). From the Docker host the call passes the LAN rule; from elsewhere, enable the External API in Settings and present the printed `bk_…` key. See the [Security](../README.md#security) section. |
 
 ## Rolling back to the Python app
 
