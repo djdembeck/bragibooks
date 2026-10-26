@@ -16,7 +16,9 @@
 	let search = $state('');
 	let sortBy = $state<'name' | 'date' | 'size'>('name');
 	let sortDir = $state<'asc' | 'desc'>('asc');
-	let loading = $state(false);
+	// Start in the loading state: initPath() awaits /settings before any
+	// directory request starts, so a false initial value renders the empty state.
+	let loading = $state(true);
 	let settingsError = $state<CleanedAdbError | null>(null);
 
 	const SUPPORTED_EXTENSIONS = new Set(['.mp3', '.m4a', '.m4b', '.mp4', '.aac', '.ogg', '.flac', '.wma']);
@@ -57,15 +59,18 @@
 	}
 
 	async function initPath() {
+		loading = true;
 		try {
 			const settings = await get<Settings>('/settings', {});
 			if (!settings?.input_dir) {
 				settingsError = toCleanedError('Source directory is not configured.');
+				loading = false;
 				return;
 			}
 			await loadDirectory(settings.input_dir);
 		} catch (e) {
 			settingsError = toCleanedError(e);
+			loading = false;
 		}
 	}
 
@@ -267,12 +272,14 @@
 
 	<!-- Content area -->
 	{#if entries.length === 0}
-		{#if loading || dl.showSkeleton}
+		{#if loading || !dl.hasLoaded || dl.showSkeleton}
 			<div class="p-3 space-y-2" aria-label="Directory loading">
 				{#each Array(8) as _}
 					<Skeleton height="2.5rem" />
 				{/each}
 			</div>
+		{:else if dl.error}
+			<!-- The failure alert above owns this space; do not also claim "empty". -->
 		{:else}
 			<EmptyState
 				title="No source directories found"
