@@ -59,6 +59,18 @@ import (
 //     loopback/LAN: allow via the double-submit-CSRF guard, in BOTH the
 //     enabled and disabled states. This is what keeps the same-origin web
 //     UI working on the LAN whether or not a key exists.
+//
+//     Fail-closed clause (finding: reverse-proxy LAN bypass): if the
+//     request reaches the direct peer through a proxy that is NOT in
+//     BRAGIBOOKS_TRUSTED_PROXIES and carries a forwarding header
+//     (X-Forwarded-For, X-Real-IP, Forwarded), the end client cannot be
+//     attributed — the proxy's outward-facing hop decides nothing we can
+//     verify — so the request is NOT treated as loopback/LAN and falls
+//     through to rule 4 (enabled: 401 Bearer; disabled: 403). A peer
+//     that IS a configured trusted proxy skips the clause (its XFF chain
+//     is legitimate and consumed per the XFF-trust rule above).
+//     Genuine direct LAN browsers are unaffected: browsers do not send
+//     those headers themselves.
 //  3. A present but invalid key: 403 "invalid API key" — always, so a
 //     stale credential can never degrade to the LAN fallback.
 //  4. Otherwise (non-LAN, no valid key):
@@ -110,8 +122,9 @@ func RequireAdminWithState(lazy func() config.AdminAuthState) func(http.Handler)
 
 			// No presented key: the loopback-LAN path is reachable in both
 			// the enabled and disabled states (the UI-keeps-working
-			// guarantee).
-			if isLoopbackLAN(r) {
+			// guarantee), subject to the fail-closed clause (forwarding
+			// header from a non-trusted peer refuses the LAN fallback).
+			if lanPathAllowed(r) {
 				csrfGuard(w, r, next)
 				return
 			}
@@ -179,6 +192,40 @@ func isLoopbackLAN(r *http.Request) bool {
 	// Not arriving from a trusted proxy: the XFF header is not trusted and
 	// the direct peer decides (finding: XFF trust).
 	return isLoopbackLANIP(peer)
+}
+
+// lanPathAllowed reports whether the no-key loopback-LAN fallback path
+// applies: the peer must be loopback-LAN (isLoopbackLAN, including the
+// trusted-proxy XFF walk), AND the request must not anonymize the peer.
+//
+// A forwarding header (X-Forwarded-For, X-Real-IP, Forwarded) arriving
+// from a peer that is NOT a configured trusted proxy means the end
+// client cannot be attributed: a reverse proxy (e.g. with
+// BRAGIBOOKS_TRUSTED_PROXIES unset) forwards all internet traffic with
+// RemoteAddr = the proxy's hop (loopback/LAN), and the keyless LAN
+// fallback would then pass ANY internet client (finding: reverse-proxy
+// LAN bypass). The request therefore falls through to the enabled→401
+// Bearer / disabled→403 branch instead. A configured trusted proxy
+// skips the clause — its XFF chain is legitimate and already consumed
+// by endClientFromChain. Genuine direct LAN browsers are unaffected:
+// browsers do not send those headers themselves.
+func lanPathAllowed(r *http.Request) bool {
+	if !isLoopbackLAN(r) {
+		return false
+	}
+	if !hasForwardingHeader(r) {
+		return true
+	}
+	proxies := parseTrustedProxies()
+	return len(proxies) > 0 && isTrustedProxyIP(clientAddress(r), proxies)
+}
+
+// hasForwardingHeader reports whether the request carries any of the
+// conventional forwarding headers.
+func hasForwardingHeader(r *http.Request) bool {
+	return r.Header.Get("X-Forwarded-For") != "" ||
+		r.Header.Get("X-Real-IP") != "" ||
+		r.Header.Get("Forwarded") != ""
 }
 
 // endClientFromChain resolves the end client from an X-Forwarded-For chain

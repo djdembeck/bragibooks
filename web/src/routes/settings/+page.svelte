@@ -220,19 +220,28 @@
 			} else {
 				// Plain-HTTP LAN origins have no Clipboard API. Fall back to
 				// a temporary textarea so the key is still captured.
+				// showModal() makes everything OUTSIDE the dialog inert, so
+				// the textarea must be created inside the open <dialog>
+				// (Modal.svelte renders the dialog element) or it cannot be
+				// focused and the execCommand selection silently fails;
+				// fall back to document.body only when no dialog is open.
+				const host =
+					(document.querySelector('dialog[open]') as HTMLElement | null) ??
+					document.body;
 				const ta = document.createElement('textarea');
 				ta.value = key;
 				ta.setAttribute('readonly', '');
-				ta.style.position = 'fixed';
-				ta.style.top = '0';
-				ta.style.left = '0';
+				ta.style.position = 'absolute';
 				ta.style.opacity = '0';
-				document.body.appendChild(ta);
-				ta.select();
-				ta.setSelectionRange(0, key.length);
-				const ok = document.execCommand('copy');
-				ta.remove();
-				if (!ok) throw new Error('copy was rejected');
+				host.appendChild(ta);
+				try {
+					ta.select();
+					ta.setSelectionRange(0, key.length);
+					const ok = document.execCommand('copy');
+					if (!ok) throw new Error('copy was rejected');
+				} finally {
+					ta.remove();
+				}
 			}
 			keyCopied = true;
 			copyState = 'copied';

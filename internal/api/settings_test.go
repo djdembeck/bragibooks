@@ -3,6 +3,7 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -50,6 +51,7 @@ func newSettingsTestDB(t *testing.T) *sql.DB {
 			region TEXT DEFAULT 'us',
 			api_enabled BOOLEAN NOT NULL DEFAULT 0,
 			api_key_digest TEXT NOT NULL DEFAULT '',
+			legacy_token_migrated BOOLEAN NOT NULL DEFAULT 0,
 			created_at TEXT DEFAULT (datetime('now')),
 			updated_at TEXT DEFAULT (datetime('now'))
 		)`); err != nil {
@@ -280,6 +282,75 @@ func TestSettingsAPIEndpointEnvManaged(t *testing.T) {
 	}
 }
 
+// TestSettingsAPIEndpointRegenerateWhileEnvManaged pins the deliberate
+// "the key is not deployment-managed" contract: the env pin manages ONLY
+// the enabled flag (enable/disable are refused), so an env-enabled
+// endpoint with a missing or rotated key must stay reissue-able. The
+// regenerate mints and stores a new digest, leaves api_enabled exactly
+// as it was, and enables no flag mutation: consume/enable endpoints stay
+// refused (403) in the same pinned state.
+func TestSettingsAPIEndpointRegenerateWhileEnvManaged(t *testing.T) {
+	t.Setenv("SERVER_API_ENDPOINT_ENABLED", "true")
+	db := newSettingsTestDB(t)
+	h := newSettingsTestService(t, db)
+
+	seededKey := "bk_" + strings.Repeat("ab", 32)
+	if _, err := db.Exec("INSERT INTO settings (id, api_enabled, api_key_digest) VALUES (1, 1, ?)", keyDigestOf(seededKey)); err != nil {
+		t.Fatal(err)
+	}
+	h.svc.Config.SetAPIEndpointState(true, keyDigestOf(seededKey))
+
+	// Same refusal shape as TestSettingsAPIEndpointEnvManaged: only
+	// enable/disable are deployment-managed.
+	if code, _ := settingsRoundTrip(t, h, http.MethodPost, "/api/settings/api-endpoint/enable"); code != http.StatusForbidden {
+		t.Fatalf("enable while env-managed = %d, want 403", code)
+	}
+	if code, _ := settingsRoundTrip(t, h, http.MethodPost, "/api/settings/api-endpoint/disable"); code != http.StatusForbidden {
+		t.Fatalf("disable while env-managed = %d, want 403", code)
+	}
+
+	code, got := settingsRoundTrip(t, h, http.MethodPost, "/api/settings/api-endpoint/regenerate")
+	if code != http.StatusOK {
+		t.Fatalf("regenerate while env-managed = %d, want 200 (the key is not deployment-managed): %v", code, got)
+	}
+	newKey, _ := got["api_key"].(string)
+	if !strings.HasPrefix(newKey, "bk_") || len(newKey) != 3+64 {
+		t.Fatalf("regenerated api_key = %q, want bk_<64 hex>", newKey)
+	}
+
+	var stored int
+	var digest string
+	if err := db.QueryRow("SELECT api_enabled, api_key_digest FROM settings WHERE id = 1").Scan(&stored, &digest); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 1 {
+		t.Errorf("api_enabled after pinned reissue = %d, want 1 (the pin governs only the flag, and the row kept it)", stored)
+	}
+	if digest == keyDigestOf(seededKey) {
+		t.Error("stored digest unchanged after reissue — the superseded key would keep working")
+	}
+	if digest != keyDigestOf(newKey) {
+		t.Errorf("row digest after reissue = %q, want sha256(new key)", digest)
+	}
+
+	// The live config agrees with the row: the reissue swapped the digest
+	// without touching the pinned flag.
+	if h.svc.Config.Config().Server.APIEndpoint.KeyDigest != digest {
+		t.Errorf("live digest = %q, row digest = %q — live config out of sync after reissue", h.svc.Config.Config().Server.APIEndpoint.KeyDigest, digest)
+	}
+	if h.svc.Config.Config().Server.APIEndpoint.Enabled != true {
+		t.Error("live flag flipped after a pinned reissue — the pin must govern the flag")
+	}
+
+	// The same pinned state still refuses the state-mutation endpoints.
+	if code, _ := settingsRoundTrip(t, h, http.MethodPost, "/api/settings/api-endpoint/enable"); code != http.StatusForbidden {
+		t.Errorf("enable after pinned reissue = %d, want 403", code)
+	}
+	if code, _ := settingsRoundTrip(t, h, http.MethodPost, "/api/settings/api-endpoint/disable"); code != http.StatusForbidden {
+		t.Errorf("disable after pinned reissue = %d, want 403", code)
+	}
+}
+
 // TestSettingsRowWritesAreSerialized pins the settings row's mutual
 // exclusion. The form save (UpdateSettings) and the external-API
 // enable/disable/regenerate flows are each a full-row read-modify-write
@@ -369,5 +440,187 @@ func enableAndDisable(t *testing.T, router http.Handler) {
 		req := httptest.NewRequest(http.MethodPost, p, strings.NewReader(`{}`))
 		req.Header.Set("Content-Type", "application/json")
 		router.ServeHTTP(httptest.NewRecorder(), req)
+	}
+}
+
+// TestRegenerateAfterDisableCannotReopen pins the regenerate
+// precondition race (finding: regenerate precondition race). The
+// "enabled" check is enforced INSIDE settingsMu, against the same locked
+// snapshot the write is built from — a disable that commits before the
+// regenerate takes the lock must make the regenerate fail with 400
+// "enable the external API first", never persist enabled=true with a
+// fresh key. The interleaving is driven deterministically through the
+// SettingsPersistDelay hook (no timing dependence): while the regenerate
+// holds the lock inside its widened pre-commit window, the test flips
+// the live state to disabled — exactly a concurrent disable that landed
+// in the window if the lock did not serialize it — then releases the
+// hook and observes the outcome.
+func TestRegenerateAfterDisableCannotReopen(t *testing.T) {
+	db := newSettingsTestDB(t)
+	h := newSettingsTestService(t, db)
+	router := buildSettingsRouter(h)
+
+	// Seed an enabled state the regenerate is allowed to see.
+	seededKey := "bk_" + strings.Repeat("cd", 32)
+	if _, err := db.Exec("INSERT INTO settings (id, api_enabled, api_key_digest) VALUES (1, 1, ?)", keyDigestOf(seededKey)); err != nil {
+		t.Fatal(err)
+	}
+	h.svc.Config.SetAPIEndpointState(true, keyDigestOf(seededKey))
+
+	// Delivery channel for the request: the hook blocks the in-flight
+	// regenerate (under the settings lock) until the test drives the
+	// interleave.
+	h.svc.SettingsPersistDelay = func() {
+		// A concurrent disable that commits inside the regenerate's
+		// snapshot-to-write window (in production the disable blocks on
+		// the settingsMu this flow holds here and commits the moment it
+		// is released — the hook is the deterministic stand-in for that
+		// window: it flips the state the next in-lock read must see).
+		// The hook runs under the lock, so the outer flow's snapshot is
+		// taken after this flip, exactly like one taken after the
+		// disable committed.
+		h.svc.Config.SetAPIEndpointState(false, "")
+		if _, err := db.Exec("UPDATE settings SET api_enabled = 0, api_key_digest = '' WHERE id = 1"); err != nil {
+			t.Errorf("simulate disable row write: %v", err)
+		}
+	}
+	t.Cleanup(func() { h.svc.SettingsPersistDelay = nil })
+
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/api-endpoint/regenerate", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	code := rec.Code
+	got := map[string]any{}
+	if data, _ := io.ReadAll(rec.Result().Body); len(data) > 0 {
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("decode regenerate response: %v (%s)", err, data)
+		}
+	}
+
+	// The regenerate must NOT have succeeded: a disabled pre-commit
+	// snapshot fails the in-lock precondition.
+	if code == http.StatusOK {
+		t.Fatalf("regenerate after a concurrent disable succeeded — remote access reopened (body: %v)", got)
+	}
+	if code != http.StatusBadRequest {
+		t.Fatalf("regenerate after disable = %d, want 400 (body: %v)", code, got)
+	}
+	// And the persisted state must remain disabled with no key.
+	var stored int
+	var digest string
+	if err := db.QueryRow("SELECT api_enabled, api_key_digest FROM settings WHERE id = 1").Scan(&stored, &digest); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 0 || digest != "" {
+		t.Fatalf("row after failed regenerate = (enabled=%d, digest=%q), want (0, '')", stored, digest)
+	}
+	if live := h.svc.Config.Config(); live.Server.APIEndpoint.Enabled {
+		t.Error("live state re-enabled after a failed regenerate")
+	}
+}
+
+// TestGenerateAPIKeyFault closes the cryptoRand test seam
+// (finding: cryptoRand seam untested): the "could not generate API key"
+// 500 branch must fire when the entropy source fails, and neither the
+// DB row nor the persisted flag file may change.
+func TestGenerateAPIKeyFault(t *testing.T) {
+	fault := errors.New("entropy failure")
+	oldRand := cryptoRand
+	cryptoRand = readerFunc(func(_ []byte) (int, error) { return 0, fault })
+	t.Cleanup(func() { cryptoRand = oldRand })
+
+	t.Run("enable", func(t *testing.T) {
+		db := newSettingsTestDB(t)
+		h := newSettingsTestService(t, db)
+
+		before := settingsRowSnapshot(t, db) // fresh DB: no row
+		code, got := settingsRoundTrip(t, h, http.MethodPost, "/api/settings/api-endpoint/enable")
+		if code != http.StatusInternalServerError {
+			t.Fatalf("enable with faulted entropy = %d, want 500 (%v)", code, got)
+		}
+		// Neither the DB row nor the persisted flag file may change.
+		assertSettingsStateUntouched(t, db, h.svc.Config.ConfigPath(), before)
+	})
+
+	t.Run("regenerate", func(t *testing.T) {
+		db := newSettingsTestDB(t)
+		h := newSettingsTestService(t, db)
+
+		seededKey := "bk_" + strings.Repeat("ef", 32)
+		if _, err := db.Exec("INSERT INTO settings (id, api_enabled, api_key_digest) VALUES (1, 1, ?)", keyDigestOf(seededKey)); err != nil {
+			t.Fatal(err)
+		}
+		h.svc.Config.SetAPIEndpointState(true, keyDigestOf(seededKey))
+		before := settingsRowSnapshot(t, db) // enabled + seeded digest
+
+		code, got := settingsRoundTrip(t, h, http.MethodPost, "/api/settings/api-endpoint/regenerate")
+		if code != http.StatusInternalServerError {
+			t.Fatalf("regenerate with faulted entropy = %d, want 500 (%v)", code, got)
+		}
+		// The seeded digest must survive a failed reissue: the row is
+		// byte-for-byte what it was before the attempt.
+		assertSettingsStateUntouched(t, db, h.svc.Config.ConfigPath(), before)
+	})
+}
+
+// settingsRow is the (external-API-relevant) settings-row state a failed
+// flow must not touch.
+type settingsRow struct {
+	present bool
+	enabled int
+	digest  string
+	marker  int
+}
+
+// settingsRowSnapshot captures the settings row (absent = zero values).
+func settingsRowSnapshot(t *testing.T, db *sql.DB) settingsRow {
+	t.Helper()
+	row := settingsRow{}
+	if err := db.QueryRow("SELECT api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0) FROM settings WHERE id = 1").Scan(&row.enabled, &row.digest, &row.marker); err != nil {
+		if err == sql.ErrNoRows {
+			return row
+		}
+		t.Fatalf("read settings row: %v", err)
+	}
+	row.present = true
+	return row
+}
+
+// assertSettingsStateUntouched asserts the settings row and the YAML flag
+// file are exactly their pre-attempt state: a failed flow must not have
+// written either store.
+func assertSettingsStateUntouched(t *testing.T, db *sql.DB, configPath string, before settingsRow) {
+	t.Helper()
+	after := settingsRowSnapshot(t, db)
+	if before != after {
+		t.Errorf("settings row changed by a failed flow: before %+v, after %+v", before, after)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Errorf("flag file %q was written by a failed flow (stat err=%v)", configPath, err)
+	}
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
+
+// assertStateUntouched asserts the settings row and the YAML flag file
+// are exactly as created: api_enabled=0, empty digest, marker 0, and
+// the flag file absent (a failed flow must not write it).
+func assertStateUntouched(t *testing.T, db *sql.DB, configPath string) {
+	t.Helper()
+	var stored int
+	var digest string
+	var marker int
+	if err := db.QueryRow("SELECT api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0) FROM settings WHERE id = 1").Scan(&stored, &digest, &marker); err != nil {
+		t.Fatalf("read settings row: %v", err)
+	}
+	if stored != 0 || digest != "" || marker != 0 {
+		t.Errorf("row changed by a failed flow: (enabled=%d, digest=%q, marker=%d), want (0, '', 0)", stored, digest, marker)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Errorf("flag file %q was written by a failed flow (stat err=%v)", configPath, err)
 	}
 }

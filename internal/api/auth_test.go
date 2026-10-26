@@ -76,12 +76,23 @@ func TestRequireAdminLocalModeRejectsForeign(t *testing.T) {
 	}
 }
 
-// A direct loopback-LAN peer is accepted; the XFF chain is moot (the
-// direct peer already decides).
+// A direct loopback-LAN peer is accepted (browsers do not send
+// forwarding headers).
 func TestRequireAdminLocalModeAcceptsDirectLANPeer(t *testing.T) {
-	rec := doAuthReq(t, sw(config.AdminAuthState{}), "GET", "/api/books", "127.0.0.1:5555", "10.0.3.4", "", "")
+	rec := doAuthReq(t, sw(config.AdminAuthState{}), "GET", "/api/books", "127.0.0.1:5555", "", "", "")
 	if rec.Code != http.StatusOK {
 		t.Errorf("direct LAN peer = %d, want 200", rec.Code)
+	}
+}
+
+// Fail-closed clause (reverse-proxy LAN bypass): a direct loopback peer
+// that presents a forwarding header without any trusted proxy configured
+// is not LAN-attributable — the LAN fallback refuses and the disabled
+// state answers 403.
+func TestRequireAdminLocalModeRejectsForwardingHeaderFromNonTrustedPeer(t *testing.T) {
+	rec := doAuthReq(t, sw(config.AdminAuthState{}), "GET", "/api/books", "127.0.0.1:5555", "10.0.3.4", "", "")
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("loopback peer with XFF and no trusted proxies = %d, want 403", rec.Code)
 	}
 }
 
@@ -670,6 +681,55 @@ func TestCSRFSafeMethods(t *testing.T) {
 			sw(config.AdminAuthState{Enabled: true, KeyDigest: keyDigestOf("anything")})(okHandler()).ServeHTTP(rec, req)
 			if rec.Code != http.StatusOK {
 				t.Errorf("%s with cookie auth, no CSRF token = %d, want 200 (%s)", method, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// Fail-closed clause, enabled state (reverse-proxy LAN bypass): with the
+// external API enabled, an untrusted direct peer at loopback presenting a
+// forwarding header cannot serve the keyless LAN fallback — it must fall
+// through to the 401 Bearer branch. A genuine direct LAN browser is
+// unaffected: it sends no forwarding headers and stays 200.
+func TestEnabledFailClosedProxyBypass(t *testing.T) {
+	// (a) Enabled + no key + loopback peer + XFF + no trusted proxies: 401.
+	rec := doAuthReq(t, sw(config.AdminAuthState{Enabled: true, KeyDigest: keyDigestOf("bk_proxy")}),
+		"GET", "/api/books", "127.0.0.1:3128", "203.0.113.88", "", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("enabled loopback-peer + XFF, no trusted proxies = %d, want 401", rec.Code)
+	}
+
+	// (b) Same, with a trusted proxy configured whose XFF end client is
+	// public: rejected via the chain (existing behavior, kept green).
+	t.Setenv("BRAGIBOOKS_TRUSTED_PROXIES", "127.0.0.1")
+	rec = doAuthReq(t, sw(config.AdminAuthState{Enabled: true, KeyDigest: keyDigestOf("bk_proxy")}),
+		"GET", "/api/books", "127.0.0.1:3128", "203.0.113.88", "", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("enabled trusted proxy + public end client = %d, want 401", rec.Code)
+	}
+
+	// (c) Enabled + no key + loopback, no forwarding headers: 200 (the
+	// UI path is preserved).
+	rec = doAuthReq(t, sw(config.AdminAuthState{Enabled: true, KeyDigest: keyDigestOf("bk_proxy")}),
+		"GET", "/api/books", "127.0.0.1:3128", "", "", "")
+	if rec.Code != http.StatusOK {
+		t.Errorf("enabled direct loopback, no forwarding headers = %d, want 200", rec.Code)
+	}
+}
+
+// Fail-closed clause, each header, disabled state: the LAN fallback
+// refuses and the disabled-state 403 applies (regression parity with the
+// no-header cases).
+func TestDisabledFailClosedPerHeader(t *testing.T) {
+	for _, hdr := range []string{"X-Forwarded-For", "X-Real-IP", "Forwarded"} {
+		t.Run(hdr, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/books", nil)
+			req.RemoteAddr = "127.0.0.1:5555"
+			req.Header.Set(hdr, "203.0.113.88")
+			rec := httptest.NewRecorder()
+			sw(config.AdminAuthState{})(okHandler()).ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("disabled loopback + %s = %d, want 403", hdr, rec.Code)
 			}
 		})
 	}

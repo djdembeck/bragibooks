@@ -70,6 +70,9 @@ type Settings struct {
 	Region             string `db:"region" json:"region"`
 	APIEndpointEnabled bool   `db:"api_enabled" json:"-"`
 	APIKeyDigest       string `db:"api_key_digest" json:"-"`
-	CreatedAt          string `db:"created_at" json:"created_at"`
-	UpdatedAt          string `db:"updated_at" json:"updated_at"`
+	// LegacyTokenMigrated marks that the one-time BRAGIBOOKS_ADMIN_TOKEN
+	// migration has run; it never changes again (finding: one-shot marker).
+	LegacyTokenMigrated bool   `db:"legacy_token_migrated" json:"-"`
+	CreatedAt           string `db:"created_at" json:"created_at"`
+	UpdatedAt           string `db:"updated_at" json:"updated_at"`
 }

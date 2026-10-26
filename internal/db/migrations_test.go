@@ -36,8 +36,8 @@ var testMigrations = []migration{
 // mutate the package's `migrations` var (in-file order), so it must not be
 // moved after them.
 func TestRunMigrationsRealShape(t *testing.T) {
-	if len(migrations) < 5 {
-		t.Fatalf("migrations = %d entries, want the 5 production migrations (run before the test var mutations)", len(migrations))
+	if len(migrations) < 6 {
+		t.Fatalf("migrations = %d entries, want the 6 production migrations (run before the test var mutations)", len(migrations))
 	}
 	db := openTestDB(t)
 	if err := RunMigrations(db); err != nil {
@@ -51,6 +51,9 @@ func TestRunMigrationsRealShape(t *testing.T) {
 	}
 	if !hasColumn(t, db, "settings", "api_key_digest") {
 		t.Error("settings.api_key_digest missing after v5")
+	}
+	if !hasColumn(t, db, "settings", "legacy_token_migrated") {
+		t.Error("settings.legacy_token_migrated missing after v6")
 	}
 	if !hasColumn(t, db, "settings", "audiobookdb_base_url") {
 		t.Error("settings.audiobookdb_base_url missing (v3 regression)")
@@ -67,6 +70,82 @@ func TestRunMigrationsRealShape(t *testing.T) {
 	}
 	if n := appliedCount(t, db); n != len(migrations) {
 		t.Errorf("applied after re-apply = %d, want no new rows (%d)", n, len(migrations))
+	}
+}
+
+// TestRunMigrationsV5ToV6PinsTheOnUpgradePath pins the cutover from a
+// pre-external-API-key v5 DB (no legacy_token_migrated column) to v6: the
+// fresh column appears as unconsumed (0) on the EXISTING row, every
+// pre-existing column value — including an api_enabled=1 state + digest —
+// survives, and the row count is unchanged. A clobbering v6 (DROP/recreate,
+// or an all-defaults INSERT OR REPLACE) would lose the stored key state.
+// It runs before the two tests that permanently mutate package `migrations`,
+// so it must not be moved after them.
+func TestRunMigrationsV5ToV6PinsTheOnUpgradePath(t *testing.T) {
+	// v5 shape: apply the production migrations up to (excluding) v6.
+	old := migrations
+	migrations = migrations[:5]
+	defer func() { migrations = old }()
+
+	db := openTestDB(t)
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations to v5: %v", err)
+	}
+
+	const (
+		rowKey    = "row5-key"
+		rowBase   = "https://row5.example"
+		rowBinary = "row5-m4b"
+		rowIn     = "/v5/in"
+		rowOut    = "/v5/out"
+		rowDone   = "/v5/done"
+		rowScheme = "{v5}/{scheme}"
+		rowRegion = "eu"
+		rowDigest = "9999999999999999999999999999999999999999999999999999999999999999"
+	)
+	if _, err := db.Exec(`INSERT INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest)
+		VALUES (1, ?, ?, ?, ?, ?, ?, 3, ?, ?, 1, ?)`,
+		rowKey, rowBase, rowBinary, rowIn, rowOut, rowDone, rowScheme, rowRegion, rowDigest); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture must be the pre-cutover shape, or the test proves nothing.
+	if hasColumn(t, db, "settings", "legacy_token_migrated") {
+		t.Fatal("v5 fixture already has the marker column")
+	}
+
+	// Upgrade: restore the full list; only v6 is pending.
+	migrations = old
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations v5->v6: %v", err)
+	}
+
+	if !hasColumn(t, db, "settings", "legacy_token_migrated") {
+		t.Fatal("legacy_token_migrated missing after v6")
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM settings").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("row count after v6 = %d, want 1 (no re-seed, no drop)", n)
+	}
+	var apiKey, baseURL, binary, inDir, outDir, doneDir, scheme, region, digest string
+	var numCPUs, apiEnabled, marker int
+	if err := db.QueryRow(`SELECT audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated FROM settings WHERE id = 1`).
+		Scan(&apiKey, &baseURL, &binary, &inDir, &outDir, &doneDir, &numCPUs, &scheme, &region, &apiEnabled, &digest, &marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker != 0 {
+		t.Errorf("new marker on the existing row = %d, want 0 (unconsumed)", marker)
+	}
+	if apiKey != rowKey || baseURL != rowBase || binary != rowBinary || inDir != rowIn ||
+		outDir != rowOut || doneDir != rowDone || numCPUs != 3 || scheme != rowScheme ||
+		region != rowRegion || apiEnabled != 1 || digest != rowDigest {
+		t.Errorf("pre-existing row state lost by v6: (%q, %q, %q, %q, %q, %q, %d, %q, %q, %d, %q)",
+			apiKey, baseURL, binary, inDir, outDir, doneDir, numCPUs, scheme, region, apiEnabled, digest)
+	}
+	if n := appliedCount(t, db); n != 6 {
+		t.Errorf("applied migrations = %d, want all 6", n)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -84,19 +85,37 @@ func (h *Handler) envManagedGuard(w http.ResponseWriter) bool {
 // row-write and clobber each other (a form save landing after an enable
 // would clear the freshly stored key digest, and the returned key would
 // stop working after a restart).
-func (h *Handler) persistAPIEndpointState(w http.ResponseWriter, enabled bool, keyDigest string) bool {
+//
+// requireEnabled (regenerate only) is evaluated against the SAME locked
+// snapshot prev that the write is built from: a concurrent disable that
+// commits before this flow takes the lock leaves the snapshot disabled,
+// so the regenerate fails with 400 instead of persisting enabled=true
+// with a fresh key and reopening remote access after a successful
+// disable (finding: regenerate precondition race).
+func (h *Handler) persistAPIEndpointState(w http.ResponseWriter, enabled bool, keyDigest string, requireEnabled bool) bool {
 	h.svc.settingsMu.Lock()
 	defer h.svc.settingsMu.Unlock()
 
+	// The pre-commit window (the SettingsPersistDelay test hook; nil in
+	// production) is widened BEFORE the authoritative snapshot is taken:
+	// the write must be built from the state as it exists when it
+	// commits, so a concurrent disable that lands in this window leaves
+	// the snapshot disabled (finding: regenerate precondition race). The
+	// lock is held across the whole window, so no other flow can commit
+	// in it.
+	if h.svc.SettingsPersistDelay != nil {
+		h.svc.SettingsPersistDelay()
+	}
+
 	prev := h.svc.Config.Config()
+	if requireEnabled && !prev.Server.APIEndpoint.Enabled {
+		writeError(w, http.StatusBadRequest, "enable the external API first")
+		return false
+	}
 	snap := *prev
 	snap.Server.APIEndpoint = config.APIEndpointConfig{
 		Enabled:   enabled,
 		KeyDigest: keyDigest,
-	}
-
-	if h.svc.SettingsPersistDelay != nil {
-		h.svc.SettingsPersistDelay()
 	}
 
 	// 1. DB first — the settings row is the authoritative store (it is the
@@ -107,9 +126,12 @@ func (h *Handler) persistAPIEndpointState(w http.ResponseWriter, enabled bool, k
 	}
 
 	// 2. File second: the enabled flag only (the digest has no YAML path by
-	//    tag). Only reachable when not env-managed — the env guard already
-	//    rejected env-managed enable/disable, so this write is never frozen
-	//    by overrideKey's env gate.
+	//    tag). The write ALWAYS runs, including from the regenerate path,
+	//    which is allowed while SERVER_API_ENDPOINT_ENABLED pins the flag:
+	//    while the pin is present it shadows this file value (env wins at
+	//    load, and the value written equals the pin — enable/disable are
+	//    the only flows the env guard blocks), and once the pin is removed
+	//    the file flag matches the pin that governed the write.
 	if err := h.svc.Config.SaveKeys(map[string]any{"server": map[string]any{"api_endpoint": map[string]any{"enabled": enabled}}}); err != nil {
 		if rbErr := h.saveSettingsToDB(prev); rbErr != nil {
 			// Both stores now disagree and the rollback lost: report both,
@@ -141,7 +163,7 @@ func (h *Handler) EnableAPIEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not generate API key")
 		return
 	}
-	if !h.persistAPIEndpointState(w, true, digest) {
+	if !h.persistAPIEndpointState(w, true, digest, false) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "api_key": raw})
@@ -152,7 +174,7 @@ func (h *Handler) DisableAPIEndpoint(w http.ResponseWriter, r *http.Request) {
 	if h.envManagedGuard(w) {
 		return
 	}
-	if !h.persistAPIEndpointState(w, false, "") {
+	if !h.persistAPIEndpointState(w, false, "", false) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
@@ -161,6 +183,13 @@ func (h *Handler) DisableAPIEndpoint(w http.ResponseWriter, r *http.Request) {
 // RegenerateAPIEndpoint mints a fresh key while the external API is
 // enabled, invalidating the previous one. Allowed in env-managed mode
 // (only the enabled flag is deployment-managed, not the key).
+//
+// The "enabled" precondition is enforced INSIDE settingsMu, against the
+// same locked snapshot the row write is built from (a fast pre-check
+// here skips the key mint when it is already known to be disabled; the
+// locked check is the authoritative one — a disable that commits first
+// makes the regenerate fail with 400, never re-enable, finding:
+// regenerate precondition race).
 func (h *Handler) RegenerateAPIEndpoint(w http.ResponseWriter, r *http.Request) {
 	if !h.svc.Config.Config().Server.APIEndpoint.Enabled {
 		writeError(w, http.StatusBadRequest, "enable the external API first")
@@ -171,7 +200,7 @@ func (h *Handler) RegenerateAPIEndpoint(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "could not generate API key")
 		return
 	}
-	if !h.persistAPIEndpointState(w, true, digest) {
+	if !h.persistAPIEndpointState(w, true, digest, true) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "api_key": raw})
@@ -373,9 +402,21 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 	if cfg.Server.APIEndpoint.Enabled {
 		apiEnabled = 1
 	}
+	// The whole row is replaced, so the legacy-token one-shot marker
+	// (schema v6) must be carried through: this INSERT is the only
+	// settings-row writer the UI's form save and the external-API state
+	// flows use, and dropping the marker to 0 would let the startup
+	// migration re-seed the digest after a user later disabled the API
+	// (finding: legacy token cutover).
+	var legacyMigrated int
+	if err := h.svc.DB.QueryRow(
+		`SELECT COALESCE(legacy_token_migrated, 0) FROM settings WHERE id = 1`,
+	).Scan(&legacyMigrated); err != nil && err != sql.ErrNoRows {
+		return err
+	}
 	_, err := h.svc.DB.Exec(`
-		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 	`,
 		cfg.APIKey.APIKey,
 		cfg.APIKey.BaseURL,
@@ -388,6 +429,7 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 		cfg.Processing.Region,
 		apiEnabled,
 		cfg.Server.APIEndpoint.KeyDigest,
+		legacyMigrated,
 	)
 	return err
 }

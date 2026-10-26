@@ -34,9 +34,12 @@ type Services struct {
 	settingsMu sync.Mutex
 
 	// SettingsPersistDelay is a test hook called, under the settings
-	// lock, between the snapshot read and the row write in the settings
-	// persistence flows. Production wiring leaves it nil; tests use it
-	// to widen the window between read and write so an unsynchronized
+	// lock, inside the pre-commit window of the settings persistence
+	// flows — between the flow's boundaries, either just before the
+	// snapshot read (the external-API state flows: the write must be
+	// built from the state as it exists at commit time) or after the
+	// snapshot read (the form save). Production wiring leaves it nil;
+	// tests use it to widen the window so an unsynchronized
 	// interleaving becomes deterministic.
 	SettingsPersistDelay func()
 }

@@ -116,6 +116,7 @@ func setupNewSchema(db *sql.DB) error {
 			region TEXT DEFAULT 'us',
 			api_enabled BOOLEAN NOT NULL DEFAULT 0,
 			api_key_digest TEXT NOT NULL DEFAULT '',
+			legacy_token_migrated BOOLEAN NOT NULL DEFAULT 0,
 			created_at TEXT DEFAULT (datetime('now')),
 			updated_at TEXT DEFAULT (datetime('now'))
 		)
@@ -518,6 +519,67 @@ func TestMigrateSettingsCarriesLiveCredentialValues(t *testing.T) {
 			t.Errorf("base URL = %q, want the live value", baseURL)
 		}
 	})
+}
+
+// --- TestMigrateSettingsPreservesLegacyTokenMarker ---
+
+// A merge regression resetting legacy_token_migrated to 0 would re-arm the
+// legacy-token migration: after a later user disable (which clears the
+// digest) the row would read "fresh and unconsumed" and the next boot would
+// re-seed the token into a running deployment. The surviving row's marker
+// — like the api flag + digest next to it — must pass through the merge.
+func TestMigrateSettingsPreservesLegacyTokenMarker(t *testing.T) {
+	// The seeded row's (api_enabled, api_key_digest, marker) triple and the
+	// value the merge must leave in the marker column.
+	tests := []struct {
+		name   string
+		marker int
+	}{
+		{"marker-one-in-comes-out", 1},
+		{"marker-zero-in-stays", 0}, // no magic consumption in the merge path
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			legacy := newLegacyDB(t)
+			t.Cleanup(func() { legacy.Close() })
+			newDB := newEmptyDB(t)
+			t.Cleanup(func() { newDB.Close() })
+			if err := setupNewSchema(newDB); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := legacy.Exec(`INSERT INTO importer_setting (id, input_directory, output_directory,
+				completed_directory, num_cpus, output_scheme)
+				VALUES (1, '/legacy/in', '/legacy/out', '/legacy/done', 2, '{author}/{title}')`); err != nil {
+				t.Fatal(err)
+			}
+			// Row with the external-API state + marker the merge must
+			// carry through, mirroring the credential-preservation test.
+			if _, err := newDB.Exec(`INSERT INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, api_enabled, api_key_digest, legacy_token_migrated)
+				VALUES (1, 'db-key', 'https://audiobookdb.org/api', 'm4b-merge', 1, 'aabbccdd', ?)`, tc.marker); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := migrateSettings(legacy, newDB, "https://live.example/api"); err != nil {
+				t.Fatalf("migrateSettings: %v", err)
+			}
+			var apiKey, inputDir, apiDigest string
+			var apiEnabled, marker int
+			if err := newDB.QueryRow("SELECT audiobookdb_api_key, input_dir, api_enabled, api_key_digest, legacy_token_migrated FROM settings WHERE id = 1").
+				Scan(&apiKey, &inputDir, &apiEnabled, &apiDigest, &marker); err != nil {
+				t.Fatal(err)
+			}
+			if marker != tc.marker {
+				t.Fatalf("legacy_token_migrated = %d, want %d (marker survived the merge)", marker, tc.marker)
+			}
+			// The credential assertions confirm the test proves the
+			// merge ran on this row, not a no-op.
+			if apiEnabled != 1 || apiDigest != "aabbccdd" || apiKey != "db-key" || inputDir != "/legacy/in" {
+				t.Errorf("merged row disagreeing with the credential-preservation rule: (enabled=%d, digest=%q, key=%q, input_dir=%q)",
+					apiEnabled, apiDigest, apiKey, inputDir)
+			}
+		})
+	}
 }
 
 // --- TestCheckLegacyTables ---
