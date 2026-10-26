@@ -131,7 +131,7 @@ jobs:
           git push origin "${VERSION}"
           echo "created=true" >> "$GITHUB_OUTPUT"
 
-      # Go: version is tag-only; binary is stamped via -ldflags at docker build (see docker step below).
+      # Go: version comes from the pushed tag via -ldflags (Docker build here; GoReleaser below).
 
       - name: Build and push version Docker image
         run: |
@@ -140,6 +140,18 @@ jobs:
           REGISTRY_IMAGE="ghcr.io/djdembeck/bragibooks"
 
           HUB_IMAGE="djdembeck/bragibooks"
+
+          # Bare semver tags mirror CI's type=semver rules and 'latest' for
+          # major releases. The tag push is made with GITHUB_TOKEN, which
+          # cannot trigger workflow runs, so CI does not re-run for the
+          # pushed tag — the aliases must be published here too.
+          MAJOR_MINOR="${VERSION%.*}"
+          SEMVER_TAGS=("${VERSION}" "${MAJOR_MINOR}" "${MAJOR_MINOR%.*}")
+          [ "${VERSION%%.*}" != "0" ] && SEMVER_TAGS+=("latest")
+          EXTRA_TAGS=()
+          for t in "${SEMVER_TAGS[@]}"; do
+            EXTRA_TAGS+=("${REGISTRY_IMAGE}:${t}" "${HUB_IMAGE}:${t}")
+          done
 
           # Login to GHCR and Docker Hub (same secrets as the CI dual publish);
           # Hub login is required for the registry reads in the idempotency
@@ -153,28 +165,33 @@ jobs:
           # and the same build is pushed.
           if docker manifest inspect "${REGISTRY_IMAGE}:${VERSION}" >/dev/null 2>&1; then
             echo "Image ${REGISTRY_IMAGE}:${VERSION} already exists - skipping build"
-            # Ensure the Hub tag exists and is identical; retag by digest if missing.
-            if ! docker manifest inspect "${HUB_IMAGE}:${VERSION}" >/dev/null 2>&1; then
-              digest=$(docker buildx imagetools inspect "${REGISTRY_IMAGE}:${VERSION}" --format '{{.Manifest.Digest}}')
-              [ -n "${digest}" ] || { echo "Cannot resolve existing GHCR digest - re-dispatch required" >&2; exit 1; }
-              docker buildx imagetools create --tag "${HUB_IMAGE}:${VERSION}" "${REGISTRY_IMAGE}:${VERSION}@${digest}"
-            fi
+            # Ensure every alias of the existing image exists (idempotent
+            # rerun); retag by digest where missing.
+            for t in "${EXTRA_TAGS[@]}"; do
+              if ! docker manifest inspect "${t}" >/dev/null 2>&1; then
+                digest=$(docker buildx imagetools inspect "${REGISTRY_IMAGE}:${VERSION}" --format '{{.Manifest.Digest}}')
+                [ -n "${digest}" ] || { echo "Cannot resolve existing GHCR digest - re-dispatch required" >&2; exit 1; }
+                docker buildx imagetools create --tag "${t}" "${REGISTRY_IMAGE}:${VERSION}@${digest}"
+              fi
+            done
             exit 0
           fi
 
           # Build and push the version-tagged image.
-          # The Dockerfile should define `ARG VERSION=devel` and stamp the binary
-          # with `-ldflags "-w -s -X github.com/bragibooks/bragibooks/internal/version.Version=${VERSION}"`.
-          # No version package exists yet; add one following the milmus pattern
-          # before version stamping will take effect.
+          # Version is stamped by docker/Dockerfile from --build-arg VERSION (bare semver in the binary).
+          ALL_TAGS=("${REGISTRY_IMAGE}:${VERSION}" "${HUB_IMAGE}:${VERSION}" "${EXTRA_TAGS[@]}")
+          BUILD_TAGS=()
+          for t in "${ALL_TAGS[@]}"; do
+            BUILD_TAGS+=(-t "$t")
+          done
           docker build \
             -f docker/Dockerfile \
             --build-arg VERSION="${VERSION}" \
-            -t "${REGISTRY_IMAGE}:${VERSION}" \
-            -t "${HUB_IMAGE}:${VERSION}" \
+            "${BUILD_TAGS[@]}" \
             .
-          docker push "${REGISTRY_IMAGE}:${VERSION}"
-          docker push "${HUB_IMAGE}:${VERSION}"
+          for t in "${ALL_TAGS[@]}"; do
+            docker push "${t}"
+          done
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
