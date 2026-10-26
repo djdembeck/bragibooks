@@ -7,7 +7,7 @@ COPY web/ ./
 RUN bun run build
 
 # Stage 1: Build Go backend with embedded frontend
-FROM golang:1.25-alpine AS builder
+FROM golang:1.27-alpine AS builder
 RUN apk add --no-cache git
 WORKDIR /build
 COPY go.mod go.sum ./
