@@ -1053,8 +1053,27 @@
 	// A non-empty override wins over the global setting, mirroring the
 	// worker's per-book resolution. The inspection copy is what the
 	// processor will actually use for this book.
+	// Mirrors Go's clean on absolute paths (the processor runs the dir
+	// override through filepath.Abs): a hand-typed /media/../books previews
+	// exactly where the worker writes it. Override dirs are absolute at
+	// write time, so the relative dev-config global is untouched.
+	function cleanAbsDir(p: string): string {
+		if (!p.startsWith('/')) return p;
+		const out: string[] = [];
+		for (const seg of p.split('/')) {
+			if (seg === '' || seg === '.') continue;
+			if (seg === '..') {
+				if (out.length > 0) out.pop();
+				continue;
+			}
+			out.push(seg);
+		}
+		return '/' + out.join('/');
+	}
+
 	function effectiveOutputDir(candidate: MatchCandidate): string {
-		return candidate.outputDirOverride || outputDir;
+		const o = (candidate.outputDirOverride || '').trim();
+		return o ? cleanAbsDir(o) : outputDir;
 	}
 
 	function effectiveScheme(candidate: MatchCandidate): string {
@@ -1354,9 +1373,12 @@
 
 	async function saveMatches() {
 		if (removingMany) return;
+		const ready = candidates.filter(isSavable);
+		if (ready.length === 0) return;
 		// A per-book override the server would 400 (or the worker would
-		// reject) blocks the save: same rules as the Import mirror.
-		for (const candidate of candidates) {
+		// reject) blocks the save — check only what this save will PUT: a
+		// not-eligible candidate's bad value must not block the others.
+		for (const candidate of ready) {
 			const dir = candidate.outputDirOverride.trim();
 			const fmt = candidate.pathFormatOverride.trim();
 			const issue = outputDirIssue(dir) || outputFormatIssue(fmt);
@@ -1367,8 +1389,6 @@
 				return;
 			}
 		}
-		const ready = candidates.filter(isSavable);
-		if (ready.length === 0) return;
 		saving = true;
 		pageError = null;
 		try {
