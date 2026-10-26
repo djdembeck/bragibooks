@@ -145,9 +145,12 @@ func TestUpdateSettingsRejectedRequestChangesNothing(t *testing.T) {
 		t.Fatalf("seed PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
 
-	rec := doPutSettings(t, h, `{"input_dir":"/in","output_dir":"/out","output_scheme":`+`"`+`{con}`+"`")
+	rec := doPutSettings(t, h, `{"input_dir":"/in","output_dir":"/out","output_scheme":"{con}"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("rejected PUT: status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "output scheme:") {
+		t.Fatalf("rejected PUT: body = %s, want validation error containing %q", rec.Body.String(), "output scheme:")
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
