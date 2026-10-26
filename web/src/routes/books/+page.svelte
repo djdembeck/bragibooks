@@ -58,7 +58,7 @@
 		}
 		const query = params.toString();
 		void goto(`/books${query ? `?${query}` : ''}`, {
-			replaceState: true,
+			replace: true,
 			reset: false
 		});
 	}
