@@ -45,7 +45,8 @@ export function formatElapsed(since: string | null, ended: string | null, nowMs:
 	const m = Math.floor((sec % 3600) / 60);
 	const s = sec % 60;
 	if (live) {
-		const parts = [h ? `${h}h` : '', m ? `${m}m` : '', s ? `${s}s` : ''];
+		// Always seconds-bearing so the cell is populated from the first second.
+		const parts = [h ? `${h}h` : '', m ? `${m}m` : '', `${s}s`];
 		return parts.filter(Boolean).join(' ');
 	}
 	if (sec < 60) return `${s}s`;

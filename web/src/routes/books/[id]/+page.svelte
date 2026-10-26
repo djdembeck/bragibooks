@@ -566,7 +566,7 @@
 									<dd>{formatJobTime(job.completed_at)}</dd>
 								</div>
 							{/if}
-							{#if job.started_at || (!job.completed_at && job.created_at)}
+							{#if job.started_at || job.created_at}
 								<div class="joblist__time">
 									<dt>Elapsed</dt>
 									<dd>{formatElapsed(job.started_at ?? job.created_at, job.completed_at, nowMs)}</dd>

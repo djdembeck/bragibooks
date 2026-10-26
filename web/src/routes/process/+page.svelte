@@ -411,7 +411,7 @@
 			{#if job.completedAt}
 				<div class="job-timestamp"><dt>Done</dt><dd>{formatJobTime(job.completedAt)}</dd></div>
 			{/if}
-			{#if job.startedAt || (!job.completedAt && job.createdAt)}
+			{#if job.startedAt || job.createdAt}
 				<div class="job-timestamp"><dt>Elapsed</dt><dd>{formatElapsed(job.startedAt ?? job.createdAt, job.completedAt, nowMs)}</dd></div>
 			{/if}
 			{#if !job.startedAt && !job.completedAt && job.createdAt}
