@@ -43,7 +43,7 @@
 <dialog
 	bind:this={dialog}
 	aria-labelledby={title ? 'dialog-title' : undefined}
-	class="relative w-full max-w-lg rounded-sm border border-[var(--border-strong)] bg-[var(--bg-panel)] p-0 text-[var(--text)] shadow-2xl backdrop:bg-[var(--enamel)]/50"
+	class="w-full max-w-lg rounded-sm border border-[var(--border-strong)] bg-[var(--bg-panel)] p-0 text-[var(--text)] shadow-2xl backdrop:bg-[var(--enamel)]/50"
 	onclose={onClose}
 	onkeydown={onKeydown}
 >
