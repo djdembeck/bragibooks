@@ -2,6 +2,7 @@ package audio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -518,9 +519,36 @@ func TestUpdateVersionKillsWrapperProcessGroup(t *testing.T) {
 		t.Fatalf("bad sleeper pid %q: %v", raw, err)
 	}
 
-	// Give the SIGKILL (and reaping) a beat to land.
-	time.Sleep(500 * time.Millisecond)
-	if p, _ := os.FindProcess(pid); p != nil && p.Signal(syscall.Signal(0)) == nil {
+	// Bounded check: poll briefly for the SIGKILL to land, treating a
+	// missing /proc/<pid> (reaped) or a Z (zombie, awaiting reaper)
+	// state as terminated. Do not rely on PID 1 promptly reaping the
+	// orphaned sleeper — a zombie is already dead.
+	if !processTerminated(pid, 2*time.Second) {
 		t.Errorf("process leak: wrapper sleeper %d survived the probe's process-group kill", pid)
+	}
+}
+
+// processTerminated polls /proc/<pid>/stat until the process is gone
+// (no entry) or a zombie (state Z), up to timeout.
+func processTerminated(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		state, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+		if err == nil {
+			// stat: pid (comm) state ... — comm can contain
+			// spaces/parens, so state is the field after the last ')'.
+			if i := strings.LastIndex(string(state), ") "); i != -1 {
+				if strings.TrimSpace(string(state[i+2:])) == "Z" {
+					return true
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
