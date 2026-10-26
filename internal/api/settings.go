@@ -11,7 +11,7 @@ import (
 	"github.com/bragibooks/bragibooks/internal/audio"
 	"github.com/bragibooks/bragibooks/internal/audiobookdb"
 	"github.com/bragibooks/bragibooks/internal/config"
-	"github.com/bragibooks/bragibooks/internal/server"
+	"github.com/bragibooks/bragibooks/internal/version"
 )
 
 // GetSettings handles GET /api/settings.
@@ -28,7 +28,7 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 		"output_scheme":        cfg.Processing.PathFormat,
 		"region":               cfg.Processing.Region,
 		"audiobookdb_base_url": cfg.APIKey.BaseURL,
-		"bragibooks_version":   server.Version,
+		"bragibooks_version":   version.Version,
 		"m4b_merge_version":    h.svc.Processor.ReadVersion(),
 	}
 
@@ -182,7 +182,7 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		"output_scheme":        live.Processing.PathFormat,
 		"region":               live.Processing.Region,
 		"audiobookdb_base_url": live.APIKey.BaseURL,
-		"bragibooks_version":   server.Version,
+		"bragibooks_version":   version.Version,
 		"m4b_merge_version":    m4bMergeVersion,
 	}
 
