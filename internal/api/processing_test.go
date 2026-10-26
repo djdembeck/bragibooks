@@ -45,7 +45,14 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
 func newTestJobsHandler(t *testing.T) (*Handler, *ProcessingService) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
-	db, err := sql.Open("sqlite", path)
+	// WAL + busy_timeout (internal/db/sqlite.go also enables foreign keys,
+	// but the pre-existing tests seed books/jobs without matching rows and
+	// rely on that being off, so it is intentionally omitted here). The
+	// worker goroutine and the test poll the DB concurrently, and without a
+	// busy timeout their writes race into SQLITE_BUSY.
+	db, err := sql.Open("sqlite", fmt.Sprintf(
+		"file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", path,
+	))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
@@ -688,6 +695,211 @@ func TestProcessJobRecordsOutputFormat(t *testing.T) {
 	if dest == "" {
 		t.Error("dest_path = empty; want the discovered output path")
 	}
+}
+
+// TestProcessJobUsesBookOutputDirOverride: a book with a directory override
+// routes its output to the override root while a sibling book without one
+// uses the global root — per-field inheritance at the worker.
+func TestProcessJobUsesBookOutputDirOverride(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	bin := writeMergingBinary(t, t.TempDir())
+	globalTemp := t.TempDir()
+	otherTemp := t.TempDir()
+	svc.proc = &audio.Processor{Binary: bin, OutputDir: globalTemp, PathFormat: "{title}", LogLevel: "info"}
+
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status, output_dir_override) VALUES (1, 'Book One', 'matched', ?), (2, 'Book Two', 'matched', '')",
+		otherTemp,
+	); err != nil {
+		t.Fatalf("seed books: %v", err)
+	}
+
+	ctx := t.Context()
+	svc.RunWorkers(ctx, 1)
+
+	id1, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")})
+	if err != nil {
+		t.Fatalf("queue job 1: %v", err)
+	}
+	id2, err := svc.QueueJob(ctx, 2, []string{filepath.Join(t.TempDir(), "b.m4b")})
+	if err != nil {
+		t.Fatalf("queue job 2: %v", err)
+	}
+	waitJobStatus(t, h.svc.DB, id1, "done")
+	waitJobStatus(t, h.svc.DB, id2, "done")
+
+	// Both books land at <root>/Author/Title.m4b (the fake binary has one
+	// fixed title), so the destination is proven by the persisted dest_path
+	// plus a per-root file count: exactly one .m4b per root, in the right
+	// place.
+	var dest1, dest2 string
+	if err := h.svc.DB.QueryRow("SELECT dest_path FROM books WHERE id = 1").Scan(&dest1); err != nil {
+		t.Fatalf("dest path 1: %v", err)
+	}
+	if err := h.svc.DB.QueryRow("SELECT dest_path FROM books WHERE id = 2").Scan(&dest2); err != nil {
+		t.Fatalf("dest path 2: %v", err)
+	}
+	want1 := filepath.Join(otherTemp, "Author", "Title.m4b")
+	want2 := filepath.Join(globalTemp, "Author", "Title.m4b")
+	if dest1 != want1 {
+		t.Errorf("overridden book dest_path = %q; want %q", dest1, want1)
+	}
+	if dest2 != want2 {
+		t.Errorf("inheriting book dest_path = %q; want %q", dest2, want2)
+	}
+	if n := countM4Bs(t, otherTemp); n != 1 {
+		t.Errorf("m4b count under the override root = %d; want 1", n)
+	}
+	if n := countM4Bs(t, globalTemp); n != 1 {
+		t.Errorf("m4b count under the global root = %d; want 1", n)
+	}
+}
+
+// countM4Bs counts regular .m4b files anywhere under dir.
+func countM4Bs(t *testing.T, dir string) int {
+	t.Helper()
+	n := 0
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() && strings.HasSuffix(d.Name(), ".m4b") {
+			n++
+		}
+		return nil
+	})
+	return n
+}
+
+// TestProcessJobRejectsUnsafeFormatOverrides: a stored path-format override
+// that would steer writes outside the output tree fails the job (and book)
+// before the binary runs — mirroring the API 400s as worker-side defense.
+func TestProcessJobRejectsUnsafeFormatOverrides(t *testing.T) {
+	cases := []struct {
+		name    string
+		format  string
+		wantErr string
+	}{
+		{"absolute format", "/abs/{title}", "must be relative (no leading /)"},
+		{"dotdot format segment", "../escape/{title}", "must not contain '..' path segments"},
+		{"no placeholder", "{genre}", "at least one placeholder"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, svc := newTestJobsHandler(t)
+			bin := writeMergingBinary(t, t.TempDir())
+			globalTemp := t.TempDir()
+			svc.proc = &audio.Processor{Binary: bin, OutputDir: globalTemp, PathFormat: "{title}", LogLevel: "info"}
+
+			if _, err := h.svc.DB.Exec(
+				"INSERT INTO books (id, title, status, path_format_override) VALUES (1, 'Book', 'matched', ?)",
+				tc.format,
+			); err != nil {
+				t.Fatalf("seed book: %v", err)
+			}
+
+			ctx := t.Context()
+			svc.RunWorkers(ctx, 1)
+			id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")})
+			if err != nil {
+				t.Fatalf("queue job: %v", err)
+			}
+			waitJobStatus(t, h.svc.DB, id, "error")
+			if got := bookStatusFromDB(t, h.svc.DB, 1); got != "error" {
+				t.Errorf("book status = %q; want error", got)
+			}
+			var dest, msg, jobErr string
+			if err := h.svc.DB.QueryRow(
+				"SELECT dest_path, status_message FROM books WHERE id = ?", 1,
+			).Scan(&dest, &msg); err != nil {
+				t.Fatalf("book query: %v", err)
+			}
+			if err := h.svc.DB.QueryRow("SELECT error FROM processing_jobs WHERE id = ?", id).Scan(&jobErr); err != nil {
+				t.Fatalf("job error query: %v", err)
+			}
+			if dest != "" {
+				t.Errorf("dest_path = %q; want empty (no write)", dest)
+			}
+			for _, want := range []string{tc.wantErr} {
+				if !strings.Contains(jobErr, want) {
+					t.Errorf("job error = %q; want it to contain %q", jobErr, want)
+				}
+				if !strings.Contains(msg, want) {
+					t.Errorf("book status_message = %q; want it to contain %q", msg, want)
+				}
+			}
+			var found []string
+			_ = filepath.WalkDir(globalTemp, func(path string, d os.DirEntry, err error) error {
+				if err == nil && d.Type().IsRegular() && strings.HasSuffix(d.Name(), ".m4b") {
+					found = append(found, path)
+				}
+				return nil
+			})
+			if len(found) != 0 {
+				t.Errorf(".m4b files under the global root = %v; want none", found)
+			}
+		})
+	}
+}
+
+// TestProcessJobFormatOnlyOverrideInheritsDir: with only the path-format
+// override set, the run inherits the global output root (explicit
+// per-field inheritance proof at the worker).
+func TestProcessJobFormatOnlyOverrideInheritsDir(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	bin := writeM4bWithSchemeBinary(t, t.TempDir())
+	globalTemp := t.TempDir()
+	svc.proc = &audio.Processor{Binary: bin, OutputDir: globalTemp, PathFormat: "{author}/{title}", LogLevel: "info"}
+
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status, path_format_override) VALUES (1, 'Book', 'matched', 'Special/{title}')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+
+	ctx := t.Context()
+	svc.RunWorkers(ctx, 1)
+	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")})
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	waitJobStatus(t, h.svc.DB, id, "done")
+
+	want := filepath.Join(globalTemp, "Special", "Title.m4b")
+	var dest string
+	if err := h.svc.DB.QueryRow("SELECT dest_path FROM books WHERE id = 1").Scan(&dest); err != nil {
+		t.Fatalf("dest path query: %v", err)
+	}
+	if dest != want {
+		t.Errorf("dest_path = %q; want %q", dest, want)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("output missing at %s: %v", want, err)
+	}
+}
+
+// writeM4bWithSchemeBinary is like writeMergingBinary, but honors -p: the
+// scheme's {title} is substituted with "Title" and the .m4b is written at
+// the scheme path under -o.
+func writeM4bWithSchemeBinary(t *testing.T, dir string) string {
+	t.Helper()
+	p := filepath.Join(dir, "merging-scheme-bin")
+	script := `#!/bin/sh
+out=""
+scheme=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift ;;
+    -p) scheme="$2"; shift ;;
+  esac
+  shift
+done
+p=$(echo "$scheme" | sed 's/{title}/Title/g')
+mkdir -p "$out/$(dirname "$p")"
+printf 'book' > "$out/$p.m4b"
+echo merged
+`
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatalf("write merging binary: %v", err)
+	}
+	return p
 }
 
 // TestFinishedJobLeavesMap covers the terminal cleanup: after a job reaches a

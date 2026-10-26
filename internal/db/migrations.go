@@ -131,6 +131,14 @@ ALTER TABLE settings ADD COLUMN legacy_token_migrated BOOLEAN NOT NULL DEFAULT 0
 
 `,
 	},
+	{
+		version: 7,
+		sql: `
+ALTER TABLE books ADD COLUMN output_dir_override TEXT DEFAULT '';
+ALTER TABLE books ADD COLUMN path_format_override TEXT DEFAULT '';
+
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

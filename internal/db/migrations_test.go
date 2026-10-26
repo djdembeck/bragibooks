@@ -55,6 +55,12 @@ func TestRunMigrationsRealShape(t *testing.T) {
 	if !hasColumn(t, db, "settings", "legacy_token_migrated") {
 		t.Error("settings.legacy_token_migrated missing after v6")
 	}
+	if !hasColumn(t, db, "books", "output_dir_override") {
+		t.Error("books.output_dir_override missing (v7)")
+	}
+	if !hasColumn(t, db, "books", "path_format_override") {
+		t.Error("books.path_format_override missing (v7)")
+	}
 	if !hasColumn(t, db, "settings", "audiobookdb_base_url") {
 		t.Error("settings.audiobookdb_base_url missing (v3 regression)")
 	}
@@ -144,8 +150,8 @@ func TestRunMigrationsV5ToV6PinsTheOnUpgradePath(t *testing.T) {
 		t.Errorf("pre-existing row state lost by v6: (%q, %q, %q, %q, %q, %q, %d, %q, %q, %d, %q)",
 			apiKey, baseURL, binary, inDir, outDir, doneDir, numCPUs, scheme, region, apiEnabled, digest)
 	}
-	if n := appliedCount(t, db); n != 6 {
-		t.Errorf("applied migrations = %d, want all 6", n)
+	if n := appliedCount(t, db); n != len(migrations) {
+		t.Errorf("applied migrations = %d, want all %d (fresh DB took the full list)", n, len(migrations))
 	}
 }
 

@@ -108,7 +108,7 @@ The normal work is deliberately linear: **select, match, queue, finish**.
    curl http://localhost:8888/api/health
    ```
 
-2. **Intake:** browse the mounted input directory and select one or more audiobook folders or files.
+2. **Intake:** browse the mounted input directory and select one or more audiobook folders or files. Optionally expand the **Per-import output override** in the footer to send this batch somewhere other than the global output folder (or with a different path format) — it applies to every book in the import and is carried onto each book, where the Match screen shows the effective output per book.
 3. **Match:** let Bragibooks search AudiobookDB, then confirm or correct the book, release, author, and narrator metadata. Custom search is available when the first match is wrong.
 4. **Queue:** submit the matched batch. Bragibooks invokes `m4b-merge` to merge, convert, clean, tag, and repackage the source files.
 5. **Finish:** follow live processing output in the browser, then review completed books and any errors. Jobs can take from seconds to hours depending on the number and type of files.

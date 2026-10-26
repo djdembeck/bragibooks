@@ -393,13 +393,24 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		state.sendProgress(`{"status":"running","message":"started processing"}`)
 	}
 
-	// Get ASIN from the matched book
-	var asin string
+	// Get ASIN and the per-book output overrides from the matched book.
+	// Resolved HERE, at worker start, not in the persisted job args:
+	// persisting would freeze the inherited global at queue time, while
+	// this re-read makes edits and reprocesses pick up current values.
+	var asin, bookDirOverride, bookFormatOverride string
 	if job.BookID.Valid {
+		// The overrides are NOT NULL columns and are scanned unconditionally
+		// (a book without a matched ASIN still carries them); only the ASIN
+		// value is gated on its nullable validity, as before.
 		var bookAsin sql.NullString
-		row := s.db.QueryRow("SELECT asin FROM books WHERE id = ?", job.BookID.Int64)
-		if err := row.Scan(&bookAsin); err == nil && bookAsin.Valid {
-			asin = bookAsin.String
+		row := s.db.QueryRow(
+			"SELECT asin, output_dir_override, path_format_override FROM books WHERE id = ?",
+			job.BookID.Int64,
+		)
+		if err := row.Scan(&bookAsin, &bookDirOverride, &bookFormatOverride); err == nil {
+			if bookAsin.Valid {
+				asin = bookAsin.String
+			}
 		}
 	}
 
@@ -438,7 +449,35 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		return
 	}
 
-	result, err := s.proc.Run(runCtx, job.ID, srcPaths, asin)
+	// Build run options. The stored override is authored data, so re-validate
+	// it here before it can steer file writes: a malformed path-format
+	// override fails the job the same way a malformed m4b-merge arg does.
+	// The directory override skips re-validation: it was validated absolute
+	// at write time and is used as-is.
+	opts := audio.RunOptions{
+		OutputDirOverride:  strings.TrimSpace(bookDirOverride),
+		PathFormatOverride: strings.TrimSpace(bookFormatOverride),
+	}
+	if msg := invalidPathFormatOverride(opts.PathFormatOverride); msg != "" {
+		overrideErr := fmt.Errorf("%s", msg)
+		if job.BookID.Valid {
+			s.db.Exec(
+				"UPDATE books SET status = 'error', status_message = ? WHERE id = ?",
+				overrideErr.Error(), job.BookID.Int64,
+			)
+		}
+		s.db.Exec(
+			"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE id = ?",
+			jobStatusError, overrideErr.Error(), job.ID,
+		)
+		if state != nil {
+			state.finalize(`{"status":"error","message":"`+escapeJSON(overrideErr.Error())+`"}`, overrideErr)
+		}
+		s.forgetJob(job.ID)
+		return
+	}
+
+	result, err := s.proc.Run(runCtx, job.ID, srcPaths, asin, opts)
 	if err != nil {
 		// A cancellation during the run kills m4b-merge via its context;
 		// that is 'cancelled', not 'error'.

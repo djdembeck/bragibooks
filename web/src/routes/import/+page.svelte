@@ -2,7 +2,8 @@
 	import { get, post } from '#lib/api.js';
 	import { goto } from '$app/navigation';
 	import type { DirectoryEntry, DirectoriesResponse, Settings, CreateBooksResponse } from '#lib/types.js';
-	import { PageHeader, Alert, ErrorDetail, Button, Skeleton, EmptyState } from '#lib/components/index.js';
+	import { PageHeader, Alert, ErrorDetail, Button, Skeleton, EmptyState, DirPicker } from '#lib/components/index.js';
+	import { validateScheme, parseParts } from '#lib/scheme.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { ChevronUp, ChevronDown, Folder, FileAudio, File } from '@lucide/svelte';
@@ -20,6 +21,19 @@
 	// directory request starts, so a false initial value renders the empty state.
 	let loading = $state(true);
 	let settingsError = $state<CleanedAdbError | null>(null);
+
+	// Optional per-import output override: applies to every book in this import
+	// batch; empty = follow the global Settings.
+	let showOverrides = $state(false);
+	let overrideDir = $state('');
+	let overrideScheme = $state('');
+	let dirPickerOpen = $state(false);
+	let globalOutputDir = $state('');
+	const overrideSchemeError = $derived(
+		overrideScheme.trim()
+			? validateScheme(parseParts(overrideScheme.trim())).errors[0] || null
+			: null
+	);
 
 	const SUPPORTED_EXTENSIONS = new Set(['.mp3', '.m4a', '.m4b', '.mp4', '.aac', '.ogg', '.flac', '.wma']);
 
@@ -67,6 +81,7 @@
 				loading = false;
 				return;
 			}
+			globalOutputDir = settings.output_dir || '';
 			await loadDirectory(settings.input_dir);
 		} catch (e) {
 			settingsError = toCleanedError(e);
@@ -168,7 +183,11 @@
 		creating = true;
 		dl.setError(null);
 		try {
-			const payload = { books: sourcePaths.map((src_path) => ({ src_path })) };
+			const override = {
+				output_dir_override: overrideDir.trim() || undefined,
+				path_format_override: overrideScheme.trim() || undefined
+			};
+			const payload = { books: sourcePaths.map((src_path) => ({ src_path, ...override })) };
 			await post<CreateBooksResponse>('/books', payload);
 			await goto('/match');
 		} catch (e) {
@@ -389,21 +408,88 @@
 
 	<!-- Footer: selection count + dispatch action -->
 	{#if entries.length > 0}
-		<div class="flex flex-col-reverse items-center justify-end gap-3 border-t border-[var(--border)] bg-[var(--surface)] px-4 py-3 sm:flex-row">
-			<p class="text-sm text-[var(--text-muted)]">
-				<span class="font-mono text-[var(--text-secondary)]">{selectedCount}</span>
-				<span class="ml-1">{selectedCount === 1 ? 'item selected' : 'items selected'} for match</span>
-			</p>
-			<Button
-				variant="primary"
-				disabled={selectedCount === 0 || creating}
-				loading={creating}
-				onclick={start}
-			>
-				{creating ? 'Importing…' : 'Import and match'}
-			</Button>
+		<div class="border-t border-[var(--border)] bg-[var(--surface)] px-4 py-3">
+			{#if showOverrides}
+				<div class="mb-3 space-y-2 border-b border-[var(--border-subtle)] pb-3">
+					<div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+						<label class="text-sm text-[var(--text-secondary)]" for="import-override-dir">
+							Output folder <span class="text-[var(--text-muted)]">(optional, defaults to Settings)</span>
+						</label>
+						<div class="flex min-w-0 flex-1 items-center gap-1.5">
+							<input
+								id="import-override-dir"
+								type="text"
+								bind:value={overrideDir}
+								disabled={creating}
+								placeholder={globalOutputDir || '—'}
+								class="min-h-[44px] min-w-0 flex-1 rounded-sm border border-[var(--border)] bg-[var(--bg-panel)] px-3 text-sm"
+								aria-label="Override output folder"
+							/>
+							<Button variant="ghost" disabled={creating} onclick={() => (dirPickerOpen = true)}>
+								Browse
+							</Button>
+							{#if overrideDir}
+								<Button variant="ghost" disabled={creating} onclick={() => (overrideDir = '')}>
+									Clear
+								</Button>
+							{/if}
+						</div>
+					</div>
+					<div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-3">
+						<label class="pt-2 text-sm text-[var(--text-secondary)]" for="import-override-scheme">
+							Path format <span class="text-[var(--text-muted)]">(optional, defaults to Settings)</span>
+						</label>
+						<div class="flex min-w-0 flex-1 items-start gap-1.5">
+							<input
+								id="import-override-scheme"
+								type="text"
+								bind:value={overrideScheme}
+								disabled={creating}
+								placeholder="e.g. author/title"
+								class="min-h-[44px] min-w-0 flex-1 rounded-sm border border-[var(--border)] bg-[var(--bg-panel)] px-3 font-mono text-sm"
+								aria-label="Override path format"
+							/>
+							<Button variant="ghost" disabled={creating} onclick={() => (overrideScheme = '')}>
+								Clear
+							</Button>
+						</div>
+						{#if overrideSchemeError}
+							<p class="text-sm text-[var(--state-red)]" role="alert">{overrideSchemeError}</p>
+						{/if}
+					</div>
+				</div>
+			{/if}
+			<div class="flex flex-col-reverse items-center justify-end gap-3 sm:flex-row">
+				<button
+					type="button"
+					disabled={creating}
+					onclick={() => (showOverrides = !showOverrides)}
+					class="text-sm text-[var(--text-muted)] transition-colors hover:text-[var(--text)]"
+					aria-expanded={showOverrides}
+				>
+					{showOverrides ? 'Hide per-import output override' : 'Per-import output override (optional)'}
+				</button>
+				<p class="text-sm text-[var(--text-muted)]">
+					<span class="font-mono text-[var(--text-secondary)]">{selectedCount}</span>
+					<span class="ml-1">{selectedCount === 1 ? 'item selected' : 'items selected'} for match</span>
+				</p>
+				<Button
+					variant="primary"
+					disabled={selectedCount === 0 || creating || !!overrideSchemeError}
+					loading={creating}
+					onclick={start}
+				>
+					{creating ? 'Importing…' : 'Import and match'}
+				</Button>
+			</div>
 		</div>
 	{/if}
+	<DirPicker
+		bind:open={dirPickerOpen}
+		title="Choose output folder"
+		startPath={overrideDir.trim() || globalOutputDir}
+		onselect={(path) => (overrideDir = path)}
+	/>
 </div>
 {/if}
 

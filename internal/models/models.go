@@ -18,6 +18,8 @@ type Book struct {
 	FormatType           string         `db:"format_type" json:"format_type"`
 	SrcPath              string         `db:"src_path" json:"src_path"`
 	DestPath             string         `db:"dest_path" json:"dest_path"`
+	OutputDirOverride    string         `db:"output_dir_override" json:"output_dir_override"`
+	PathFormatOverride   string         `db:"path_format_override" json:"path_format_override"`
 	Status               string         `db:"status" json:"status"`
 	StatusMessage        string         `db:"status_message" json:"status_message"`
 	CoverImageURL        string         `db:"cover_image_url" json:"cover_image_url"`

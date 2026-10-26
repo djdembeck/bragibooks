@@ -39,6 +39,8 @@ export interface Book {
 	format_type: string;
 	src_path: string;
 	dest_path: string;
+	output_dir_override: string;
+	path_format_override: string;
 	status: 'pending' | 'matched' | 'processing' | 'done' | 'error';
 	status_message: string;
 	cover_image_url: string;
@@ -71,6 +73,8 @@ export interface BookWithPeople {
 	format_type: string;
 	src_path: string;
 	dest_path: string;
+	output_dir_override: string;
+	path_format_override: string;
 	status: 'pending' | 'matched' | 'processing' | 'done' | 'error';
 	status_message: string;
 	cover_image_url: string;
@@ -88,7 +92,7 @@ export interface BooksListResponse {
 }
 
 export interface CreateBooksRequest {
-	books: { src_path: string; title?: string }[];
+	books: { src_path: string; title?: string; output_dir_override?: string; path_format_override?: string }[];
 }
 
 export interface CreateBooksResponse {
@@ -109,6 +113,8 @@ export interface UpdateBookRequest {
 	format_type?: string;
 	src_path?: string;
 	dest_path?: string;
+	output_dir_override?: string;
+	path_format_override?: string;
 	status?: 'pending' | 'matched' | 'processing' | 'done' | 'error';
 	status_message?: string;
 	cover_image_url?: string;
@@ -375,6 +381,8 @@ export function normalizeBook(raw: unknown): BookWithPeople {
 		format_type: str(r.format_type),
 		src_path: str(r.src_path),
 		dest_path: str(r.dest_path),
+		output_dir_override: str(r.output_dir_override),
+		path_format_override: str(r.path_format_override),
 		status: (str(r.status) || 'pending') as BookWithPeople['status'],
 		status_message: str(r.status_message),
 		cover_image_url: str(r.cover_image_url),

@@ -21,8 +21,8 @@
 		AUDIO_FILE_EXTS
 	} from '#lib/types.js';
 	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, AbdTag, Modal } from '#lib/components/index.js';
-	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
-	import { resolveScheme } from '#lib/scheme.js';
+	import { toCleanedError, cleanAdbError, type CleanedAdbError } from '#lib/adbError.js';
+	import { resolveScheme, validateScheme, parseParts } from '#lib/scheme.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 
 	type ReviewMode = 'batch' | 'focused';
@@ -36,6 +36,9 @@
 		bookId: number;
 		srcPath: string;
 		title: string;
+		/** Per-book overrides carried in from the import; '' = follow global. */
+		outputDirOverride: string;
+		pathFormatOverride: string;
 		/** Local cover assigned at intake — never confused with catalog art. */
 		coverUrl: string;
 		searchResults: AudiobookDBBook[];
@@ -237,6 +240,8 @@
 					bookId: book.id,
 					srcPath: book.src_path,
 					title: book.title,
+					outputDirOverride: book.output_dir_override || '',
+					pathFormatOverride: book.path_format_override || '',
 					coverUrl: book.cover_image_url || '',
 					searchResults: [],
 					selectedBookId: null,
@@ -1044,18 +1049,32 @@
 		};
 	}
 
+	// ── Effective output settings ─────────────────────────────
+	// A non-empty override wins over the global setting, mirroring the
+	// worker's per-book resolution. The inspection copy is what the
+	// processor will actually use for this book.
+	function effectiveOutputDir(candidate: MatchCandidate): string {
+		return candidate.outputDirOverride || outputDir;
+	}
+
+	function effectiveScheme(candidate: MatchCandidate): string {
+		return candidate.pathFormatOverride || outputScheme;
+	}
+
 	function proposedRelativeName(candidate: MatchCandidate): string {
-		if (!outputScheme || !candidate.details.book) return '';
-		return resolveScheme(outputScheme, schemeValues(candidate));
+		if (!effectiveScheme(candidate) || !candidate.details.book) return '';
+		return resolveScheme(effectiveScheme(candidate), schemeValues(candidate));
 	}
 
 	function fullOutputPath(candidate: MatchCandidate): string {
-		if (!outputScheme) return 'Output scheme is not set — configure it in Settings.';
+		const root = effectiveOutputDir(candidate);
+		if (!effectiveScheme(candidate))
+			return 'Output scheme is not set — configure it in Settings or set a per-book override.';
 		if (!candidate.details.book) return 'Select a record to preview the output name.';
-		if (!outputDir) return 'Output folder is not set — configure it in Settings.';
+		if (!root) return 'Output folder is not set — configure it in Settings or set a per-book override.';
 		const relative = proposedRelativeName(candidate);
-		const root = outputDir.replace(/\/+$/, '');
-		return relative ? `${root}/${relative}` : root;
+		const trimmed = root.replace(/\/+$/, '');
+		return relative ? `${trimmed}/${relative}` : trimmed;
 	}
 
 	// ── Eligibility — one predicate for counting and saving ────
@@ -1320,6 +1339,20 @@
 
 	async function saveMatches() {
 		if (removingMany) return;
+		// A per-book path-format override that doesn't resolve is a live
+		// processor failure, so it's checked before the save — the same way
+		// the Settings page blocks the global scheme.
+		for (const candidate of candidates) {
+			if (candidate.pathFormatOverride) {
+				const schemeErr = validateScheme(parseParts(candidate.pathFormatOverride)).errors[0];
+				if (schemeErr) {
+					setActive(candidate.bookId);
+					setMode('focused');
+					pageError = cleanAdbError(`"${sourceBase(candidate)}": ${schemeErr}`);
+					return;
+				}
+			}
+		}
 		const ready = candidates.filter(isSavable);
 		if (ready.length === 0) return;
 		saving = true;
@@ -1353,6 +1386,8 @@
 			.join(', ');
 		return {
 			title: release?.title || book?.title || candidate.title,
+			output_dir_override: candidate.outputDirOverride || undefined,
+			path_format_override: candidate.pathFormatOverride || undefined,
 			asin: extractAsin(book?.external) || undefined,
 			audiobookdb_book_id: book?.id,
 			audiobookdb_release_id: release?.id,
@@ -1706,8 +1741,15 @@
 								<path d="M5 12h13m-5-5 5 5-5 5" />
 							</svg>
 							<div class="batch__name">
-								<span class="batch__name-label">Proposed output</span>
-								{#if !outputScheme}
+								<span class="batch__name-head">
+									<span class="batch__name-label">Proposed output</span>
+									{#if c.outputDirOverride || c.pathFormatOverride}
+										<span class="batch__override-chip" title="Per-book output override from the import">
+											per-book
+										</span>
+									{/if}
+								</span>
+								{#if !effectiveScheme(c)}
 									<a class="batch__name-link" href="/settings">
 										{settingsLoaded
 											? 'Set an output scheme'
@@ -1951,7 +1993,13 @@
 							</figure>
 							<div class="match__source-copy">
 								<h2>{sourceBase(c)}</h2>
-								{#if outputScheme}
+								{#if c.outputDirOverride || c.pathFormatOverride}
+									<p class="match__override">
+										<code title={effectiveScheme(c)}>{effectiveOutputDir(c)}</code>
+										{#if c.pathFormatOverride}<span> · path format overridden</span>{/if}
+									</p>
+								{/if}
+								{#if outputScheme || c.pathFormatOverride}
 									<p class="match__proposed">
 										<span>Proposed output — processor reports the final path</span>
 										<code title={fullOutputPath(c)}>
@@ -2943,6 +2991,23 @@
 		color: var(--m-muted);
 	}
 
+	.batch__name-head {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+	}
+
+	.batch__override-chip {
+		padding: 0 6px;
+		border: 1px solid var(--m-border);
+		border-radius: var(--m-r-sm);
+		font-size: 10.5px;
+		font-weight: 600;
+		line-height: 1.5;
+		color: var(--m-ink-2);
+	}
+
 	.batch__name-value {
 		font-size: 14px;
 		font-weight: 600;
@@ -3451,6 +3516,18 @@
 		font-weight: 700;
 		color: var(--m-ink);
 		margin: 0 0 4px;
+		overflow-wrap: anywhere;
+	}
+
+	.match__override {
+		margin: 0 0 4px;
+		font-size: 12px;
+		color: var(--m-muted);
+	}
+
+	.match__override code {
+		font-size: 12px;
+		color: var(--m-ink-2);
 		overflow-wrap: anywhere;
 	}
 

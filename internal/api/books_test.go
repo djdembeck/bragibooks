@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -36,6 +37,8 @@ CREATE TABLE books (
     format_type TEXT DEFAULT '',
     src_path TEXT DEFAULT '',
     dest_path TEXT DEFAULT '',
+    output_dir_override TEXT DEFAULT '',
+    path_format_override TEXT DEFAULT '',
     status TEXT DEFAULT 'pending',
     status_message TEXT DEFAULT '',
     cover_image_url TEXT DEFAULT '',
@@ -222,6 +225,165 @@ func TestCreateBookWithNULLReleaseDate(t *testing.T) {
 	}
 	if dbStatus != "pending" {
 		t.Errorf("db status = %q; want %q", dbStatus, "pending")
+	}
+}
+
+func TestCreateBooksWithOverrides(t *testing.T) {
+	h := newTestHandler(t)
+
+	reqBody, err := json.Marshal(CreateBooksRequest{
+		Books: []CreateBookEntry{
+			{SrcPath: "/some/path/One_Book.m4b", OutputDirOverride: new(" /Genre/SciFi "), PathFormatOverride: new("{author}")},
+			{SrcPath: "/some/path/Two_Books.m4b"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/api/books", bytes.NewReader(reqBody))
+	w := httptest.NewRecorder()
+	h.CreateBooks(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d — body: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+
+	var gotDir, gotFmt string
+	err = h.svc.DB.QueryRow("SELECT output_dir_override, path_format_override FROM books WHERE title = ?", "One Book").
+		Scan(&gotDir, &gotFmt)
+	if err != nil {
+		t.Fatalf("query overrides for book 1: %v", err)
+	}
+	if gotDir != "/Genre/SciFi" {
+		t.Errorf("book 1 output_dir_override = %q; want %q (trimmed)", gotDir, "/Genre/SciFi")
+	}
+	if gotFmt != "{author}" {
+		t.Errorf("book 1 path_format_override = %q; want %q", gotFmt, "{author}")
+	}
+
+	var blankDir, blankFmt string
+	err = h.svc.DB.QueryRow("SELECT output_dir_override, path_format_override FROM books WHERE title = ?", "Two Books").
+		Scan(&blankDir, &blankFmt)
+	if err != nil {
+		t.Fatalf("query overrides for book 2: %v", err)
+	}
+	if blankDir != "" || blankFmt != "" {
+		t.Errorf("book 2 overrides = (%q, %q); want (\"\", \"\")", blankDir, blankFmt)
+	}
+}
+
+func TestUpdateBookOutputOverrideSetAndClear(t *testing.T) {
+	h := newTestHandler(t)
+	h.svc.DB.Exec(`INSERT INTO books (id, title, status) VALUES (1, 'Seed', 'pending')`)
+
+	putBody := func(body UpdateBookRequest) *httptest.ResponseRecorder {
+		t.Helper()
+		reqBody, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal request: %v", err)
+		}
+		ctx := chi.NewRouteContext()
+		ctx.URLParams.Keys = append(ctx.URLParams.Keys, "id")
+		ctx.URLParams.Values = append(ctx.URLParams.Values, "1")
+		req := httptest.NewRequest("PUT", "/api/books/1", bytes.NewReader(reqBody))
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, ctx))
+		w := httptest.NewRecorder()
+		h.UpdateBook(w, req)
+		return w
+	}
+
+	setDir := "/Media/Audiobooks"
+	setFmt := "{author}/{title}"
+	w := putBody(UpdateBookRequest{OutputDirOverride: new(setDir), PathFormatOverride: new(setFmt)})
+	if w.Code != http.StatusOK {
+		t.Fatalf("set overrides status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	var gotDir, gotFmt string
+	if err := h.svc.DB.QueryRow("SELECT output_dir_override, path_format_override FROM books WHERE id = ?", 1).
+		Scan(&gotDir, &gotFmt); err != nil {
+		t.Fatalf("query set overrides: %v", err)
+	}
+	if gotDir != setDir || gotFmt != setFmt {
+		t.Errorf("set overrides = (%q, %q); want (%q, %q)", gotDir, gotFmt, setDir, setFmt)
+	}
+
+	w = putBody(UpdateBookRequest{OutputDirOverride: new(""), PathFormatOverride: new("")})
+	if w.Code != http.StatusOK {
+		t.Fatalf("clear overrides status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	if err := h.svc.DB.QueryRow("SELECT output_dir_override, path_format_override FROM books WHERE id = ?", 1).
+		Scan(&gotDir, &gotFmt); err != nil {
+		t.Fatalf("query cleared overrides: %v", err)
+	}
+	if gotDir != "" || gotFmt != "" {
+		t.Errorf("cleared overrides = (%q, %q); want (\"\", \"\")", gotDir, gotFmt)
+	}
+}
+
+func TestCreateBookRejectsInvalidOverrides(t *testing.T) {
+	h := newTestHandler(t)
+	goodDir := "/Media/Audiobooks"
+	relDir := "genre/relative"
+
+	cases := []struct {
+		name    string
+		dir     *string
+		format  *string
+		wantErr string
+	}{
+		{"relative dir", new(relDir), nil, "must be an absolute path"},
+		{"dotdot format segment", new(goodDir), new("../escape/{title}"), "must not contain '..' path segments"},
+		{"absolute format", new(goodDir), new("/abs/{title}"), "must be relative (no leading /)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reqBody, err := json.Marshal(CreateBooksRequest{Books: []CreateBookEntry{
+				{SrcPath: "/some/path/Book.m4b", OutputDirOverride: tc.dir, PathFormatOverride: tc.format},
+			}})
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			req := httptest.NewRequest("POST", "/api/books", bytes.NewReader(reqBody))
+			w := httptest.NewRecorder()
+			h.CreateBooks(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d; want 400 — body: %s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tc.wantErr) {
+				t.Errorf("body = %q; want it to contain %q", w.Body.String(), tc.wantErr)
+			}
+		})
+	}
+
+	var n int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM books").Scan(&n); err != nil {
+		t.Fatalf("count books: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("books after rejected batches = %d; want 0 (pre-pass must reject before any insert)", n)
+	}
+
+	// "vol..2" contains dots but no ".." path segment: legal, stored verbatim (after trim).
+	fm := "vol..2/{title}"
+	reqBody, err := json.Marshal(CreateBooksRequest{Books: []CreateBookEntry{
+		{SrcPath: "/some/path/Book.m4b", OutputDirOverride: &goodDir, PathFormatOverride: &fm},
+	}})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/api/books", bytes.NewReader(reqBody))
+	w := httptest.NewRecorder()
+	h.CreateBooks(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("vol..2 status = %d; want 201 — body: %s", w.Code, w.Body.String())
+	}
+	var stored string
+	if err := h.svc.DB.QueryRow("SELECT path_format_override FROM books WHERE id = 1").Scan(&stored); err != nil {
+		t.Fatalf("query stored format: %v", err)
+	}
+	if stored != fm {
+		t.Errorf("stored format = %q; want %q (no '..' segment)", stored, fm)
 	}
 }
 

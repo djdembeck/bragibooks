@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -122,6 +123,90 @@ echo merged
 	return p
 }
 
+// writeFakeM4bWithScheme is like writeFakeM4b, but honors -p: it substitutes
+// {title} in the scheme with the fixed fake title "Title", creates the
+// scheme's directory, and writes the .m4b at the scheme path under -o.
+func writeFakeM4bWithScheme(t *testing.T, dir string) string {
+	t.Helper()
+	p := filepath.Join(dir, "fake-m4b-scheme")
+	script := `#!/bin/sh
+out=""
+scheme=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift ;;
+    -p) scheme="$2"; shift ;;
+  esac
+  shift
+done
+p=$(echo "$scheme" | sed 's/{title}/Title/g')
+mkdir -p "$out/$(dirname "$p")"
+printf 'book' > "$out/$p.m4b"
+echo merged
+`
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+	return p
+}
+
+// findM4bs walks dir and returns all .m4b paths found.
+func findM4bs(t *testing.T, dir string) []string {
+	t.Helper()
+	var found []string
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(d.Name(), ".m4b") {
+			found = append(found, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", dir, err)
+	}
+	return found
+}
+
+// TestRunHonorsOutputOverrides covers per-run destination overrides: both
+// fields (dir + format) point the run at a different root and scheme tree,
+// and a format-only override inherits the global output root.
+func TestRunHonorsOutputOverrides(t *testing.T) {
+	globalDir := t.TempDir()
+	otherDir := t.TempDir()
+	bin := writeFakeM4bWithScheme(t, t.TempDir())
+
+	t.Run("both overrides", func(t *testing.T) {
+		proc := NewProcessor(bin, globalDir, "", 2, "{author}/{title}", "info")
+		res, err := proc.Run(context.Background(), "ov1", []string{"/tmp/x/a.m4b"}, "", RunOptions{
+			OutputDirOverride:  otherDir,
+			PathFormatOverride: "Override/{title}",
+		})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		want, _ := filepath.Abs(filepath.Join(otherDir, "Override", "Title.m4b"))
+		if res.OutputFile != want {
+			t.Errorf("OutputFile = %q, want %q", res.OutputFile, want)
+		}
+		if found := findM4bs(t, globalDir); len(found) != 0 {
+			t.Errorf(".m4b files under the global root = %v, want none", found)
+		}
+	})
+
+	t.Run("format only inherits global dir", func(t *testing.T) {
+		proc := NewProcessor(bin, globalDir, "", 2, "{author}/{title}", "info")
+		res, err := proc.Run(context.Background(), "ov2", []string{"/tmp/x/a.m4b"}, "", RunOptions{
+			PathFormatOverride: "Override/{title}",
+		})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		want, _ := filepath.Abs(filepath.Join(globalDir, "Override", "Title.m4b"))
+		if res.OutputFile != want {
+			t.Errorf("OutputFile = %q, want %q", res.OutputFile, want)
+		}
+	})
+}
+
 // TestRunWritesToPerJobSubtree covers the row-13 discovery choice: with a
 // jobID, m4b-merge runs against OutputDir/<jobID>.tmp and the result is
 // moved back to its scheme path under OutputDir. A fresher .m4b sitting in
@@ -147,7 +232,7 @@ func TestRunWritesToPerJobSubtree(t *testing.T) {
 	}
 
 	proc := NewProcessor(bin, out, "", 2, "{author}/{title}", "info")
-	res, err := proc.Run(context.Background(), "j1", []string{"/tmp/x/a.m4b"}, "")
+	res, err := proc.Run(context.Background(), "j1", []string{"/tmp/x/a.m4b"}, "", RunOptions{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -186,7 +271,7 @@ func TestRunWithRelativeOutputDir(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(cwd) })
 
 	proc := NewProcessor(bin, out, "", 2, "{author}/{title}", "info")
-	res, err := proc.Run(context.Background(), "rel1", []string{"/tmp/x/a.m4b"}, "")
+	res, err := proc.Run(context.Background(), "rel1", []string{"/tmp/x/a.m4b"}, "", RunOptions{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -222,7 +307,7 @@ exit 0
 	}
 
 	proc := NewProcessor(bin, "", "", 1, "{title}", "info")
-	res, err := proc.Run(context.Background(), "", []string{"/tmp/x/a.m4b"}, "")
+	res, err := proc.Run(context.Background(), "", []string{"/tmp/x/a.m4b"}, "", RunOptions{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -251,7 +336,7 @@ func TestRunRelocationFailureKeepsOutput(t *testing.T) {
 	}
 
 	proc := NewProcessor(bin, out, "", 1, "{author}/{title}", "info")
-	_, err := proc.Run(context.Background(), "rel2", []string{"/tmp/x/a.m4b"}, "")
+	_, err := proc.Run(context.Background(), "rel2", []string{"/tmp/x/a.m4b"}, "", RunOptions{})
 	if err == nil {
 		t.Fatalf("Run: succeeded, want a relocation failure")
 	}
@@ -302,7 +387,7 @@ func TestRunRenameCopyFailurePreservesM4B(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(dst, 0o755) })
 
 	proc := NewProcessor(bin, out, "", 1, "{author}/{title}", "info")
-	_, err := proc.Run(context.Background(), "ren1", []string{"/tmp/x/a.m4b"}, "")
+	_, err := proc.Run(context.Background(), "ren1", []string{"/tmp/x/a.m4b"}, "", RunOptions{})
 	if err == nil {
 		t.Fatalf("Run: succeeded, want a move failure")
 	}
@@ -337,7 +422,7 @@ func TestRunMergeFailureCleansJobSubtree(t *testing.T) {
 	}
 
 	proc := NewProcessor(bin, out, "", 1, "{author}/{title}", "info")
-	_, err := proc.Run(context.Background(), "mer1", []string{"/tmp/x/a.m4b"}, "")
+	_, err := proc.Run(context.Background(), "mer1", []string{"/tmp/x/a.m4b"}, "", RunOptions{})
 	if err == nil {
 		t.Fatalf("Run: succeeded, want a merge failure")
 	}
@@ -694,7 +779,7 @@ printf '\033[33mWARN\033[0m \033[2mcover missing\033[0m\n' >&2
 	}
 
 	proc := NewProcessor(bin, t.TempDir(), "", 1, "{author}/{title}", "info")
-	res, err := proc.Run(context.Background(), "ansi1", []string{"/tmp/x/a.m4b"}, "")
+	res, err := proc.Run(context.Background(), "ansi1", []string{"/tmp/x/a.m4b"}, "", RunOptions{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -713,7 +798,7 @@ printf '\033[33mWARN\033[0m \033[2mcover missing\033[0m\n' >&2
 		t.Fatalf("write failing fake binary: %v", err)
 	}
 	proc = NewProcessor(failBin, "", "", 1, "{title}", "info")
-	_, err = proc.Run(context.Background(), "", []string{"/tmp/x/a.m4b"}, "")
+	_, err = proc.Run(context.Background(), "", []string{"/tmp/x/a.m4b"}, "", RunOptions{})
 	if err == nil {
 		t.Fatal("Run: succeeded, want a merge failure")
 	}
