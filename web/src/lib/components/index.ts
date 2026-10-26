@@ -9,6 +9,7 @@ export { default as ErrorDetail } from './ErrorDetail.svelte';
 export { default as Button } from './Button.svelte';
 export { default as Modal } from './Modal.svelte';
 export { default as DirPicker } from './DirPicker.svelte';
+export { default as PathFormatBuilder } from './PathFormatBuilder.svelte';
 export { default as AbdTag } from './AbdTag.svelte';
 export { default as Spinner } from './Spinner.svelte';
 export { default as CoverArt } from './CoverArt.svelte';

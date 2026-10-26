@@ -3,9 +3,18 @@
 
 .opencode
 .sisyphus
-# .impeccable: shared artifacts (design.json, surfaces/*.md) stay tracked;
-# ignore only the ephemeral output block recommended by pbakaus/impeccable.
+
+# Environment files (keep committed templates)
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Impeccable: keep shared project artifacts (config.json, live/config.json,
+# design.json, surfaces/*.md, critique/*.md) tracked; ignore only ephemeral
+# output in the marked block below, per pbakaus/impeccable.
 # impeccable-ignore-start
+# Ephemeral output, runtime state, and per-developer overrides.
 **/.impeccable/config.local.json
 **/.impeccable/hook.cache.json
 **/.impeccable/hook.pending.json
