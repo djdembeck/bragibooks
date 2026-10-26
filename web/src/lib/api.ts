@@ -2,6 +2,20 @@ import { cleanAdbError, type CleanedAdbError } from '#lib/adbError.js';
 
 const API_BASE = '';
 
+// Legacy cutover: the app no longer supports a stored admin token — remote
+// access uses the server-generated External API key (never stored by the
+// UI). A leftover `bragibooks_token` would otherwise be presented on every
+// request and get 403 (a presented-but-invalid key is always rejected), so
+// remove it from localStorage and expire the mirrored cookie once at load.
+try {
+	if (typeof window !== 'undefined') {
+		window.localStorage.removeItem('bragibooks_token');
+		document.cookie = 'bragibooks_token=; path=/; max-age=0';
+	}
+} catch {
+	// storage unavailable — nothing to clear
+}
+
 /**
  * Error thrown by every api.ts call. `message` is the operator sentence;
  * `cleaned` carries the full result (including `raw`) so pages can offer a
@@ -20,34 +34,21 @@ export class ApiError extends Error {
 	}
 }
 
-// Optional admin token (set when the server runs with BRAGIBOOKS_ADMIN_TOKEN);
-// absent (no header) when the token is not stored.
+// Same-origin UI auth: the UI never stores a key. It relies on the server's
+// double-submit CSRF guard (loopback-LAN path) on the browser state.
 function authHeaders(): Record<string, string> {
 	try {
-		const token = window.localStorage.getItem('bragibooks_token');
-		if (token) {
-			// EventSource cannot send headers; mirror the token into a cookie so
-			// SSE streams authenticate against the server-side cookie check.
-			// No Secure flag: local HTTP must work. The cookie persists after
-			// log-out, which is acceptable for a local-first admin tool.
-			// Written verbatim (the server percent-decodes before comparing), so
-			// base64 chars like +/= match; cookie-breaking tokens are skipped
-			// and SSE degrades to polling while fetches keep using the header.
-			if (!/[;\s]/.test(token)) document.cookie = `bragibooks_token=${token}; path=/`;
-		}
 		const headers: Record<string, string> = {};
-		if (token) headers.Authorization = `Bearer ${token}`;
 		// The server requires a double-submit CSRF token on state-changing
-		// requests when no Authorization header is present (local mode).
-		// Echo the server-set bragibooks_csrf cookie into X-CSRF-Token;
-		// request with no cookie (first hit) sends an empty value, which
-		// the server rejects and the next UI action retries after the
+		// requests. Echo the server-set bragibooks_csrf cookie into
+		// X-CSRF-Token; a request with no cookie (first hit) sends no value,
+		// which the server rejects and the next UI action retries after the
 		// GET (or any prior response) has set the cookie.
 		const csrf = document.cookie
 			.split('; ')
 			.find((c) => c.startsWith('bragibooks_csrf='))
 			?.slice('bragibooks_csrf='.length);
-		if (csrf && !headers.Authorization) {
+		if (csrf) {
 			headers['X-CSRF-Token'] = csrf;
 		}
 		return headers;

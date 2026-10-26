@@ -1,9 +1,50 @@
 <script lang="ts">
 	import { get } from '#lib/api.js';
-	import type { BookWithPeople, BooksListResponse, JobsListResponse, ProcessingJob, StatusCounts } from '#lib/types.js';
+	import type { BookWithPeople, BooksListResponse, JobsListResponse, ProcessingJob, Settings, StatusCounts } from '#lib/types.js';
 	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt } from '#lib/components/index.js';
 	import { formatRuntime } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
+
+	// One-time notice pointing at the (default-off) external API key.
+	// localStorage here is the DISMISSAL marker only — never the key.
+	const API_NOTICE_KEY = 'bragibooks_api_notice_dismissed';
+	// "unknown" must never read as "off": a failed settings fetch is not
+	// evidence that remote access is disabled. A deployment-managed flag
+	// is also not actionable from Settings, so it gets no nudge.
+	let apiNotice = $state<'unknown' | 'off' | 'on' | 'managed'>('unknown');
+	let noticeDismissed = $state(false);
+	const showApiNotice = $derived(apiNotice === 'off' && !noticeDismissed);
+	$effect(() => {
+		// Storage can be unavailable (private mode, blocked storage): a
+		// throwing read must not sink the settings fetch below it.
+		try {
+			noticeDismissed = localStorage.getItem(API_NOTICE_KEY) === '1';
+		} catch {
+			noticeDismissed = false;
+		}
+		get<Settings>('/settings')
+			.then((s) => {
+				apiNotice = s.api_endpoint_env_managed
+					? 'managed'
+					: s.api_endpoint_enabled === true
+						? 'on'
+						: 'off';
+			})
+			.catch(() => {
+				// Decorative notice: an unknown state hides the banner
+				// instead of claiming the API is off.
+				apiNotice = 'unknown';
+			});
+	});
+
+	function dismissApiNotice() {
+		try {
+			localStorage.setItem(API_NOTICE_KEY, '1');
+		} catch {
+			// storage unavailable — the banner stays for this page only
+		}
+		noticeDismissed = true;
+	}
 
 	let totals = $state({ pending: 0, matched: 0, processing: 0, done: 0, error: 0 });
 	let recent: BookWithPeople[] = $state([]);
@@ -85,6 +126,21 @@
 </script>
 
 <PageHeader title="Overview" description="What needs attention in your library, and where each book is right now." />
+
+{#if showApiNotice}
+	<div class="mb-6">
+		<Alert role="status">
+			{#snippet actions()}
+				<Button variant="ghost" onclick={dismissApiNotice}>Dismiss</Button>
+			{/snippet}
+			<span>
+				External API is off. Enable it in
+				<a href="/settings" class="underline underline-offset-2">Settings</a> to use the
+				API from other machines.
+			</span>
+		</Alert>
+	</div>
+{/if}
 
 {#if dl.error}
 	<div class="mb-6">

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net"
@@ -12,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -78,6 +81,31 @@ func main() {
 	// Refresh cfg after potential DB-loaded overrides
 	cfg = cfgMgr.Config()
 
+	// One-time migration of the legacy BRAGIBOOKS_ADMIN_TOKEN into the
+	// settings-based external API key, so an upgrade with the env token
+	// does not silently lock out remote clients (finding: legacy token
+	// cutover). Runs before the startup state line so that line reports
+	// the post-migration state. When it applies, the live state is
+	// swapped from the persisted digest (mirrors the settings endpoints'
+	// SetAPIEndpointState step).
+	migrated, migratedDigest, migErr := migrateLegacyAdminToken(database)
+	if migErr != nil {
+		// A persistence failure on ANY path that observed the token is
+		// fatal: the one-shot marker did not reach the row, so the token
+		// could re-seed the external API key on a later boot. A broken
+		// DB layer failing at startup is the correct, visible state —
+		// no background retry is attempted.
+		log.Fatalf("Legacy token migration aborted startup: %v", migErr)
+	}
+	if migrated {
+		cfgMgr.SetAPIEndpointState(true, migratedDigest)
+		cfg = cfgMgr.Config()
+	}
+
+	// One startup line about the external API state (the auth middleware
+	// itself logs nothing).
+	log.Print(externalAPIStatusLine(cfgMgr.AdminAuthState()))
+
 	// Cover art extracted from source media lives beside the database, so
 	// the container's persistent /config volume keeps it across restarts.
 	coversDir := filepath.Join(filepath.Dir(dbPath), "covers")
@@ -90,7 +118,6 @@ func main() {
 		log.Printf("Warning: ffmpeg not found on PATH (%v) — source cover art will not be extracted", ffmpegErr)
 		ffmpegPath = ""
 	}
-
 	// Services
 	processor := audio.NewProcessor(
 		cfg.M4bMerge.Binary,
@@ -118,7 +145,7 @@ func main() {
 	defer cancel()
 	go processingSvc.RunWorkers(ctx, cfg.Processing.NumCPUs)
 
-	handler := api.NewHandler(api.Services{
+	handler := api.NewHandler(&api.Services{
 		DB:            database,
 		Config:        cfgMgr,
 		Processor:     processor,
@@ -143,13 +170,15 @@ func main() {
 	// orchestrators and the CLI can probe liveness without credentials.
 	r.Get("/api/health", server.HealthCheck)
 
-	// Admin auth (finding: unauthenticated API): token mode when
-	// BRAGIBOOKS_ADMIN_TOKEN is set, loopback-LAN-only local mode when not.
-	// Applied to the /api subtree and to the extracted source covers;
-	// the embedded SPA (served same origin below) stays reachable for the
-	// UI to load. Covers are mounted inside RegisterRoutes so they cannot
-	// drift outside this gate.
-	handler.RegisterRoutes(r, api.RequireAdmin(os.Getenv("BRAGIBOOKS_ADMIN_TOKEN")))
+	// Admin auth (finding: unauthenticated API): loopback-LAN access is
+	// always available (the same-origin UI relies on it via CSRF); when
+	// the external API is enabled, a valid API key additionally allows
+	// any address. State is read per request from the config manager so
+	// Settings-page toggles apply without a restart. Applied to the /api
+	// subtree and to the extracted source covers; the embedded SPA (served
+	// same origin below) stays reachable for the UI to load. Covers are
+	// mounted inside RegisterRoutes so they cannot drift outside this gate.
+	handler.RegisterRoutes(r, api.RequireAdminWithState(cfgMgr.AdminAuthState))
 
 	// SPA handler — serve embedded frontend for non-API routes.
 	r.HandleFunc("/*", webfs.Handler().ServeHTTP)
@@ -190,6 +219,217 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("graceful shutdown failed: %v", err)
 	}
+}
+
+// externalAPIStatusLine renders the one startup line about the external
+// API state (the auth middleware itself logs nothing): which state
+// (disabled / enabled with key / enabled without key) sees which message.
+func externalAPIStatusLine(state config.AdminAuthState) string {
+	switch {
+	case !state.Enabled:
+		return "External API disabled — loopback/LAN access only."
+	case state.KeyDigest != "":
+		return "External API enabled — remote access authorized with API key; LAN access unchanged."
+	default:
+		return "External API enabled via env but no key exists — open Settings → External API → Reissue key to mint one for remote clients."
+	}
+}
+
+// digestPresent renders a digest's presence for a warning line without
+// leaking the value itself.
+func digestPresent(digest string) string {
+	if digest == "" {
+		return "empty"
+	}
+	return "present"
+}
+
+// migrateLegacyAdminToken performs the one-time migration of the legacy
+// BRAGIBOOKS_ADMIN_TOKEN env var into the settings-based external API
+// key (finding: legacy token cutover).
+//
+// It applies exactly once, ever, only when ALL of:
+//  1. BRAGIBOOKS_ADMIN_TOKEN is set;
+//  2. the deployment pin SERVER_API_ENDPOINT_ENABLED is absent — the pin
+//     is only valid for post-cutover deployments, and if it is present
+//     the deployment chose to manage the flag itself, so the legacy var
+//     is ignored;
+//  3. the STORED state (read from the DB row, not the construction-time
+//     config snapshot — the legacy Django auto-migration and
+//     ensureDefaultSettings may have just written the row) is fresh:
+//     api_enabled=0 with an empty api_key_digest;
+//  4. the one-shot marker legacy_token_migrated in the settings row
+//     (schema v6) is false.
+//
+// Condition 4 alone is what keeps the migration from resurrecting a
+// token the user later disabled: a disable clears the digest back to
+// ”, which by itself looks exactly like the pre-upgrade state — the
+// marker is never cleared, so the re-seed never re-runs. A rotation
+// after an explicit disable+enable is covered by condition 3 (the state
+// was no longer fresh when the marker flipped).
+//
+// Seeding is the only thing that is one-shot: the marker is consumed on
+// FIRST observation of the variable on every path that reaches it — the
+// fresh-state seed, the non-fresh warn-and-ignore, and the pin-suppressed
+// run alike — so a later disable can never leave the row reading "fresh
+// and unconsumed", and a pin removed later cannot re-seed the token.
+//
+// When it applies, the state seed and the marker flip are ONE row-write
+// (the row's existing values are carried through), persisted to the DB
+// only — the YAML flag file is deliberately NOT written. main() swaps
+// the live config state from the returned digest so the rest of
+// startup and the auth middleware see the migrated key immediately.
+//
+// Returns (true, digest) when it migrated, (false, "") otherwise. A
+// non-nil error means the process MUST NOT continue: the legacy token was
+// observed but its one-shot marker (or the migration itself) could not be
+// persisted — main() fatals on it, because a row that lost the mark would
+// read as unconsumed and the token could re-seed the external API key on
+// a later boot (finding: legacy token cutover, P1).
+func migrateLegacyAdminToken(database *sql.DB) (bool, string, error) {
+	legacyToken := strings.TrimSpace(os.Getenv("BRAGIBOOKS_ADMIN_TOKEN"))
+	if legacyToken == "" {
+		return false, "", nil
+	}
+	if os.Getenv("SERVER_API_ENDPOINT_ENABLED") != "" {
+		// The pin manages the flag, so the legacy var never seeds — but
+		// its first observation still consumes the one-shot marker, the
+		// same way the non-fresh warn-and-ignore below does, so a pin
+		// removed later cannot re-seed the token (finding: legacy token
+		// cutover, P1 no-resurrection-after-disable). consumeLegacyToken-
+		// MarkerOnObservation is a no-op once the marker is set, so boots
+		// with the pin present do not rewrite the row.
+		var present int
+		if err := database.QueryRow("SELECT 1 FROM settings WHERE id = 1").Scan(&present); err == nil {
+			if err := consumeLegacyTokenMarkerOnObservation(database, "the deployment pin SERVER_API_ENDPOINT_ENABLED manages the external API flag"); err != nil {
+				// Fail closed: the observed token's mark did not persist,
+				// so the row would read as un-consumed — a pin removed
+				// later (or any later disable) could re-seed the token.
+				return false, "", fmt.Errorf("the legacy token was observed under the deployment pin, but its one-shot observation mark could not be persisted: %v — startup aborted to prevent the token re-seeding the external API key after a later disable or pin removal; fix the database and restart", err)
+			}
+		}
+		return false, "", nil
+	}
+
+	// Read the whole row so nothing the Django auto-migration carried in
+	// is discarded by the seed's INSERT OR REPLACE (same carry-through
+	// rule as migrateSettings). No row yet → the seed creates it.
+	var m4bBinary, inputDir, outputDir, completedDir, outputScheme, region, apiKey, baseURL string
+	var numCPUs int
+	var apiEnabled int
+	var digest string
+	var markerVal int
+	err := database.QueryRow(`
+		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url,
+		       api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0)
+		FROM settings WHERE id = 1
+	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &apiEnabled, &digest, &markerVal)
+	if err == sql.ErrNoRows {
+		// A new database with no settings row yet: nothing to migrate.
+		return false, "", nil
+	}
+	if err != nil {
+		// The token is set, so the mark must eventually persist; an
+		// unreadable row leaves that unproven — fail closed.
+		return false, "", fmt.Errorf("the legacy token was observed, but the settings row could not be read to check its migration state: %v — startup aborted so the token cannot re-seed the external API key on a later boot; fix the database and restart", err)
+	}
+	if markerVal != 0 {
+		log.Printf("Warning: BRAGIBOOKS_ADMIN_TOKEN is set but the legacy token was already migrated into the external API key (legacy_token_migrated) and is now ignored — manage remote access in Settings → External API.")
+		return false, "", nil
+	}
+	if apiEnabled != 0 || digest != "" {
+		// The token is ignored, but its observation still consumes the
+		// one-shot marker in this same row-read's write: leaving it unset
+		// would let a later user disable (api_enabled=0, digest='') read
+		// as "fresh" and re-seed the token on the next boot — resurrection
+		// after an explicit disable (finding: legacy token cutover, P1).
+		if err := consumeLegacyTokenMarkerOnObservation(database, "the external API already has state in the database"); err != nil {
+			// Fail closed: without the mark persisted a later user
+			// disable (api_enabled=0, digest='') would read as fresh and
+			// re-seed the token on the next boot.
+			return false, "", fmt.Errorf("the legacy token was observed while the external API already has state in the database (api_enabled=%d, api_key_digest %s), but its one-shot observation mark could not be persisted: %v — startup aborted to prevent the token re-seeding the external API key after a later disable; fix the database and restart", apiEnabled, digestPresent(digest), err)
+		}
+		log.Printf("Warning: BRAGIBOOKS_ADMIN_TOKEN is set but the external API already has state in the database (api_enabled=%d, api_key_digest %s) — the legacy token is ignored and its first-observation mark is set; manage remote access in Settings → External API.", apiEnabled, digestPresent(digest))
+		return false, "", nil
+	}
+
+	sum := sha256.Sum256([]byte(legacyToken))
+	migratedDigest := hex.EncodeToString(sum[:])
+	if _, err := database.Exec(`
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, datetime('now'))
+	`,
+		apiKey,
+		baseURL,
+		m4bBinary,
+		inputDir,
+		outputDir,
+		completedDir,
+		numCPUs,
+		outputScheme,
+		region,
+		migratedDigest,
+	); err != nil {
+		// Fail closed: the seed write is what makes the cutover a fact
+		// (row + marker persisted). Retrying on the next boot would
+		// leave this boot running with the token un-migrated — the key
+		// the remote clients got would not exist.
+		return false, "", fmt.Errorf("the legacy token migration could not persist the migrated key and marker: %v — startup aborted so the token cannot re-seed the external API key on a later boot with a partially persisted state; fix the database and restart", err)
+	}
+
+	log.Printf("Migrated legacy admin token: BRAGIBOOKS_ADMIN_TOKEN was one time migrated into the external API key (remote access is now key-based) and is now IGNORED — manage remote access in Settings → External API.")
+	return true, migratedDigest, nil
+}
+
+// consumeLegacyTokenMarkerOnObservation marks legacy_token_migrated on the
+// id=1 settings row. The whole row is replaced, so every other column is
+// carried through unchanged, byte for byte (same carry-through rule as
+// migrateSettings) — api_enabled and api_key_digest are deliberately left
+// exactly as they are: consuming the marker never touches the external API
+// state, it only stops the legacy token from ever seeding it again. Callers
+// have already confirmed the row exists and the marker is unset (finding:
+// legacy token cutover, P1 no-resurrection-after-disable).
+//
+// It is a no-op once the marker is already set (it returns before writing),
+// so startups with the deployment pin present — which consume the marker on
+// every boot — do not rewrite the row and do not reset updated_at.
+func consumeLegacyTokenMarkerOnObservation(database *sql.DB, reason string) error {
+	var m4bBinary, inputDir, outputDir, completedDir, outputScheme, region, apiKey, baseURL, created string
+	var numCPUs, apiEnabled int
+	var digest string
+	var marker int
+	if err := database.QueryRow(`
+		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url,
+		       api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0), created_at
+		FROM settings WHERE id = 1
+	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &apiEnabled, &digest, &marker, &created); err != nil {
+		return err
+	}
+	if marker != 0 {
+		return nil // already consumed: no write, no timestamp churn
+	}
+	_, err := database.Exec(`
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, created_at, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'))
+	`,
+		apiKey,
+		baseURL,
+		m4bBinary,
+		inputDir,
+		outputDir,
+		completedDir,
+		numCPUs,
+		outputScheme,
+		region,
+		apiEnabled,
+		digest,
+		created,
+	)
+	if err != nil {
+		return err
+	}
+	log.Printf("Legacy token observation mark set: BRAGIBOOKS_ADMIN_TOKEN is ignored because %s — it can no longer seed the external API key.", reason)
+	return nil
 }
 
 func autoMigrateLegacy(newDB *sql.DB, cfgMgr *config.ConfigManager) {
@@ -330,13 +570,14 @@ func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {
 	cfg := cfgMgr.Config()
 	yamlKeys := cfgMgr.YAMLKeys()
 
-	var m4bBinary, inputDir, outputDir, completedDir, outputScheme, region, apiKey, baseURL string
+	var m4bBinary, inputDir, outputDir, completedDir, outputScheme, region, apiKey, baseURL, endpointKeyDigest string
 	var numCPUs int
+	var endpointEnabled int
 
 	err := database.QueryRow(`
-		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url
+		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url, api_enabled, api_key_digest
 		FROM settings WHERE id = 1
-	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL)
+	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &endpointEnabled, &endpointKeyDigest)
 	if err != nil {
 		log.Printf("Warning: could not load settings from DB: %v", err)
 		return
@@ -372,6 +613,14 @@ func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {
 	if !yamlKeys["api_key.base_url"] && os.Getenv("API_KEY_BASE_URL") == "" {
 		cfg.APIKey.BaseURL = baseURL
 	}
+	// The enabled flag follows the usual YAML/env gate (a deployment pin
+	// wins over a store save); the digest has no deployment source and
+	// always comes from the DB row — otherwise the key would die after a
+	// restart.
+	if !yamlKeys["server.api_endpoint.enabled"] && os.Getenv("SERVER_API_ENDPOINT_ENABLED") == "" {
+		cfg.Server.APIEndpoint.Enabled = endpointEnabled != 0
+	}
+	cfg.Server.APIEndpoint.KeyDigest = endpointKeyDigest
 }
 
 func ensureDefaultSettings(database *sql.DB) error {

@@ -23,21 +23,20 @@ FROM debian:trixie-slim
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ffmpeg ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
-    useradd -u 1000 app && \
-    mkdir -p /config /input /output && \
-    chown -R app:app /config /input /output
+    mkdir -p /config /input /output
 WORKDIR /app
 COPY --from=builder /build/bragibooks /usr/local/bin/
 COPY --from=ghcr.io/djdembeck/m4b-merge:main-amd64 /usr/local/bin/m4b-merge /usr/local/bin/
 COPY docker/entrypoint.sh /usr/local/bin/bragibooks-entrypoint
 RUN chmod 0755 /usr/local/bin/bragibooks-entrypoint
-ENV PUID=1000 PGID=1000
-# The image runs as `app` (uid 1000); the built-in default database path
-# is relative to WORKDIR (/app, not writable) and would fatal at startup.
-# Pin the runtime default to the app-owned /config volume. Compose files
-# and operator env vars keep overriding this.
+# The image runs as root by default (matching the legacy image); the
+# entrypoint chowns the runtime directories and drops to UID/GID (legacy
+# variable names, defaults 99/100; PUID/PGID accepted as aliases) so
+# host-mounted volumes keep working on upgrade. The built-in default
+# database path is relative to WORKDIR and would fatal at startup, so
+# pin it to the /config volume. Compose files and operator env vars
+# keep overriding these.
 ENV DATABASE_PATH=/config/bragibooks.db
 EXPOSE 8080
 VOLUME ["/config", "/input", "/output"]
-USER app
 ENTRYPOINT ["/usr/local/bin/bragibooks-entrypoint"]

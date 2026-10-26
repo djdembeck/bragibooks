@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/bragibooks/bragibooks/internal/config"
+
 	"github.com/go-chi/chi/v5"
 )
 
@@ -67,11 +69,16 @@ func TestRegisterRoutesCoversRequireAdmin(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "7.jpg"), []byte("\xff\xd8\xff\xe0jpeg"), 0o644); err != nil {
 		t.Fatalf("write cover: %v", err)
 	}
-	h := &Handler{svc: Services{DB: newTestDB(t), CoversDir: dir}}
 	const token = "s3cret"
+	h := &Handler{svc: &Services{
+		DB:        newTestDB(t),
+		CoversDir: dir,
+		Config:    config.NewConfigManager(),
+	}}
+	h.svc.Config.SetAPIEndpointState(true, keyDigestOf(token))
 
 	r := chi.NewRouter()
-	h.RegisterRoutes(r, RequireAdmin(token))
+	h.RegisterRoutes(r, RequireAdminWithState(h.svc.Config.AdminAuthState))
 
 	req := func(remoteAddr, cookie string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("GET", "/covers/7.jpg", nil)

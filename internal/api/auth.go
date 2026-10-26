@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/bragibooks/bragibooks/internal/config"
 )
 
 // The loopback-LAN definition, stated once and used everywhere in this
@@ -23,9 +25,8 @@ import (
 // This is deliberately NOT “only loopback”: the compose deployment runs in
 // a private LAN and the host must be able to reach it (finding: local
 // mode must stop LAN exposure without breaking single-host use). The
-// tradeoff is documented: any host on that LAN can reach the API in local
-// mode, which is why the env token (BRAGIBOOKS_ADMIN_TOKEN) is the
-// recommended configuration for anything not on a trusted quiet LAN.
+// tradeoff is documented: any host on that LAN can reach the API — the
+// web UI relies on exactly this, via the CSRF double-submit cookie.
 //
 // X-Forwarded-For is honored ONLY when the direct TCP peer (RemoteAddr)
 // is in an explicitly configured trusted-proxy set (env
@@ -46,34 +47,48 @@ import (
 // the request; its token then rides the auto-attached cookie and takes
 // the CSRF guard.
 //
-// Token auth (header or cookie) grants remote access in token mode and is
-// subject to the same loopback-LAN rule only in local mode.
+// The access rule, given the current {Enabled, KeyDigest} state (read per
+// request, so runtime toggles apply without a restart):
+//
+//  1. A present, valid key (Bearer header or bragibooks_token cookie)
+//     allows from any address — but only while the external API is
+//     enabled; a retained digest never authorizes remote access in the
+//     disabled state. A Bearer header is CSRF-exempt; the key is
+//     compared as its SHA-256 digest against the stored digest.
+//  2. No presented key (or none applicable) and the client is
+//     loopback/LAN: allow via the double-submit-CSRF guard, in BOTH the
+//     enabled and disabled states. This is what keeps the same-origin web
+//     UI working on the LAN whether or not a key exists.
+//
+//     Fail-closed clause (finding: reverse-proxy LAN bypass): if the
+//     request reaches the direct peer through a proxy that is NOT in
+//     BRAGIBOOKS_TRUSTED_PROXIES and carries a forwarding header
+//     (X-Forwarded-For, X-Real-IP, Forwarded), the end client cannot be
+//     attributed — the proxy's outward-facing hop decides nothing we can
+//     verify — so the request is NOT treated as loopback/LAN and falls
+//     through to rule 4 (enabled: 401 Bearer; disabled: 403). A peer
+//     that IS a configured trusted proxy skips the clause (its XFF chain
+//     is legitimate and consumed per the XFF-trust rule above).
+//     Genuine direct LAN browsers are unaffected: browsers do not send
+//     those headers themselves.
+//  3. A present but invalid key: 403 "invalid API key" — always, so a
+//     stale credential can never degrade to the LAN fallback.
+//  4. Otherwise (non-LAN, no valid key):
+//     - Enabled: 401 "API key required" with WWW-Authenticate: Bearer.
+//     - Disabled: 403 "external API disabled — enable External API in
+//       Settings to access the API remotely".
 
-// RequireAdmin returns an http.Handler middleware enforcing admin access
-// on the /api route group (excluding /api/health and static serving, which
-// are mounted outside it by the caller).
+// RequireAdminWithState returns an http.Handler middleware enforcing
+// admin access on the /api route group (excluding /api/health and static
+// serving, which are mounted outside it by the caller).
 //
-// Token mode (adminToken != ""): every request must carry the admin token
-// via "Authorization: Bearer <token>" (preferred) or the
-// adminCookieName cookie (constant-time compare; the cookie exists so
-// clients that cannot set headers — e.g. EventSource — can authenticate).
-// Requests that omit the token get 401; a wrong token gets 403. Token
-// auth works from any address.
-//
-// Local mode (adminToken == ""): requests must come from a loopback-LAN
-// address (see above). X-Forwarded-For is honored only when the direct
-// peer is explicitly listed in BRAGIBOOKS_TRUSTED_PROXIES; the chain is
-// walked from the rightmost hop to the client and the first untrusted
-// entry is taken as the end client (with no trusted proxies configured
-// the header is ignored and the direct peer decides). Everything else is
-// 403. One warning is logged at construction time so the operator knows
-// the service is running without a secret.
-func RequireAdmin(adminToken string) func(http.Handler) http.Handler {
-	if adminToken == "" {
-		log.Printf("Warning: no BRAGIBOOKS_ADMIN_TOKEN configured — admin API is in local mode: only loopback/10./192.168./172.16-31 clients are accepted. Set the env var to enable token auth for remote access.")
-	}
+// lazy supplies the current auth state (config.AdminAuthState) per
+// request, so enable/disable/reissue from the settings endpoints takes
+// effect on the next request without a restart.
+func RequireAdminWithState(lazy func() config.AdminAuthState) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			st := lazy()
 			token, hasToken := bearerToken(r)
 			// Requests authenticated by an explicit "Bearer" Authorization
 			// header are CSRF-exempt: browsers never attach that header to
@@ -85,45 +100,40 @@ func RequireAdmin(adminToken string) func(http.Handler) http.Handler {
 			exempt := bearerHeaderPresent(r)
 
 			if hasToken {
-				if adminToken == "" {
-					// Token mode is not active; a token-bearing request in
-					// local mode is checked against the loopback-LAN rule
-					// below, not compared against anything.
-					if !isLoopbackLAN(r) {
-						writeError(w, http.StatusForbidden, "admin API access from non-local address without a configured token")
-						return
-					}
-					if exempt {
-						next.ServeHTTP(w, r)
-						return
-					}
-					csrfGuard(w, r, next)
+				// A presented credential is always treated as key auth and
+				// is only honored while the external API is enabled: a
+				// retained digest must not open remote access in the
+				// disabled state (the DB row and the flag can disagree,
+				// e.g. after an env/YAML pin to false). Deliberately
+				// stricter than an old-code silent fallthrough — a
+				// presented-but-stale key is never accepted, and the web
+				// UI sends no stored key, so it is unaffected.
+				if !st.Enabled || st.KeyDigest == "" || !matchAPIKeyDigest(token, st.KeyDigest) {
+					writeError(w, http.StatusForbidden, "invalid API key")
 					return
 				}
-				if subtle.ConstantTimeCompare([]byte(token), []byte(adminToken)) == 1 {
-					if exempt {
-						next.ServeHTTP(w, r)
-						return
-					}
-					csrfGuard(w, r, next)
+				if exempt {
+					next.ServeHTTP(w, r)
 					return
 				}
-				writeError(w, http.StatusForbidden, "invalid admin token")
+				csrfGuard(w, r, next)
 				return
 			}
 
-			// No bearer token: local mode requires a loopback-LAN client.
-			if adminToken != "" {
-				// Token mode: token is required.
-				w.Header().Set("WWW-Authenticate", `Bearer realm="bragibooks"`)
-				writeError(w, http.StatusUnauthorized, "admin token required")
+			// No presented key: the loopback-LAN path is reachable in both
+			// the enabled and disabled states (the UI-keeps-working
+			// guarantee), subject to the fail-closed clause (forwarding
+			// header from a non-trusted peer refuses the LAN fallback).
+			if lanPathAllowed(r) {
+				csrfGuard(w, r, next)
 				return
 			}
-			if !isLoopbackLAN(r) {
-				writeError(w, http.StatusForbidden, "admin API is only reachable from loopback/LAN addresses (set BRAGIBOOKS_ADMIN_TOKEN for remote access)")
+			if !st.Enabled {
+				writeError(w, http.StatusForbidden, "external API disabled — enable External API in Settings to access the API remotely")
 				return
 			}
-			csrfGuard(w, r, next)
+			w.Header().Set("WWW-Authenticate", `Bearer realm="bragibooks"`)
+			writeError(w, http.StatusUnauthorized, "API key required")
 		})
 	}
 }
@@ -182,6 +192,40 @@ func isLoopbackLAN(r *http.Request) bool {
 	// Not arriving from a trusted proxy: the XFF header is not trusted and
 	// the direct peer decides (finding: XFF trust).
 	return isLoopbackLANIP(peer)
+}
+
+// lanPathAllowed reports whether the no-key loopback-LAN fallback path
+// applies: the peer must be loopback-LAN (isLoopbackLAN, including the
+// trusted-proxy XFF walk), AND the request must not anonymize the peer.
+//
+// A forwarding header (X-Forwarded-For, X-Real-IP, Forwarded) arriving
+// from a peer that is NOT a configured trusted proxy means the end
+// client cannot be attributed: a reverse proxy (e.g. with
+// BRAGIBOOKS_TRUSTED_PROXIES unset) forwards all internet traffic with
+// RemoteAddr = the proxy's hop (loopback/LAN), and the keyless LAN
+// fallback would then pass ANY internet client (finding: reverse-proxy
+// LAN bypass). The request therefore falls through to the enabled→401
+// Bearer / disabled→403 branch instead. A configured trusted proxy
+// skips the clause — its XFF chain is legitimate and already consumed
+// by endClientFromChain. Genuine direct LAN browsers are unaffected:
+// browsers do not send those headers themselves.
+func lanPathAllowed(r *http.Request) bool {
+	if !isLoopbackLAN(r) {
+		return false
+	}
+	if !hasForwardingHeader(r) {
+		return true
+	}
+	proxies := parseTrustedProxies()
+	return len(proxies) > 0 && isTrustedProxyIP(clientAddress(r), proxies)
+}
+
+// hasForwardingHeader reports whether the request carries any of the
+// conventional forwarding headers.
+func hasForwardingHeader(r *http.Request) bool {
+	return r.Header.Get("X-Forwarded-For") != "" ||
+		r.Header.Get("X-Real-IP") != "" ||
+		r.Header.Get("Forwarded") != ""
 }
 
 // endClientFromChain resolves the end client from an X-Forwarded-For chain

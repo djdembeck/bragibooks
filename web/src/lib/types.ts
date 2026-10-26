@@ -152,6 +152,8 @@ export interface Settings {
 	num_cpus: number;
 	output_scheme: string;
 	region: string;
+	api_endpoint_enabled?: boolean;
+	api_endpoint_env_managed?: boolean;
 	created_at?: string;
 	updated_at?: string;
 	bragibooks_version?: string;

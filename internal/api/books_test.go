@@ -72,7 +72,7 @@ func newTestDB(t *testing.T) *sql.DB {
 // newTestHandler returns a Handler backed by an in-memory SQLite DB.
 func newTestHandler(t *testing.T) *Handler {
 	t.Helper()
-	return &Handler{svc: Services{DB: newTestDB(t)}}
+	return &Handler{svc: &Services{DB: newTestDB(t)}}
 }
 
 func TestUpdateBookMultiFieldSQLConstruction(t *testing.T) {
@@ -266,7 +266,7 @@ func TestCreateBooksAttachesSourceCover(t *testing.T) {
 		t.Fatalf("write sidecar: %v", err)
 	}
 	coversDir := t.TempDir()
-	h := &Handler{svc: Services{
+	h := &Handler{svc: &Services{
 		DB:        newTestDB(t),
 		CoversDir: coversDir,
 		FFmpeg:    stubFFmpegForCovers(t, filepath.Join(t.TempDir(), "args")),
@@ -289,7 +289,7 @@ func TestCreateBooksAttachesSourceCover(t *testing.T) {
 
 func TestCreateBooksWithoutSourceArtKeepsPlaceholder(t *testing.T) {
 	coversDir := t.TempDir()
-	h := &Handler{svc: Services{
+	h := &Handler{svc: &Services{
 		DB:        newTestDB(t),
 		CoversDir: coversDir,
 		FFmpeg:    stubFFmpegForCovers(t, filepath.Join(t.TempDir(), "args")),
@@ -311,7 +311,7 @@ func TestCreateBooksWithoutSourceArtKeepsPlaceholder(t *testing.T) {
 
 func TestDeleteBookRemovesExtractedCover(t *testing.T) {
 	coversDir := t.TempDir()
-	h := &Handler{svc: Services{DB: newTestDB(t), CoversDir: coversDir}}
+	h := &Handler{svc: &Services{DB: newTestDB(t), CoversDir: coversDir}}
 
 	res, err := h.svc.DB.Exec("INSERT INTO books (title, status) VALUES ('Delete Me', 'pending')")
 	if err != nil {
