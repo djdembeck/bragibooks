@@ -1,4 +1,4 @@
-import { cleanAdbError, type CleanedAdbError } from '$lib/adbError';
+import { cleanAdbError, type CleanedAdbError } from '#lib/adbError.js';
 
 const API_BASE = '';
 

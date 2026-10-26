@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick, untrack } from 'svelte';
-	import { get, put, del } from '$lib/api';
+	import { get, put, del } from '#lib/api.js';
 	import { goto } from '$app/navigation';
 	import type {
 		BookWithPeople,
@@ -11,7 +11,7 @@
 		AudiobookDBRelease,
 		Settings,
 		UpdateBookRequest
-	} from '$lib/types';
+	} from '#lib/types.js';
 	import {
 		extractAsin,
 		pickCover,
@@ -19,11 +19,11 @@
 		bookCoverUrl,
 		decodeHtmlEntities,
 		AUDIO_FILE_EXTS
-	} from '$lib/types';
-	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, AbdTag, Modal } from '$lib/components';
-	import { toCleanedError, type CleanedAdbError } from '$lib/adbError';
-	import { resolveScheme } from '$lib/scheme';
-	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
+	} from '#lib/types.js';
+	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, AbdTag, Modal } from '#lib/components/index.js';
+	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
+	import { resolveScheme } from '#lib/scheme.js';
+	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 
 	type ReviewMode = 'batch' | 'focused';
 

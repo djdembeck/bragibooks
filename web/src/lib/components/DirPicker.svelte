@@ -1,11 +1,11 @@
 <script lang="ts">
-	import { get } from '$lib/api';
+	import { get } from '#lib/api.js';
 	import Modal from './Modal.svelte';
 	import Button from './Button.svelte';
 	import Skeleton from './Skeleton.svelte';
 	import ErrorDetail from './ErrorDetail.svelte';
-	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
-	import type { DirectoryEntry, DirectoriesResponse } from '$lib/types';
+	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
+	import type { DirectoryEntry, DirectoriesResponse } from '#lib/types.js';
 	import { Folder, FolderUp, Check, AlertTriangle } from '@lucide/svelte';
 
 	let {

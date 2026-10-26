@@ -17,6 +17,14 @@
     {
       "groupName": "docker-compose",
       "matchManagers": ["docker-compose"]
+    },
+    {
+      // TypeScript 7 is the native (Go) compiler: the JS API no longer
+      // exports the surface @sveltejs/kit 3.x and svelte-check need
+      // (ts.readConfigFile, ts.sys), which breaks `svelte-kit sync` and
+      // the vite build. Allow TS 6.x until the toolchain moves on.
+      "matchPackageNames": ["typescript"],
+      "allowedVersions": "< 7.0.0"
     }
   ]
 }

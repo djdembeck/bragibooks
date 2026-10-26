@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { page } from '$app/stores';
-	import { Logo } from '$lib/components';
+	import { page } from '$app/state';
+	import { Logo } from '#lib/components/index.js';
 
 	// One familiar topnav for every route. No polling, no count badges:
 	// batch counts live in the workspace that owns the data.
@@ -17,7 +17,7 @@
 		return pathname === href || pathname.startsWith(`${href}/`);
 	}
 
-	const pathname = $derived($page.url.pathname);
+	const pathname = $derived(page.url.pathname);
 </script>
 
 <!-- Skip link — first focusable element -->

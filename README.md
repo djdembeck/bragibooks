@@ -251,7 +251,7 @@ Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). Feat
 
 ## Building
 
-Building from source requires Go 1.25, [Bun](https://bun.sh/), and the runtime dependencies `ffmpeg` and [`m4b-merge`](https://github.com/djdembeck/m4b-merge). The production build embeds the SvelteKit frontend in the Go binary.
+Building from source requires Go 1.26+, [Bun](https://bun.sh/), and the runtime dependencies `ffmpeg` and [`m4b-merge`](https://github.com/djdembeck/m4b-merge). The production build embeds the SvelteKit frontend in the Go binary.
 
 ### Make
 

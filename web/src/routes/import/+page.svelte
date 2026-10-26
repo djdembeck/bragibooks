@@ -1,10 +1,10 @@
 <script lang="ts">
-	import { get, post } from '$lib/api';
+	import { get, post } from '#lib/api.js';
 	import { goto } from '$app/navigation';
-	import type { DirectoryEntry, DirectoriesResponse, Settings, CreateBooksResponse } from '$lib/types';
-	import { PageHeader, Alert, ErrorDetail, Button, Skeleton, EmptyState } from '$lib/components';
-	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
-	import { toCleanedError, type CleanedAdbError } from '$lib/adbError';
+	import type { DirectoryEntry, DirectoriesResponse, Settings, CreateBooksResponse } from '#lib/types.js';
+	import { PageHeader, Alert, ErrorDetail, Button, Skeleton, EmptyState } from '#lib/components/index.js';
+	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
+	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { ChevronUp, ChevronDown, Folder, FileAudio, File } from '@lucide/svelte';
 
 	let currentPath = $state('');

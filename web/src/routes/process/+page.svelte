@@ -1,10 +1,10 @@
 <script lang="ts">
-	import { get, post, streamEvents } from '$lib/api';
-	import type { BookWithPeople, BooksListResponse, ProcessingResponse, ProcessingJob, JobsListResponse } from '$lib/types';
-	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, StatusBadge, CoverArt } from '$lib/components';
-	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
-	import { cleanAdbError, toCleanedError } from '$lib/adbError';
-	import { formatJobTime } from '$lib/datetime';
+	import { get, post, streamEvents } from '#lib/api.js';
+	import type { BookWithPeople, BooksListResponse, ProcessingResponse, ProcessingJob, JobsListResponse } from '#lib/types.js';
+	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, StatusBadge, CoverArt } from '#lib/components/index.js';
+	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
+	import { cleanAdbError, toCleanedError } from '#lib/adbError.js';
+	import { formatJobTime } from '#lib/datetime.js';
 	import { CheckCircle, Clock, ArrowRight, FileText } from '@lucide/svelte';
 
 	interface JobItem {
