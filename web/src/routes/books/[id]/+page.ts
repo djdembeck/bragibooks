@@ -1,7 +1,7 @@
-import { ApiError, get } from '$lib/api';
-import { normalizeBook } from '$lib/types';
-import { toCleanedError } from '$lib/adbError';
-import type { BookWithPeople } from '$lib/types';
+import { ApiError, get } from '#lib/api.js';
+import { normalizeBook } from '#lib/types.js';
+import { toCleanedError } from '#lib/adbError.js';
+import type { BookWithPeople } from '#lib/types.js';
 import type { PageLoad } from './$types';
 
 export const load: PageLoad = async ({ params }) => {

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Button } from '$lib/components';
+	import { Button } from '#lib/components/index.js';
 	import type { Snippet } from 'svelte';
 
 	let {

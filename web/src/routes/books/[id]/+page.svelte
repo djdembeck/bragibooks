@@ -1,12 +1,12 @@
 <script lang="ts">
-	import { goto, invalidateAll } from '$app/navigation';
-	import { get, put, post } from '$lib/api';
+	import { goto, refreshAll } from '$app/navigation';
+	import { get, put, post } from '#lib/api.js';
 	import type { PageData } from './$types';
-	import type { BookWithPeople, ProcessingJob, JobsListResponse, AudiobookDBBook, AudiobookDBRelease } from '$lib/types';
-	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '$lib/types';
-	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '$lib/adbError';
-	import { formatJobTime } from '$lib/datetime';
-	import { StatusBadge, AbdTag, EmptyState, Button, Alert, ErrorDetail, Skeleton, CoverArt } from '$lib/components';
+	import type { BookWithPeople, ProcessingJob, JobsListResponse, AudiobookDBBook, AudiobookDBRelease } from '#lib/types.js';
+	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '#lib/types.js';
+	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
+	import { formatJobTime } from '#lib/datetime.js';
+	import { StatusBadge, AbdTag, EmptyState, Button, Alert, ErrorDetail, Skeleton, CoverArt } from '#lib/components/index.js';
 	import { ExternalLink, ArrowLeft } from '@lucide/svelte';
 
 	let { data }: { data: PageData } = $props();
@@ -95,7 +95,7 @@
 		try {
 			await post(`/process`, { book_ids: [book.id], src_dirs: [book.src_path] });
 			confirming = null;
-			await invalidateAll(); // refresh book status + job list for the new job
+			await refreshAll(); // refresh book status + job list for the new job
 			await goto('/process');
 		} catch (e) {
 			actionError = toCleanedError(e);
@@ -111,7 +111,7 @@
 		try {
 			await put(`/books/${book.id}`, { status: 'pending' });
 			confirming = null;
-			await invalidateAll();
+			await refreshAll();
 			await goto('/match');
 		} catch (e) {
 			actionError = toCleanedError(e);
@@ -129,7 +129,7 @@
 		actionError = null;
 		try {
 			await post(`/jobs/${job.id}/cancel`, {});
-			await invalidateAll(); // book reverts to matched + job list shows cancelled
+			await refreshAll(); // book reverts to matched + job list shows cancelled
 		} catch (e) {
 			actionError = toCleanedError(e);
 		} finally {
@@ -256,7 +256,7 @@
 
 {#if !book}
 	{#if data.loadError}
-		<Alert variant="error" onretry={() => invalidateAll()}>
+		<Alert variant="error" onretry={() => refreshAll()}>
 			Could not load this book: {data.loadError.message}
 			<ErrorDetail raw={data.loadError.raw} needsSettings={data.loadError.needsSettings} />
 		</Alert>

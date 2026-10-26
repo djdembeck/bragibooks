@@ -1,9 +1,9 @@
 <script lang="ts">
-	import { get } from '$lib/api';
-	import type { BookWithPeople, BooksListResponse, JobsListResponse, ProcessingJob, StatusCounts } from '$lib/types';
-	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt } from '$lib/components';
-	import { formatRuntime } from '$lib/types';
-	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
+	import { get } from '#lib/api.js';
+	import type { BookWithPeople, BooksListResponse, JobsListResponse, ProcessingJob, StatusCounts } from '#lib/types.js';
+	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt } from '#lib/components/index.js';
+	import { formatRuntime } from '#lib/types.js';
+	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 
 	let totals = $state({ pending: 0, matched: 0, processing: 0, done: 0, error: 0 });
 	let recent: BookWithPeople[] = $state([]);

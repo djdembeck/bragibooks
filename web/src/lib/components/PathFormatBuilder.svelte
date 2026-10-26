@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick } from 'svelte';
-	import { MARTIAN, parseParts, resolveExample, serializeParts, TOKEN_META, TOKEN_ORDER, validateScheme, type Part, type TokenKey } from '$lib/scheme';
+	import { MARTIAN, parseParts, resolveExample, serializeParts, TOKEN_META, TOKEN_ORDER, validateScheme, type Part, type TokenKey } from '#lib/scheme.js';
 
 	let { value = $bindable(''), outputDir = '' }: { value?: string; outputDir?: string } = $props();
 

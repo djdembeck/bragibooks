@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { bookCoverUrl } from '$lib/types';
+	import { bookCoverUrl } from '#lib/types.js';
 
 	interface Props {
 		/** Cover URL in any backend form; a falsy value renders the placeholder spine. */

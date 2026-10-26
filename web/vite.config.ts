@@ -1,3 +1,4 @@
+import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig, loadEnv } from 'vite';
@@ -9,7 +10,18 @@ export default defineConfig(({ mode }) => {
 	const proxyTarget = env.VITE_PROXY_TARGET || 'http://localhost:8080';
 
 	return {
-		plugins: [tailwindcss(), sveltekit()],
+		plugins: [
+			tailwindcss(),
+			sveltekit({
+				adapter: adapter({
+					pages: 'build',
+					assets: 'build',
+					fallback: 'index.html',
+					precompress: false,
+					strict: true,
+				}),
+			}),
+		],
 		server: isDev
 			? {
 					port,

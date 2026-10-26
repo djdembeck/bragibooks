@@ -1,12 +1,12 @@
 <script lang="ts">
-	import { get, post } from '$lib/api';
-import { goto } from '$app/navigation';
-import { page as pageStore } from '$app/stores';
-	import type { BooksListResponse, BookWithPeople } from '$lib/types';
-	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt } from '$lib/components';
-	import { formatRuntime } from '$lib/types';
-	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
-	import { toCleanedError, type CleanedAdbError } from '$lib/adbError';
+	import { get, post } from '#lib/api.js';
+	import { goto } from '$app/navigation';
+	import { page as pageStore } from '$app/state';
+	import type { BooksListResponse, BookWithPeople } from '#lib/types.js';
+	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt } from '#lib/components/index.js';
+	import { formatRuntime } from '#lib/types.js';
+	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
+	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 
 	const limit = 20;
 	const filters: { value: string; label: string }[] = [
@@ -47,7 +47,7 @@ import { page as pageStore } from '$app/stores';
 	}
 
 	function updateUrl(nextFilter: string, nextPage: number, nextQ?: string) {
-		const params = new URLSearchParams($pageStore.url.searchParams);
+		const params = new URLSearchParams(pageStore.url.search);
 		if (nextFilter === 'all') params.delete('status');
 		else params.set('status', nextFilter);
 		if (nextPage > 0) params.set('page', String(nextPage));
@@ -59,8 +59,7 @@ import { page as pageStore } from '$app/stores';
 		const query = params.toString();
 		void goto(`/books${query ? `?${query}` : ''}`, {
 			replaceState: true,
-			keepFocus: true,
-			noScroll: true
+			reset: false
 		});
 	}
 
@@ -194,9 +193,9 @@ import { page as pageStore } from '$app/stores';
 	}
 
 	$effect(() => {
-		const nextFilter = normalizedFilter($pageStore.url.searchParams.get('status'));
-		const nextPage = normalizedPage($pageStore.url.searchParams.get('page'));
-		const nextQ = $pageStore.url.searchParams.get('q') ?? '';
+		const nextFilter = normalizedFilter(pageStore.url.searchParams.get('status'));
+		const nextPage = normalizedPage(pageStore.url.searchParams.get('page'));
+		const nextQ = pageStore.url.searchParams.get('q') ?? '';
 		if (filter !== nextFilter) filter = nextFilter;
 		if (currentPage !== nextPage) currentPage = nextPage;
 		if (q !== nextQ) q = nextQ;

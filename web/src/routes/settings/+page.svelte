@@ -1,10 +1,10 @@
 <script lang="ts">
-	import { get, put } from '$lib/api';
-	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker, PathFormatBuilder } from '$lib/components';
-	import { parseParts, validateScheme } from '$lib/scheme';
-	import type { Settings } from '$lib/types';
-	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
-	import { toCleanedError, type CleanedAdbError } from '$lib/adbError';
+	import { get, put } from '#lib/api.js';
+	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker, PathFormatBuilder } from '#lib/components/index.js';
+	import { parseParts, validateScheme } from '#lib/scheme.js';
+	import type { Settings } from '#lib/types.js';
+	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
+	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { Save, FolderOpen } from '@lucide/svelte';
 
 	type PathField = 'input_dir' | 'output_dir' | 'completed_dir';

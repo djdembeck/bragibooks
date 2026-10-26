@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { Circle, Clock, Check, AlertCircle, CheckCircle2 } from '@lucide/svelte';
-	import { normalizeStatus } from '$lib/status';
+	import { normalizeStatus } from '#lib/status.js';
 
 	let { status }: { status: string } = $props();
 
