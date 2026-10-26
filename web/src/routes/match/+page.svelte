@@ -12,7 +12,14 @@
 		Settings,
 		UpdateBookRequest
 	} from '$lib/types';
-	import { extractAsin, pickCover, hitCoverUrl, bookCoverUrl, decodeHtmlEntities } from '$lib/types';
+	import {
+		extractAsin,
+		pickCover,
+		hitCoverUrl,
+		bookCoverUrl,
+		decodeHtmlEntities,
+		AUDIO_FILE_EXTS
+	} from '$lib/types';
 	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, AbdTag } from '$lib/components';
 	import { toCleanedError, type CleanedAdbError } from '$lib/adbError';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
@@ -745,8 +752,11 @@
 		return parts.join(' · ');
 	}
 
+	// Only a real audio extension is an extension: a period that is part of the
+	// name (author initials, "Dr.", "Vol. 2") must survive, or auto-match
+	// searches the catalog for a truncated title.
 	function stripExtension(name: string): string {
-		return name.replace(/\.[^/.]+$/, '');
+		return name.replace(AUDIO_FILE_EXTS, '');
 	}
 
 	function pathLast(name: string): string {

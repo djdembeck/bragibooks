@@ -468,15 +468,35 @@ func (h *Handler) CreateBooks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, CreateBooksResponse{Books: enriched})
 }
 
+// audioExtensions are the containers a single-file source may use. Only these
+// suffixes are stripped when deriving a title: a period anywhere else in the
+// name (author initials like "Ursula K. Le Guin", "Vol. 2", "Dr.") is part of
+// the title, not an extension.
+var audioExtensions = map[string]bool{
+	".mp3":  true,
+	".m4a":  true,
+	".m4b":  true,
+	".mp4":  true,
+	".aac":  true,
+	".ogg":  true,
+	".oga":  true,
+	".opus": true,
+	".flac": true,
+	".wav":  true,
+	".wma":  true,
+	".mka":  true,
+}
+
 func deriveTitle(path string) string {
 	base := filepath.Base(path)
-	ext := filepath.Ext(base)
-	name := strings.TrimSuffix(base, ext)
-	name = strings.TrimSpace(name)
-	name = strings.ReplaceAll(name, "_", " ")
+	if ext := filepath.Ext(base); audioExtensions[strings.ToLower(ext)] {
+		base = strings.TrimSuffix(base, ext)
+	}
+	name := strings.ReplaceAll(base, "_", " ")
 	name = strings.ReplaceAll(name, ".", " ")
 	name = strings.ReplaceAll(name, "-", " ")
-	name = strings.TrimSpace(name)
+	// Collapse the whitespace left behind by those separators.
+	name = strings.Join(strings.Fields(name), " ")
 	if name == "" {
 		name = "Untitled"
 	}
