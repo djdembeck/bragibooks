@@ -160,21 +160,78 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           echo "${{ secrets.DOCKER_PASSWORD }}" | docker login docker.io -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-          # Idempotency guard: skip when the image already exists on GHCR (e.g.
-          # rerun of a completed release). Hub is re-tagged from the same build
-          # push below, overwriting is not a concern because tags are versioned
-          # and the same build is pushed.
+          # compare two dotted versions for the alias reconciliation below:
+          # semver_ge A B returns 0 when A is the same as or newer than B.
+          semver_ge() {
+            local -a a b
+            IFS=. read -r -a a <<< "${1}"
+            IFS=. read -r -a b <<< "${2}"
+            a+=(0 0 0)
+            b+=(0 0 0)
+            if [ "${a[0]}" -ne "${b[0]}" ]; then
+              [ "${a[0]}" -gt "${b[0]}" ]
+              return
+            fi
+            if [ "${a[1]}" -ne "${b[1]}" ]; then
+              [ "${a[1]}" -gt "${b[1]}" ]
+              return
+            fi
+            [ "${a[2]}" -ge "${b[2]}" ]
+          }
+
+          # idempotency guard: skip the build when the image already exists on
+          # GHCR (e.g. rerun of a completed release) and reconcile the mutable
+          # aliases against the existing digest instead; Hub tags come from the
+          # same build, so the same digest is reused for the retags and a
+          # re-dispatched older release never moves an alias backwards.
           if docker manifest inspect "${REGISTRY_IMAGE}:${BARE}" >/dev/null 2>&1; then
             echo "Image ${REGISTRY_IMAGE}:${BARE} already exists - skipping build"
-            # Ensure every alias of the existing image exists (idempotent
-            # rerun); retag by digest where missing.
+            digest=$(docker buildx imagetools inspect "${REGISTRY_IMAGE}:${BARE}" --format '{{.Manifest.Digest}}')
+            [ -n "${digest}" ] || { echo "Cannot resolve existing GHCR digest - re-dispatch required" >&2; exit 1; }
+            backfilled=0
+            repointed=0
+            kept=0
             for t in "${EXTRA_TAGS[@]}"; do
               if ! docker manifest inspect "${t}" >/dev/null 2>&1; then
-                digest=$(docker buildx imagetools inspect "${REGISTRY_IMAGE}:${BARE}" --format '{{.Manifest.Digest}}')
-                [ -n "${digest}" ] || { echo "Cannot resolve existing GHCR digest - re-dispatch required" >&2; exit 1; }
+                echo "Alias ${t} missing - retagging by digest"
                 docker buildx imagetools create --tag "${t}" "${REGISTRY_IMAGE}:${BARE}@${digest}"
+                backfilled=$((backfilled+1))
+                continue
+              fi
+              alias_digest=$(docker buildx imagetools inspect "${t}" --format '{{.Manifest.Digest}}')
+              [ -n "${alias_digest}" ] || { echo "Cannot resolve existing GHCR digest - re-dispatch required" >&2; exit 1; }
+              if [ "${alias_digest}" = "${digest}" ]; then
+                continue
+              fi
+              # the alias lags; resolve the version it currently points at
+              # from the org.opencontainers.image.version annotation so a
+              # re-dispatched older release is not written over it
+              alias_tag="${t##*:}"
+              alias_version=$(docker buildx imagetools inspect "${t}" --format '{{index .Annotations "org.opencontainers.image.version"}}' 2>/dev/null || true)
+              alias_version="${alias_version#v}"
+              if [ -z "${alias_version}" ] && [[ "${alias_tag}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+                echo "Alias ${t} version annotation unreadable - falling back to its tag version ${alias_tag}" >&2
+                alias_version="${alias_tag}"
+              fi
+              if [ -z "${alias_version}" ] || ! [[ "${alias_version}" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+                echo "Alias ${t} digest differs and no usable version - keeping as-is" >&2
+                kept=$((kept+1))
+                continue
+              fi
+              if semver_ge "${BARE}" "${alias_version}"; then
+                echo "Re-pointing stale alias ${t} (${alias_version}) at ${BARE}"
+                docker buildx imagetools create --tag "${t}" "${REGISTRY_IMAGE}:${BARE}@${digest}"
+                repointed=$((repointed+1))
+              else
+                echo "Keeping alias ${t} (${alias_version}) - newer than re-run version ${BARE}"
+                kept=$((kept+1))
               fi
             done
+            if [ "${backfilled}" -eq 0 ] && [ "${repointed}" -eq 0 ] && [ "${kept}" -eq 0 ]; then
+              echo "All aliases of ${REGISTRY_IMAGE}:${BARE} aligned - nothing to do"
+            else
+              echo "Alias reconciliation complete: ${backfilled} backfilled, ${repointed} re-pointed, ${kept} kept newer"
+            fi
             exit 0
           fi
 
