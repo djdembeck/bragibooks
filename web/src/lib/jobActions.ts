@@ -7,6 +7,10 @@ const jobActionLabels: Record<JobAction, string> = {
 };
 
 export function jobActionLabel(action: string | null | undefined): string {
-	if (action && action in jobActionLabels) return jobActionLabels[action as JobAction];
+	// hasOwn keeps inherited Object.prototype keys (constructor, toString) out
+	// of the fallback check — `in` would match them.
+	if (action && Object.hasOwn(jobActionLabels, action)) {
+		return jobActionLabels[action as JobAction];
+	}
 	return 'M4B merge';
 }
