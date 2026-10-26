@@ -22,6 +22,11 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Features & Improvements
 
+- **Job history records what each job did** (#440)
+  - `processing_jobs` now carries a stable `action` key (`merge` | `metadata_update` | `import`); the migration backfills existing rows as `merge`.
+  - Imports and metadata saves write terminal `done` audit rows, so job history no longer only shows processing runs. These rows never affect queuing or the orphan sweep, which key on `queued`/`running`.
+  - `GET /api/jobs` and `GET /api/jobs/:id` expose `action`; the Queue job cards and the book record's Job history list show an action badge (M4B merge / Metadata update / Import) beside the status chip.
+
 - **Record workspace rollout**
   - Restored the original gold palette, stacked-books logo, and favicon; applied the shared top navigation, neutral work surfaces, and self-hosted Public Sans headings across Overview, Import, Match, Queue, Books, book detail, and Settings.
   - Added counted batch match approval with explicit inclusion and optional focused review. Source and proposed output names stay visible; the processor's actual output path remains distinct from the preview.

@@ -161,6 +161,7 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 		ID:           id,
 		BookID:       sql.NullInt64{Int64: bookID, Valid: true},
 		M4bMergeArgs: string(argsJSON),
+		Action:       "merge",
 		Status:       "queued",
 		Error:        nil,
 		OutputFile:   nil,
@@ -170,8 +171,8 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 
 	// Insert into DB
 	_, err = s.db.Exec(
-		"INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status) VALUES (?, ?, ?, ?)",
-		job.ID, job.BookID.Int64, job.M4bMergeArgs, job.Status,
+		"INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action) VALUES (?, ?, ?, ?, ?)",
+		job.ID, job.BookID.Int64, job.M4bMergeArgs, job.Status, job.Action,
 	)
 	if err != nil {
 		return "", fmt.Errorf("insert processing job: %w", err)
@@ -200,6 +201,34 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	// preserved as-is.)
 	s.workerCh <- job
 	return id, nil
+}
+
+// RecordBookAction writes a terminal-only audit row for a non-processing book
+// action (import, metadata update). status is always jobStatusDone: the row is
+// history, not a worker job, so it never touches queuing (hasActiveJobForBook
+// counts only queued/running) and never the orphan sweep (which updates only
+// queued/running). Best-effort: a write failure is logged ("record book
+// action") — a stuck audit row must not sink the book operation it decorates,
+// matching the existing best-effort auxiliary writes (attachSourceCover); the
+// failure stays operator-visible via the missing history row plus the log
+// line.
+func (s *ProcessingService) RecordBookAction(bookID int64, action, detail string) {
+	if s == nil {
+		return
+	}
+	detailJSON, err := json.Marshal(map[string]any{"detail": detail})
+	if err != nil {
+		log.Printf("record book action: marshal detail: %v", err)
+		return
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO processing_jobs (id, book_id, status, action, m4b_merge_args, started_at, completed_at)
+		 VALUES (?, ?, 'done', ?, ?, datetime('now'), datetime('now'))`,
+		uuid.New().String(), bookID, action, string(detailJSON),
+	)
+	if err != nil {
+		log.Printf("record book action: insert: %v", err)
+	}
 }
 
 // hasActiveJobForBook reports whether the book already has a job that has
@@ -629,7 +658,7 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 		bookID, _ = strconv.ParseInt(v[0], 10, 64)
 	}
 
-	query := "SELECT id, book_id, status, output, error, output_file, started_at, completed_at, created_at FROM processing_jobs"
+	query := "SELECT id, book_id, status, action, output, error, output_file, started_at, completed_at, created_at FROM processing_jobs"
 	args := make([]any, 0, 2)
 	if bookID > 0 {
 		query += " WHERE book_id = ?"
@@ -648,7 +677,7 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 	jobs := make([]map[string]any, 0)
 	for rows.Next() {
 		var job models.ProcessingJob
-		err := rows.Scan(&job.ID, &job.BookID, &job.Status, &job.Output,
+		err := rows.Scan(&job.ID, &job.BookID, &job.Status, &job.Action, &job.Output,
 			&job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt)
 		if err != nil {
 			continue
@@ -658,6 +687,7 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 			"id":           job.ID,
 			"book_id":      nil,
 			"status":       job.Status,
+			"action":       job.Action,
 			"output":       job.Output,
 			"error":        nil,
 			"output_file":  nil,
@@ -692,11 +722,11 @@ func (h *Handler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chiURLParam(r, "id")
 
 	row := h.svc.DB.QueryRow(
-		"SELECT id, book_id, m4b_merge_args, status, output, error, output_file, started_at, completed_at, created_at FROM processing_jobs WHERE id = ?",
+		"SELECT id, book_id, m4b_merge_args, status, action, output, error, output_file, started_at, completed_at, created_at FROM processing_jobs WHERE id = ?",
 		jobID,
 	)
 	var job models.ProcessingJob
-	err := row.Scan(&job.ID, &job.BookID, &job.M4bMergeArgs, &job.Status, &job.Output,
+	err := row.Scan(&job.ID, &job.BookID, &job.M4bMergeArgs, &job.Status, &job.Action, &job.Output,
 		&job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "job not found")
@@ -711,6 +741,7 @@ func (h *Handler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"id":           job.ID,
 		"status":       job.Status,
+		"action":       job.Action,
 		"output":       job.Output,
 		"error":        nil,
 		"output_file":  nil,

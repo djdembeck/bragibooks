@@ -6,6 +6,7 @@
 	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '#lib/types.js';
 	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { formatJobTime } from '#lib/datetime.js';
+	import { jobActionLabel } from '#lib/jobActions.js';
 	import { StatusBadge, AbdTag, EmptyState, Button, Alert, ErrorDetail, Skeleton, CoverArt } from '#lib/components/index.js';
 	import { ExternalLink, ArrowLeft } from '@lucide/svelte';
 
@@ -535,7 +536,7 @@
 			</div>
 		{/if}
 		{#if jobs.length === 0 && !jobsError}
-			<p class="record-section__note">No processing jobs yet.</p>
+			<p class="record-section__note">No recorded activity yet.</p>
 		{/if}
 		{#if jobs.length > 0}
 			<ol class="joblist">
@@ -543,6 +544,7 @@
 					<li class="joblist__item">
 						<div class="joblist__head">
 							<StatusBadge status={job.status} />
+							<span class="action-badge">{jobActionLabel(job.action)}</span>
 							<code class="joblist__id">{job.id}</code>
 						</div>
 						<dl class="joblist__times">
@@ -1006,6 +1008,18 @@
 		align-items: center;
 		gap: 0.75rem;
 		flex-wrap: wrap;
+	}
+
+	.action-badge {
+		font-size: 0.65rem;
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		color: var(--text-secondary);
+		background: var(--surface);
+		border: 1.5px solid var(--border-strong);
+		border-radius: var(--radius-sm);
+		padding: 0.125rem 0.5rem;
 	}
 
 	.joblist__id {

@@ -410,6 +410,8 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.svc.ProcessingSvc.RecordBookAction(bookID, "metadata_update", book.Title)
+
 	people, err := h.getPeopleByBookID(bookID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("get people: %v", err))
@@ -462,6 +464,7 @@ func (h *Handler) CreateBooks(w http.ResponseWriter, r *http.Request) {
 		// read its own art now so Match can show the original cover beside
 		// catalog candidates instead of an empty placeholder.
 		h.attachSourceCover(r.Context(), id, entry.SrcPath)
+		h.svc.ProcessingSvc.RecordBookAction(id, "import", entry.SrcPath)
 		book, err := h.getBook(id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("get created book: %v", err))

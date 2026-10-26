@@ -131,6 +131,13 @@ ALTER TABLE settings ADD COLUMN legacy_token_migrated BOOLEAN NOT NULL DEFAULT 0
 
 `,
 	},
+	{
+		version: 7,
+		sql: `
+ALTER TABLE processing_jobs ADD COLUMN action TEXT NOT NULL DEFAULT 'merge';
+
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

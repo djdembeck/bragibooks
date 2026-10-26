@@ -61,6 +61,9 @@ func TestRunMigrationsRealShape(t *testing.T) {
 	if !hasColumn(t, db, "books", "converted") {
 		t.Error("books.converted missing (v2 regression)")
 	}
+	if !hasColumn(t, db, "processing_jobs", "action") {
+		t.Error("processing_jobs.action missing (v7 regression)")
+	}
 	if !hasColumn(t, db, "people", "asin") {
 		t.Error("people.asin missing (v4 regression)")
 	}
@@ -144,8 +147,64 @@ func TestRunMigrationsV5ToV6PinsTheOnUpgradePath(t *testing.T) {
 		t.Errorf("pre-existing row state lost by v6: (%q, %q, %q, %q, %q, %q, %d, %q, %q, %d, %q)",
 			apiKey, baseURL, binary, inDir, outDir, doneDir, numCPUs, scheme, region, apiEnabled, digest)
 	}
-	if n := appliedCount(t, db); n != 6 {
-		t.Errorf("applied migrations = %d, want all 6", n)
+	// (v7 also applies on the upgrade to the full list — that is the V6ToV7 test.)
+	if n := appliedCount(t, db); n != len(migrations) {
+		t.Errorf("applied migrations = %d, want all %d", n, len(migrations))
+	}
+}
+
+// TestRunMigrationsV6ToV7PinsTheOnUpgradePath pins the cutover from a
+// pre-action v6 DB (processing_jobs rows without an action value) to v7:
+// the fresh column backfills every pre-existing row with 'merge' (every
+// legacy job was an m4b-merge run) while the row's id, status, and args
+// survive. It runs before the two tests that permanently mutate package
+// `migrations`, so it must not be moved after them.
+func TestRunMigrationsV6ToV7PinsTheOnUpgradePath(t *testing.T) {
+	// v6 shape: apply the production migrations up to (excluding) v7.
+	old := migrations
+	migrations = migrations[:6]
+	defer func() { migrations = old }()
+
+	db := openTestDB(t)
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations to v6: %v", err)
+	}
+
+	const (
+		rowArgs = `{"src_paths":["/v6/a.m4b"]}`
+		rowOut  = `/v6/out/book.m4b`
+	)
+	if _, err := db.Exec(`INSERT INTO books (id, title, status) VALUES (1, 'Legacy Book', 'done')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, output) VALUES ('legacy-1', 1, ?, 'done', ?)`,
+		rowArgs, rowOut); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture must be the pre-cutover shape, or the test proves nothing.
+	if hasColumn(t, db, "processing_jobs", "action") {
+		t.Fatal("v6 fixture already has the action column")
+	}
+
+	// Upgrade: restore the full list; only v7 is pending.
+	migrations = old
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations v6->v7: %v", err)
+	}
+
+	var id, status, args, out, action string
+	if err := db.QueryRow(`SELECT id, status, m4b_merge_args, output, action FROM processing_jobs WHERE id = 'legacy-1'`).
+		Scan(&id, &status, &args, &out, &action); err != nil {
+		t.Fatal(err)
+	}
+	if id != "legacy-1" || status != "done" || args != rowArgs || out != rowOut {
+		t.Errorf("pre-existing row state lost by v7: (%q, %q, %q, %q)", id, status, args, out)
+	}
+	if action != "merge" {
+		t.Errorf("backfilled action = %q, want merge", action)
+	}
+	if n := appliedCount(t, db); n != len(migrations) {
+		t.Errorf("applied migrations = %d, want all %d", n, len(migrations))
 	}
 }
 

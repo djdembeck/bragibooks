@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
 	id TEXT PRIMARY KEY,
 	book_id INTEGER REFERENCES books(id) ON DELETE SET NULL,
 	m4b_merge_args TEXT,
+	action TEXT NOT NULL DEFAULT 'merge',
 	status TEXT DEFAULT 'queued',
 	output TEXT DEFAULT '',
 	error TEXT DEFAULT '',
@@ -268,6 +269,115 @@ func TestCancelUnknownJobReturns404(t *testing.T) {
 	w := doCancel(t, h, "does-not-exist")
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("cancel unknown status = %d; want 404 — body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestQueueJobRecordsMergeAction(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status, status_message) VALUES (1, 'Book', 'matched', '')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"})
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	var action string
+	if err := h.svc.DB.QueryRow("SELECT action FROM processing_jobs WHERE id = ?", id).Scan(&action); err != nil {
+		t.Fatalf("read action: %v", err)
+	}
+	if action != "merge" {
+		t.Fatalf("action = %q; want merge", action)
+	}
+}
+
+func TestListJobsCarriesAction(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	h.svc.DB.Exec("INSERT INTO processing_jobs (id, book_id, status, action) VALUES ('j1', 1, 'done', 'import')")
+	h.svc.DB.Exec("INSERT INTO processing_jobs (id, book_id, status, action) VALUES ('j2', 1, 'done', 'metadata_update')")
+
+	w := httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=10", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	var resp ListJobsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Jobs) != 2 {
+		t.Fatalf("jobs = %d; want 2", len(resp.Jobs))
+	}
+	byID := map[string]any{}
+	for _, j := range resp.Jobs {
+		byID[j["id"].(string)] = j["action"]
+	}
+	if byID["j1"] != "import" {
+		t.Errorf("j1 action = %v; want import", byID["j1"])
+	}
+	if byID["j2"] != "metadata_update" {
+		t.Errorf("j2 action = %v; want metadata_update", byID["j2"])
+	}
+}
+
+func TestGetJobStatusCarriesAction(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	h.svc.DB.Exec("INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action) VALUES ('j1', 1, '{\"detail\":\"/in/a.m4b\"}', 'done', 'import')")
+
+	req := httptest.NewRequest("GET", "/api/jobs/j1", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Keys = append(rctx.URLParams.Keys, "id")
+	rctx.URLParams.Values = append(rctx.URLParams.Values, "j1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	w := httptest.NewRecorder()
+	h.GetJobStatus(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["action"] != "import" {
+		t.Fatalf("action = %v; want import", resp["action"])
+	}
+}
+
+func TestRecordBookActionWritesTerminalRow(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	h.svc.DB.Exec("INSERT INTO books (id, title, status) VALUES (7, 'Book', 'pending')")
+
+	svc.RecordBookAction(7, "import", "/in/a.m4b")
+
+	var (
+		status     string
+		action     string
+		bookID     int64
+		args, done string
+	)
+	err := h.svc.DB.QueryRow(
+		"SELECT status, action, book_id, m4b_merge_args, completed_at FROM processing_jobs WHERE action = 'import'",
+	).Scan(&status, &action, &bookID, &args, &done)
+	if err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "done" {
+		t.Errorf("status = %q; want done", status)
+	}
+	if bookID != 7 {
+		t.Errorf("book_id = %d; want 7", bookID)
+	}
+	if done == "" {
+		t.Errorf("completed_at empty; want set")
+	}
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(args), &detail); err != nil {
+		t.Fatalf("args not JSON: %v (args: %s)", err, args)
+	}
+	if detail["detail"] != "/in/a.m4b" {
+		t.Errorf("detail = %v; want /in/a.m4b", detail["detail"])
 	}
 }
 

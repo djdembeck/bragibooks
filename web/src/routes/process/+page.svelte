@@ -5,6 +5,7 @@
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { cleanAdbError, toCleanedError } from '#lib/adbError.js';
 	import { formatJobTime } from '#lib/datetime.js';
+	import { jobActionLabel } from '#lib/jobActions.js';
 	import { CheckCircle, Clock, ArrowRight, FileText } from '@lucide/svelte';
 
 	interface JobItem {
@@ -12,6 +13,7 @@
 		bookId: number | null;
 		bookTitle?: string;
 		status: string;
+		action: string;
 		output: string;
 		error: string | null;
 		startedAt: string | null;
@@ -80,6 +82,7 @@
 				bookId: j.book_id,
 				bookTitle: books.find((book) => book.id === j.book_id)?.title,
 				status: j.status,
+				action: j.action ?? 'merge',
 				output: j.output || '',
 				error: j.error || null,
 				startedAt: j.started_at,
@@ -228,6 +231,7 @@
 					bookId: job.book_id,
 					bookTitle: selected.find((book) => book.id === job.book_id)?.title,
 					status: 'queued',
+					action: 'merge',
 					output: '',
 					error: null,
 					startedAt: null,
@@ -274,7 +278,7 @@
 			case 'queued': return 'Waiting for a processing slot';
 			case 'running': return 'm4b-merge is processing this book';
 			case 'done':
-			case 'completed': return 'Merged successfully';
+			case 'completed': return 'Completed';
 			case 'cancelled': return 'Stopped by the operator';
 			case 'error':
 			case 'failed': return 'Processing failed';
@@ -394,7 +398,7 @@
 
 {#snippet JobRecord(job: JobItem, active: boolean)}
 	<article class="job-record">
-		<div class="job-record__heading"><div class="job-identity">{#if job.bookId}<a href="/books/{job.bookId}">{job.bookTitle || `Book #${job.bookId}`}</a>{:else}<strong>Unlinked job</strong>{/if}<code title={job.id}>{job.id.slice(0, 8)}</code></div><StatusBadge status={job.status} /></div>
+		<div class="job-record__heading"><div class="job-identity">{#if job.bookId}<a href="/books/{job.bookId}">{job.bookTitle || `Book #${job.bookId}`}</a>{:else}<strong>Unlinked job</strong>{/if}<code title={job.id}>{job.id.slice(0, 8)}</code></div><StatusBadge status={job.status} /><span class="action-badge">{jobActionLabel(job.action)}</span></div>
 		<p class="job-description">{jobStatusLabel(job.status)}</p>
 		<dl class="job-timestamps">
 			{#if job.startedAt}
@@ -472,6 +476,7 @@
 	.job-record { min-width: 0; padding: 1.25rem 1.5rem; border-top: 1px solid var(--border-subtle); }
 	.job-history .job-record { padding: 1rem 0; }
 	.job-record__heading { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 0.5rem; }
+	.action-badge { font-size: 0.65rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-secondary); background: var(--surface); border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm); padding: 0.125rem 0.5rem; }
 	.job-identity { display: grid; gap: 0.35rem; min-width: 0; }
 	.job-identity a, .job-identity strong { font-size: 0.875rem; font-weight: 600; overflow-wrap: anywhere; }
 	.job-identity code { font-size: 0.75rem; color: var(--text-muted); }
