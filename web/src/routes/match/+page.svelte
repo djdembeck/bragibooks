@@ -1061,6 +1061,21 @@
 		return candidate.pathFormatOverride || outputScheme;
 	}
 
+	// Client-side mirror of the server rules (absolute dir; relative format,
+	// no '..' path segments, Settings token rules) — the same mirror the
+	// Import page applies before it posts.
+	function outputDirIssue(v: string): string | null {
+		if (v && !v.startsWith('/')) return 'Output directory must be an absolute path (start with /) — leave empty to inherit Settings.';
+		return null;
+	}
+
+	function outputFormatIssue(v: string): string | null {
+		if (!v) return null;
+		if (v.startsWith('/')) return 'Path format must be relative (no leading /).';
+		if (v.split('/').some((seg) => seg === '..')) return "Path format must not contain '..' path segments.";
+		return validateScheme(parseParts(v)).errors[0] || null;
+	}
+
 	function proposedRelativeName(candidate: MatchCandidate): string {
 		if (!effectiveScheme(candidate) || !candidate.details.book) return '';
 		return resolveScheme(effectiveScheme(candidate), schemeValues(candidate));
@@ -1339,18 +1354,17 @@
 
 	async function saveMatches() {
 		if (removingMany) return;
-		// A per-book path-format override that doesn't resolve is a live
-		// processor failure, so it's checked before the save — the same way
-		// the Settings page blocks the global scheme.
+		// A per-book override the server would 400 (or the worker would
+		// reject) blocks the save: same rules as the Import mirror.
 		for (const candidate of candidates) {
-			if (candidate.pathFormatOverride) {
-				const schemeErr = validateScheme(parseParts(candidate.pathFormatOverride)).errors[0];
-				if (schemeErr) {
-					setActive(candidate.bookId);
-					setMode('focused');
-					pageError = cleanAdbError(`"${sourceBase(candidate)}": ${schemeErr}`);
-					return;
-				}
+			const dir = candidate.outputDirOverride.trim();
+			const fmt = candidate.pathFormatOverride.trim();
+			const issue = outputDirIssue(dir) || outputFormatIssue(fmt);
+			if (issue) {
+				setActive(candidate.bookId);
+				setMode('focused');
+				pageError = cleanAdbError(`${sourceBase(candidate)}: ${issue}`);
+				return;
 			}
 		}
 		const ready = candidates.filter(isSavable);
@@ -1386,8 +1400,10 @@
 			.join(', ');
 		return {
 			title: release?.title || book?.title || candidate.title,
-			output_dir_override: candidate.outputDirOverride || undefined,
-			path_format_override: candidate.pathFormatOverride || undefined,
+			// Always present: trimmed "" clears the override server-side
+			// (omitted would leave it unchanged).
+			output_dir_override: candidate.outputDirOverride.trim(),
+			path_format_override: candidate.pathFormatOverride.trim(),
 			asin: extractAsin(book?.external) || undefined,
 			audiobookdb_book_id: book?.id,
 			audiobookdb_release_id: release?.id,
@@ -2061,6 +2077,44 @@
 							>
 								Remove
 							</Button>
+						</div>
+						<div class="match__override-edit">
+							<label for="override-dir-input">
+								Output directory override
+								<code class="match__override-inherit">empty = Settings</code>
+							</label>
+							<input
+								id="override-dir-input"
+								type="text"
+								bind:value={c.outputDirOverride}
+								aria-invalid={outputDirIssue(c.outputDirOverride.trim()) ? true : undefined}
+								aria-describedby={
+									outputDirIssue(c.outputDirOverride.trim()) ? 'override-dir-error' : undefined
+								}
+							/>
+							{#if outputDirIssue(c.outputDirOverride.trim())}
+								<p id="override-dir-error" class="match__override-error" role="alert">
+									{outputDirIssue(c.outputDirOverride.trim())}
+								</p>
+							{/if}
+							<label for="override-fmt-input">
+								Output path format override
+								<code class="match__override-inherit">empty = Settings</code>
+							</label>
+							<input
+								id="override-fmt-input"
+								type="text"
+								bind:value={c.pathFormatOverride}
+								aria-invalid={outputFormatIssue(c.pathFormatOverride.trim()) ? true : undefined}
+								aria-describedby={
+									outputFormatIssue(c.pathFormatOverride.trim()) ? 'override-fmt-error' : undefined
+								}
+							/>
+							{#if outputFormatIssue(c.pathFormatOverride.trim())}
+								<p id="override-fmt-error" class="match__override-error" role="alert">
+									{outputFormatIssue(c.pathFormatOverride.trim())}
+								</p>
+							{/if}
 						</div>
 					</div>
 
@@ -3529,6 +3583,53 @@
 		font-size: 12px;
 		color: var(--m-ink-2);
 		overflow-wrap: anywhere;
+	}
+
+	.match__override-edit {
+		margin-top: 10px;
+		padding-top: 10px;
+		border-top: 1px solid var(--m-border-soft);
+		display: grid;
+		gap: 8px;
+		font-size: 12px;
+	}
+
+	.match__override-edit label {
+		color: var(--m-muted);
+		font-weight: 500;
+	}
+
+	.match__override-inherit {
+		margin-left: 6px;
+		font-weight: 400;
+		font-size: 11px;
+		color: var(--m-muted);
+	}
+
+	.match__override-edit input {
+		min-height: 32px;
+		padding: 4px 8px;
+		border: 1px solid var(--m-border);
+		border-radius: var(--m-r-sm);
+		background: var(--m-surface);
+		color: var(--m-ink);
+		font-size: 12px;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	}
+
+	.match__override-edit input:focus-visible {
+		outline: 2px solid var(--m-ink-2);
+		outline-offset: 1px;
+	}
+
+	.match__override-edit input[aria-invalid='true'] {
+		border-color: var(--state-red-border);
+	}
+
+	.match__override-error {
+		margin: 0;
+		color: var(--state-red);
+		font-size: 12px;
 	}
 
 	.match__proposed {

@@ -29,11 +29,30 @@
 	let overrideScheme = $state('');
 	let dirPickerOpen = $state(false);
 	let globalOutputDir = $state('');
-	const overrideSchemeError = $derived(
-		overrideScheme.trim()
-			? validateScheme(parseParts(overrideScheme.trim())).errors[0] || null
-			: null
-	);
+	// Client-side mirror of the server rules (absolute dir; relative format,
+	// no '..' path segments, Settings token rules): the form reports a
+	// guaranteed 400 before it is ever sent.
+	function hasDotDotSegment(s: string): boolean {
+		return s.split('/').some((seg) => seg === '..');
+	}
+
+	function overrideDirIssue(v: string): string | null {
+		if (v && !v.startsWith('/')) return 'Output directory must be an absolute path (start with /) — leave empty to inherit Settings.';
+		return null;
+	}
+
+	function overrideFormatIssue(v: string): string | null {
+		if (!v) return null;
+		if (v.startsWith('/')) return 'Path format must be relative (no leading /).';
+		if (hasDotDotSegment(v)) return "Path format must not contain '..' path segments.";
+		return validateScheme(parseParts(v)).errors[0] || null;
+	}
+
+	const overrideDirValue = $derived(overrideDir.trim());
+	const overrideFormatValue = $derived(overrideScheme.trim());
+	const overrideDirError = $derived(overrideDirIssue(overrideDirValue));
+	const overrideFormatError = $derived(overrideFormatIssue(overrideFormatValue));
+	const overrideHasErrors = $derived(!!overrideDirError || !!overrideFormatError);
 
 	const SUPPORTED_EXTENSIONS = new Set(['.mp3', '.m4a', '.m4b', '.mp4', '.aac', '.ogg', '.flac', '.wma']);
 
@@ -180,6 +199,10 @@
 	async function start() {
 		const sourcePaths = selectedSourcePaths();
 		if (sourcePaths.length === 0) return;
+		// The derived field errors are the single rule source; rechecking here
+		// stops a stale-UI path (e.g. programmatic mutation) from posting a
+		// value the API would 400.
+		if (overrideHasErrors) return;
 		creating = true;
 		dl.setError(null);
 		try {
@@ -411,8 +434,8 @@
 		<div class="border-t border-[var(--border)] bg-[var(--surface)] px-4 py-3">
 			{#if showOverrides}
 				<div class="mb-3 space-y-2 border-b border-[var(--border-subtle)] pb-3">
-					<div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-						<label class="text-sm text-[var(--text-secondary)]" for="import-override-dir">
+					<div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+						<label class="shrink-0 text-sm text-[var(--text-secondary)]" for="import-override-dir">
 							Output folder <span class="text-[var(--text-muted)]">(optional, defaults to Settings)</span>
 						</label>
 						<div class="flex min-w-0 flex-1 items-center gap-1.5">
@@ -423,7 +446,8 @@
 								disabled={creating}
 								placeholder={globalOutputDir || '—'}
 								class="min-h-[44px] min-w-0 flex-1 rounded-sm border border-[var(--border)] bg-[var(--bg-panel)] px-3 text-sm"
-								aria-label="Override output folder"
+								aria-invalid={overrideDirError ? true : undefined}
+								aria-describedby={overrideDirError ? 'import-override-dir-error' : undefined}
 							/>
 							<Button variant="ghost" disabled={creating} onclick={() => (dirPickerOpen = true)}>
 								Browse
@@ -434,12 +458,17 @@
 								</Button>
 							{/if}
 						</div>
+						{#if overrideDirError}
+							<p id="import-override-dir-error" class="text-sm text-[var(--state-red)]" role="alert">
+								{overrideDirError}
+							</p>
+						{/if}
 					</div>
-					<div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-3">
-						<label class="pt-2 text-sm text-[var(--text-secondary)]" for="import-override-scheme">
+					<div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+						<label class="shrink-0 text-sm text-[var(--text-secondary)]" for="import-override-scheme">
 							Path format <span class="text-[var(--text-muted)]">(optional, defaults to Settings)</span>
 						</label>
-						<div class="flex min-w-0 flex-1 items-start gap-1.5">
+						<div class="flex min-w-0 flex-1 items-center gap-1.5">
 							<input
 								id="import-override-scheme"
 								type="text"
@@ -447,14 +476,17 @@
 								disabled={creating}
 								placeholder="e.g. author/title"
 								class="min-h-[44px] min-w-0 flex-1 rounded-sm border border-[var(--border)] bg-[var(--bg-panel)] px-3 font-mono text-sm"
-								aria-label="Override path format"
+								aria-invalid={overrideFormatError ? true : undefined}
+								aria-describedby={overrideFormatError ? 'import-override-scheme-error' : undefined}
 							/>
 							<Button variant="ghost" disabled={creating} onclick={() => (overrideScheme = '')}>
 								Clear
 							</Button>
 						</div>
-						{#if overrideSchemeError}
-							<p class="text-sm text-[var(--state-red)]" role="alert">{overrideSchemeError}</p>
+						{#if overrideFormatError}
+							<p id="import-override-scheme-error" class="text-sm text-[var(--state-red)]" role="alert">
+								{overrideFormatError}
+							</p>
 						{/if}
 					</div>
 				</div>
@@ -475,7 +507,7 @@
 				</p>
 				<Button
 					variant="primary"
-					disabled={selectedCount === 0 || creating || !!overrideSchemeError}
+					disabled={selectedCount === 0 || creating || overrideHasErrors}
 					loading={creating}
 					onclick={start}
 				>
