@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -475,8 +476,8 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 			msg = result.OutputWarning
 		}
 		s.db.Exec(
-			"UPDATE books SET status = 'done', status_message = ?, dest_path = ? WHERE id = ?",
-			msg, outputFile, job.BookID.Int64,
+			"UPDATE books SET status = 'done', status_message = ?, dest_path = ?, format_type = ? WHERE id = ?",
+			msg, outputFile, outputFormat(outputFile), job.BookID.Int64,
 		)
 	}
 	output := result.Stdout
@@ -837,6 +838,17 @@ func (h *Handler) StreamJob(w http.ResponseWriter, r *http.Request) {
 	case <-time.After(10 * time.Second):
 		// Force close if no done signal
 	}
+}
+
+// outputFormat returns the container format of a produced output file, e.g.
+// "m4b", for the book's FILE PATHS card. Output discovery only publishes
+// .m4b files (findNewestM4B), so the extension is the real format rather
+// than a guess from arbitrary user input.
+func outputFormat(path string) string {
+	if path == "" {
+		return ""
+	}
+	return strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 }
 
 // escapeJSON replaces characters that would break inline JSON construction.
