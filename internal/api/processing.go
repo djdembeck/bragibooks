@@ -569,11 +569,11 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			for _, e := range entries {
-				if e.Type == "file" && isAudioFile(e.Name) {
+				if e.Type == "file" && audio.IsAudioFile(e.Name) {
 					inputPaths = append(inputPaths, e.Path)
 				}
 			}
-		} else if _, err := os.Stat(srcDir); err == nil && isAudioFile(srcDir) {
+		} else if _, err := os.Stat(srcDir); err == nil && audio.IsAudioFile(srcDir) {
 			inputPaths = append(inputPaths, srcDir)
 		} else {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot read src_dir %s: %v", srcDir, err))
@@ -838,17 +838,6 @@ func (h *Handler) StreamJob(w http.ResponseWriter, r *http.Request) {
 	case <-time.After(10 * time.Second):
 		// Force close if no done signal
 	}
-}
-
-// isAudioFile checks if a filename has an audio file extension.
-func isAudioFile(name string) bool {
-	ext := strings.ToLower(name)
-	for _, audioExt := range []string{".mp3", ".m4a", ".m4b", ".mp4", ".aac", ".ogg", ".flac", ".wma"} {
-		if strings.HasSuffix(ext, audioExt) {
-			return true
-		}
-	}
-	return false
 }
 
 // outputFormat returns the container format of a produced output file, e.g.

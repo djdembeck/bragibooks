@@ -23,6 +23,12 @@ type Services struct {
 	Processor     *audio.Processor
 	AudiobookDB   *atomic.Value
 	ProcessingSvc *ProcessingService
+	// CoversDir is the on-disk directory for cover art extracted from
+	// source media. Empty disables extraction; the UI keeps its placeholder.
+	CoversDir string
+	// FFmpeg is the ffmpeg binary used to read embedded art. Empty disables
+	// extraction (ffmpeg is not installed).
+	FFmpeg string
 }
 
 // Handler wraps services and registers routes.
@@ -81,6 +87,18 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 		// Migration
 		r.Post("/migrate", h.MigrateLegacyDB)
 		r.Post("/migrate/people", h.RecoverPeople)
+	})
+
+	// Extracted source covers are library content — the same art the book
+	// endpoints return — so they sit behind the same gate rather than being
+	// enumerable by book ID. They are mounted outside /api only because the
+	// `<img>` tags that render them cannot attach a bearer header: the SPA
+	// mirrors its token into the same-origin `bragibooks_token` cookie
+	// (web/src/lib/api.ts), which the browser sends with those requests, and
+	// local mode admits loopback/LAN clients exactly as it does for the API.
+	r.Group(func(r chi.Router) {
+		r.Use(auth)
+		r.Handle("/covers/*", CoverHandler(h.svc.CoversDir))
 	})
 }
 

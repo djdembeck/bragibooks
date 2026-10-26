@@ -8,11 +8,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/bragibooks/bragibooks/internal/models"
 )
 
 // schemaSQL creates the tables required for the books API tests.
@@ -218,6 +222,123 @@ func TestCreateBookWithNULLReleaseDate(t *testing.T) {
 	}
 	if dbStatus != "pending" {
 		t.Errorf("db status = %q; want %q", dbStatus, "pending")
+	}
+}
+
+// stubFFmpegForCovers returns a fake ffmpeg that records its argv and
+// writes deterministic bytes to the final argument (the output path).
+func stubFFmpegForCovers(t *testing.T, argsFile string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ffmpeg")
+	script := "#!/bin/sh\necho \"$@\" > " + argsFile + "\nfor last; do :; done\nprintf 'fake-jpeg' > \"$last\"\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub ffmpeg: %v", err)
+	}
+	return path
+}
+
+// postBook drives CreateBooks directly and decodes the created book.
+func postBook(t *testing.T, h *Handler, srcPath string) models.BookWithPeople {
+	t.Helper()
+	reqBody, err := json.Marshal(CreateBooksRequest{Books: []CreateBookEntry{{SrcPath: srcPath}}})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/api/books", bytes.NewReader(reqBody))
+	w := httptest.NewRecorder()
+	h.CreateBooks(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create status = %d; want 201 — body: %s", w.Code, w.Body.String())
+	}
+	var resp CreateBooksResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Books) != 1 {
+		t.Fatalf("created %d books; want 1", len(resp.Books))
+	}
+	return resp.Books[0]
+}
+
+func TestCreateBooksAttachesSourceCover(t *testing.T) {
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "cover.jpg"), []byte("source-art"), 0o644); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+	coversDir := t.TempDir()
+	h := &Handler{svc: Services{
+		DB:        newTestDB(t),
+		CoversDir: coversDir,
+		FFmpeg:    stubFFmpegForCovers(t, filepath.Join(t.TempDir(), "args")),
+	}}
+
+	book := postBook(t, h, srcDir)
+	if book.CoverImageURL != "/covers/1.jpg" {
+		t.Fatalf("cover_image_url = %q; want /covers/1.jpg", book.CoverImageURL)
+	}
+
+	// The served URL must resolve to the file the extractor wrote.
+	got, err := os.ReadFile(filepath.Join(coversDir, "1.jpg"))
+	if err != nil {
+		t.Fatalf("read extracted cover: %v", err)
+	}
+	if string(got) != "fake-jpeg" {
+		t.Errorf("extracted cover = %q; want the ffmpeg output", got)
+	}
+}
+
+func TestCreateBooksWithoutSourceArtKeepsPlaceholder(t *testing.T) {
+	coversDir := t.TempDir()
+	h := &Handler{svc: Services{
+		DB:        newTestDB(t),
+		CoversDir: coversDir,
+		FFmpeg:    stubFFmpegForCovers(t, filepath.Join(t.TempDir(), "args")),
+	}}
+
+	// An empty folder carries neither a sidecar image nor audio.
+	book := postBook(t, h, t.TempDir())
+	if book.CoverImageURL != "" {
+		t.Fatalf("cover_image_url = %q; want empty for an art-less source", book.CoverImageURL)
+	}
+	entries, err := os.ReadDir(coversDir)
+	if err != nil {
+		t.Fatalf("read covers dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("covers dir has %d files; want none", len(entries))
+	}
+}
+
+func TestDeleteBookRemovesExtractedCover(t *testing.T) {
+	coversDir := t.TempDir()
+	h := &Handler{svc: Services{DB: newTestDB(t), CoversDir: coversDir}}
+
+	res, err := h.svc.DB.Exec("INSERT INTO books (title, status) VALUES ('Delete Me', 'pending')")
+	if err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	bookID, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("book id: %v", err)
+	}
+	coverPath := filepath.Join(coversDir, fmt.Sprintf("%d.jpg", bookID))
+	if err := os.WriteFile(coverPath, []byte("art"), 0o644); err != nil {
+		t.Fatalf("seed cover: %v", err)
+	}
+
+	ctx := chi.NewRouteContext()
+	ctx.URLParams.Keys = append(ctx.URLParams.Keys, "id")
+	ctx.URLParams.Values = append(ctx.URLParams.Values, fmt.Sprint(bookID))
+	req := httptest.NewRequest("DELETE", fmt.Sprintf("/api/books/%d", bookID), nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, ctx))
+
+	w := httptest.NewRecorder()
+	h.DeleteBook(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d; want 204 — body: %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(coverPath); !os.IsNotExist(err) {
+		t.Errorf("cover file still present after delete: %v", err)
 	}
 }
 
