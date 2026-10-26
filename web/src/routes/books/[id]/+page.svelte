@@ -5,6 +5,7 @@
 	import type { BookWithPeople, ProcessingJob, JobsListResponse, AudiobookDBBook, AudiobookDBRelease } from '$lib/types';
 	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '$lib/types';
 	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '$lib/adbError';
+	import { formatJobTime } from '$lib/datetime';
 	import { StatusBadge, AbdTag, EmptyState, Button, Alert, ErrorDetail, Skeleton, CoverArt } from '$lib/components';
 	import { ExternalLink, ArrowLeft } from '@lucide/svelte';
 
@@ -216,12 +217,6 @@
 			row('Release date', localDate, adbDate)
 		];
 	});
-
-	function fmtTs(ts: string | null): string {
-		if (!ts) return '—';
-		const d = new Date(ts.replace(' ', 'T'));
-		return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
-	}
 
 	/* ── Display hygiene ───────────────────────────────────────
 	 * Stored descriptions may carry HTML source (<p>/<b>/<br />);
@@ -549,13 +544,27 @@
 						<div class="joblist__head">
 							<StatusBadge status={job.status} />
 							<code class="joblist__id">{job.id}</code>
-							<span class="joblist__times">
-								{#if job.started_at}started {fmtTs(job.started_at)}{/if}
-								{#if job.started_at && job.completed_at} · {/if}
-								{#if job.completed_at}done {fmtTs(job.completed_at)}{/if}
-								{#if !job.started_at && !job.completed_at}created {fmtTs(job.created_at)}{/if}
-							</span>
 						</div>
+						<dl class="joblist__times">
+							{#if job.started_at}
+								<div class="joblist__time">
+									<dt>Started</dt>
+									<dd>{formatJobTime(job.started_at)}</dd>
+								</div>
+							{/if}
+							{#if job.completed_at}
+								<div class="joblist__time">
+									<dt>Done</dt>
+									<dd>{formatJobTime(job.completed_at)}</dd>
+								</div>
+							{/if}
+							{#if !job.started_at && !job.completed_at && job.created_at}
+								<div class="joblist__time">
+									<dt>Created</dt>
+									<dd>{formatJobTime(job.created_at)}</dd>
+								</div>
+							{/if}
+						</dl>
 						{#if job.error}
 							{@const jerr = cleanAdbError(job.error)}
 							<p class="joblist__error">{jerr.message}</p>
@@ -1005,8 +1014,31 @@
 	}
 
 	.joblist__times {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.375rem 1.25rem;
+		margin: 0.5rem 0 0;
 		font-size: 0.8rem;
 		color: var(--text-secondary);
+	}
+
+	.joblist__time {
+		display: flex;
+		align-items: baseline;
+		gap: 0.4rem;
+	}
+
+	.joblist__time dt {
+		font-size: 0.7rem;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--text-muted);
+	}
+
+	.joblist__time dd {
+		margin: 0;
+		font-variant-numeric: tabular-nums;
 	}
 
 	.joblist__error {
