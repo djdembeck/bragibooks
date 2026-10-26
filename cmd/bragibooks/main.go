@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -105,6 +106,18 @@ func main() {
 	// itself logs nothing).
 	log.Print(externalAPIStatusLine(cfgMgr.AdminAuthState()))
 
+	// Cover art extracted from source media lives beside the database, so
+	// the container's persistent /config volume keeps it across restarts.
+	coversDir := filepath.Join(filepath.Dir(dbPath), "covers")
+	if err := os.MkdirAll(coversDir, 0755); err != nil {
+		log.Printf("Warning: could not create covers directory %s: %v (source covers disabled)", coversDir, err)
+		coversDir = ""
+	}
+	ffmpegPath, ffmpegErr := exec.LookPath("ffmpeg")
+	if ffmpegErr != nil {
+		log.Printf("Warning: ffmpeg not found on PATH (%v) — source cover art will not be extracted", ffmpegErr)
+		ffmpegPath = ""
+	}
 	// Services
 	processor := audio.NewProcessor(
 		cfg.M4bMerge.Binary,
@@ -115,10 +128,13 @@ func main() {
 		cfg.Processing.LogLevel,
 	)
 
-	// Verify m4b-merge version meets minimum requirement
-	if err := processor.CheckVersion(); err != nil {
+	// Verify m4b-merge version meets minimum requirement and store the
+	// reported version for display in the settings page.
+	mergeVersion, err := processor.CheckVersion()
+	if err != nil {
 		log.Fatalf("m4b-merge version check failed: %v", err)
 	}
+	processor.StoreVersion(mergeVersion)
 
 	audiobookDBClient := audiobookdb.NewClient(cfg.APIKey.APIKey, cfg.APIKey.BaseURL)
 	audiobookDBVal := &atomic.Value{}
@@ -135,6 +151,8 @@ func main() {
 		Processor:     processor,
 		AudiobookDB:   audiobookDBVal,
 		ProcessingSvc: processingSvc,
+		CoversDir:     coversDir,
+		FFmpeg:        ffmpegPath,
 	})
 
 	// Router
@@ -157,8 +175,9 @@ func main() {
 	// the external API is enabled, a valid API key additionally allows
 	// any address. State is read per request from the config manager so
 	// Settings-page toggles apply without a restart. Applied to the /api
-	// subtree only; the embedded SPA (served same origin below) stays
-	// reachable for the UI to load.
+	// subtree and to the extracted source covers; the embedded SPA (served
+	// same origin below) stays reachable for the UI to load. Covers are
+	// mounted inside RegisterRoutes so they cannot drift outside this gate.
 	handler.RegisterRoutes(r, api.RequireAdminWithState(cfgMgr.AdminAuthState))
 
 	// SPA handler — serve embedded frontend for non-API routes.

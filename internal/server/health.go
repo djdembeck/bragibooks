@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/bragibooks/bragibooks/internal/version"
 )
 
 type HealthResponse struct {
@@ -10,12 +12,10 @@ type HealthResponse struct {
 	Version string `json:"version"`
 }
 
-const Version = "0.1.0"
-
 func HealthCheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(HealthResponse{
 		Status:  "ok",
-		Version: Version,
+		Version: version.Version,
 	})
 }

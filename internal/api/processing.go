@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -475,8 +476,8 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 			msg = result.OutputWarning
 		}
 		s.db.Exec(
-			"UPDATE books SET status = 'done', status_message = ?, dest_path = ? WHERE id = ?",
-			msg, outputFile, job.BookID.Int64,
+			"UPDATE books SET status = 'done', status_message = ?, dest_path = ?, format_type = ? WHERE id = ?",
+			msg, outputFile, outputFormat(outputFile), job.BookID.Int64,
 		)
 	}
 	output := result.Stdout
@@ -568,11 +569,11 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			for _, e := range entries {
-				if e.Type == "file" && isAudioFile(e.Name) {
+				if e.Type == "file" && audio.IsAudioFile(e.Name) {
 					inputPaths = append(inputPaths, e.Path)
 				}
 			}
-		} else if _, err := os.Stat(srcDir); err == nil && isAudioFile(srcDir) {
+		} else if _, err := os.Stat(srcDir); err == nil && audio.IsAudioFile(srcDir) {
 			inputPaths = append(inputPaths, srcDir)
 		} else {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot read src_dir %s: %v", srcDir, err))
@@ -839,15 +840,15 @@ func (h *Handler) StreamJob(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// isAudioFile checks if a filename has an audio file extension.
-func isAudioFile(name string) bool {
-	ext := strings.ToLower(name)
-	for _, audioExt := range []string{".mp3", ".m4a", ".m4b", ".mp4", ".aac", ".ogg", ".flac", ".wma"} {
-		if strings.HasSuffix(ext, audioExt) {
-			return true
-		}
+// outputFormat returns the container format of a produced output file, e.g.
+// "m4b", for the book's FILE PATHS card. Output discovery only publishes
+// .m4b files (findNewestM4B), so the extension is the real format rather
+// than a guess from arbitrary user input.
+func outputFormat(path string) string {
+	if path == "" {
+		return ""
 	}
-	return false
+	return strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 }
 
 // escapeJSON replaces characters that would break inline JSON construction.

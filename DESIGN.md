@@ -226,7 +226,7 @@ Rounding runs on four steps by role: 6px (`sm`) for buttons, inputs, checkboxes,
 - **Mobile:** destinations move to a horizontally scrollable second row; targets stay ≥44px.
 
 ### Page Header
-Title in the display face with an optional 15px secondary description (65ch) above a 1px `#d7d7d0` rule; 1.5rem below the rule. Route-local sticky heads (Match) keep the same hairline with mode controls and a counted approval action on the right.
+Title in the display face with an optional 15px secondary description (65ch) above a 1px `#d7d7d0` rule; 1.5rem below the rule. Match's head is sticky on desktop with the mode controls and counted approval on the right; on phones it scrolls with the list. During Match's removal pass the head replaces Save with the pass count and a ghost Cancel and hides the description; below 900px it also collapses to a compact sticky strip with the title, count, and Cancel, with the review-mode switch hidden.
 
 ### Inputs / Fields
 - **Style:** `#f8f8f6` fill, 1px `#92928a` border, 6px radius, 44px min-height.
@@ -241,6 +241,9 @@ Title in the display face with an optional 15px secondary description (65ch) abo
 
 ### Mode Toggle
 Segmented pair (Batch / Focused) on Match: `#f8f8f6` track, 1px border, 6px outer / 4px inner radius; the pressed segment takes the pale gold `#fff4d3` fill with a 1px inset hairline.
+
+### Removal Pass (Match, Batch review)
+A deliberate mode entered from the batch bar's "Select to remove". The row checkbox stops meaning "include in this save" and becomes a removal selector: checked boxes paint `#b3261e` with a white tick, and picked rows sit on the `#fdecea` state-red wash with "Selected for removal" in red 12px. Source names wrap to two lines in both batch review and the pass so duplicate folders and author-prefixed titles stay distinguishable. The sticky page head takes over the mode: Save is replaced by "N of M sources selected to remove" in red 600 and a ghost Cancel, and the description is hidden. The removal bar keeps select-all, the files-stay sentence, and the red-wash "Remove N records" action (at zero selection it reads "Select sources to remove" and is disabled); on wide screens it docks under the head while the list scrolls. Below 900px the head scrolls with the list except in the pass, where it collapses to a compact sticky strip of title, count, and Cancel with the mode switch hidden; below 761px the commit actions dock to a fixed bottom bar (white panel, 1px `#e7b9b5` top edge). Confirmation is a native dialog headed "Remove N records?" with an uppercase "N sources" line above the scrollable list, each source name plus its selected record title, the files sentence in the footer, and Cancel focused on open. Per-row Remove keeps its inline two-step band for single removals.
 
 ### Provenance Tag
 "AbDB" chip: `#f8edf5` fill, 1px `#dcc2d5` border, `#8a286d` 12px 600 uppercase; hover draws the full-provenance border; the full "AudiobookDB" label is secondary ink, un-cased. An anchor when a record URL exists.
@@ -257,6 +260,7 @@ Square always: 3rem row thumbnails (6px corner) and the 16rem record-page hero (
 - **Do** render StatusBadge as glyph + word + color (never color alone), and label absent state plainly ("No catalog match", "details unavailable") — never hidden.
 - **Do** collapse all animation under `prefers-reduced-motion` (shimmer, transitions, chase).
 - **Do** keep the original develop branding: the stacked-books mark at `/images/logo-small-black.svg`, `favicon.ico`, and the Public Sans OFL license living beside the font file.
+- **Do** keep destructive selection in its own mode: the include-in-save box never doubles as a removal selector, and a multi-record delete always lists the exact source names before it runs.
 
 ### Don't:
 - **Don't** reintroduce tape-editor framing — no station rail, equipment, meters, tape strips, or kickers/eyebrows; the Merge Bench vocabulary is retired.

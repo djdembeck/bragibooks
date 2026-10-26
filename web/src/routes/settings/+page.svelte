@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { get, post, put } from '$lib/api';
-	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker, Modal } from '$lib/components';
+	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker, Modal, PathFormatBuilder } from '$lib/components';
+	import { parseParts, validateScheme } from '$lib/scheme';
 	import type { Settings } from '$lib/types';
 	import { delayedLoad, type DelayedLoadState } from '$lib/delayedLoad.svelte';
 	import { toCleanedError, type CleanedAdbError } from '$lib/adbError';
@@ -75,6 +76,9 @@
 		const cpusErr = validateNonNegativeInt(settings.num_cpus);
 		if (cpusErr) { fieldErrors.num_cpus = cpusErr; valid = false; }
 
+		const schemeErr = validateScheme(parseParts(settings.output_scheme)).errors[0];
+		if (schemeErr) { fieldErrors.output_scheme = schemeErr; valid = false; }
+
 		return valid;
 	}
 
@@ -87,7 +91,11 @@
 		saved = false;
 		saveError = null;
 		try {
-			await put<Settings>('/settings', settings);
+			const updated = await put<Settings>('/settings', settings);
+			if (updated) {
+				settings.bragibooks_version = updated.bragibooks_version;
+				settings.m4b_merge_version = updated.m4b_merge_version;
+			}
 			saved = true;
 			setTimeout(() => (saved = false), 3000);
 		} catch (e) {
@@ -402,14 +410,14 @@
 					<p class="settings-help">Leave blank to keep original input files in place.</p>
 				</div>
 
-				<div class="settings-field">
-					<label for="output_scheme" class="settings-label">Output path format</label>
-					<input id="output_scheme" type="text" bind:value={settings.output_scheme} />
-					<div class="settings-ref">
-						<p class="settings-ref__title">Use <code>/</code> for subdirectories.</p>
-						<p class="settings-ref__text">Supported keywords:</p>
-						<p class="settings-ref__keywords">asin, author, narrator, series_name, series_position, subtitle, title, year</p>
-					</div>
+				<div class="settings-field" role="group" aria-labelledby="output_scheme_label">
+					<!-- svelte-ignore a11y_label_has_associated_control: labels the composite builder group via aria-labelledby -->
+					<label id="output_scheme_label" class="settings-label">Output path format <span class="text-[var(--state-red)]">*</span></label>
+					<PathFormatBuilder bind:value={settings.output_scheme} outputDir={settings.output_dir} />
+					<p class="settings-help">Tap a part above to add it. Within a part, Arrows move, Delete removes, Alt+Arrows reorders.</p>
+					{#if fieldErrors.output_scheme}
+						<p class="settings-field-error" role="alert">{fieldErrors.output_scheme}</p>
+					{/if}
 				</div>
 			</div>
 		</section>
@@ -591,6 +599,33 @@
 						Changes here apply immediately; Save settings does not affect them.
 					</p>
 				{/if}
+		</div>
+		</section>
+		<!-- Version -->
+		<section class="settings-section" aria-labelledby="settings-version">
+			<h2 class="settings-section__title" id="settings-version">Version</h2>
+			<div class="settings-grid">
+				<div class="settings-field">
+					<dl class="version-pair">
+						<dt class="settings-label">Bragi Books</dt>
+						<dd class="settings-value font-mono">{settings.bragibooks_version || 'unknown'}</dd>
+					</dl>
+					<p class="settings-help">The version of the running Bragi Books build.</p>
+				</div>
+				<div class="settings-field">
+					<dl class="version-pair">
+						<dt class="settings-label">m4b-merge</dt>
+						<dd class="settings-value font-mono">{settings.m4b_merge_version || 'unknown'}</dd>
+					</dl>
+					<p class="settings-help">
+						{#if settings.m4b_merge_version === 'unknown'}
+							The configured binary did not report a version — check the m4b-merge binary path in
+							Processing.
+						{:else}
+							The version of the m4b-merge binary set in Processing; updates after you save.
+						{/if}
+					</p>
+				</div>
 			</div>
 		</section>
 
@@ -757,13 +792,14 @@
 
 	@media (min-width: 640px) {
 		.settings-grid {
-			grid-template-columns: 1fr 1fr;
+			grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 		}
 	}
 
 	.settings-field {
 		padding: 1rem 1.25rem;
 		background: var(--bg-panel);
+		min-width: 0;
 	}
 
 	.settings-label {
@@ -856,44 +892,26 @@
 		margin-top: 0.625rem;
 	}
 
+	.settings-value {
+		margin: 0;
+		font-size: 0.875rem;
+		line-height: 1.5;
+		color: var(--text);
+		overflow-wrap: anywhere;
+	}
+
+	/* Term/definition pair — the dl resets are needed because <dd>
+	   ships with a left margin by default */
+	.version-pair {
+		margin: 0;
+	}
+
+	.version-pair dd {
+		margin: 0;
+	}
+
 	#input_dir_desc {
 		text-wrap: balance;
-	}
-
-	/* Reference box for output scheme keywords */
-	.settings-ref {
-		margin-top: 0.5rem;
-		padding: 0.5rem 0.75rem;
-		background: var(--bg);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-sm);
-	}
-
-	.settings-ref__title {
-		font-size: 0.78rem;
-		font-weight: 500;
-		color: var(--text);
-	}
-
-	.settings-ref__title code {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.75rem;
-		padding: 0.05rem 0.3rem;
-		background: var(--elevated);
-		border-radius: 2px;
-	}
-
-	.settings-ref__text {
-		margin-top: 0.25rem;
-		font-size: 0.75rem;
-		color: var(--text-muted);
-	}
-
-	.settings-ref__keywords {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.75rem;
-		color: var(--text-muted);
-		line-height: 1.6;
 	}
 
 	/* Save bar — end of the form, reachable without scrolling */
