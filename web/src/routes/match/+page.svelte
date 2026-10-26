@@ -105,7 +105,7 @@
 	$effect(() => {
 		const node = headEl;
 		if (!node) return;
-		const measure = () => (headHeight = node.offsetHeight);
+		const measure = () => (headHeight = node.getBoundingClientRect().height);
 		measure();
 		const observer = new ResizeObserver(measure);
 		observer.observe(node);
@@ -1395,7 +1395,7 @@
 
 <div class="match" style="--head-h: {headHeight}px">
 	<p class="sr-only" aria-live="polite">{removalNotice || announcements}</p>
-	<div class="match__head" bind:this={headEl}>
+	<div class="match__head" class:match__head--pass={removeMode} bind:this={headEl}>
 		<div class="match__head-in">
 			<div class="match__intro">
 				<h1 class="match__title" id="match-title" tabindex="-1">Match metadata</h1>
@@ -1426,18 +1426,35 @@
 							Focused review
 						</button>
 					</div>
-					<Button
-						class="match__save"
-						loading={saving}
-						disabled={includedReadyCount === 0 || removingMany}
-						onclick={saveMatches}
-					>
-						{saving
-							? 'Saving…'
-							: `Save ${includedReadyCount} ${
-									includedReadyCount === 1 ? 'match' : 'matches'
-								} → Queue`}
-					</Button>
+					{#if removeMode}
+						<div class="match__pass-head">
+							<span class="match__pass-count">
+								{removeSelectedCount} of {candidates.length}
+								{candidates.length === 1 ? 'source' : 'sources'} selected to remove
+							</span>
+							<Button
+								variant="ghost"
+								class="match__pass-cancel"
+								disabled={removingMany}
+								onclick={() => endRemovePass()}
+							>
+								Cancel
+							</Button>
+						</div>
+					{:else}
+						<Button
+							class="match__save"
+							loading={saving}
+							disabled={includedReadyCount === 0 || removingMany}
+							onclick={saveMatches}
+						>
+							{saving
+								? 'Saving…'
+								: `Save ${includedReadyCount} ${
+										includedReadyCount === 1 ? 'match' : 'matches'
+									} → Queue`}
+						</Button>
+					{/if}
 				</div>
 			{:else if !initialLoadComplete}
 				<div class="match__head-actions" aria-hidden="true">
@@ -1552,38 +1569,25 @@
 							/>
 							<span>Select all sources</span>
 						</label>
-						<span class="batch__count batch__count--removal">
-							{removeSelectedCount} of {candidates.length}
-							{candidates.length === 1 ? 'source' : 'sources'} selected to remove
-						</span>
 					</div>
 					<div class="batch__bar-side">
 						<p class="batch__hint">
 							Removing deletes the book’s record from Bragi Books. Files on disk are not
 							touched.
 						</p>
-						<div class="batch__pass-actions">
-							<Button
-								variant="ghost"
-								disabled={removingMany}
-								onclick={() => endRemovePass()}
-							>
-								Cancel
-							</Button>
-							<Button
-								variant="danger"
-								id="batch-remove-commit"
-								data-commit-removal
-								disabled={removeSelectedCount === 0 || removingMany}
-								onclick={openRemoveDialog}
-							>
-								{removeSelectedCount === 0
-									? 'Remove records'
-									: `Remove ${removeSelectedCount} ${
-											removeSelectedCount === 1 ? 'record' : 'records'
-										}`}
-							</Button>
-						</div>
+						<Button
+							variant="danger"
+							id="batch-remove-commit"
+							data-commit-removal
+							disabled={removeSelectedCount === 0 || removingMany}
+							onclick={openRemoveDialog}
+						>
+							{removeSelectedCount === 0
+								? 'Select sources to remove'
+								: `Remove ${removeSelectedCount} ${
+										removeSelectedCount === 1 ? 'record' : 'records'
+									}`}
+						</Button>
 					</div>
 				</div>
 				{#if removeFailure}
@@ -1690,7 +1694,10 @@
 						<div class="batch__names">
 							<div class="batch__name">
 								<span class="batch__name-label">Before</span>
-								<span class="batch__name-value" title={c.srcPath}>{sourceBase(c)}</span>
+								<span
+									class="batch__name-value batch__name-value--source"
+									title={c.srcPath}>{sourceBase(c)}</span
+								>
 							</div>
 							<svg class="batch__arrow" viewBox="0 0 24 24" aria-hidden="true">
 								<path d="M5 12h13m-5-5 5 5-5 5" />
@@ -1850,7 +1857,7 @@
 						onclick={openRemoveDialog}
 					>
 						{removeSelectedCount === 0
-							? 'Remove records'
+							? 'Select sources to remove'
 							: `Remove ${removeSelectedCount} ${
 									removeSelectedCount === 1 ? 'record' : 'records'
 								}`}
@@ -2499,6 +2506,9 @@
 		<p class="batch-dialog__lead">
 			These sources leave the Match list and their book records are deleted from Bragi Books.
 		</p>
+		<p class="batch-dialog__list-label">
+			{removeTargets.length} {removeTargets.length === 1 ? 'source' : 'sources'}
+		</p>
 		<ul class="batch-dialog__list">
 			{#each removeTargets as target (target.bookId)}
 				<li class="batch-dialog__item">
@@ -2603,6 +2613,10 @@
 		max-width: 54ch;
 	}
 
+	.match__head--pass .match__sub {
+		display: none;
+	}
+
 	.match__head-actions {
 		display: flex;
 		align-items: center;
@@ -2656,6 +2670,27 @@
 	.match__head :global(.match__save) {
 		flex-shrink: 0;
 		min-height: 44px;
+	}
+
+	.match__pass-head {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		flex-shrink: 0;
+	}
+
+	.match__pass-count {
+		font-size: 13px;
+		font-weight: 600;
+		line-height: 1.4;
+		color: var(--state-red);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.match__head :global(.match__pass-cancel) {
+		min-height: 36px;
+		padding: 0 12px;
+		font-size: 13px;
 	}
 
 	.match__alert {
@@ -2725,17 +2760,6 @@
 
 	.batch__row--removal .batch__check input:checked::before {
 		color: #fff;
-	}
-
-	.batch__count--removal {
-		color: var(--state-red);
-		font-weight: 600;
-	}
-
-	.batch__pass-actions {
-		display: flex;
-		align-items: center;
-		gap: 8px;
 	}
 
 	.batch__commitbar {
@@ -2940,6 +2964,16 @@
 	.batch__name-value--empty {
 		color: var(--m-muted);
 		font-weight: 500;
+	}
+
+	/* Source identity wraps in both batch and removal review. */
+	.batch__name-value--source {
+		white-space: normal;
+		overflow-wrap: anywhere;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
 	}
 
 	.batch__name-link {
@@ -4176,6 +4210,15 @@
 		max-width: 58ch;
 	}
 
+	.batch-dialog__list-label {
+		margin: 0 0 6px;
+		font-size: 11.5px;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--m-muted);
+	}
+
 	.batch-dialog__list {
 		list-style: none;
 		margin: 0;
@@ -4270,9 +4313,19 @@
 	}
 
 	@media (max-width: 900px) {
+		/* The page head scrolls with the list on phones; only the removal pass
+		 * keeps a compact sticky strip so its count and exit stay in reach. */
 		.match__head {
+			position: static;
 			margin: 0 -1rem 16px;
 			padding: 12px 1rem 12px;
+		}
+
+		.match__head--pass {
+			position: sticky;
+			top: calc(var(--nav-height) - 2px);
+			margin-bottom: 12px;
+			padding: 8px 1rem 10px;
 		}
 
 		.match__head-in {
@@ -4280,8 +4333,20 @@
 			gap: 12px;
 		}
 
+		.match__head--pass .match__head-in {
+			gap: 4px;
+		}
+
 		.match__title {
 			font-size: 24px;
+		}
+
+		.match__head--pass .match__title {
+			font-size: 20px;
+		}
+
+		.match__head--pass .match__modes {
+			display: none;
 		}
 
 		.match__head-actions {
@@ -4289,6 +4354,10 @@
 			flex-direction: column;
 			align-items: stretch;
 			gap: 10px;
+		}
+
+		.match__head--pass .match__head-actions {
+			gap: 0;
 		}
 
 		.match__modes {
@@ -4304,6 +4373,15 @@
 		.match__head :global(.match__save) {
 			width: 100%;
 			min-height: 46px;
+		}
+
+		.match__pass-head {
+			width: 100%;
+			justify-content: space-between;
+		}
+
+		.match__head :global(.match__pass-cancel) {
+			min-height: 44px;
 		}
 
 		.match__grid {
