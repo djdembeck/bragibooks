@@ -5,7 +5,7 @@
 	import type { BookWithPeople, ProcessingJob, JobsListResponse, AudiobookDBBook, AudiobookDBRelease } from '#lib/types.js';
 	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '#lib/types.js';
 	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
-	import { formatJobTime } from '#lib/datetime.js';
+	import { formatJobTime, formatElapsed } from '#lib/datetime.js';
 	import { StatusBadge, AbdTag, EmptyState, Button, Alert, ErrorDetail, Skeleton, CoverArt } from '#lib/components/index.js';
 	import { ExternalLink, ArrowLeft } from '@lucide/svelte';
 
@@ -78,6 +78,14 @@
 	const inFlightJob = $derived(
 		book ? jobs.some((j) => j.status === 'queued' || j.status === 'running') : false
 	);
+	let nowMs = $state(Date.now());
+	// 1s tick only while this book has an in-flight job, so an idle page costs nothing.
+	$effect(() => {
+		if (!inFlightJob) return;
+		nowMs = Date.now();
+		const timer = window.setInterval(() => (nowMs = Date.now()), 1000);
+		return () => clearInterval(timer);
+	});
 
 	function beginAction(action: 'reprocess' | 'rematch') {
 		if (acting || inFlightJob || (action === 'reprocess' && isFileBacked)) return;
@@ -556,6 +564,12 @@
 								<div class="joblist__time">
 									<dt>Done</dt>
 									<dd>{formatJobTime(job.completed_at)}</dd>
+								</div>
+							{/if}
+							{#if job.started_at || (!job.completed_at && job.created_at)}
+								<div class="joblist__time">
+									<dt>Elapsed</dt>
+									<dd>{formatElapsed(job.started_at ?? job.created_at, job.completed_at, nowMs)}</dd>
 								</div>
 							{/if}
 							{#if !job.started_at && !job.completed_at && job.created_at}

@@ -4,7 +4,7 @@
 	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, StatusBadge, CoverArt } from '#lib/components/index.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { cleanAdbError, toCleanedError } from '#lib/adbError.js';
-	import { formatJobTime } from '#lib/datetime.js';
+	import { formatJobTime, formatElapsed } from '#lib/datetime.js';
 	import { CheckCircle, Clock, ArrowRight, FileText } from '@lucide/svelte';
 
 	interface JobItem {
@@ -265,6 +265,14 @@
 	const pendingBooks = $derived(books.filter((b) => b.status === 'pending'));
 	const activeJobs = $derived(jobs.filter(isActiveJob));
 	const pastJobs = $derived(jobs.filter((job) => !isActiveJob(job)));
+	let nowMs = $state(Date.now());
+	// 1s tick only while a live job is present, so an idle page costs nothing.
+	$effect(() => {
+		if (activeJobs.length === 0) return;
+		nowMs = Date.now();
+		const timer = window.setInterval(() => (nowMs = Date.now()), 1000);
+		return () => clearInterval(timer);
+	});
 	const failedJobs = $derived(pastJobs.filter((job) => job.status === 'error' || job.status === 'failed').length);
 	const runningJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'running').length);
 	const queuedJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'queued').length);
@@ -402,6 +410,9 @@
 			{/if}
 			{#if job.completedAt}
 				<div class="job-timestamp"><dt>Done</dt><dd>{formatJobTime(job.completedAt)}</dd></div>
+			{/if}
+			{#if job.startedAt || (!job.completedAt && job.createdAt)}
+				<div class="job-timestamp"><dt>Elapsed</dt><dd>{formatElapsed(job.startedAt ?? job.createdAt, job.completedAt, nowMs)}</dd></div>
 			{/if}
 			{#if !job.startedAt && !job.completedAt && job.createdAt}
 				<div class="job-timestamp"><dt>Created</dt><dd>{formatJobTime(job.createdAt)}</dd></div>

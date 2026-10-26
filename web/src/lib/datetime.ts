@@ -25,3 +25,30 @@ export function formatJobTime(value: string | null | undefined): string {
 	const date = parseJobTimestamp(value);
 	return date ? formatter.format(date) : value;
 }
+
+/**
+ * Human duration between two stored job timestamps, e.g. `12s`, `5m`,
+ * `27h 14m`, or live `1h 4m 30s`. `ended` null means "still running" and the
+ * second endpoint is `nowMs`. The delta is offset-invariant — both endpoints
+ * come from the same naive-UTC source — so it is correct even before #442
+ * fixes absolute clock rendering. Clamps to zero to hide any clock skew.
+ */
+export function formatElapsed(since: string | null, ended: string | null, nowMs: number): string {
+	const start = since ? parseJobTimestamp(since) : null;
+	if (!start) return '';
+	const live = !ended;
+	const end = live ? nowMs : ended ? parseJobTimestamp(ended)?.getTime() ?? NaN : NaN;
+	if (!live && Number.isNaN(end)) return '';
+	const ms = Math.max(0, (live ? nowMs : end) - start.getTime());
+	const sec = Math.floor(ms / 1000);
+	const h = Math.floor(sec / 3600);
+	const m = Math.floor((sec % 3600) / 60);
+	const s = sec % 60;
+	if (live) {
+		const parts = [h ? `${h}h` : '', m ? `${m}m` : '', s ? `${s}s` : ''];
+		return parts.filter(Boolean).join(' ');
+	}
+	if (sec < 60) return `${s}s`;
+	if (sec < 3600) return `${m}m`;
+	return `${h}h ${m}m`;
+}
