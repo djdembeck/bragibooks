@@ -11,8 +11,11 @@ PUID="${UID:-${PUID:-99}}"
 PGID="${GID:-${PGID:-100}}"
 
 if [ "$(id -u)" = "0" ]; then
-    chown -R "${PUID}:${PGID}" /config /input /output || \
-        echo "warning: could not chown runtime directories; continuing" >&2
+    if find /config /input /output ! -user "${PUID}" -o ! -group "${PGID}" | head -n 1 | grep -q .; then
+        chown -R "${PUID}:${PGID}" /config /input /output || \
+            echo "warning: could not chown runtime directories; continuing" >&2
+    fi
+    echo "Starting with UID: ${PUID}, GID: ${PGID}"
     exec setpriv --reuid "${PUID}" --regid "${PGID}" --clear-groups /usr/local/bin/bragibooks "$@"
 fi
 

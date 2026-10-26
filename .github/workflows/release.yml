@@ -137,6 +137,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.version.outputs.new_version }}"
+          BARE="${VERSION#v}"
           REGISTRY_IMAGE="ghcr.io/djdembeck/bragibooks"
 
           HUB_IMAGE="djdembeck/bragibooks"
@@ -145,9 +146,9 @@ jobs:
           # major releases. The tag push is made with GITHUB_TOKEN, which
           # cannot trigger workflow runs, so CI does not re-run for the
           # pushed tag — the aliases must be published here too.
-          MAJOR_MINOR="${VERSION%.*}"
-          SEMVER_TAGS=("${VERSION}" "${MAJOR_MINOR}" "${MAJOR_MINOR%.*}")
-          [ "${VERSION%%.*}" != "0" ] && SEMVER_TAGS+=("latest")
+          MAJOR_MINOR="${BARE%.*}"
+          SEMVER_TAGS=("${BARE}" "${MAJOR_MINOR}" "${MAJOR_MINOR%.*}")
+          [ "${BARE%%.*}" != "0" ] && SEMVER_TAGS+=("latest")
           EXTRA_TAGS=()
           for t in "${SEMVER_TAGS[@]}"; do
             EXTRA_TAGS+=("${REGISTRY_IMAGE}:${t}" "${HUB_IMAGE}:${t}")
@@ -163,15 +164,15 @@ jobs:
           # rerun of a completed release). Hub is re-tagged from the same build
           # push below, overwriting is not a concern because tags are versioned
           # and the same build is pushed.
-          if docker manifest inspect "${REGISTRY_IMAGE}:${VERSION}" >/dev/null 2>&1; then
-            echo "Image ${REGISTRY_IMAGE}:${VERSION} already exists - skipping build"
+          if docker manifest inspect "${REGISTRY_IMAGE}:${BARE}" >/dev/null 2>&1; then
+            echo "Image ${REGISTRY_IMAGE}:${BARE} already exists - skipping build"
             # Ensure every alias of the existing image exists (idempotent
             # rerun); retag by digest where missing.
             for t in "${EXTRA_TAGS[@]}"; do
               if ! docker manifest inspect "${t}" >/dev/null 2>&1; then
-                digest=$(docker buildx imagetools inspect "${REGISTRY_IMAGE}:${VERSION}" --format '{{.Manifest.Digest}}')
+                digest=$(docker buildx imagetools inspect "${REGISTRY_IMAGE}:${BARE}" --format '{{.Manifest.Digest}}')
                 [ -n "${digest}" ] || { echo "Cannot resolve existing GHCR digest - re-dispatch required" >&2; exit 1; }
-                docker buildx imagetools create --tag "${t}" "${REGISTRY_IMAGE}:${VERSION}@${digest}"
+                docker buildx imagetools create --tag "${t}" "${REGISTRY_IMAGE}:${BARE}@${digest}"
               fi
             done
             exit 0
