@@ -71,6 +71,24 @@ func isPathFormatToken(key string) bool {
 	return false
 }
 
+// ValidateRelativePathFormat checks a template that must resolve INSIDE the
+// output root (m4b-merge -p): relative — no leading "/" — and free of ".."
+// path segments — before delegating the token/character rules to
+// ValidatePathFormat. Used by output-profile writes, queue-time resolution,
+// and worker validation so a stored snapshot can never steer writes outside
+// the resolved destination.
+func ValidateRelativePathFormat(template string) error {
+	if strings.HasPrefix(template, "/") {
+		return fmt.Errorf("relative path format must not start with '/'")
+	}
+	for _, seg := range strings.Split(template, "/") {
+		if seg == ".." {
+			return fmt.Errorf("relative path format must not contain '..' path segments")
+		}
+	}
+	return ValidatePathFormat(template)
+}
+
 // ValidatePathFormat checks a m4b-merge -p template against the
 // Linux+Windows character union (output roots are commonly foreign-OS
 // mounts). Mirrors the web scheme rules so live UI feedback and saved

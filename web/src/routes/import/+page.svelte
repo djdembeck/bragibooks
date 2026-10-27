@@ -2,8 +2,7 @@
 	import { get, post } from '#lib/api.js';
 	import { goto } from '$app/navigation';
 	import type { DirectoryEntry, DirectoriesResponse, Settings, CreateBooksResponse } from '#lib/types.js';
-	import { PageHeader, Alert, ErrorDetail, Button, Skeleton, EmptyState, DirPicker } from '#lib/components/index.js';
-	import { validateScheme, parseParts } from '#lib/scheme.js';
+	import { PageHeader, Alert, ErrorDetail, Button, Skeleton, EmptyState } from '#lib/components/index.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { ChevronUp, ChevronDown, Folder, FileAudio, File } from '@lucide/svelte';
@@ -21,38 +20,6 @@
 	// directory request starts, so a false initial value renders the empty state.
 	let loading = $state(true);
 	let settingsError = $state<CleanedAdbError | null>(null);
-
-	// Optional per-import output override: applies to every book in this import
-	// batch; empty = follow the global Settings.
-	let showOverrides = $state(false);
-	let overrideDir = $state('');
-	let overrideScheme = $state('');
-	let dirPickerOpen = $state(false);
-	let globalOutputDir = $state('');
-	// Client-side mirror of the server rules (absolute dir; relative format,
-	// no '..' path segments, Settings token rules): the form reports a
-	// guaranteed 400 before it is ever sent.
-	function hasDotDotSegment(s: string): boolean {
-		return s.split('/').some((seg) => seg === '..');
-	}
-
-	function overrideDirIssue(v: string): string | null {
-		if (v && !v.startsWith('/')) return 'Output directory must be an absolute path (start with /) — leave empty to inherit Settings.';
-		return null;
-	}
-
-	function overrideFormatIssue(v: string): string | null {
-		if (!v) return null;
-		if (v.startsWith('/')) return 'Path format must be relative (no leading /).';
-		if (hasDotDotSegment(v)) return "Path format must not contain '..' path segments.";
-		return validateScheme(parseParts(v)).errors[0] || null;
-	}
-
-	const overrideDirValue = $derived(overrideDir.trim());
-	const overrideFormatValue = $derived(overrideScheme.trim());
-	const overrideDirError = $derived(overrideDirIssue(overrideDirValue));
-	const overrideFormatError = $derived(overrideFormatIssue(overrideFormatValue));
-	const overrideHasErrors = $derived(!!overrideDirError || !!overrideFormatError);
 
 	const SUPPORTED_EXTENSIONS = new Set(['.mp3', '.m4a', '.m4b', '.mp4', '.aac', '.ogg', '.flac', '.wma']);
 
@@ -109,7 +76,6 @@
 				settingsError = toCleanedError('Source directory is not configured.');
 				return;
 			}
-			globalOutputDir = settings.output_dir || '';
 			const response = await get<DirectoriesResponse>(
 				`/directories?path=${encodeURIComponent(settings.input_dir)}`
 			);
@@ -210,18 +176,10 @@
 	async function start() {
 		const sourcePaths = selectedSourcePaths();
 		if (sourcePaths.length === 0) return;
-		// The derived field errors are the single rule source; rechecking here
-		// stops a stale-UI path (e.g. programmatic mutation) from posting a
-		// value the API would 400.
-		if (overrideHasErrors) return;
 		creating = true;
 		dl.setError(null);
 		try {
-			const override = {
-				output_dir_override: overrideDir.trim() || undefined,
-				path_format_override: overrideScheme.trim() || undefined
-			};
-			const payload = { books: sourcePaths.map((src_path) => ({ src_path, ...override })) };
+			const payload = { books: sourcePaths.map((src_path) => ({ src_path })) };
 			await post<CreateBooksResponse>('/books', payload);
 			await goto('/match');
 		} catch (e) {
@@ -449,81 +407,14 @@
 	<!-- Footer: selection count + dispatch action -->
 	{#if entries.length > 0}
 		<div class="border-t border-[var(--border)] bg-[var(--surface)] px-4 py-3">
-			{#if showOverrides}
-				<div class="mb-3 space-y-2 border-b border-[var(--border-subtle)] pb-3">
-					<div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
-						<label class="shrink-0 text-sm text-[var(--text-secondary)]" for="import-override-dir">
-							Output folder <span class="text-[var(--text-muted)]">(optional, defaults to Settings)</span>
-						</label>
-						<div class="flex min-w-0 flex-1 items-center gap-1.5">
-							<input
-								id="import-override-dir"
-								type="text"
-								bind:value={overrideDir}
-								disabled={creating}
-								placeholder={globalOutputDir || '—'}
-								class="min-h-[44px] min-w-0 flex-1 rounded-sm border border-[var(--border)] bg-[var(--bg-panel)] px-3 text-sm"
-								aria-invalid={overrideDirError ? true : undefined}
-								aria-describedby={overrideDirError ? 'import-override-dir-error' : undefined}
-							/>
-							<Button variant="ghost" disabled={creating} onclick={() => (dirPickerOpen = true)}>
-								Browse
-							</Button>
-							{#if overrideDir}
-								<Button variant="ghost" disabled={creating} onclick={() => (overrideDir = '')}>
-									Clear
-								</Button>
-							{/if}
-						</div>
-						{#if overrideDirError}
-							<p id="import-override-dir-error" class="text-sm text-[var(--state-red)]" role="alert">
-								{overrideDirError}
-							</p>
-						{/if}
-					</div>
-					<div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
-						<label class="shrink-0 text-sm text-[var(--text-secondary)]" for="import-override-scheme">
-							Path format <span class="text-[var(--text-muted)]">(optional, defaults to Settings)</span>
-						</label>
-						<div class="flex min-w-0 flex-1 items-center gap-1.5">
-							<input
-								id="import-override-scheme"
-								type="text"
-								bind:value={overrideScheme}
-								disabled={creating}
-								placeholder="e.g. author/title"
-								class="min-h-[44px] min-w-0 flex-1 rounded-sm border border-[var(--border)] bg-[var(--bg-panel)] px-3 font-mono text-sm"
-								aria-invalid={overrideFormatError ? true : undefined}
-								aria-describedby={overrideFormatError ? 'import-override-scheme-error' : undefined}
-							/>
-							<Button variant="ghost" disabled={creating} onclick={() => (overrideScheme = '')}>
-								Clear
-							</Button>
-						</div>
-						{#if overrideFormatError}
-							<p id="import-override-scheme-error" class="text-sm text-[var(--state-red)]" role="alert">
-								{overrideFormatError}
-							</p>
-						{/if}
-					</div>
-				</div>
-			{/if}
 			<div class="flex flex-col-reverse items-center justify-end gap-3 sm:flex-row">
-				<Button
-					variant="ghost"
-					disabled={creating}
-					onclick={() => (showOverrides = !showOverrides)}
-					aria-expanded={showOverrides}
-				>
-					{showOverrides ? 'Hide per-import output override' : 'Per-import output override (optional)'}
-				</Button>
 				<p class="text-sm text-[var(--text-muted)]">
 					<span class="font-mono text-[var(--text-secondary)]">{selectedCount}</span>
 					<span class="ml-1">{selectedCount === 1 ? 'item selected' : 'items selected'} for match</span>
 				</p>
 				<Button
 					variant="primary"
-					disabled={selectedCount === 0 || creating || overrideHasErrors}
+					disabled={selectedCount === 0 || creating}
 					loading={creating}
 					onclick={start}
 				>
@@ -532,12 +423,6 @@
 			</div>
 		</div>
 	{/if}
-	<DirPicker
-		bind:open={dirPickerOpen}
-		title="Choose output folder"
-		startPath={overrideDir.trim() || globalOutputDir}
-		onselect={(path) => (overrideDir = path)}
-	/>
 </div>
 {/if}
 

@@ -132,10 +132,27 @@ ALTER TABLE settings ADD COLUMN legacy_token_migrated BOOLEAN NOT NULL DEFAULT 0
 `,
 	},
 	{
+		// v7 is an empty marker. Its original two book override columns were
+		// replaced by named output profiles (v8) before the schema shipped,
+		// so re-adding them here would resurrect columns v8 drops.
 		version: 7,
 		sql: `
-ALTER TABLE books ADD COLUMN output_dir_override TEXT DEFAULT '';
-ALTER TABLE books ADD COLUMN path_format_override TEXT DEFAULT '';
+`,
+	},
+	{
+		version: 8,
+		sql: `
+CREATE TABLE IF NOT EXISTS output_profiles (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+	output_dir TEXT NOT NULL DEFAULT '',
+	output_scheme TEXT NOT NULL DEFAULT '',
+	created_at TEXT DEFAULT (datetime('now')),
+	updated_at TEXT DEFAULT (datetime('now'))
+);
+
+ALTER TABLE books DROP COLUMN output_dir_override;
+ALTER TABLE books DROP COLUMN path_format_override;
 
 `,
 	},
@@ -152,7 +169,9 @@ ALTER TABLE books ADD COLUMN path_format_override TEXT DEFAULT '';
 //   - statements containing "IF NOT EXISTS" or CREATE TRIGGER/INDEX are
 //     skipped when the object already exists;
 //   - bare "ALTER TABLE ... ADD COLUMN" statements are skipped when the
-//     column already exists.
+//     column already exists;
+//   - bare "ALTER TABLE ... DROP COLUMN" statements are skipped when the
+//     column is already absent.
 //
 // This makes a migration safe to re-apply even without its log row.
 func RunMigrations(db *sql.DB) error {
@@ -254,15 +273,39 @@ func splitStatements(sqlText string) []string {
 // alterAddColumnRe recognizes a bare ALTER TABLE ... ADD COLUMN statement.
 var alterAddColumnRe = regexp.MustCompile(`(?is)^ALTER\s+TABLE\s+(\w+)\s+ADD\s+(?:COLUMN\s+)?(\w+)`)
 
+// alterDropColumnRe recognizes a bare ALTER TABLE ... DROP COLUMN statement.
+var alterDropColumnRe = regexp.MustCompile(`(?is)^ALTER\s+TABLE\s+(\w+)\s+DROP\s+(?:COLUMN\s+)?(\w+)`)
+
+// columnExistsInTable reports via pragma_table_info whether table carries
+// the named column; false on any query error.
+func columnExistsInTable(tx *sql.Tx, table, column string) bool {
+	var n int
+	if err := tx.QueryRow(
+		"SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?",
+		table, column,
+	).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
 // stmtIsSkippable reports whether the statement is already satisfied by the
 // current schema and can be skipped (idempotent re-application).
 //
 // Statements carrying "IF NOT EXISTS" are self-guarding and MUST run (they
-// are the idempotent form), so the only form worth prechecking is the bare
-// "ALTER TABLE ... ADD COLUMN" used by migrations v2-v4: it is skipped when
-// the column already exists, which makes a re-invocation after a lost log
-// row safe. Any other bare, non-idempotent statement is executed and would
-// fail loudly if its object already exists — the intended behavior for a
+// are the idempotent form), so the only forms worth prechecking are the two
+// bare ALTER TABLE column statements:
+//   - "ADD COLUMN" (migrations v2-v5): skipped when the column already
+//     exists, making a re-invocation after a lost log row safe.
+//   - "DROP COLUMN" (migration v8's cleanup of the superseded v7 book
+//     columns): skipped when the column is already absent, so re-applying
+//     v8 — or healing a lost v7 log row after v8 has run — never fails on
+//     the already-dropped column. A fresh database (v7 never applied)
+//     simply has no such columns and the drops are skipped too; a database
+//     that already ran the old unreleased v7 gets them removed.
+//
+// Any other bare, non-idempotent statement is executed and would fail
+// loudly if its object already exists — the intended behavior for a
 // migration that is genuinely not idempotent.
 func stmtIsSkippable(tx *sql.Tx, stmt string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(stmt))
@@ -270,14 +313,10 @@ func stmtIsSkippable(tx *sql.Tx, stmt string) bool {
 		return false
 	}
 	if m := alterAddColumnRe.FindStringSubmatch(stmt); m != nil {
-		table, column := m[1], m[2]
-		var n int
-		if err := tx.QueryRow(
-			"SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?",
-			table, column,
-		).Scan(&n); err == nil {
-			return n > 0
-		}
+		return columnExistsInTable(tx, m[1], m[2])
+	}
+	if m := alterDropColumnRe.FindStringSubmatch(stmt); m != nil {
+		return !columnExistsInTable(tx, m[1], m[2])
 	}
 	return false
 }

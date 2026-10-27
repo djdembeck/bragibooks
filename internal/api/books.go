@@ -33,11 +33,11 @@ type PersonUpdate struct {
 }
 
 // CreateBookEntry is a single source path to turn into a pending book.
+// Output destinations are NOT per-book: saved output profiles (Settings)
+// are selected once per queue request and snapshotted into the jobs.
 type CreateBookEntry struct {
-	SrcPath            string  `json:"src_path"`
-	Title              string  `json:"title,omitempty"`
-	OutputDirOverride  *string `json:"output_dir_override"`
-	PathFormatOverride *string `json:"path_format_override"`
+	SrcPath string `json:"src_path"`
+	Title   string `json:"title,omitempty"`
 }
 
 // CreateBooksRequest is the JSON body accepted by POST /api/books.
@@ -65,8 +65,6 @@ type UpdateBookRequest struct {
 	FormatType           *string        `json:"format_type"`
 	SrcPath              *string        `json:"src_path"`
 	DestPath             *string        `json:"dest_path"`
-	OutputDirOverride    *string        `json:"output_dir_override"`
-	PathFormatOverride   *string        `json:"path_format_override"`
 	Status               *string        `json:"status"`
 	StatusMessage        *string        `json:"status_message"`
 	CoverImageURL        *string        `json:"cover_image_url"`
@@ -76,7 +74,7 @@ type UpdateBookRequest struct {
 
 // booksColumns is the SELECT column list for the books table, shared by the
 // list and count helpers so the scan column set stays in one place.
-const booksColumns = "id, title, asin, audiobookdb_book_id, audiobookdb_release_id, description, release_date, series, publisher, language, runtime_length_minutes, format_type, src_path, dest_path, output_dir_override, path_format_override, status, status_message, cover_image_url, created_at, updated_at"
+const booksColumns = "id, title, asin, audiobookdb_book_id, audiobookdb_release_id, description, release_date, series, publisher, language, runtime_length_minutes, format_type, src_path, dest_path, status, status_message, cover_image_url, created_at, updated_at"
 
 // validBookStatus reports whether s is an accepted book status filter value.
 func validBookStatus(s string) bool {
@@ -367,24 +365,6 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 		setters = append(setters, "dest_path = ?")
 		args = append(args, *req.DestPath)
 	}
-	if req.OutputDirOverride != nil {
-		v := strings.TrimSpace(*req.OutputDirOverride)
-		if v != "" && !strings.HasPrefix(v, "/") {
-			writeError(w, http.StatusBadRequest, "output directory override must be an absolute path")
-			return
-		}
-		setters = append(setters, "output_dir_override = ?")
-		args = append(args, v)
-	}
-	if req.PathFormatOverride != nil {
-		v := strings.TrimSpace(*req.PathFormatOverride)
-		if msg := invalidPathFormatOverride(v); msg != "" {
-			writeError(w, http.StatusBadRequest, msg)
-			return
-		}
-		setters = append(setters, "path_format_override = ?")
-		args = append(args, v)
-	}
 	if req.Status != nil {
 		setters = append(setters, "status = ?")
 		args = append(args, *req.Status)
@@ -447,37 +427,6 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, bookWithPeople)
 }
 
-// hasDotDotSegment reports whether s contains a literal ".." path segment
-// ("Vol..2" is a legal name and is not flagged).
-func hasDotDotSegment(s string) bool {
-	for _, seg := range strings.Split(s, "/") {
-		if seg == ".." {
-			return true
-		}
-	}
-	return false
-}
-
-// invalidPathFormatOverride reports why a stored path-format override would
-// be unusable: it must be relative, free of ".." segments, and satisfy the
-// same token rules as Settings (audio.ValidatePathFormat, as in
-// internal/api/settings.go's OutputScheme handling).
-func invalidPathFormatOverride(s string) string {
-	if s == "" {
-		return ""
-	}
-	if strings.HasPrefix(s, "/") {
-		return "output path format must be relative (no leading /)"
-	}
-	if hasDotDotSegment(s) {
-		return "output path format must not contain '..' path segments"
-	}
-	if err := audio.ValidatePathFormat(s); err != nil {
-		return "output path format: " + err.Error()
-	}
-	return ""
-}
-
 // CreateBooks handles POST /api/books, creating a batch of pending books from source paths.
 func (h *Handler) CreateBooks(w http.ResponseWriter, r *http.Request) {
 	var req CreateBooksRequest
@@ -490,40 +439,17 @@ func (h *Handler) CreateBooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pre-pass so one bad entry 400s the whole batch before any insert.
-	type createOverride struct{ dir, fmt string }
-	overrides := make([]createOverride, len(req.Books))
-	for i, entry := range req.Books {
-		dir := ""
-		if entry.OutputDirOverride != nil {
-			dir = strings.TrimSpace(*entry.OutputDirOverride)
-		}
-		fm := ""
-		if entry.PathFormatOverride != nil {
-			fm = strings.TrimSpace(*entry.PathFormatOverride)
-		}
-		if dir != "" && !strings.HasPrefix(dir, "/") {
-			writeError(w, http.StatusBadRequest, "output directory override must be an absolute path")
-			return
-		}
-		if msg := invalidPathFormatOverride(fm); msg != "" {
-			writeError(w, http.StatusBadRequest, msg)
-			return
-		}
-		overrides[i] = createOverride{dir, fm}
-	}
-
 	created := make([]models.Book, 0, len(req.Books))
-	for i, entry := range req.Books {
+	for _, entry := range req.Books {
 		title := entry.Title
 		if title == "" {
 			title = deriveTitle(entry.SrcPath)
 		}
 
 		res, err := h.svc.DB.Exec(
-			`INSERT INTO books (title, src_path, release_date, status, created_at, updated_at, output_dir_override, path_format_override)
-			 VALUES (?, ?, '', 'pending', datetime('now'), datetime('now'), ?, ?)`,
-			title, entry.SrcPath, overrides[i].dir, overrides[i].fmt,
+			`INSERT INTO books (title, src_path, release_date, status, created_at, updated_at)
+			 VALUES (?, ?, '', 'pending', datetime('now'), datetime('now'))`,
+			title, entry.SrcPath,
 		)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("create book: %v", err))
@@ -693,7 +619,7 @@ func (h *Handler) DeleteBook(w http.ResponseWriter, r *http.Request) {
 // getBook returns a single book by ID, or nil if not found.
 func (h *Handler) getBook(id int64) (*models.Book, error) {
 	rows, err := h.svc.DB.Query(
-		"SELECT id, title, asin, audiobookdb_book_id, audiobookdb_release_id, description, release_date, series, publisher, language, runtime_length_minutes, format_type, src_path, dest_path, output_dir_override, path_format_override, status, status_message, cover_image_url, created_at, updated_at FROM books WHERE id = ?",
+		"SELECT id, title, asin, audiobookdb_book_id, audiobookdb_release_id, description, release_date, series, publisher, language, runtime_length_minutes, format_type, src_path, dest_path, status, status_message, cover_image_url, created_at, updated_at FROM books WHERE id = ?",
 		id,
 	)
 	if err != nil {
@@ -746,7 +672,6 @@ func scanBooks(rows *sql.Rows) ([]models.Book, error) {
 			&b.ID, &b.Title, &asin, &audiobookdbBookID, &audiobookdbReleaseID,
 			&b.Description, &b.ReleaseDate, &b.Series, &b.Publisher, &b.Language,
 			&b.RuntimeLengthMinutes, &b.FormatType, &b.SrcPath, &b.DestPath,
-			&b.OutputDirOverride, &b.PathFormatOverride,
 			&b.Status, &b.StatusMessage, &b.CoverImageURL, &b.CreatedAt, &b.UpdatedAt,
 		)
 		if err != nil {

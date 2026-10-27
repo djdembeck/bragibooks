@@ -18,8 +18,6 @@ type Book struct {
 	FormatType           string         `db:"format_type" json:"format_type"`
 	SrcPath              string         `db:"src_path" json:"src_path"`
 	DestPath             string         `db:"dest_path" json:"dest_path"`
-	OutputDirOverride    string         `db:"output_dir_override" json:"output_dir_override"`
-	PathFormatOverride   string         `db:"path_format_override" json:"path_format_override"`
 	Status               string         `db:"status" json:"status"`
 	StatusMessage        string         `db:"status_message" json:"status_message"`
 	CoverImageURL        string         `db:"cover_image_url" json:"cover_image_url"`
@@ -57,6 +55,19 @@ type ProcessingJob struct {
 	StartedAt    *string       `db:"started_at" json:"started_at"`
 	CompletedAt  *string       `db:"completed_at" json:"completed_at"`
 	CreatedAt    string        `db:"created_at" json:"created_at"`
+}
+
+// OutputProfile is a named, reusable output destination for queue batches:
+// an optional output-directory override (empty inherits the global output
+// directory at queue time) and an optional relative path format (empty
+// inherits the global format at queue time). Profiles are settings, not
+// book attributes: jobs store fully-resolved snapshots of the selected
+// profile, never profile references.
+type OutputProfile struct {
+	ID           int64  `db:"id" json:"id"`
+	Name         string `db:"name" json:"name"`
+	OutputDir    string `db:"output_dir" json:"output_dir"`
+	OutputScheme string `db:"output_scheme" json:"output_scheme"`
 }
 
 // Settings holds application configuration persisted in the database.

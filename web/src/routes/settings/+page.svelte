@@ -1,8 +1,9 @@
 <script lang="ts">
-	import { get, post, put } from '#lib/api.js';
+	import { get, post, put, del, ApiError } from '#lib/api.js';
+	import { Pencil, Trash2 } from '@lucide/svelte';
 	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker, Modal, PathFormatBuilder } from '#lib/components/index.js';
 	import { parseParts, validateScheme } from '#lib/scheme.js';
-	import type { Settings } from '#lib/types.js';
+	import type { Settings, OutputProfile } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { Save, FolderOpen, Check, Copy, Plus } from '@lucide/svelte';
@@ -311,6 +312,178 @@
 
 	const apiEnabled = $derived(settings?.api_endpoint_enabled === true);
 	const apiEnvManaged = $derived(settings?.api_endpoint_env_managed === true);
+
+	// ---------- Saved output profiles ----------
+	// Managed independently from the settings form: loading or saving a
+	// profile never touches the global /settings record.
+	type ProfileDraft = { id: number | null; name: string; output_dir: string; output_scheme: string };
+
+	let profileLoading = $state(true);
+	let profileError = $state<string | null>(null);
+	let profiles = $state<OutputProfile[]>([]);
+
+	let profileModalOpen = $state(false);
+	let profileDraft = $state<ProfileDraft>({ id: null, name: '', output_dir: '', output_scheme: '' });
+	let profileFieldErrors = $state<Record<string, string | null>>({});
+	let profileServerError = $state<string | null>(null);
+	let profileSaving = $state(false);
+	let profileDeleteMsg = $state<string | null>(null);
+	// Inline two-step delete confirmation (same grammar as the
+	// external-API disable action), not a native dialog.
+	let profilePendingDelete = $state<OutputProfile | null>(null);
+	let profileDeleting = $state(false);
+	// Directory picker for the profile form: starts at the profile's own
+	// directory, or the global output directory when the field is blank.
+	let profilePickerOpen = $state(false);
+
+	function onProfilePick(path: string) {
+		profileDraft.output_dir = path;
+		profilePickerOpen = false;
+	}
+
+	// m4b-merge template tokens a relative format must contain at least one of.
+	const PROFILE_SCHEME_TOKENS: readonly string[] = [
+		'author',
+		'narrator',
+		'series_name',
+		'series_position',
+		'subtitle',
+		'title',
+		'year',
+		'asin'
+	];
+
+	async function loadProfiles() {
+		profileLoading = true;
+		profileError = null;
+		try {
+			const res = await get<{ profiles: OutputProfile[] }>('/output-profiles');
+			profiles = res.profiles;
+		} catch (e) {
+			profileError = e instanceof ApiError ? e.message : 'Could not load output profiles.';
+		} finally {
+			profileLoading = false;
+		}
+	}
+
+	$effect(() => {
+		loadProfiles();
+	});
+
+	function openCreateProfile() {
+		profileDraft = { id: null, name: '', output_dir: '', output_scheme: '' };
+		profileFieldErrors = {};
+		profileServerError = null;
+		profileModalOpen = true;
+	}
+
+	function openEditProfile(profile: OutputProfile) {
+		profileDraft = {
+			id: profile.id,
+			name: profile.name,
+			output_dir: profile.output_dir,
+			output_scheme: profile.output_scheme
+		};
+		profileFieldErrors = {};
+		profileServerError = null;
+		profileModalOpen = true;
+	}
+
+	function validateProfile(): boolean {
+		profileFieldErrors = {};
+		let valid = true;
+
+		if (!profileDraft.name.trim()) {
+			profileFieldErrors.name = 'Name is required';
+			valid = false;
+		}
+
+		const dir = profileDraft.output_dir.trim();
+		const scheme = profileDraft.output_scheme.trim();
+
+		if (!dir && !scheme) {
+			profileFieldErrors.both = 'Set an output directory, an output path format, or both.';
+			valid = false;
+		}
+
+		if (dir && !dir.startsWith('/')) {
+			profileFieldErrors.output_dir = 'Must be an absolute path (start with /).';
+			valid = false;
+		}
+
+		if (scheme) {
+			if (scheme.startsWith('/')) {
+				profileFieldErrors.output_scheme = 'Must be relative to the output directory (no leading /).';
+				valid = false;
+			} else if (scheme.split('/').some((seg) => seg === '..')) {
+				profileFieldErrors.output_scheme = 'Must not contain a “..” path segment.';
+				valid = false;
+			} else if (!PROFILE_SCHEME_TOKENS.some((t) => scheme.includes(`{${t}}`))) {
+				profileFieldErrors.output_scheme = 'Must contain at least one token (e.g. {author}/{title}).';
+				valid = false;
+			}
+		}
+
+		return valid;
+	}
+
+	async function saveProfile(e: Event) {
+		e.preventDefault();
+		if (!validateProfile()) return;
+
+		profileSaving = true;
+		profileServerError = null;
+		const body = {
+			name: profileDraft.name.trim(),
+			output_dir: profileDraft.output_dir.trim(),
+			output_scheme: profileDraft.output_scheme.trim()
+		};
+		try {
+			if (profileDraft.id === null) {
+				await post<OutputProfile>('/output-profiles', body);
+			} else {
+				await put<OutputProfile>(`/output-profiles/${profileDraft.id}`, body);
+			}
+			profileModalOpen = false;
+			await loadProfiles();
+		} catch (e) {
+			profileServerError =
+				e instanceof ApiError ? e.message : e instanceof Error ? e.message : 'Failed to save profile.';
+		} finally {
+			profileSaving = false;
+		}
+	}
+
+	function startDeleteProfile(profile: OutputProfile) {
+		if (profileDeleting) return;
+		profilePendingDelete = profile;
+		profileDeleteMsg = null;
+		requestAnimationFrame(() => document.getElementById('profile-delete-confirm')?.focus());
+	}
+
+	function cancelProfileDelete() {
+		profilePendingDelete = null;
+	}
+
+	async function confirmDeleteProfile() {
+		const profile = profilePendingDelete;
+		if (!profile || profileDeleting) return;
+		profileDeleting = true;
+		try {
+			await del(`/output-profiles/${profile.id}`);
+			profilePendingDelete = null;
+		} catch (e) {
+			profileDeleteMsg =
+				e instanceof ApiError && e.status === 404
+					? 'Profile no longer exists.'
+					: e instanceof Error
+						? e.message
+						: 'Failed to delete profile.';
+		} finally {
+			profileDeleting = false;
+		}
+		await loadProfiles();
+	}
 </script>
 
 <PageHeader
@@ -422,8 +595,109 @@
 			</div>
 		</section>
 
-		<!-- Processing -->
-		<section class="settings-section" aria-labelledby="settings-processing">
+			<!-- Saved output profiles -->
+			<section class="settings-section" aria-labelledby="settings-output-profiles">
+				<div class="settings-section__header">
+					<h2 class="settings-section__title settings-section__title--inline" id="settings-output-profiles">
+						Saved output profiles
+					</h2>
+					<Button variant="secondary" class="shrink-0" onclick={openCreateProfile}>
+						<Plus class="h-4 w-4" aria-hidden="true" />
+						Add profile
+					</Button>
+				</div>
+				<div class="settings-grid">
+					<div class="settings-field">
+						<p class="settings-help">
+							Reusable named presets for the output directory and path format that batch processing can
+							select at queue time.
+						</p>
+						{#if profileDeleteMsg}
+							<div class="mb-3">
+								<Alert variant="error" role="status">{profileDeleteMsg}</Alert>
+							</div>
+						{/if}
+						{#if profileError}
+							<div class="mb-3">
+								<Alert variant="error" onretry={loadProfiles}>
+									<span class="font-medium">Could not load output profiles.</span>
+									<span class="block text-xs opacity-80 mt-1">{profileError}</span>
+								</Alert>
+							</div>
+						{:else if profileLoading}
+							<div class="profile-list" aria-label="Loading output profiles">
+								{#each Array(3) as _}
+									<Skeleton height="1rem" />
+								{/each}
+							</div>
+						{:else if profiles.length === 0}
+							<p class="profile-empty">No saved profiles yet.</p>
+						{:else}
+							<ul class="profile-list" aria-label="Saved output profiles">
+								{#each profiles as profile (profile.id)}
+									<li class="profile-row">
+										<div class="profile-row__info">
+											<span class="profile-row__name">{profile.name}</span>
+											<span class="profile-row__values">
+												<code>{profile.output_dir || 'Use global output directory'}</code>
+												<code>{profile.output_scheme || 'Use global path format'}</code>
+											</span>
+										</div>
+										{#if profilePendingDelete?.id === profile.id}
+											<div class="settings-confirm" role="alert">
+												<p class="settings-confirm__text">
+													Delete the output profile &ldquo;{profile.name}&rdquo;? Queued jobs that used it
+													keep their stored output settings.
+												</p>
+												<div class="settings-confirm__actions">
+													<Button
+														id="profile-delete-confirm"
+														variant="danger"
+														loading={profileDeleting}
+														disabled={profileDeleting}
+														onclick={confirmDeleteProfile}
+													>
+														Yes, delete
+													</Button>
+													<Button
+														variant="ghost"
+														disabled={profileDeleting}
+														onclick={cancelProfileDelete}
+													>
+														Cancel
+													</Button>
+												</div>
+											</div>
+										{:else}
+											<div class="profile-row__actions">
+												<Button
+													variant="ghost"
+													class="min-h-9 min-w-9 !px-2"
+													aria-label={`Edit profile ${profile.name}`}
+													onclick={() => openEditProfile(profile)}
+												>
+													<Pencil class="h-4 w-4" aria-hidden="true" />
+												</Button>
+												<Button
+													variant="ghost"
+													class="min-h-9 min-w-9 !px-2"
+													aria-label={`Delete profile ${profile.name}`}
+													onclick={() => startDeleteProfile(profile)}
+												>
+													<Trash2 class="h-4 w-4" aria-hidden="true" />
+												</Button>
+											</div>
+										{/if}
+									</li>
+								{/each}
+							</ul>
+						{/if}
+					</div>
+				</div>
+			</section>
+
+			<!-- Processing -->
+			<section class="settings-section" aria-labelledby="settings-processing">
 			<h2 class="settings-section__title" id="settings-processing">Processing</h2>
 			<div class="settings-grid">
 				<div class="settings-field">
@@ -653,9 +927,25 @@
 		onselect={onPick}
 	/>
 
+	<DirPicker
+		bind:open={profilePickerOpen}
+		startPath={profileDraft.output_dir || settings?.output_dir || ''}
+		title="Choose profile output directory"
+		onselect={onProfilePick}
+	/>
+
 	{#snippet apiKeyFooter()}
 		<div class="flex justify-end">
 			<Button variant="secondary" onclick={closeKeyModal}>Done</Button>
+		</div>
+	{/snippet}
+
+	{#snippet profileModalFooter()}
+		<div class="settings-confirm__actions">
+			<Button variant="secondary" onclick={() => (profileModalOpen = false)}>Cancel</Button>
+			<Button variant="primary" loading={profileSaving} type="submit" form="profile-form">
+				{profileDraft.id === null ? 'Create profile' : 'Save changes'}
+			</Button>
 		</div>
 	{/snippet}
 
@@ -711,6 +1001,89 @@
 			{/if}
 		{/if}
 	</Modal>
+
+	<Modal
+		bind:open={profileModalOpen}
+		title={profileDraft.id === null ? 'New output profile' : `Edit profile — ${profileDraft.name}`}
+		footer={profileModalFooter}
+	>
+		<form id="profile-form" class="settings-form" onsubmit={saveProfile} novalidate>
+			{#if profileServerError}
+				<div class="mb-4">
+					<Alert variant="error">{profileServerError}</Alert>
+				</div>
+			{/if}
+			<div class="settings-field">
+				<label for="profile-name" class="settings-label"
+					>Name <span class="text-[var(--state-red)]">*</span></label
+				>
+				<input
+					id="profile-name"
+					type="text"
+					bind:value={profileDraft.name}
+					aria-invalid={!!profileFieldErrors.name}
+					aria-describedby={profileFieldErrors.name ? 'profile-name_desc_err' : undefined}
+				/>
+				{#if profileFieldErrors.name}
+					<p id="profile-name_desc_err" class="settings-field-error" role="alert">{profileFieldErrors.name}</p>
+				{/if}
+			</div>
+
+			{#if profileFieldErrors.both}
+				<div class="mb-4">
+					<Alert variant="error">{profileFieldErrors.both}</Alert>
+				</div>
+			{/if}
+
+			<div class="settings-field">
+				<label for="profile-output-dir" class="settings-label">Output directory override (optional)</label>
+				<div class="settings-input-row">
+					<input
+						id="profile-output-dir"
+						type="text"
+						bind:value={profileDraft.output_dir}
+						aria-invalid={!!profileFieldErrors.output_dir}
+						aria-describedby={
+							(profileFieldErrors.output_dir
+								? 'profile-output-dir_desc_err profile-output-dir_desc'
+								: 'profile-output-dir_desc')
+						}
+					/>
+					<Button variant="secondary" class="shrink-0" onclick={() => (profilePickerOpen = true)}>
+						<FolderOpen class="h-4 w-4" aria-hidden="true" />
+						Browse
+					</Button>
+				</div>
+				<p id="profile-output-dir_desc" class="settings-help">
+					Leave blank to use the global output directory.
+				</p>
+				{#if profileFieldErrors.output_dir}
+					<p id="profile-output-dir_desc_err" class="settings-field-error" role="alert"
+						>{profileFieldErrors.output_dir}</p
+					>
+				{/if}
+			</div>
+
+			<div class="settings-field" role="group" aria-labelledby="profile-output-scheme_label">
+				<!-- svelte-ignore a11y_label_has_associated_control: labels the composite builder group via aria-labelledby -->
+				<label
+					id="profile-output-scheme_label"
+					class="settings-label"
+					>Output path format override (optional)</label
+				>
+				<PathFormatBuilder
+					bind:value={profileDraft.output_scheme}
+					outputDir={profileDraft.output_dir || settings?.output_dir || ''}
+				/>
+				<p class="settings-help">
+					Relative format, e.g. {`{author}/{title}`}. Leave empty to use the global path format.
+				</p>
+				{#if profileFieldErrors.output_scheme}
+					<p class="settings-field-error" role="alert">{profileFieldErrors.output_scheme}</p>
+				{/if}
+			</div>
+		</form>
+	</Modal>
 {/if}
 
 <svelte:head>
@@ -762,6 +1135,83 @@
 		font-size: 0.75rem;
 		line-height: 1.5;
 		color: var(--text-muted);
+	}
+
+	/* Section header with an action button on the right (replaces the
+	   default full-bleed title strip: one shared background row) */
+	.settings-section__header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+		padding: 0.75rem 1.25rem;
+		background: var(--surface);
+		border-bottom: 1px solid var(--border-subtle);
+	}
+
+	.settings-section__header .settings-section__title {
+		flex: 1 1 auto;
+		margin: 0;
+		padding: 0;
+		background: none;
+		border-bottom: none;
+	}
+
+	/* Saved output profiles */
+	.profile-list {
+		display: grid;
+		gap: 0.625rem;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	.profile-empty {
+		margin: 0.5rem 0 0;
+		font-size: 0.8125rem;
+		color: var(--text-muted);
+	}
+
+	.profile-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		padding: 0.625rem 0.75rem;
+		background: var(--bg);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+	}
+
+	.profile-row__info {
+		min-width: 0;
+		display: grid;
+		gap: 0.125rem;
+	}
+
+	.profile-row__name {
+		font-size: 0.875rem;
+		font-weight: 600;
+		color: var(--text);
+		overflow-wrap: anywhere;
+	}
+
+	.profile-row__values {
+		display: grid;
+		gap: 0.125rem;
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+	}
+
+	.profile-row__values code {
+		overflow-wrap: anywhere;
+	}
+
+	.profile-row__actions {
+		display: flex;
+		flex-shrink: 0;
+		gap: 0.25rem;
 	}
 
 	/* Section — one labeled white panel per group */

@@ -2,7 +2,7 @@
 	import { get, post } from '#lib/api.js';
 	import { goto } from '$app/navigation';
 	import { page as pageStore } from '$app/state';
-	import type { BooksListResponse, BookWithPeople } from '#lib/types.js';
+	import type { BooksListResponse, BookWithPeople, OutputProfile, OutputProfilesResponse } from '#lib/types.js';
 	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt } from '#lib/components/index.js';
 	import { formatRuntime } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
@@ -36,6 +36,25 @@
 	let selectingAll = $state(false);
 	let bulkRequeueing = $state(false);
 	let bulkError = $state<CleanedAdbError | null>(null);
+	let profiles = $state<OutputProfile[]>([]);
+	let profilesError = $state<string | null>(null);
+	// null = "Global settings"; set only when the user picks a saved profile.
+	let selectedProfileId = $state<number | null>(null);
+
+	async function loadProfiles() {
+		// Independent of the catalog load: a profile-list failure must not
+		// fail the page; the selector simply offers Global settings only.
+		try {
+			const res = await get<OutputProfilesResponse>('/output-profiles');
+			profiles = res.profiles || [];
+			profilesError = null;
+		} catch {
+			profilesError = 'Saved profiles unavailable — queuing uses global settings.';
+		}
+	}
+	const selectedBulkProfile = $derived(
+		selectedProfileId === null ? null : profiles.find((p) => p.id === selectedProfileId) ?? null
+	);
 
 	function normalizedFilter(value: string | null): string {
 		return value && validFilters.has(value) ? value : 'all';
@@ -73,6 +92,7 @@
 	}
 
 	async function loadBooks() {
+		void loadProfiles();
 		await dl.run(async () => {
 			const nextResponse = await get<BooksListResponse>(buildBooksQuery());
 			const lastPage = Math.max(0, Math.ceil(nextResponse.total / limit) - 1);
@@ -141,6 +161,7 @@
 		allMatchedIds = null;
 		allMatchedTotal = 0;
 		bulkError = null;
+		selectedProfileId = null; // The batch it applied to no longer exists.
 	}
 
 	async function bulkRequeue() {
@@ -154,7 +175,13 @@
 			const books = await Promise.all(
 				ids.map((id) => get<BookWithPeople>(`/books/${id}`)),
 			);
-			await post(`/process`, { book_ids: ids, src_dirs: books.map((b) => b.src_path) });
+			const payload: { book_ids: number[]; src_dirs: string[]; output_profile_id?: number } = {
+				book_ids: ids,
+				src_dirs: books.map((b) => b.src_path),
+			};
+			if (selectedProfileId !== null) payload.output_profile_id = selectedProfileId;
+			await post(`/process`, payload);
+			selectedProfileId = null; // Batch queued with this choice; back to Global settings.
 			await goto('/process');
 		} catch (e) {
 			bulkError = toCleanedError(e);
@@ -290,9 +317,36 @@
 				<span class="font-mono font-semibold">{allMatchedTotal}</span> books selected for bulk requeue
 				<span class="text-xs text-[var(--text-muted)]">· {activeFilterLabel.toLowerCase()}{q ? ` · “${q}”` : ''}</span>
 			</p>
-			<div class="flex items-center gap-2">
-				<Button loading={bulkRequeueing} onclick={bulkRequeue}>Requeue selected</Button>
-				<Button variant="ghost" disabled={bulkRequeueing} onclick={clearSelection}>Clear</Button>
+			<div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+				<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+					<label class="text-sm text-[var(--text-secondary)]" for="bulk-output-profile-select">Output profile</label>
+					<select
+						id="bulk-output-profile-select"
+						class="min-h-11 border border-[var(--border)] bg-[var(--bg-panel)] px-2 text-sm text-[var(--text)]"
+						value={selectedProfileId === null ? '' : String(selectedProfileId)}
+						onchange={(event) => {
+							const value = event.currentTarget.value;
+							selectedProfileId = value === '' ? null : Number(value);
+						}}
+						aria-describedby={selectedBulkProfile || profilesError ? 'bulk-profile-summary' : undefined}
+					>
+						<option value="">Global settings</option>
+						{#each profiles as profile (profile.id)}
+							<option value={profile.id}>{profile.name}</option>
+						{/each}
+					</select>
+					{#if selectedBulkProfile}
+						<p id="bulk-profile-summary" class="w-full text-xs text-[var(--text-muted)]" aria-live="polite">
+							{selectedBulkProfile.output_dir || 'Uses global setting'} · {selectedBulkProfile.output_scheme || 'Uses global setting'} — applies only to these {allMatchedTotal} books in this queue.
+						</p>
+					{:else if profilesError}
+						<p id="bulk-profile-summary" class="w-full text-xs text-[var(--text-secondary)]" aria-live="polite">{profilesError}</p>
+					{/if}
+				</div>
+				<div class="flex items-center gap-2">
+					<Button loading={bulkRequeueing} onclick={bulkRequeue}>Requeue selected</Button>
+					<Button variant="ghost" disabled={bulkRequeueing} onclick={clearSelection}>Clear</Button>
+				</div>
 			</div>
 		</div>
 	{/if}

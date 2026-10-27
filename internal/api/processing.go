@@ -30,6 +30,10 @@ type ProcessingService struct {
 	mu       sync.RWMutex
 	workerCh chan *models.ProcessingJob
 	wg       sync.WaitGroup
+	// workerStartHook (test-only, production nil) runs after the worker
+	// dequeues its first job and before processing, pinning the
+	// enqueue-then-reconfigure window for snapshot tests.
+	workerStartHook func(jobID string)
 }
 
 type jobState struct {
@@ -128,6 +132,9 @@ func (s *ProcessingService) RunWorkers(ctx context.Context, numWorkers int) {
 						s.forgetJob(job.ID)
 						continue
 					}
+					if s.workerStartHook != nil {
+						s.workerStartHook(job.ID)
+					}
 					s.processJob(ctx, job)
 				case <-ctx.Done():
 					return
@@ -141,18 +148,40 @@ func (s *ProcessingService) RunWorkers(ctx context.Context, numWorkers int) {
 // running job, so the client gets a 409 instead of a duplicate process.
 var errActiveJobForBook = errors.New("book already has an active job")
 
+// jobArgs is the typed payload stored in a job's m4b_merge_args. The
+// optional destination fields are a fully-resolved queue-time snapshot of
+// the selected output profile (effective directory + format, blank fields
+// inherited from the globals at queue time); zero (omitted) for unprofiled
+// jobs that run with the worker-time global settings.
+type jobArgs struct {
+	SrcPaths []string `json:"src_paths"`
+	// OutputDir is the effective absolute output root ("" = inherit the
+	// processor's live value at run time).
+	OutputDir string `json:"output_dir,omitempty"`
+	// OutputScheme is the effective relative path format ("" = inherit).
+	OutputScheme string `json:"output_scheme,omitempty"`
+}
+
 // QueueJob creates a processing job, persists it to the DB, and enqueues it.
-func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths []string) (string, error) {
+// opts carries the resolved destination snapshot for profile-backed
+// requests; the zero value preserves the global-settings behavior.
+func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths []string, opts audio.RunOptions) (string, error) {
 	if bookID > 0 && s.hasActiveJobForBook(bookID) {
 		return "", errActiveJobForBook
 	}
 
 	id := uuid.New().String()
 
-	// Serialize src paths as JSON for storage
-	argsJSON, err := json.Marshal(map[string]any{
-		"src_paths": srcPaths,
-	})
+	// Serialize the typed args for storage; when no profile is selected the
+	// destination fields are omitted entirely.
+	args := jobArgs{SrcPaths: srcPaths}
+	if d := strings.TrimSpace(opts.OutputDirOverride); d != "" {
+		args.OutputDir = d
+	}
+	if f := strings.TrimSpace(opts.PathFormatOverride); f != "" {
+		args.OutputScheme = f
+	}
+	argsJSON, err := json.Marshal(args)
 	if err != nil {
 		return "", fmt.Errorf("serialize job args: %w", err)
 	}
@@ -393,44 +422,30 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		state.sendProgress(`{"status":"running","message":"started processing"}`)
 	}
 
-	// Get ASIN and the per-book output overrides from the matched book.
-	// Resolved HERE, at worker start, not in the persisted job args:
-	// persisting would freeze the inherited global at queue time, while
-	// this re-read makes edits and reprocesses pick up current values.
-	var asin, bookDirOverride, bookFormatOverride string
+	// Get the ASIN from the matched book. The destination snapshot, when
+	// present, is the fully-resolved queue-time profile pair persisted in
+	// the job args — it is NOT re-read from any persisted setting, so the
+	// job keeps the destination the requester selected even if the profile
+	// or globals change after enqueueing.
+	var asin string
 	if job.BookID.Valid {
-		// The overrides are NOT NULL columns and are scanned unconditionally
-		// (a book without a matched ASIN still carries them); only the ASIN
-		// value is gated on its nullable validity, as before.
 		var bookAsin sql.NullString
-		row := s.db.QueryRow(
-			"SELECT asin, output_dir_override, path_format_override FROM books WHERE id = ?",
-			job.BookID.Int64,
-		)
-		if err := row.Scan(&bookAsin, &bookDirOverride, &bookFormatOverride); err == nil {
-			if bookAsin.Valid {
-				asin = bookAsin.String
-			}
+		if err := s.db.QueryRow("SELECT asin FROM books WHERE id = ?", job.BookID.Int64).
+			Scan(&bookAsin); err == nil && bookAsin.Valid {
+			asin = bookAsin.String
 		}
 	}
 
-	// Parse source paths from stored args
-	var args map[string]any
-	var srcPaths []string
-	var argsErr error
-	if err := json.Unmarshal([]byte(job.M4bMergeArgs), &args); err != nil {
-		argsErr = fmt.Errorf("failed to parse args")
-	} else if paths, ok := args["src_paths"].([]interface{}); !ok {
-		argsErr = fmt.Errorf("invalid args: no src_paths")
-	} else {
-		srcPaths = make([]string, len(paths))
-		for i, p := range paths {
-			if s, ok := p.(string); ok {
-				srcPaths[i] = s
-			}
+	// Parse the stored typed args
+	var args jobArgs
+	argsErr := fmt.Errorf("failed to parse args")
+	if err := json.Unmarshal([]byte(job.M4bMergeArgs), &args); err == nil {
+		if len(args.SrcPaths) == 0 {
+			argsErr = fmt.Errorf("invalid args: no src_paths")
+		} else {
+			argsErr = nil
 		}
 	}
-
 	if argsErr != nil {
 		if job.BookID.Valid {
 			s.db.Exec(
@@ -449,35 +464,36 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		return
 	}
 
-	// Build run options. The stored override is authored data, so re-validate
-	// it here before it can steer file writes: a malformed path-format
-	// override fails the job the same way a malformed m4b-merge arg does.
-	// The directory override skips re-validation: it was validated absolute
-	// at write time and is used as-is.
+	// Build run options from the stored snapshot. The destination fields are
+	// validated at queue time; re-validate the relative format here as
+	// worker-side defense before authored data can steer file writes. The
+	// directory was validated absolute at queue time and is used as-is.
 	opts := audio.RunOptions{
-		OutputDirOverride:  strings.TrimSpace(bookDirOverride),
-		PathFormatOverride: strings.TrimSpace(bookFormatOverride),
+		OutputDirOverride:  strings.TrimSpace(args.OutputDir),
+		PathFormatOverride: strings.TrimSpace(args.OutputScheme),
 	}
-	if msg := invalidPathFormatOverride(opts.PathFormatOverride); msg != "" {
-		overrideErr := fmt.Errorf("%s", msg)
-		if job.BookID.Valid {
+	if opts.PathFormatOverride != "" {
+		if err := audio.ValidateRelativePathFormat(opts.PathFormatOverride); err != nil {
+			invalidSnapshotErr := fmt.Errorf("invalid stored output snapshot: %v", err)
+			if job.BookID.Valid {
+				s.db.Exec(
+					"UPDATE books SET status = 'error', status_message = ? WHERE id = ?",
+					invalidSnapshotErr.Error(), job.BookID.Int64,
+				)
+			}
 			s.db.Exec(
-				"UPDATE books SET status = 'error', status_message = ? WHERE id = ?",
-				overrideErr.Error(), job.BookID.Int64,
+				"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE id = ?",
+				jobStatusError, invalidSnapshotErr.Error(), job.ID,
 			)
+			if state != nil {
+				state.finalize(`{"status":"error","message":"`+escapeJSON(invalidSnapshotErr.Error())+`"}`, invalidSnapshotErr)
+			}
+			s.forgetJob(job.ID)
+			return
 		}
-		s.db.Exec(
-			"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE id = ?",
-			jobStatusError, overrideErr.Error(), job.ID,
-		)
-		if state != nil {
-			state.finalize(`{"status":"error","message":"`+escapeJSON(overrideErr.Error())+`"}`, overrideErr)
-		}
-		s.forgetJob(job.ID)
-		return
 	}
 
-	result, err := s.proc.Run(runCtx, job.ID, srcPaths, asin, opts)
+	result, err := s.proc.Run(runCtx, job.ID, args.SrcPaths, asin, opts)
 	if err != nil {
 		// A cancellation during the run kills m4b-merge via its context;
 		// that is 'cancelled', not 'error'.
@@ -566,6 +582,12 @@ func (s *ProcessingService) finalizeCancelled(job *models.ProcessingJob) {
 type StartProcessingRequest struct {
 	BookIDs []int64  `json:"book_ids"`
 	SrcDirs []string `json:"src_dirs"`
+	// OutputProfileID selects a saved output profile for this batch. Nil /
+	// absent means global settings. The selection applies only to the jobs
+	// created by THIS request, resolved once at queue time into a snapshot
+	// stored in every job — it is never persisted on books and is not
+	// reused by later queues.
+	OutputProfileID *int64 `json:"output_profile_id"`
 }
 
 // ProcessingJobCreated is returned in the response of StartProcessing.
@@ -591,6 +613,66 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 	if len(req.SrcDirs) == 0 {
 		writeError(w, http.StatusBadRequest, "src_dirs is required")
 		return
+	}
+
+	// Resolve the selected output profile (if any) ONCE, before any job is
+	// created, against exactly one config snapshot: blank fields inherit
+	// the current global values independently into the effective pair, and
+	// the complete pair is snapshotted into every job this request creates.
+	// Any resolution failure 400s/404s the whole request with zero jobs.
+	var runOpts audio.RunOptions
+	if req.OutputProfileID != nil {
+		if *req.OutputProfileID <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid output profile id")
+			return
+		}
+		profile, err := h.getOutputProfile(*req.OutputProfileID)
+		if err != nil {
+			if errors.Is(err, errProfileNotFound) {
+				writeError(w, http.StatusNotFound, "output profile not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "load output profile: "+err.Error())
+			return
+		}
+		cm := h.svc.Config
+		if cm == nil {
+			writeError(w, http.StatusInternalServerError, "settings manager unavailable")
+			return
+		}
+		cfg := cm.Config()
+		effDir := strings.TrimSpace(profile.OutputDir)
+		if effDir == "" {
+			effDir = strings.TrimSpace(cfg.Directories.OutputDir)
+		}
+		effFormat := strings.TrimSpace(profile.OutputScheme)
+		if effFormat == "" {
+			effFormat = strings.TrimSpace(cfg.Processing.PathFormat)
+		}
+		// An empty effective destination means the global value itself is
+		// empty: refuse before any job exists. Never run filepath.Abs on ""
+		// (it would silently substitute the process working directory).
+		if effDir == "" {
+			writeError(w, http.StatusBadRequest, "output directory is not set (set the profile override or the global output directory)")
+			return
+		}
+		if effFormat == "" {
+			writeError(w, http.StatusBadRequest, "output path format is not set (set the profile format or the global path format)")
+			return
+		}
+		absDir, err := filepath.Abs(effDir)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot resolve output directory %s: %v", effDir, err))
+			return
+		}
+		// The relative-format validator is deliberately applied to the
+		// effective format even when it was inherited from the global
+		// setting: a profile-started job must land inside its root.
+		if err := audio.ValidateRelativePathFormat(effFormat); err != nil {
+			writeError(w, http.StatusBadRequest, "output path format: "+err.Error())
+			return
+		}
+		runOpts = audio.RunOptions{OutputDirOverride: absDir, PathFormatOverride: effFormat}
 	}
 
 	jobs := make([]ProcessingJobCreated, 0)
@@ -624,7 +706,7 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		jobID, err := h.svc.ProcessingSvc.QueueJob(r.Context(), bookID, inputPaths)
+		jobID, err := h.svc.ProcessingSvc.QueueJob(r.Context(), bookID, inputPaths, runOpts)
 		switch {
 		case errors.Is(err, errActiveJobForBook):
 			// The book already has a queued/running job: re-queuing would

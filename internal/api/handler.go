@@ -95,6 +95,12 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 		r.Get("/search/books/{id}", h.GetBookFromDB)
 		r.Get("/search/releases/{id}", h.GetReleaseFromDB)
 
+		// Output profiles
+		r.Get("/output-profiles", h.ListOutputProfiles)
+		r.Post("/output-profiles", h.CreateOutputProfile)
+		r.Put("/output-profiles/{id}", h.UpdateOutputProfile)
+		r.Delete("/output-profiles/{id}", h.DeleteOutputProfile)
+
 		// Settings
 		r.Get("/settings", h.GetSettings)
 		r.Put("/settings", h.UpdateSettings)

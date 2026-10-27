@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/bragibooks/bragibooks/internal/audio"
+	"github.com/bragibooks/bragibooks/internal/config"
 )
 
 // processingSchemaSQL adds the processing_jobs table to the books test schema.
@@ -155,7 +156,7 @@ func TestCancelQueuedJob(t *testing.T) {
 	// Queueing intentionally leaves the book in its pre-queue state ('matched'):
 	// the queued -> processing transition happens at worker start, so a queued
 	// cancel needs no status rollback.
-	id, err := h.svc.ProcessingSvc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"})
+	id, err := h.svc.ProcessingSvc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -217,7 +218,7 @@ func TestCancelRunningJob(t *testing.T) {
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 1, []string{"/x/a.m4b"})
+	id, err := svc.QueueJob(ctx, 1, []string{"/x/a.m4b"}, audio.RunOptions{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -545,7 +546,7 @@ func fakeM4bBinary(t *testing.T, dir string) string {
 func TestStreamJobProgressCloseEndsStream(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -597,17 +598,17 @@ func TestQueueJobDuplicateRejected(t *testing.T) {
 		t.Fatalf("seed book: %v", err)
 	}
 
-	first, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"})
+	first, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
 	if err != nil {
 		t.Fatalf("first queue: %v", err)
 	}
-	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}); err == nil {
+	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{}); err == nil {
 		t.Fatal("second queue for a book with a queued job: want error, got nil")
 	}
 
 	// A finished job frees the book for a new run.
 	setJobStatus(t, h.svc.DB, first, "done")
-	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}); err != nil {
+	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{}); err != nil {
 		t.Fatalf("queue after terminal job: %v", err)
 	}
 }
@@ -659,6 +660,69 @@ echo merged
 	return p
 }
 
+// writeDerivedTitleBinary writes a fake m4b-merge that honors -o and -p and
+// derives the output file name from the FIRST -i source's basename, so
+// same-batch jobs writing into one shared destination tree do not collide
+// (each book lands at <root>/<scheme-with-{title}-filled>.m4b, distinct per
+// source).
+func writeDerivedTitleBinary(t *testing.T, dir string) string {
+	t.Helper()
+	p := filepath.Join(dir, "derived-bin")
+	script := `#!/usr/bin/env python3
+import os, sys, re
+
+args = sys.argv[1:]
+out = scheme = input_ = asin = None
+i = 0
+while i < len(args):
+    a = args[i]
+    if a == "-o" and i + 1 < len(args):
+        out = args[i + 1]; i += 2
+    elif a in ("-i", "--input") and i + 1 < len(args):
+        if input_ is None:
+            input_ = args[i + 1]
+        i += 2
+    elif a == "-p" and i + 1 < len(args):
+        scheme = args[i + 1]; i += 2
+    elif a == "-a" and i + 1 < len(args):
+        asin = args[i + 1]; i += 2
+    else:
+        i += 1
+# {title} derives from the source basename so same-batch jobs in one shared
+# destination tree never collide; the remaining tokens fall back to the CLI
+# asin (test books pass none -> empty), mirroring m4b-merge's empty fields.
+title = os.path.basename(input_).rsplit(".", 1)[0]
+tokens = {"title": title, "asin": asin or "", "author": "", "narrator": "",
+          "series_name": "", "series_position": "", "subtitle": "", "year": ""}
+rel = re.sub(r"\{(\w+)\}", lambda m: tokens.get(m.group(1), ""), scheme or "{title}")
+# Empty token fields (author, series, ...) leave leading/duplicate slashes
+# in the relative path; normalize so os.path.join keeps the -o root
+# (an absolute rel would silently discard it) and directories collapse.
+rel = re.sub(r"/+", "/", rel).strip("/")
+os.makedirs(os.path.join(out, os.path.dirname(rel) or "."), exist_ok=True)
+with open(os.path.join(out, rel + ".m4b"), "w") as f:
+    f.write("book")
+print("merged")
+`
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatalf("write derived-title binary: %v", err)
+	}
+	return p
+}
+
+// countM4Bs counts regular .m4b files anywhere under dir.
+func countM4Bs(t *testing.T, dir string) int {
+	t.Helper()
+	n := 0
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() && strings.HasSuffix(d.Name(), ".m4b") {
+			n++
+		}
+		return nil
+	})
+	return n
+}
+
 // TestProcessJobRecordsOutputFormat is the regression test for #438: the run
 // that discovers the produced .m4b knows its format, so the success write
 // must persist it alongside dest_path. Without it the book page's FILE PATHS
@@ -677,7 +741,7 @@ func TestProcessJobRecordsOutputFormat(t *testing.T) {
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")})
+	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")}, audio.RunOptions{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -697,211 +761,6 @@ func TestProcessJobRecordsOutputFormat(t *testing.T) {
 	}
 }
 
-// TestProcessJobUsesBookOutputDirOverride: a book with a directory override
-// routes its output to the override root while a sibling book without one
-// uses the global root — per-field inheritance at the worker.
-func TestProcessJobUsesBookOutputDirOverride(t *testing.T) {
-	h, svc := newTestJobsHandler(t)
-	bin := writeMergingBinary(t, t.TempDir())
-	globalTemp := t.TempDir()
-	otherTemp := t.TempDir()
-	svc.proc = &audio.Processor{Binary: bin, OutputDir: globalTemp, PathFormat: "{title}", LogLevel: "info"}
-
-	if _, err := h.svc.DB.Exec(
-		"INSERT INTO books (id, title, status, output_dir_override) VALUES (1, 'Book One', 'matched', ?), (2, 'Book Two', 'matched', '')",
-		otherTemp,
-	); err != nil {
-		t.Fatalf("seed books: %v", err)
-	}
-
-	ctx := t.Context()
-	svc.RunWorkers(ctx, 1)
-
-	id1, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")})
-	if err != nil {
-		t.Fatalf("queue job 1: %v", err)
-	}
-	id2, err := svc.QueueJob(ctx, 2, []string{filepath.Join(t.TempDir(), "b.m4b")})
-	if err != nil {
-		t.Fatalf("queue job 2: %v", err)
-	}
-	waitJobStatus(t, h.svc.DB, id1, "done")
-	waitJobStatus(t, h.svc.DB, id2, "done")
-
-	// Both books land at <root>/Author/Title.m4b (the fake binary has one
-	// fixed title), so the destination is proven by the persisted dest_path
-	// plus a per-root file count: exactly one .m4b per root, in the right
-	// place.
-	var dest1, dest2 string
-	if err := h.svc.DB.QueryRow("SELECT dest_path FROM books WHERE id = 1").Scan(&dest1); err != nil {
-		t.Fatalf("dest path 1: %v", err)
-	}
-	if err := h.svc.DB.QueryRow("SELECT dest_path FROM books WHERE id = 2").Scan(&dest2); err != nil {
-		t.Fatalf("dest path 2: %v", err)
-	}
-	want1 := filepath.Join(otherTemp, "Author", "Title.m4b")
-	want2 := filepath.Join(globalTemp, "Author", "Title.m4b")
-	if dest1 != want1 {
-		t.Errorf("overridden book dest_path = %q; want %q", dest1, want1)
-	}
-	if dest2 != want2 {
-		t.Errorf("inheriting book dest_path = %q; want %q", dest2, want2)
-	}
-	if n := countM4Bs(t, otherTemp); n != 1 {
-		t.Errorf("m4b count under the override root = %d; want 1", n)
-	}
-	if n := countM4Bs(t, globalTemp); n != 1 {
-		t.Errorf("m4b count under the global root = %d; want 1", n)
-	}
-}
-
-// countM4Bs counts regular .m4b files anywhere under dir.
-func countM4Bs(t *testing.T, dir string) int {
-	t.Helper()
-	n := 0
-	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err == nil && d.Type().IsRegular() && strings.HasSuffix(d.Name(), ".m4b") {
-			n++
-		}
-		return nil
-	})
-	return n
-}
-
-// TestProcessJobRejectsUnsafeFormatOverrides: a stored path-format override
-// that would steer writes outside the output tree fails the job (and book)
-// before the binary runs — mirroring the API 400s as worker-side defense.
-func TestProcessJobRejectsUnsafeFormatOverrides(t *testing.T) {
-	cases := []struct {
-		name    string
-		format  string
-		wantErr string
-	}{
-		{"absolute format", "/abs/{title}", "must be relative (no leading /)"},
-		{"dotdot format segment", "../escape/{title}", "must not contain '..' path segments"},
-		{"no placeholder", "{genre}", "at least one placeholder"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			h, svc := newTestJobsHandler(t)
-			bin := writeMergingBinary(t, t.TempDir())
-			globalTemp := t.TempDir()
-			svc.proc = &audio.Processor{Binary: bin, OutputDir: globalTemp, PathFormat: "{title}", LogLevel: "info"}
-
-			if _, err := h.svc.DB.Exec(
-				"INSERT INTO books (id, title, status, path_format_override) VALUES (1, 'Book', 'matched', ?)",
-				tc.format,
-			); err != nil {
-				t.Fatalf("seed book: %v", err)
-			}
-
-			ctx := t.Context()
-			svc.RunWorkers(ctx, 1)
-			id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")})
-			if err != nil {
-				t.Fatalf("queue job: %v", err)
-			}
-			waitJobStatus(t, h.svc.DB, id, "error")
-			if got := bookStatusFromDB(t, h.svc.DB, 1); got != "error" {
-				t.Errorf("book status = %q; want error", got)
-			}
-			var dest, msg, jobErr string
-			if err := h.svc.DB.QueryRow(
-				"SELECT dest_path, status_message FROM books WHERE id = ?", 1,
-			).Scan(&dest, &msg); err != nil {
-				t.Fatalf("book query: %v", err)
-			}
-			if err := h.svc.DB.QueryRow("SELECT error FROM processing_jobs WHERE id = ?", id).Scan(&jobErr); err != nil {
-				t.Fatalf("job error query: %v", err)
-			}
-			if dest != "" {
-				t.Errorf("dest_path = %q; want empty (no write)", dest)
-			}
-			for _, want := range []string{tc.wantErr} {
-				if !strings.Contains(jobErr, want) {
-					t.Errorf("job error = %q; want it to contain %q", jobErr, want)
-				}
-				if !strings.Contains(msg, want) {
-					t.Errorf("book status_message = %q; want it to contain %q", msg, want)
-				}
-			}
-			var found []string
-			_ = filepath.WalkDir(globalTemp, func(path string, d os.DirEntry, err error) error {
-				if err == nil && d.Type().IsRegular() && strings.HasSuffix(d.Name(), ".m4b") {
-					found = append(found, path)
-				}
-				return nil
-			})
-			if len(found) != 0 {
-				t.Errorf(".m4b files under the global root = %v; want none", found)
-			}
-		})
-	}
-}
-
-// TestProcessJobFormatOnlyOverrideInheritsDir: with only the path-format
-// override set, the run inherits the global output root (explicit
-// per-field inheritance proof at the worker).
-func TestProcessJobFormatOnlyOverrideInheritsDir(t *testing.T) {
-	h, svc := newTestJobsHandler(t)
-	bin := writeM4bWithSchemeBinary(t, t.TempDir())
-	globalTemp := t.TempDir()
-	svc.proc = &audio.Processor{Binary: bin, OutputDir: globalTemp, PathFormat: "{author}/{title}", LogLevel: "info"}
-
-	if _, err := h.svc.DB.Exec(
-		"INSERT INTO books (id, title, status, path_format_override) VALUES (1, 'Book', 'matched', 'Special/{title}')",
-	); err != nil {
-		t.Fatalf("seed book: %v", err)
-	}
-
-	ctx := t.Context()
-	svc.RunWorkers(ctx, 1)
-	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")})
-	if err != nil {
-		t.Fatalf("queue job: %v", err)
-	}
-	waitJobStatus(t, h.svc.DB, id, "done")
-
-	want := filepath.Join(globalTemp, "Special", "Title.m4b")
-	var dest string
-	if err := h.svc.DB.QueryRow("SELECT dest_path FROM books WHERE id = 1").Scan(&dest); err != nil {
-		t.Fatalf("dest path query: %v", err)
-	}
-	if dest != want {
-		t.Errorf("dest_path = %q; want %q", dest, want)
-	}
-	if _, err := os.Stat(want); err != nil {
-		t.Errorf("output missing at %s: %v", want, err)
-	}
-}
-
-// writeM4bWithSchemeBinary is like writeMergingBinary, but honors -p: the
-// scheme's {title} is substituted with "Title" and the .m4b is written at
-// the scheme path under -o.
-func writeM4bWithSchemeBinary(t *testing.T, dir string) string {
-	t.Helper()
-	p := filepath.Join(dir, "merging-scheme-bin")
-	script := `#!/bin/sh
-out=""
-scheme=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -o) out="$2"; shift ;;
-    -p) scheme="$2"; shift ;;
-  esac
-  shift
-done
-p=$(echo "$scheme" | sed 's/{title}/Title/g')
-mkdir -p "$out/$(dirname "$p")"
-printf 'book' > "$out/$p.m4b"
-echo merged
-`
-	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
-		t.Fatalf("write merging binary: %v", err)
-	}
-	return p
-}
-
 // TestFinishedJobLeavesMap covers the terminal cleanup: after a job reaches a
 // terminal state its in-memory state is dropped, while the DB retains it.
 func TestFinishedJobLeavesMap(t *testing.T) {
@@ -918,7 +777,7 @@ func TestFinishedJobLeavesMap(t *testing.T) {
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")})
+	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")}, audio.RunOptions{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -930,5 +789,440 @@ func TestFinishedJobLeavesMap(t *testing.T) {
 	}
 	if got := bookStatusFromDB(t, h.svc.DB, 1); got != "done" {
 		t.Errorf("book status = %q; want done", got)
+	}
+}
+
+// profileSuiteFixtures wires one test's shared destination roots, the temp
+// YAML config (loaded through ConfigManager.LoadFrom and applied to the
+// Processor from the SAME config), and its shaped profiles.
+type profileSuiteFixtures struct {
+	h        *Handler
+	svc      *ProcessingService
+	cm       *config.ConfigManager
+	bin      string
+	rootA    string // global output dir in the temp YAML config
+	profileB int64  // directory-only profile pointing at root B
+	profileG int64  // format-only profile "Genre/{title}"
+}
+
+// setupProfileSuite creates a jobs handler whose live config (manager AND
+// processor) comes from one temp YAML: directories.output_dir = rootA,
+// processing.path_format = {author}/{title}.
+func setupProfileSuite(t *testing.T) profileSuiteFixtures {
+	t.Helper()
+	h, svc := newTestJobsHandler(t)
+	bin := writeDerivedTitleBinary(t, t.TempDir())
+	rootA := t.TempDir()
+	yamlPath := filepath.Join(t.TempDir(), "config.yaml")
+	yamlText := fmt.Sprintf(
+		"m4b_merge:\n  binary: %q\ndirectories:\n  output_dir: %q\nprocessing:\n  path_format: \"{author}/{title}\"\n  num_cpus: 1\n  log_level: info\n", bin, rootA)
+	if err := os.WriteFile(yamlPath, []byte(yamlText), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	cm := config.NewConfigManager()
+	if _, err := cm.LoadFrom(yamlPath); err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	h.svc.Config = cm
+	svc.proc = &audio.Processor{}
+	svc.proc.ApplyConfig(cm.Config())
+
+	// Book 1 -> source A (becomes "A"), book 2 -> source B (becomes "B").
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (1, 'Alpha', 'matched'), (2, 'Beta', 'matched')",
+	); err != nil {
+		t.Fatalf("seed books: %v", err)
+	}
+
+	fx := profileSuiteFixtures{h: h, svc: svc, cm: cm, bin: bin, rootA: rootA}
+	fx.profileB, fx.profileG = 0, 0
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO output_profiles (name, output_dir, output_scheme) VALUES ('dir-b', ?, '')",
+		t.TempDir(),
+	); err != nil {
+		t.Fatalf("seed profile B: %v", err)
+	}
+	var id1 int64
+	if err := h.svc.DB.QueryRow("SELECT id FROM output_profiles WHERE name = 'dir-b'").Scan(&id1); err != nil {
+		t.Fatalf("read profile B id: %v", err)
+	}
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO output_profiles (name, output_dir, output_scheme) VALUES ('genre', '', 'Genre/{title}')",
+	); err != nil {
+		t.Fatalf("seed profile G: %v", err)
+	}
+	var id2 int64
+	if err := h.svc.DB.QueryRow("SELECT id FROM output_profiles WHERE name = 'genre'").Scan(&id2); err != nil {
+		t.Fatalf("read profile G id: %v", err)
+	}
+	fx.profileB, fx.profileG = id1, id2
+	return fx
+}
+
+// reconfigureManager swaps the live YAML config (root + scheme) and applies
+// it to the Processor — the same path UpdateSettings takes after a save.
+func (fx profileSuiteFixtures) reconfigure(t *testing.T, newRoot, newScheme string) {
+	fx.reconfigureBinary(t, fx.bin, newRoot, newScheme)
+}
+
+func (fx profileSuiteFixtures) reconfigureBinary(t *testing.T, newBin, newRoot, newScheme string) {
+	t.Helper()
+	yamlPath := filepath.Join(t.TempDir(), "config2.yaml")
+	yamlText := fmt.Sprintf(
+		"m4b_merge:\n  binary: %q\ndirectories:\n  output_dir: %q\nprocessing:\n  path_format: %q\n  num_cpus: 1\n  log_level: info\n", newBin, newRoot, newScheme)
+	if err := os.WriteFile(yamlPath, []byte(yamlText), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	if _, err := fx.cm.LoadFrom(yamlPath); err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	fx.svc.proc.ApplyConfig(fx.cm.Config())
+}
+
+// postProcess drives POST /api/process; optional profileID nil = omitted.
+func (fx profileSuiteFixtures) postProcess(t *testing.T, srcDirs []string, profileID *int64, bookIDs ...int64) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(StartProcessingRequest{BookIDs: bookIDs, SrcDirs: srcDirs, OutputProfileID: profileID})
+	req := httptest.NewRequest("POST", "/api/process", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	fx.h.StartProcessing(w, req)
+	return w
+}
+
+func m4bsForBook(t *testing.T, h *Handler, bookID int64) string {
+	t.Helper()
+	var dest string
+	if err := h.svc.DB.QueryRow("SELECT dest_path FROM books WHERE id = ?", bookID).Scan(&dest); err != nil {
+		t.Fatalf("dest path query: %v", err)
+	}
+	return dest
+}
+
+// int64Ptr returns a pointer to v for optional request fields.
+func int64Ptr(v int64) *int64 { return &v }
+
+// TestQueueProfileDirOnlySnapshotsGlobalSchema: a directory-only profile for
+// a two-book batch resolves the global scheme at queue time; both jobs store
+// the same complete pair and land under the profile root with the inherited
+// global format. A worker-time reconfigure (ApplyConfig after enqueue, via
+// the workerStartHook) must NOT affect the already-snapshotted jobs; the
+// same profile re-queued later picks up the new scheme, proving the
+// reconfigure took effect and the earlier jobs were snapshot-bound.
+func TestQueueProfileDirOnlySnapshotsGlobalSchema(t *testing.T) {
+	fx := setupProfileSuite(t)
+	rootB := t.TempDir()
+	if _, err := fx.h.svc.DB.Exec(
+		"UPDATE output_profiles SET output_dir = ? WHERE id = ?", rootB, fx.profileB,
+	); err != nil {
+		t.Fatalf("set profile B dir: %v", err)
+	}
+	// Each book gets its OWN source dir: jobs walk their paired dir for
+	// inputs, so one shared dir would feed both jobs the same files and
+	// derive the same title.
+	srcA := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcA, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	srcB := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcB, "b.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+
+	// Reconfigure exactly when the worker starts its FIRST job.
+	applied := false
+	fx.svc.workerStartHook = func(string) {
+		if !applied {
+			applied = true
+			fx.reconfigure(t, t.TempDir(), "{title}")
+		}
+	}
+	fx.svc.RunWorkers(t.Context(), 1)
+
+	w := fx.postProcess(t, []string{srcA, srcB}, int64Ptr(fx.profileB), 1, 2)
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status = %d — body: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil || len(resp.Jobs) != 2 {
+		t.Fatalf("jobs = %d (err %v); want 2", len(resp.Jobs), err)
+	}
+
+	ids := []string{resp.Jobs[0]["id"].(string), resp.Jobs[1]["id"].(string)}
+	for _, id := range ids {
+		waitJobStatus(t, fx.h.svc.DB, id, "done")
+	}
+
+	// Both jobs must store the SAME complete queue-time pair.
+	for i, id := range ids {
+		var stored string
+		if err := fx.h.svc.DB.QueryRow("SELECT m4b_merge_args FROM processing_jobs WHERE id = ?", id).
+			Scan(&stored); err != nil {
+			t.Fatalf("read job %d args: %v", i+1, err)
+		}
+		var a struct {
+			OutputDir    string `json:"output_dir"`
+			OutputScheme string `json:"output_scheme"`
+		}
+		if err := json.Unmarshal([]byte(stored), &a); err != nil {
+			t.Fatalf("unmarshal job %d args: %v", i+1, err)
+		}
+		if a.OutputDir != rootB || a.OutputScheme != "{author}/{title}" {
+			t.Errorf("job %d stored snapshot = (%q, %q); want (%q, %q)", i+1, a.OutputDir, a.OutputScheme, rootB, "{author}/{title}")
+		}
+	}
+
+	// The fake merger derives {title} from each source basename and leaves
+	// the other tokens empty, so the inherited {author}/{title} format
+	// resolves to <profile root B>/a.m4b / b.m4b.
+	for i, dest := range []string{
+		filepath.Join(rootB, "a.m4b"),
+		filepath.Join(rootB, "b.m4b"),
+	} {
+		got := m4bsForBook(t, fx.h, int64(i+1))
+		if got != dest {
+			t.Errorf("book %d dest = %q; want %q (snapshot root B, inherited {author}/{title})", i+1, got, dest)
+		}
+		if _, err := os.Stat(dest); err != nil {
+			t.Errorf("output missing at %s: %v", dest, err)
+		}
+	}
+	if n := countM4Bs(t, fx.rootA); n != 0 {
+		t.Errorf("global root A got %d .m4b; want 0 (profile root wins)", n)
+	}
+
+	// The reconfigure (root C = tmp, {title}) now governs NEW queues: a
+	// fresh profile-B batch lands under B with the NEW scheme.
+	fx.svc.workerStartHook = nil
+	src2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src2, "c.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	w = fx.postProcess(t, []string{src2}, int64Ptr(fx.profileB), 1)
+	if w.Code != http.StatusOK {
+		t.Fatalf("re-queue status = %d — body: %s", w.Code, w.Body.String())
+	}
+	var resp2 struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp2); err != nil || len(resp2.Jobs) != 1 {
+		t.Fatalf("re-queued jobs = %d (err %v); want 1", len(resp2.Jobs), err)
+	}
+	waitJobStatus(t, fx.h.svc.DB, resp2.Jobs[0]["id"].(string), "done")
+	got := m4bsForBook(t, fx.h, 1)
+	if want := filepath.Join(rootB, "c.m4b"); got != want {
+		t.Errorf("requeued book dest = %q; want %q (profile root B, worker-time global scheme {title})", got, want)
+	}
+}
+
+// TestQueueProfileFormatOnlySnapshotsGlobalDir: a format-only profile
+// snapshots the global directory at queue time; outputs land under the
+// global root A with the profile subpath even after the reconfigure changed
+// the global directory.
+func TestQueueProfileFormatOnlySnapshotsGlobalDir(t *testing.T) {
+	fx := setupProfileSuite(t)
+
+	fx.svc.workerStartHook = func(string) {
+		fx.reconfigure(t, t.TempDir(), "{title}")
+	}
+	fx.svc.RunWorkers(t.Context(), 1)
+
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	w := fx.postProcess(t, []string{src}, int64Ptr(fx.profileG), 1)
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status = %d — body: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil || len(resp.Jobs) != 1 {
+		t.Fatalf("jobs = %d (err %v); want 1", len(resp.Jobs), err)
+	}
+	waitJobStatus(t, fx.h.svc.DB, resp.Jobs[0]["id"].(string), "done")
+
+	want := filepath.Join(fx.rootA, "Genre", "a.m4b")
+	if got := m4bsForBook(t, fx.h, 1); got != want {
+		t.Errorf("dest = %q; want %q (queue-time global dir A + profile Genre/{title})", got, want)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("output missing at %s: %v", want, err)
+	}
+}
+
+// TestQueueUnprofiledUsesWorkerTimeGlobals: without a profile ID the
+// destination follows the Processor's live values AT START TIME (no
+// queue-time snapshot, no ConfigManager dependency). Queuing with globals
+// (A, {author}/{title}) then reconfiguring to (C, {title}) before the worker
+// runs must move the output to C.
+func TestQueueUnprofiledUsesWorkerTimeGlobals(t *testing.T) {
+	fx := setupProfileSuite(t)
+
+	fx.svc.workerStartHook = func(string) {
+		fx.reconfigure(t, t.TempDir(), "{title}")
+	}
+	fx.svc.RunWorkers(t.Context(), 1)
+
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	w := fx.postProcess(t, []string{src}, nil, 1)
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status = %d — body: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil || len(resp.Jobs) != 1 {
+		t.Fatalf("jobs = %d (err %v); want 1", len(resp.Jobs), err)
+	}
+	waitJobStatus(t, fx.h.svc.DB, resp.Jobs[0]["id"].(string), "done")
+
+	var dest string
+	if err := fx.h.svc.DB.QueryRow("SELECT dest_path FROM books WHERE id = ?", 1).Scan(&dest); err != nil {
+		t.Fatalf("dest query: %v", err)
+	}
+	if !strings.HasSuffix(dest, "a.m4b") {
+		t.Errorf("dest = %q; want it to end with a.m4b (worker-time {title})", dest)
+	}
+	if strings.HasPrefix(dest, fx.rootA) {
+		t.Errorf("dest = %q; must NOT be under queue-time global root (reconfigure must win unprofiled)", dest)
+	}
+}
+
+// TestQueueProfileEmptyEffectiveDir400: a directory-only profile against an
+// empty global output dir (and no profile dir) must 400 before creating a
+// single job — the resolver must not Abs("") into the working directory.
+func TestQueueProfileEmptyEffectiveDir400(t *testing.T) {
+	fx := setupProfileSuite(t)
+	if _, err := fx.h.svc.DB.Exec("DELETE FROM output_profiles WHERE id = ?", fx.profileG); err != nil {
+		t.Fatalf("delete profile G: %v", err)
+	}
+	// Reconfigure the global output dir to empty; the dir-b profile has no
+	// dir of its own after we blank it too.
+	reconfigureEmpty := func() {
+		yamlPath := filepath.Join(t.TempDir(), "c3.yaml")
+		if err := os.WriteFile(yamlPath, []byte("directories:\n  output_dir: ''\n"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if _, err := fx.cm.LoadFrom(yamlPath); err != nil {
+			t.Fatalf("LoadFrom: %v", err)
+		}
+		fx.svc.proc.ApplyConfig(fx.cm.Config())
+	}
+	reconfigureEmpty()
+	if _, err := fx.h.svc.DB.Exec("UPDATE output_profiles SET output_dir = '' WHERE id = ?", fx.profileB); err != nil {
+		t.Fatalf("blank profile B dir: %v", err)
+	}
+
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	w := fx.postProcess(t, []string{src}, int64Ptr(fx.profileB), 1)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400 — body: %s", w.Code, w.Body.String())
+	}
+	var n int
+	if err := fx.h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&n); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("jobs created = %d; want 0 (no Abs('') into cwd)", n)
+	}
+}
+
+// TestQueueStaleProfileID404AndNoJobs: a request selecting a deleted (or
+// never-extant) profile is a 404 with no jobs created.
+func TestQueueStaleProfileID404AndNoJobs(t *testing.T) {
+	fx := setupProfileSuite(t)
+	if _, err := fx.h.svc.DB.Exec("DELETE FROM output_profiles WHERE id = ?", fx.profileB); err != nil {
+		t.Fatalf("delete profile: %v", err)
+	}
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	w := fx.postProcess(t, []string{src}, int64Ptr(fx.profileB), 1)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("stale profile status = %d; want 404 — body: %s", w.Code, w.Body.String())
+	}
+	var n int
+	if err := fx.h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&n); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("jobs created = %d; want 0 for a stale profile", n)
+	}
+}
+
+// TestQueueInvalidProfileID400: a malformed (non-positive) profile ID is a
+// 400 with no jobs created; a config-unaware processor still serves
+// unprofiled requests (no ConfigManager requirement on that path).
+func TestQueueInvalidProfileID400(t *testing.T) {
+	fx := setupProfileSuite(t)
+	fx.h.svc.Config = nil // proves the no-profile path never touches the manager
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+
+	w := fx.postProcess(t, []string{src}, int64Ptr(0), 1)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid id status = %d; want 400 — body: %s", w.Code, w.Body.String())
+	}
+	var n int
+	if err := fx.h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&n); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("jobs created = %d; want 0 for an invalid id", n)
+	}
+
+	// The no-profile path still works without a ConfigManager.
+	w = fx.postProcess(t, []string{src}, nil, 1)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unprofiled status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestQueueSingleBookReprocessUsesGlobals (behavioral anchor for the book
+// detail page's single-book reprocess): a /process request with one book and
+// NO profile ID uses the worker-time global destination — the exact
+// unprofiled contract the detail page relies on.
+func TestQueueSingleBookReprocessUsesGlobals(t *testing.T) {
+	fx := setupProfileSuite(t)
+	fx.svc.RunWorkers(t.Context(), 1)
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	w := fx.postProcess(t, []string{src}, nil, 1)
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status = %d — body: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil || len(resp.Jobs) != 1 {
+		t.Fatalf("jobs = %d (err %v); want 1", len(resp.Jobs), err)
+	}
+	waitJobStatus(t, fx.h.svc.DB, resp.Jobs[0]["id"].(string), "done")
+	// {author}/{title} with empty author -> <global root A>/a.m4b
+	want := filepath.Join(fx.rootA, "a.m4b")
+	if got := m4bsForBook(t, fx.h, 1); got != want {
+		t.Errorf("single-book dest = %q; want %q (global root + global format)", got, want)
+	}
+	// Unprofiled jobs carry no destination snapshot in their stored args.
+	var stored string
+	if err := fx.h.svc.DB.QueryRow("SELECT m4b_merge_args FROM processing_jobs WHERE id = ?", resp.Jobs[0]["id"]).Scan(&stored); err != nil {
+		t.Fatalf("read stored args: %v", err)
+	}
+	if strings.Contains(stored, "output_dir") || strings.Contains(stored, "output_scheme") {
+		t.Errorf("stored args leak a destination snapshot for an unprofiled job: %s", stored)
 	}
 }

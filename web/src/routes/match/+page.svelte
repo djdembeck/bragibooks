@@ -20,9 +20,9 @@
 		decodeHtmlEntities,
 		AUDIO_FILE_EXTS
 	} from '#lib/types.js';
-	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, AbdTag, Modal, DirPicker } from '#lib/components/index.js';
-	import { toCleanedError, cleanAdbError, type CleanedAdbError } from '#lib/adbError.js';
-	import { resolveScheme, validateScheme, parseParts } from '#lib/scheme.js';
+	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, AbdTag, Modal } from '#lib/components/index.js';
+	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
+	import { resolveScheme } from '#lib/scheme.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 
 	type ReviewMode = 'batch' | 'focused';
@@ -36,11 +36,6 @@
 		bookId: number;
 		srcPath: string;
 		title: string;
-		/** Per-book overrides carried in from the import; '' = follow global. */
-		outputDirOverride: string;
-		pathFormatOverride: string;
-		initialOutputDirOverride: string;
-		initialPathFormatOverride: string;
 		/** Local cover assigned at intake — never confused with catalog art. */
 		coverUrl: string;
 		searchResults: AudiobookDBBook[];
@@ -145,11 +140,6 @@
 	let outputDir = $state('');
 	let outputScheme = $state('');
 	let settingsLoaded = $state(false);
-	let outputPickerOpen = $state(false);
-	let outputPickerCandidateId = $state<number | null>(null);
-	const outputPickerCandidate = $derived(
-		candidates.find((c) => c.bookId === outputPickerCandidateId) ?? null
-	);
 
 	// Hydrated catalog options — only populated for choices the operator can
 	// actually see (open picker / rendered search results). Cached per page.
@@ -247,10 +237,6 @@
 					bookId: book.id,
 					srcPath: book.src_path,
 					title: book.title,
-					outputDirOverride: book.output_dir_override || '',
-					pathFormatOverride: book.path_format_override || '',
-					initialOutputDirOverride: book.output_dir_override || '',
-					initialPathFormatOverride: book.path_format_override || '',
 					coverUrl: book.cover_image_url || '',
 					searchResults: [],
 					selectedBookId: null,
@@ -1058,72 +1044,18 @@
 		};
 	}
 
-	// ── Effective output settings ─────────────────────────────
-	// A non-empty override wins over the global setting, mirroring the
-	// worker's per-book resolution. The inspection copy is what the
-	// processor will actually use for this book.
-	// Mirrors Go's clean on absolute paths (the processor runs the dir
-	// override through filepath.Abs): a hand-typed /media/../books previews
-	// exactly where the worker writes it. Override dirs are absolute at
-	// write time, so the relative dev-config global is untouched.
-	function cleanAbsDir(p: string): string {
-		if (!p.startsWith('/')) return p;
-		const out: string[] = [];
-		for (const seg of p.split('/')) {
-			if (seg === '' || seg === '.') continue;
-			if (seg === '..') {
-				if (out.length > 0) out.pop();
-				continue;
-			}
-			out.push(seg);
-		}
-		return '/' + out.join('/');
-	}
-
-	function overridesChanged(candidate: MatchCandidate): boolean {
-		return (
-			candidate.outputDirOverride !== candidate.initialOutputDirOverride ||
-			candidate.pathFormatOverride !== candidate.initialPathFormatOverride
-		);
-	}
-
-	function effectiveOutputDir(candidate: MatchCandidate): string {
-		const o = (candidate.outputDirOverride || '').trim();
-		return o ? cleanAbsDir(o) : outputDir;
-	}
-
-	function effectiveScheme(candidate: MatchCandidate): string {
-		return candidate.pathFormatOverride || outputScheme;
-	}
-
-	// Client-side mirror of the server rules (absolute dir; relative format,
-	// no '..' path segments, Settings token rules) — the same mirror the
-	// Import page applies before it posts.
-	function outputDirIssue(v: string): string | null {
-		if (v && !v.startsWith('/')) return 'Output directory must be an absolute path (start with /) — leave empty to inherit Settings.';
-		return null;
-	}
-
-	function outputFormatIssue(v: string): string | null {
-		if (!v) return null;
-		if (v.startsWith('/')) return 'Path format must be relative (no leading /).';
-		if (v.split('/').some((seg) => seg === '..')) return "Path format must not contain '..' path segments.";
-		return validateScheme(parseParts(v)).errors[0] || null;
-	}
-
+	// ── Output naming preview (global Settings) ───────────────
 	function proposedRelativeName(candidate: MatchCandidate): string {
-		if (!effectiveScheme(candidate) || !candidate.details.book) return '';
-		return resolveScheme(effectiveScheme(candidate), schemeValues(candidate));
+		if (!outputScheme || !candidate.details.book) return '';
+		return resolveScheme(outputScheme, schemeValues(candidate));
 	}
 
 	function fullOutputPath(candidate: MatchCandidate): string {
-		const root = effectiveOutputDir(candidate);
-		if (!effectiveScheme(candidate))
-			return 'Output scheme is not set — configure it in Settings or set a per-book override.';
+		if (!outputScheme) return 'Output scheme is not set — configure it in Settings.';
 		if (!candidate.details.book) return 'Select a record to preview the output name.';
-		if (!root) return 'Output folder is not set — configure it in Settings or set a per-book override.';
+		if (!outputDir) return 'Output folder is not set — configure it in Settings.';
 		const relative = proposedRelativeName(candidate);
-		const trimmed = root.replace(/\/+$/, '');
+		const trimmed = outputDir.replace(/\/+$/, '');
 		return relative ? `${trimmed}/${relative}` : trimmed;
 	}
 
@@ -1391,20 +1323,6 @@
 		if (removingMany) return;
 		const ready = candidates.filter(isSavable);
 		if (ready.length === 0) return;
-		// A per-book override the server would 400 (or the worker would
-		// reject) blocks the save — check only what this save will PUT: a
-		// not-eligible candidate's bad value must not block the others.
-		for (const candidate of ready) {
-			const dir = candidate.outputDirOverride.trim();
-			const fmt = candidate.pathFormatOverride.trim();
-			const issue = outputDirIssue(dir) || outputFormatIssue(fmt);
-			if (issue) {
-				setActive(candidate.bookId);
-				setMode('focused');
-				pageError = cleanAdbError(`${sourceBase(candidate)}: ${issue}`);
-				return;
-			}
-		}
 		saving = true;
 		pageError = null;
 		try {
@@ -1436,10 +1354,6 @@
 			.join(', ');
 		return {
 			title: release?.title || book?.title || candidate.title,
-			// Always present: trimmed "" clears the override server-side
-			// (omitted would leave it unchanged).
-			output_dir_override: candidate.outputDirOverride.trim(),
-			path_format_override: candidate.pathFormatOverride.trim(),
 			asin: extractAsin(book?.external) || undefined,
 			audiobookdb_book_id: book?.id,
 			audiobookdb_release_id: release?.id,
@@ -1795,13 +1709,8 @@
 							<div class="batch__name">
 								<span class="batch__name-head">
 									<span class="batch__name-label">Proposed output</span>
-									{#if c.outputDirOverride.trim() || c.pathFormatOverride.trim() || overridesChanged(c)}
-										<span class="batch__override-chip">
-											{overridesChanged(c) ? 'per-book · pending' : 'per-book'}
-										</span>
-									{/if}
 								</span>
-								{#if !effectiveScheme(c)}
+								{#if !outputScheme}
 									<a class="batch__name-link" href="/settings">
 										{settingsLoaded
 											? 'Set an output scheme'
@@ -1822,12 +1731,6 @@
 									<span class="batch__name-value batch__name-value--empty">
 										Select a record
 									</span>
-								{/if}
-								{#if c.outputDirOverride.trim() || c.pathFormatOverride.trim() || overridesChanged(c)}
-									<div class="batch__override-summary">
-										<span>Directory: {#if c.outputDirOverride.trim()}<code>{c.outputDirOverride.trim()}</code>{:else}Settings{/if}</span>
-										<span>Format: {#if c.pathFormatOverride.trim()}<code>{c.pathFormatOverride.trim()}</code>{:else}Settings{/if}</span>
-									</div>
 								{/if}
 							</div>
 						</div>
@@ -2051,13 +1954,7 @@
 							</figure>
 							<div class="match__source-copy">
 								<h2>{sourceBase(c)}</h2>
-								{#if c.outputDirOverride || c.pathFormatOverride}
-									<p class="match__override">
-										<code title={effectiveScheme(c)}>{effectiveOutputDir(c)}</code>
-										{#if c.pathFormatOverride}<span> · path format overridden</span>{/if}
-									</p>
-								{/if}
-								{#if outputScheme || c.pathFormatOverride}
+								{#if outputScheme}
 									<p class="match__proposed">
 										<span>Proposed output — processor reports the final path</span>
 										<code title={fullOutputPath(c)}>
@@ -2119,72 +2016,6 @@
 							>
 								Remove
 							</Button>
-						</div>
-						<div class="match__override-edit">
-							<p class="match__override-state" id="override-save-state" aria-live="polite">
-								<strong>{overridesChanged(c) ? 'Pending output edits.' : 'Output overrides unchanged.'}</strong>
-								{#if !isReady(c)}
-									{overridesChanged(c)
-										? 'These edits will save only after this source has a ready catalog match and is included in the batch.'
-										: 'Output changes can be saved only after this source has a ready catalog match and is included in the batch.'}
-								{:else if !c.included}
-									{overridesChanged(c)
-										? 'This source is excluded. Include it to save these edits with the batch.'
-										: 'This source is excluded. Include it before saving output changes.'}
-								{:else if outputDirIssue(c.outputDirOverride.trim()) || outputFormatIssue(c.pathFormatOverride.trim())}
-									This match is included. Fix the output errors before saving the batch.
-								{:else}
-									{overridesChanged(c)
-										? 'These edits will save with Save matches → Queue.'
-										: 'Output changes save with Save matches → Queue.'}
-								{/if}
-							</p>
-							<label for="override-dir-input">
-								Output directory override
-								<code class="match__override-inherit">empty = Settings</code>
-							</label>
-							<div class="match__override-controls">
-								<input
-									id="override-dir-input"
-									type="text"
-									bind:value={c.outputDirOverride}
-									placeholder={outputDir || 'Inherit Settings'}
-									aria-invalid={outputDirIssue(c.outputDirOverride.trim()) ? true : undefined}
-									aria-describedby={
-										outputDirIssue(c.outputDirOverride.trim()) ? 'override-save-state override-dir-error' : 'override-save-state'
-									}
-								/>
-								<Button variant="ghost" onclick={() => {
-									outputPickerCandidateId = c.bookId;
-									outputPickerOpen = true;
-								}} aria-label="Browse output directory for {sourceBase(c)}">Browse</Button>
-								{#if c.outputDirOverride}
-									<Button variant="ghost" onclick={() => (c.outputDirOverride = '')} aria-label="Clear output directory override to inherit Settings">Clear</Button>
-								{/if}
-							</div>
-							{#if outputDirIssue(c.outputDirOverride.trim())}
-								<p id="override-dir-error" class="match__override-error" role="alert">
-									{outputDirIssue(c.outputDirOverride.trim())}
-								</p>
-							{/if}
-							<label for="override-fmt-input">
-								Output path format override
-								<code class="match__override-inherit">empty = Settings</code>
-							</label>
-							<input
-								id="override-fmt-input"
-								type="text"
-								bind:value={c.pathFormatOverride}
-								aria-invalid={outputFormatIssue(c.pathFormatOverride.trim()) ? true : undefined}
-								aria-describedby={
-									outputFormatIssue(c.pathFormatOverride.trim()) ? 'override-save-state override-fmt-error' : 'override-save-state'
-								}
-							/>
-							{#if outputFormatIssue(c.pathFormatOverride.trim())}
-								<p id="override-fmt-error" class="match__override-error" role="alert">
-									{outputFormatIssue(c.pathFormatOverride.trim())}
-								</p>
-							{/if}
 						</div>
 					</div>
 
@@ -2717,14 +2548,6 @@
 			</div>
 		{/snippet}
 	</Modal>
-	<DirPicker
-		bind:open={outputPickerOpen}
-		title="Choose output folder"
-		startPath={outputPickerCandidate?.outputDirOverride.trim() || outputDir}
-		onselect={(path) => {
-			if (outputPickerCandidate) outputPickerCandidate.outputDirOverride = path;
-		}}
-	/>
 </div>
 
 <style>
@@ -3129,35 +2952,6 @@
 		align-items: center;
 		gap: 6px;
 		min-width: 0;
-	}
-
-	.batch__override-chip {
-		padding: 0 6px;
-		border: 1px solid var(--m-border);
-		border-radius: var(--m-r-sm);
-		font-size: 11px;
-		font-weight: 600;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
-		line-height: 1.5;
-		color: var(--m-ink-2);
-	}
-
-	.batch__override-summary {
-		display: grid;
-		gap: 2px;
-		min-width: 0;
-		margin-top: 3px;
-		font-size: 12px;
-		line-height: 1.4;
-		color: var(--m-muted);
-		overflow-wrap: anywhere;
-	}
-
-	.batch__override-summary code {
-		font-size: 12px;
-		color: var(--m-ink-2);
-		white-space: normal;
 	}
 
 	.batch__name-value {
@@ -3670,98 +3464,6 @@
 		color: var(--m-ink);
 		margin: 0 0 4px;
 		overflow-wrap: anywhere;
-	}
-
-	.match__override {
-		margin: 0 0 4px;
-		font-size: 12px;
-		color: var(--m-muted);
-	}
-
-	.match__override code {
-		font-size: 12px;
-		color: var(--m-ink-2);
-		overflow-wrap: anywhere;
-	}
-
-	.match__override-edit {
-		flex-basis: 100%;
-		width: 100%;
-		min-width: 0;
-		margin-top: 10px;
-		padding-top: 10px;
-		border-top: 1px solid var(--m-border-soft);
-		display: grid;
-		gap: 8px;
-		font-size: 14px;
-	}
-
-	.match__override-state {
-		margin: 0 0 4px;
-		max-width: 65ch;
-		color: var(--m-ink-2);
-		line-height: 1.5;
-	}
-
-	.match__override-state strong {
-		font-weight: 600;
-	}
-
-	.match__override-controls {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 6px;
-		min-width: 0;
-	}
-
-	.match__override-controls input {
-		flex: 1 1 12rem;
-	}
-
-	.match__override-edit label {
-		color: var(--m-ink-2);
-		font-size: 14px;
-		font-weight: 600;
-	}
-
-	.match__override-inherit {
-		margin-left: 6px;
-		font-weight: 400;
-		font-size: 12px;
-		color: var(--m-muted);
-	}
-
-	.match__override-edit input {
-		width: 100%;
-		min-width: 0;
-		min-height: 44px;
-		padding: 8px 12px;
-		border: 1px solid var(--border-strong);
-		border-radius: var(--m-r-sm);
-		background: var(--m-surface);
-		color: var(--m-ink);
-		font-size: 14px;
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	}
-
-	.match__override-edit input:hover {
-		border-color: var(--m-muted);
-	}
-
-	.match__override-edit input:focus-visible {
-		border-color: var(--m-ink);
-		outline: 3px solid var(--focus-ring);
-		outline-offset: 3px;
-	}
-
-	.match__override-edit input[aria-invalid='true'] {
-		border-color: var(--state-red-border);
-	}
-
-	.match__override-error {
-		margin: 0;
-		color: var(--state-red);
-		font-size: 12px;
 	}
 
 	.match__proposed {
