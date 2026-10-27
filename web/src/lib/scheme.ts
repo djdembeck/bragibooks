@@ -142,7 +142,15 @@ function isGoSpace(ch: string): boolean {
 	);
 }
 
-function trimSegment(s: string): string {
+/**
+ * Trim a path segment with Go's strings.TrimSpace semantics (unicode.IsSpace:
+ * tab/LF/VT/FF/CR/space, U+0085, U+00A0, U+1680, U+2000–U+200A, U+2028, U+2029,
+ * U+202F, U+205F, U+3000). Exported so callers that mirror the Go validator's
+ * segment rules elsewhere (e.g. the settings page's ".." parity check) agree
+ * with the server — String.prototype.trim accepts more, so it must not be
+ * used there.
+ */
+export function trimSegment(s: string): string {
 	let a = 0;
 	let b = s.length;
 	while (a < b && isGoSpace(s[a])) a++;
@@ -292,12 +300,13 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 		warnings.push('This format can produce the same file for different books — include {title}.');
 	}
 
-	// W3: literal text sharing a segment with a token concatenates against
-	// the resolved value (the engine joins segments without separators),
-	// producing paths like The MartianFavorites.m4b.
+	// W3: unseparated parts sharing a segment concatenate against the
+	// resolved values (the engine joins segments without separators),
+	// producing paths like "The MartianFavorites.m4b" — and two adjacent
+	// tokens merge into one name, e.g. {author}{title} -> "Andy WeirThe Martian.m4b".
 	for (const seg of segs) {
-		if (seg.tokens.length > 0 && trimSegment(seg.text) !== '') {
-			warnings.push('Literal text joins an adjacent {token} — add a separator to keep them apart.');
+		if (seg.tokens.length > 0 && (trimSegment(seg.text) !== '' || seg.tokens.length > 1)) {
+			warnings.push('Parts in this segment join without a separator and will merge — add a "/" or text to keep them apart.');
 			break;
 		}
 	}

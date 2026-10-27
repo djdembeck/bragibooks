@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { get, post, streamEvents } from '#lib/api.js';
-	import type { BookWithPeople, BooksListResponse, ProcessingResponse, ProcessingJob, JobsListResponse } from '#lib/types.js';
-	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, StatusBadge, CoverArt, JobActionLabel } from '#lib/components/index.js';
+	import type { BookWithPeople, BooksListResponse, ProcessingResponse, ProcessingJob, JobsListResponse, OutputProfile, OutputProfilesResponse } from '#lib/types.js';
+	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, StatusBadge, CoverArt, OutputProfileSelector, JobActionLabel } from '#lib/components/index.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { cleanAdbError, toCleanedError } from '#lib/adbError.js';
 	import { formatJobTime, formatElapsed, elapsedLabel } from '#lib/datetime.js';
@@ -23,10 +23,16 @@
 		createdAt: string | null;
 		/** Local cancellation in flight: badge is optimistic until the backend terminal state lands. */
 		cancelRequested: boolean;
+		/** Queue-time output destination this batch was queued under (profile-backed queues only), e.g. "output/archive · {author}/{title}". HTML-escaped by Svelte. */
+		destination?: string;
 	}
 
 	let books: BookWithPeople[] = $state([]);
 	let selectedIds = $state<Set<number>>(new Set());
+	let profiles = $state<OutputProfile[]>([]);
+	let profilesError = $state<string | null>(null);
+	// null = "Global settings"; set only when the user picks a saved profile.
+	let selectedProfileId = $state<number | null>(null);
 	let selectAllControl = $state<HTMLInputElement>();
 	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 	let loading = $state(true);
@@ -56,6 +62,19 @@
 			restoreJobs(jobsResp.jobs);
 		});
 		loading = false;
+		// Independent of the queue load: a profile-list failure must not
+		// fail the page; the selector simply offers Global settings only.
+		void loadProfiles();
+	}
+
+	async function loadProfiles() {
+		try {
+			const res = await get<OutputProfilesResponse>('/output-profiles');
+			profiles = res.profiles || [];
+			profilesError = null;
+		} catch {
+			profilesError = 'Saved profiles unavailable — queuing uses global settings.';
+		}
 	}
 
 	async function loadBooks() {
@@ -224,10 +243,21 @@
 		dl.setError(null);
 		try {
 			const selected = matchedBooks.filter((b) => selectedIds.has(b.id));
-			const response = await post<ProcessingResponse>('/process', {
+			const payload: { book_ids: number[]; src_dirs: string[]; output_profile_id?: number } = {
 				book_ids: selected.map((b) => b.id),
 				src_dirs: selected.map((b) => b.src_path),
-			});
+			};
+			if (selectedProfileId !== null) payload.output_profile_id = selectedProfileId;
+			const response = await post<ProcessingResponse>('/process', payload);
+			// The resolved destination of record for this batch: the server's
+			// queue-time snapshot (absolute dir + effective format), not the
+			// page's cached profile, which may have been edited since load.
+			// Once the selector resets, this line is what tells two
+			// back-to-back batches (profile then global) apart.
+			const destination =
+				response.output_dir || response.output_scheme
+					? `${response.output_dir} · ${response.output_scheme}`
+					: undefined;
 			for (const job of response.jobs) {
 				const item = $state<JobItem>({
 					id: job.id,
@@ -242,12 +272,14 @@
 					completedAt: null,
 					createdAt: null,
 					cancelRequested: false,
+					destination,
 				});
 				jobs = [item, ...jobs];
 				connectSSE(item);
 				void pollJob(item);
 			}
 			selectedIds = new Set();
+			selectedProfileId = null; // Batch queued with this choice; back to Global settings.
 			await loadBooks();
 		} catch (e) {
 			dl.setError(toCleanedError(e));
@@ -359,6 +391,16 @@
 								matchedBooks.forEach((book) => { if (checked) next.add(book.id); else next.delete(book.id); });
 								selectedIds = next;
 							}} aria-label="Select all matched books" /><span>{selectedReadyCount} selected of {matchedBooks.length}</span></label>
+							{#if selectedReadyCount > 0}
+								<div class="profile-pick">
+									<OutputProfileSelector
+										{profiles}
+										bind:selectedProfileId
+										{profilesError}
+										batchCount={selectedReadyCount}
+									/>
+								</div>
+							{/if}
 							<Button loading={starting} disabled={selectedReadyCount === 0} onclick={start}>Start processing <ArrowRight size={16} aria-hidden="true" /></Button>
 						</div>
 						<div class="ready-rows">
@@ -404,6 +446,9 @@
 {#snippet JobRecord(job: JobItem, active: boolean)}
 	<article class="job-record">
 		<div class="job-record__heading"><div class="job-identity">{#if job.bookId}<a href="/books/{job.bookId}">{job.bookTitle || `Book #${job.bookId}`}</a>{:else}<strong>Unlinked job</strong>{/if}<code title={job.id}>{job.id.slice(0, 8)}</code></div><div class="job-record__state"><StatusBadge status={job.status} /><JobActionLabel action={job.action} /></div></div>
+		{#if job.destination}
+			<p class="job-destination">Destination: {job.destination}</p>
+		{/if}
 		<p class="job-description">{jobStatusLabel(job.status)}</p>
 		<dl class="job-timestamps">
 			{#if job.startedAt}
@@ -456,6 +501,7 @@
 	.section-heading p { color: var(--text-muted); font-size: 0.8125rem; margin-top: 0.35rem; }
 	.selection-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.75rem 1.5rem; background: var(--surface); border-top: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); }
 	.select-all { display: flex; align-items: center; gap: 0.75rem; min-height: 2.75rem; font-size: 0.8125rem; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+	.profile-pick { min-width: 0; }
 	.queue-row { display: grid; grid-template-columns: 2.75rem 3rem minmax(0, 1fr) auto; align-items: center; gap: 0.75rem; padding: 0.875rem 1.5rem 0.875rem 0.75rem; border-bottom: 1px solid var(--border-subtle); }
 	.queue-row:last-child { border-bottom: 0; }
 	.queue-row:hover { background: var(--surface); }
@@ -493,6 +539,7 @@
 	.job-identity { display: grid; gap: 0.35rem; min-width: 0; }
 	.job-identity a, .job-identity strong { font-size: 0.875rem; font-weight: 600; overflow-wrap: anywhere; }
 	.job-identity code { font-size: 0.75rem; color: var(--text-muted); }
+	.job-destination { color: var(--text-secondary); font-family: ui-monospace, 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace; font-size: 0.75rem; margin-top: 0.65rem; overflow-wrap: anywhere; }
 	.job-description { color: var(--text-muted); font-size: 0.75rem; margin-top: 0.65rem; }
 	.job-timestamps { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin-top: 0.35rem; font-size: 0.75rem; color: var(--text-secondary); }
 	.job-timestamp { display: flex; align-items: baseline; gap: 0.35rem; }

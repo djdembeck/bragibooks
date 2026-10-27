@@ -33,6 +33,8 @@ type PersonUpdate struct {
 }
 
 // CreateBookEntry is a single source path to turn into a pending book.
+// Output destinations are NOT per-book: saved output profiles (Settings)
+// are selected once per queue request and snapshotted into the jobs.
 type CreateBookEntry struct {
 	SrcPath string `json:"src_path"`
 	Title   string `json:"title,omitempty"`

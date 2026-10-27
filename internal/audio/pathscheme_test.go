@@ -56,3 +56,47 @@ func TestValidatePathFormat(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateRelativePathFormat(t *testing.T) {
+	tests := []struct {
+		name      string
+		template  string
+		wantErrFr string // non-empty: error must contain this
+	}{
+		{name: "relative scheme passes", template: "Genre/{title}"},
+		{name: "relative multi-segment scheme passes", template: "{author}/{title}"},
+		{name: "absolute scheme", template: "/abs/{title}", wantErrFr: "must not start with '/'"},
+		{name: "rooted traversal", template: "../x/{title}", wantErrFr: "'..' path segment"},
+		{name: "mid-segment traversal", template: "a/../../b/{title}", wantErrFr: "'..' path segment"},
+		// Traversal is checked on the TRIMMED segment (the same trimming the
+		// path-side segment rules apply), so whitespace padding cannot dress
+		// up a ".." segment and slip past the raw-text comparison.
+		{name: "whitespace-padded traversal segment", template: " .. /{title}", wantErrFr: "'..' path segment"},
+		{name: "tab and vertical tab pad traversal segment", template: "\t..\v/{title}", wantErrFr: "'..' path segment"},
+		{name: "ideographic space pads traversal segment", template: "\u3000..\u3000/{title}", wantErrFr: "'..' path segment"},
+		{name: "mixed valid and padded-traversal segments", template: "Genre/{title} / .. /season", wantErrFr: "'..' path segment"},
+		{name: "padded dot dot with text is not traversal", template: "{title}/ ..x/{author}", wantErrFr: ""},
+		{name: "dotdot as literal text is fine", template: "{title}/fd..{author}", wantErrFr: ""},
+		// Delegation: token/character rules of ValidatePathFormat must still
+		// apply through the relative wrapper.
+		{name: "no placeholder", template: "plain", wantErrFr: "must include at least one placeholder"},
+		{name: "illegal char", template: "{title}:x", wantErrFr: `path text cannot contain ":"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateRelativePathFormat(tt.template)
+			if tt.wantErrFr == "" {
+				if err != nil {
+					t.Fatalf("ValidateRelativePathFormat(%q) = %v, want nil", tt.template, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ValidateRelativePathFormat(%q) = nil, want error containing %q", tt.template, tt.wantErrFr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrFr) {
+				t.Fatalf("ValidateRelativePathFormat(%q) = %q, want error containing %q", tt.template, err, tt.wantErrFr)
+			}
+		})
+	}
+}

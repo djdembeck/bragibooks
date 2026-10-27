@@ -59,6 +59,21 @@ type ProcessingJob struct {
 	CreatedAt    string        `db:"created_at" json:"created_at"`
 }
 
+// OutputProfile is a named, reusable output destination for queue batches:
+// an optional output-directory override (empty inherits the global output
+// directory at queue time) and an optional relative path format (empty
+// inherits the global format at queue time). Profiles are settings, not
+// book attributes: jobs store fully-resolved snapshots of the selected
+// profile, never profile references.
+type OutputProfile struct {
+	ID           int64  `db:"id" json:"id"`
+	Name         string `db:"name" json:"name"`
+	OutputDir    string `db:"output_dir" json:"output_dir"`
+	OutputScheme string `db:"output_scheme" json:"output_scheme"`
+	CreatedAt    string `db:"created_at" json:"created_at"`
+	UpdatedAt    string `db:"updated_at" json:"updated_at"`
+}
+
 // Settings holds application configuration persisted in the database.
 type Settings struct {
 	AudiobookdbAPIKey  string `db:"audiobookdb_api_key" json:"-"`

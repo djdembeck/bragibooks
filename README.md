@@ -110,7 +110,7 @@ The normal work is deliberately linear: **select, match, queue, finish**.
 
 2. **Intake:** browse the mounted input directory and select one or more audiobook folders or files.
 3. **Match:** let Bragibooks search AudiobookDB, then confirm or correct the book, release, author, and narrator metadata. Custom search is available when the first match is wrong.
-4. **Queue:** submit the matched batch. Bragibooks invokes `m4b-merge` to merge, convert, clean, tag, and repackage the source files.
+4. **Queue:** select the matched books and, optionally, a **saved output profile** — a named preset (output directory and/or path format) created under Settings — then submit the batch. The profile applies only to the jobs created by that queue request and is snapshotted into each job, so later profile or Settings changes do not move already-queued work. Without a profile the global output directory and path format apply. Bragibooks invokes `m4b-merge` to merge, convert, clean, tag, and repackage the source files.
 5. **Finish:** follow live processing output in the browser, then review completed books and any errors. Jobs can take from seconds to hours depending on the number and type of files.
 
 ## Screens
@@ -228,7 +228,11 @@ The web frontend uses the HTTP API below. Responses are JSON unless noted otherw
 | `GET` | `/api/search?query=...&types=books&skip=0&take=20` | Search AudiobookDB |
 | `GET` | `/api/search/books/{id}` | Fetch an AudiobookDB book |
 | `GET` | `/api/search/releases/{id}` | Fetch an AudiobookDB release |
-| `POST` | `/api/process` | Queue processing for matched books |
+| `GET` | `/api/output-profiles` | List saved output profiles |
+| `POST` | `/api/output-profiles` | Create a saved output profile |
+| `PUT` | `/api/output-profiles/{id}` | Update a saved output profile |
+| `DELETE` | `/api/output-profiles/{id}` | Delete a saved output profile |
+| `POST` | `/api/process` | Queue processing for matched books; an optional `output_profile_id` applies a saved output profile to the batch |
 | `GET` | `/api/jobs?book_id=...` | List processing jobs, optionally filtered to one book |
 | `GET` | `/api/jobs/{id}` | Read job status |
 | `GET` | `/api/jobs/{id}/stream` | Stream live job output over SSE |

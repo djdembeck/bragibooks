@@ -140,7 +140,13 @@
 	</div>
 
 	<div class="listing">
-		{#if dl.showSkeleton || !dl.hasLoaded}
+		{#if !dl.hasLoaded && !dl.showSkeleton}
+			<!-- First load, before the 200 ms skeleton delay: announce a
+			     pending state without claiming the folder is empty. -->
+			<div class="listing__pending" role="status" aria-live="polite">
+				<span class="sr-only">Loading directory…</span>
+			</div>
+		{:else if dl.showSkeleton}
 			{#each Array(6) as _}
 				<Skeleton height="2.25rem" />
 			{/each}
@@ -331,6 +337,15 @@
 		font-size: 0.6875rem;
 		color: var(--text-muted);
 		flex-shrink: 0;
+	}
+
+	.listing__pending {
+		/* Match the six-row skeleton height so the settled listing does not
+		   shift the modal layout when the first response arrives. */
+		min-height: 13rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
 	}
 
 	.state {

@@ -136,6 +136,14 @@ func escapeSequenceEnd(s string, i int) int {
 	}
 }
 
+// RunOptions carries per-run destination overrides. A non-empty (after
+// trimming) value takes precedence over the live Processor settings;
+// empty inherits the snapshot value.
+type RunOptions struct {
+	OutputDirOverride  string
+	PathFormatOverride string
+}
+
 // Run executes m4b-merge with the given input file paths.
 // Returns the output .m4b file path, or an error.
 //
@@ -147,7 +155,7 @@ func escapeSequenceEnd(s string, i int) int {
 // (reusing the -p scheme tree inside it), and only on success move the
 // discovered file to its final location under OutputDir. This uses the
 // existing m4b-merge flags only; no CLI surface is changed.
-func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, asin string) (*ProcessResult, error) {
+func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, asin string, opts RunOptions) (*ProcessResult, error) {
 	binary, outputRoot, completedDir, pathFormat, logLevel, numCPUs := p.snapshot()
 
 	// A relative output root (a valid dev configuration) must be
@@ -157,6 +165,19 @@ func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, 
 	// produced .m4b. Empty stays empty.
 	if outputRoot != "" {
 		outputRoot, _ = filepath.Abs(outputRoot)
+	}
+
+	// Per-run destination overrides win over the snapshot values. The
+	// directory override is validated absolute at write time, so it joins
+	// byte-identically with the Match preview's effective-dir join.
+	if od := strings.TrimSpace(opts.OutputDirOverride); od != "" {
+		if abs, err := filepath.Abs(od); err == nil {
+			outputRoot = abs
+		}
+	}
+	effFormat := pathFormat
+	if f := strings.TrimSpace(opts.PathFormatOverride); f != "" {
+		effFormat = f
 	}
 
 	outputDir := outputRoot
@@ -174,7 +195,7 @@ func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, 
 
 	args := []string{
 		"-o", outputDir,
-		"-p", pathFormat,
+		"-p", effFormat,
 		"--num-cpus", strconv.Itoa(numCPUs),
 		"--log-level", logLevel,
 	}

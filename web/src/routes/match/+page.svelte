@@ -1044,6 +1044,7 @@
 		};
 	}
 
+	// ── Output naming preview (global Settings) ───────────────
 	function proposedRelativeName(candidate: MatchCandidate): string {
 		if (!outputScheme || !candidate.details.book) return '';
 		return resolveScheme(outputScheme, schemeValues(candidate));
@@ -1054,8 +1055,8 @@
 		if (!candidate.details.book) return 'Select a record to preview the output name.';
 		if (!outputDir) return 'Output folder is not set — configure it in Settings.';
 		const relative = proposedRelativeName(candidate);
-		const root = outputDir.replace(/\/+$/, '');
-		return relative ? `${root}/${relative}` : root;
+		const trimmed = outputDir.replace(/\/+$/, '');
+		return relative ? `${trimmed}/${relative}` : trimmed;
 	}
 
 	// ── Eligibility — one predicate for counting and saving ────
@@ -1706,7 +1707,9 @@
 								<path d="M5 12h13m-5-5 5 5-5 5" />
 							</svg>
 							<div class="batch__name">
-								<span class="batch__name-label">Proposed output</span>
+								<span class="batch__name-head">
+									<span class="batch__name-label">Proposed output</span>
+								</span>
 								{#if !outputScheme}
 									<a class="batch__name-link" href="/settings">
 										{settingsLoaded
@@ -2943,6 +2946,14 @@
 		color: var(--m-muted);
 	}
 
+	.batch__name-head {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+	}
+
 	.batch__name-value {
 		font-size: 14px;
 		font-weight: 600;
@@ -3396,6 +3407,7 @@
 
 	.match__source {
 		display: flex;
+		flex-wrap: wrap;
 		justify-content: space-between;
 		align-items: flex-start;
 		gap: 16px;

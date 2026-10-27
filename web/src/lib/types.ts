@@ -248,10 +248,34 @@ export interface AudiobookDBRelease {
 export interface ProcessingRequest {
 	book_ids: number[];
 	src_dirs: string[];
+	output_profile_id?: number;
 }
 
 export interface ProcessingResponse {
 	jobs: Array<{ id: string; book_id: number }>;
+	/** Queue-time destination snapshot of the started batch (profile-backed batches only); absent for global-settings batches. */
+	output_dir?: string;
+	output_scheme?: string;
+}
+
+/** Wire shape of models.OutputProfile. */
+export interface OutputProfile {
+	id: number;
+	name: string;
+	output_dir: string;
+	output_scheme: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface OutputProfilesResponse {
+	profiles: OutputProfile[];
+}
+
+export interface OutputProfileRequest {
+	name: string;
+	output_dir: string;
+	output_scheme: string;
 }
 
 export interface MigrationResult {

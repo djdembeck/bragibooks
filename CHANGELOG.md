@@ -29,6 +29,11 @@ All notable changes to this project will be documented in this file. See [standa
   - `processing_jobs` gains a `detail` column (migration v8) exposed by `GET /api/jobs` and `GET /api/jobs/:id`; pre-v8 rows are NULL, and import rows show their source path.
   - Job completion reads "Completed" across merges, imports, and metadata saves; an empty record reads "No recorded activity yet."
 
+- **Saved output profiles with queue-time snapshots**
+  - Added named output profiles (output directory and/or relative path format) managed on the Settings page via `/api/output-profiles` (list, create, update, delete). Blank fields inherit the global values.
+  - The Queue page and the Books bulk requeue action select one profile per batch. The selection is resolved once at queue time, snapshotted into each created job's arguments, so already-queued jobs are unaffected by later profile or Settings changes; no profile is stored on a book.
+  - Removed the obsolete per-book and per-import output override fields, UI, and migrations (migration v8 adds the `output_profiles` table and drops the unreleased per-book columns).
+
 - **Record workspace rollout**
   - Restored the original gold palette, stacked-books logo, and favicon; applied the shared top navigation, neutral work surfaces, and self-hosted Public Sans headings across Overview, Import, Match, Queue, Books, book detail, and Settings.
   - Added counted batch match approval with explicit inclusion and optional focused review. Source and proposed output names stay visible; the processor's actual output path remains distinct from the preview.

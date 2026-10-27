@@ -53,6 +53,15 @@ CREATE TABLE people (
 	audiobookdb_person_id TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE output_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    output_dir TEXT NOT NULL DEFAULT '',
+    output_scheme TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
 ` + processingSchemaSQL
 
 // newTestDB opens an in-memory SQLite database and creates the schema.
