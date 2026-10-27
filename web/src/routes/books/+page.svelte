@@ -166,6 +166,9 @@
 		bulkError = null;
 		try {
 			const ids = [...allMatchedIds];
+			// Snapshot with the ids: clearSelection() (filter/search change)
+			// nulls selectedProfileId mid-await, which would drop the pick.
+			const profileId = selectedProfileId;
 			// One POST whose src_dirs are parallel to book_ids: each book
 			// requeues from its own recorded source path, fetched per book.
 			const books = await Promise.all(
@@ -175,7 +178,7 @@
 				book_ids: ids,
 				src_dirs: books.map((b) => b.src_path),
 			};
-			if (selectedProfileId !== null) payload.output_profile_id = selectedProfileId;
+			if (profileId !== null) payload.output_profile_id = profileId;
 			await post(`/process`, payload);
 			selectedProfileId = null; // Batch queued with this choice; back to Global settings.
 			await goto('/process');

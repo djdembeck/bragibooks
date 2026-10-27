@@ -48,6 +48,22 @@
 		selectedProfileId === null ? null : profiles.find((p) => p.id === selectedProfileId) ?? null
 	);
 
+	// Reconcile a bound id that a concurrent deletion (e.g. another tab)
+	// removed from the loaded list: clear it so both Book and Queue
+	// consumers fall back to Global settings via two-way binding, instead
+	// of POSTing an id the backend answers with 404. Skip while the list
+	// itself is unavailable — the warning row covers that, and a selection
+	// we cannot verify against must not be dropped.
+	$effect(() => {
+		if (
+			selectedProfileId !== null &&
+			!profilesError &&
+			!profiles.some((p) => p.id === selectedProfileId)
+		) {
+			selectedProfileId = null;
+		}
+	});
+
 	function onselectchange(event: Event) {
 		const value = (event.currentTarget as HTMLSelectElement).value;
 		selectedProfileId = value === '' ? null : Number(value);
