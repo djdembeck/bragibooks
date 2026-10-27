@@ -32,12 +32,12 @@ var testMigrations = []migration{
 
 // TestRunMigrationsRealShape runs the production migration list on a fresh
 // DB and asserts the resulting table shapes, so a schema change always has
-// to be reflected here. It runs BEFORE the two tests below that permanently
-// mutate the package's `migrations` var (in-file order), so it must not be
-// moved after them.
+// to be reflected here. It runs before the tests below that swap the
+// package's `migrations` var (in-file order), so it must not be moved after
+// them.
 func TestRunMigrationsRealShape(t *testing.T) {
-	if len(migrations) < 8 {
-		t.Fatalf("migrations = %d entries, want the 8 production migrations (run before the test var mutations)", len(migrations))
+	if len(migrations) < 10 {
+		t.Fatalf("migrations = %d entries, want the 10 production migrations (run before the test var mutations)", len(migrations))
 	}
 	db := openTestDB(t)
 	if err := RunMigrations(db); err != nil {
@@ -56,17 +56,17 @@ func TestRunMigrationsRealShape(t *testing.T) {
 		t.Error("settings.legacy_token_migrated missing after v6")
 	}
 	if hasColumn(t, db, "books", "output_dir_override") {
-		t.Error("books.output_dir_override must be dropped after v8")
+		t.Error("books.output_dir_override must be dropped after v10")
 	}
 	if hasColumn(t, db, "books", "path_format_override") {
-		t.Error("books.path_format_override must be dropped after v8")
+		t.Error("books.path_format_override must be dropped after v10")
 	}
 	if !hasColumn(t, db, "output_profiles", "name") {
-		t.Fatal("output_profiles.name missing (v8)")
+		t.Fatal("output_profiles.name missing (v10)")
 	}
 	for _, col := range []string{"id", "output_dir", "output_scheme", "created_at", "updated_at"} {
 		if !hasColumn(t, db, "output_profiles", col) {
-			t.Errorf("output_profiles.%s missing (v8)", col)
+			t.Errorf("output_profiles.%s missing (v10)", col)
 		}
 	}
 	if !hasColumn(t, db, "settings", "audiobookdb_base_url") {
@@ -74,6 +74,12 @@ func TestRunMigrationsRealShape(t *testing.T) {
 	}
 	if !hasColumn(t, db, "books", "converted") {
 		t.Error("books.converted missing (v2 regression)")
+	}
+	if !hasColumn(t, db, "processing_jobs", "action") {
+		t.Error("processing_jobs.action missing (v7 regression)")
+	}
+	if !hasColumn(t, db, "processing_jobs", "detail") {
+		t.Error("processing_jobs.detail missing (v8 regression)")
 	}
 	if !hasColumn(t, db, "people", "asin") {
 		t.Error("people.asin missing (v4 regression)")
@@ -87,125 +93,13 @@ func TestRunMigrationsRealShape(t *testing.T) {
 	}
 }
 
-// seedTestBook inserts a minimal books row and asserts it is visible; every
-// column the migration under test touches must not be required here.
-func seedTestBook(t *testing.T, db *sql.DB) {
-	t.Helper()
-	if _, err := db.Exec("INSERT INTO books (title, status) VALUES (?, 'matched')", "Kept Book"); err != nil {
-		t.Fatalf("seed book: %v", err)
-	}
-	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM books").Scan(&n); err != nil || n != 1 {
-		t.Fatalf("seeded books count = %d (err %v), want 1", n, err)
-	}
-}
-
-// TestRunMigrationsV7ToV8PinsTheProfileCutover pins the upgrade from a
-// database that already ran the OLD unreleased v7 (books carried
-// output_dir_override/path_format_override) to the empty v7 + v8: the book
-// rows survive intact, both superseded columns are dropped, and the
-// output_profiles table appears with its full column set.
-func TestRunMigrationsV7ToV8PinsTheProfileCutover(t *testing.T) {
-	old := migrations
-	migrations = migrations[:7]
-	defer func() { migrations = old }()
-
-	db := openTestDB(t)
-	if err := RunMigrations(db); err != nil {
-		t.Fatalf("RunMigrations to v7: %v", err)
-	}
-	// Emulate a database that ran the old v7 SQL before it was emptied.
-	for _, col := range []string{"output_dir_override", "path_format_override"} {
-		if _, err := db.Exec("ALTER TABLE books ADD COLUMN " + col + " TEXT DEFAULT ''"); err != nil {
-			t.Fatalf("emulate old v7 column %s: %v", col, err)
-		}
-	}
-	seedTestBook(t, db)
-
-	// Upgrade: restore the full list; only v8 is pending.
-	migrations = old
-	if err := RunMigrations(db); err != nil {
-		t.Fatalf("RunMigrations v7->v8: %v", err)
-	}
-	if hasColumn(t, db, "books", "output_dir_override") {
-		t.Error("books.output_dir_override still present after v8")
-	}
-	if hasColumn(t, db, "books", "path_format_override") {
-		t.Error("books.path_format_override still present after v8")
-	}
-	for _, col := range []string{"id", "name", "output_dir", "output_scheme", "created_at", "updated_at"} {
-		if !hasColumn(t, db, "output_profiles", col) {
-			t.Errorf("output_profiles.%s missing after v8", col)
-		}
-	}
-	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM books WHERE title = ?", "Kept Book").Scan(&n); err != nil || n != 1 {
-		t.Fatalf("book row after v8: count = %d (err %v), want 1 (rows survive the drops)", n, err)
-	}
-	if n := appliedCount(t, db); n != len(migrations) {
-		t.Errorf("applied migrations = %d, want all %d", n, len(migrations))
-	}
-
-	// Re-applying v8 (lost log row) is a no-op: the CREATE is
-	// IF NOT EXISTS, both drops see absent columns and are skipped.
-	if _, err := db.Exec("DELETE FROM migration_log WHERE name = 'v8'"); err != nil {
-		t.Fatal(err)
-	}
-	if err := RunMigrations(db); err != nil {
-		t.Fatalf("RunMigrations re-apply v8: %v", err)
-	}
-	if hasColumn(t, db, "books", "output_dir_override") || hasColumn(t, db, "books", "path_format_override") {
-		t.Error("book override columns resurrected by v8 re-apply")
-	}
-	var nameCount int
-	if err := db.QueryRow("SELECT COUNT(*) FROM output_profiles").Scan(&nameCount); err != nil || nameCount != 0 {
-		t.Fatalf("output_profiles rows = %d (err %v), want 0 (no reseed)", nameCount, err)
-	}
-	if n := appliedCount(t, db); n != len(migrations) {
-		t.Errorf("applied migrations after v8 heal = %d, want %d", n, len(migrations))
-	}
-}
-
-// TestRunMigrationsV7HealCannotResurrectColumns pins the empty-v7 marker:
-// on a database where v8 has already run, re-applying v8 after a lost v7
-// log row must NOT re-add the superseded book columns that the old v7 SQL
-// would have created.
-func TestRunMigrationsV7HealCannotResurrectColumns(t *testing.T) {
-	db := openTestDB(t)
-	if err := RunMigrations(db); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
-	seedTestBook(t, db)
-
-	// Lose the v7 log row, then heal.
-	if _, err := db.Exec("DELETE FROM migration_log WHERE name = 'v7'"); err != nil {
-		t.Fatal(err)
-	}
-	if err := RunMigrations(db); err != nil {
-		t.Fatalf("RunMigrations heal v7: %v", err)
-	}
-	if hasColumn(t, db, "books", "output_dir_override") {
-		t.Error("v7 heal re-added books.output_dir_override (old v7 would have)")
-	}
-	if hasColumn(t, db, "books", "path_format_override") {
-		t.Error("v7 heal re-added books.path_format_override (old v7 would have)")
-	}
-	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM books WHERE title = ?", "Kept Book").Scan(&n); err != nil || n != 1 {
-		t.Fatalf("book row after v7 heal: count = %d (err %v), want 1", n, err)
-	}
-	if n := appliedCount(t, db); n != len(migrations) {
-		t.Errorf("applied migrations = %d, want all %d", n, len(migrations))
-	}
-}
-
 // TestRunMigrationsV5ToV6PinsTheOnUpgradePath pins the cutover from a
 // pre-external-API-key v5 DB (no legacy_token_migrated column) to v6: the
 // fresh column appears as unconsumed (0) on the EXISTING row, every
 // pre-existing column value — including an api_enabled=1 state + digest —
 // survives, and the row count is unchanged. A clobbering v6 (DROP/recreate,
 // or an all-defaults INSERT OR REPLACE) would lose the stored key state.
-// It runs before the two tests that permanently mutate package `migrations`,
+// It runs before the tests that swap package `migrations` in this file,
 // so it must not be moved after them.
 func TestRunMigrationsV5ToV6PinsTheOnUpgradePath(t *testing.T) {
 	// v5 shape: apply the production migrations up to (excluding) v6.
@@ -272,6 +166,230 @@ func TestRunMigrationsV5ToV6PinsTheOnUpgradePath(t *testing.T) {
 	}
 	if n := appliedCount(t, db); n != len(migrations) {
 		t.Errorf("applied migrations = %d, want all %d (fresh DB took the full list)", n, len(migrations))
+	}
+}
+
+// TestRunMigrationsV6ToV7PinsTheOnUpgradePath pins the cutover from a
+// pre-action v6 DB (processing_jobs rows without an action value) to v7:
+// the fresh column backfills every pre-existing row with 'merge' (every
+// legacy job was an m4b-merge run) while the row's id, status, and args
+// survive. It runs before the tests that swap package `migrations` in this
+// file, so it must not be moved after them.
+func TestRunMigrationsV6ToV7PinsTheOnUpgradePath(t *testing.T) {
+	// v6 shape: apply the production migrations up to (excluding) v7.
+	old := migrations
+	migrations = migrations[:6]
+	defer func() { migrations = old }()
+
+	db := openTestDB(t)
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations to v6: %v", err)
+	}
+
+	const (
+		rowArgs = `{"src_paths":["/v6/a.m4b"]}`
+		rowOut  = `/v6/out/book.m4b`
+	)
+	if _, err := db.Exec(`INSERT INTO books (id, title, status) VALUES (1, 'Legacy Book', 'done')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, output) VALUES ('legacy-1', 1, ?, 'done', ?)`,
+		rowArgs, rowOut); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture must be the pre-cutover shape, or the test proves nothing.
+	if hasColumn(t, db, "processing_jobs", "action") {
+		t.Fatal("v6 fixture already has the action column")
+	}
+
+	// Upgrade: restore the full list; only v7 is pending.
+	migrations = old
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations v6->v7: %v", err)
+	}
+
+	var id, status, args, out, action string
+	if err := db.QueryRow(`SELECT id, status, m4b_merge_args, output, action FROM processing_jobs WHERE id = 'legacy-1'`).
+		Scan(&id, &status, &args, &out, &action); err != nil {
+		t.Fatal(err)
+	}
+	if id != "legacy-1" || status != "done" || args != rowArgs || out != rowOut {
+		t.Errorf("pre-existing row state lost by v7: (%q, %q, %q, %q)", id, status, args, out)
+	}
+	if action != "merge" {
+		t.Errorf("backfilled action = %q; want merge", action)
+	}
+	if n := appliedCount(t, db); n != len(migrations) {
+		t.Errorf("applied migrations = %d, want all %d", n, len(migrations))
+	}
+}
+
+// TestRunMigrationsV7ToV8PinsTheOnUpgradePath pins the cutover from a
+// pre-detail v7 DB (processing_jobs rows without a detail column) to v8:
+// the fresh column lands NULL on every pre-existing row — merge jobs never
+// had a detail, and pre-v8 audit details were stored in m4b_merge_args,
+// which is legacy state the app no longer reads — while every pre-existing
+// column value survives. It runs before the tests that swap package
+// `migrations` in this file, so it must not be moved after them.
+func TestRunMigrationsV7ToV8PinsTheOnUpgradePath(t *testing.T) {
+	// v7 shape: apply the production migrations up to (excluding) v8.
+	old := migrations
+	migrations = migrations[:7]
+	defer func() { migrations = old }()
+
+	db := openTestDB(t)
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations to v7: %v", err)
+	}
+
+	const (
+		rowArgs = `{"src_paths":["/v7/a.m4b"]}`
+		rowOut  = `/v7/out/book.m4b`
+	)
+	if _, err := db.Exec(`INSERT INTO books (id, title, status) VALUES (1, 'Legacy Book', 'done')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, output, action) VALUES ('legacy-1', 1, ?, 'done', ?, 'merge')`,
+		rowArgs, rowOut); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture must be the pre-cutover shape, or the test proves nothing.
+	if hasColumn(t, db, "processing_jobs", "detail") {
+		t.Fatal("v7 fixture already has the detail column")
+	}
+
+	// Upgrade: restore the full list; only v8 is pending.
+	migrations = old
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations v7->v8: %v", err)
+	}
+
+	var id, status, args, out, action string
+	var detail sql.NullString
+	if err := db.QueryRow(`SELECT id, status, m4b_merge_args, output, action, detail FROM processing_jobs WHERE id = 'legacy-1'`).
+		Scan(&id, &status, &args, &out, &action, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if id != "legacy-1" || status != "done" || args != rowArgs || out != rowOut || action != "merge" {
+		t.Errorf("pre-existing row state lost by v8: (%q, %q, %q, %q, %q)", id, status, args, out, action)
+	}
+	if detail.Valid {
+		t.Errorf("detail on the pre-existing row = %q; want NULL", detail.String)
+	}
+	if n := appliedCount(t, db); n != len(migrations) {
+		t.Errorf("applied migrations = %d, want all %d", n, len(migrations))
+	}
+}
+
+// seedTestBook inserts a minimal books row and asserts it is visible; every
+// column the migration under test touches must not be required here.
+func seedTestBook(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec("INSERT INTO books (title, status) VALUES (?, 'matched')", "Kept Book"); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM books").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("seeded books count = %d (err %v), want 1", n, err)
+	}
+}
+
+// TestRunMigrationsV9ToV10PinsTheProfileCutover pins the upgrade from a
+// database that already ran the OLD unreleased v9 (books carried
+// output_dir_override/path_format_override) to the empty v9 + v10: the book
+// rows survive intact, both superseded columns are dropped, and the
+// output_profiles table appears with its full column set.
+func TestRunMigrationsV9ToV10PinsTheProfileCutover(t *testing.T) {
+	old := migrations
+	migrations = migrations[:9]
+	defer func() { migrations = old }()
+
+	db := openTestDB(t)
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations to v9: %v", err)
+	}
+	// Emulate a database that ran the old v9 SQL before it was emptied.
+	for _, col := range []string{"output_dir_override", "path_format_override"} {
+		if _, err := db.Exec("ALTER TABLE books ADD COLUMN " + col + " TEXT DEFAULT ''"); err != nil {
+			t.Fatalf("emulate old v9 column %s: %v", col, err)
+		}
+	}
+	seedTestBook(t, db)
+
+	// Upgrade: restore the full list; only v10 is pending.
+	migrations = old
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations v9->v10: %v", err)
+	}
+	if hasColumn(t, db, "books", "output_dir_override") {
+		t.Error("books.output_dir_override still present after v10")
+	}
+	if hasColumn(t, db, "books", "path_format_override") {
+		t.Error("books.path_format_override still present after v10")
+	}
+	for _, col := range []string{"id", "name", "output_dir", "output_scheme", "created_at", "updated_at"} {
+		if !hasColumn(t, db, "output_profiles", col) {
+			t.Errorf("output_profiles.%s missing after v10", col)
+		}
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM books WHERE title = ?", "Kept Book").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("book row after v10: count = %d (err %v), want 1 (rows survive the drops)", n, err)
+	}
+	if n := appliedCount(t, db); n != len(migrations) {
+		t.Errorf("applied migrations = %d, want all %d", n, len(migrations))
+	}
+
+	// Re-applying v10 (lost log row) is a no-op: the CREATE is
+	// IF NOT EXISTS, both drops see absent columns and are skipped.
+	if _, err := db.Exec("DELETE FROM migration_log WHERE name = 'v10'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations re-apply v10: %v", err)
+	}
+	if hasColumn(t, db, "books", "output_dir_override") || hasColumn(t, db, "books", "path_format_override") {
+		t.Error("book override columns resurrected by v10 re-apply")
+	}
+	var nameCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM output_profiles").Scan(&nameCount); err != nil || nameCount != 0 {
+		t.Fatalf("output_profiles rows = %d (err %v), want 0 (no reseed)", nameCount, err)
+	}
+	if n := appliedCount(t, db); n != len(migrations) {
+		t.Errorf("applied migrations after v10 heal = %d, want %d", n, len(migrations))
+	}
+}
+
+// TestRunMigrationsV9HealCannotResurrectColumns pins the empty-v9 marker:
+// on a database where v10 has already run, re-applying v9 after a lost v9
+// log row must NOT re-add the superseded book columns that the old v9 SQL
+// would have created.
+func TestRunMigrationsV9HealCannotResurrectColumns(t *testing.T) {
+	db := openTestDB(t)
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	seedTestBook(t, db)
+
+	// Lose the v9 log row, then heal.
+	if _, err := db.Exec("DELETE FROM migration_log WHERE name = 'v9'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations heal v9: %v", err)
+	}
+	if hasColumn(t, db, "books", "output_dir_override") {
+		t.Error("v9 heal re-added books.output_dir_override (old v9 would have)")
+	}
+	if hasColumn(t, db, "books", "path_format_override") {
+		t.Error("v9 heal re-added books.path_format_override (old v9 would have)")
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM books WHERE title = ?", "Kept Book").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("book row after v9 heal: count = %d (err %v), want 1", n, err)
+	}
+	if n := appliedCount(t, db); n != len(migrations) {
+		t.Errorf("applied migrations = %d, want all %d", n, len(migrations))
 	}
 }
 

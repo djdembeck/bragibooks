@@ -114,6 +114,10 @@ components:
     textColor: "{colors.text-secondary}"
     rounded: "{rounded.sm}"
     padding: "0.125rem 0.5rem"
+  activity-label:
+    textColor: "{colors.text-secondary}"
+    fontSize: "0.75rem"
+    fontWeight: 600
   card-panel:
     backgroundColor: "{colors.panel}"
     rounded: "{rounded.md}"
@@ -184,13 +188,14 @@ Neutral stone ground with one gold accent and a four-state guard.
 - **Body** (400, 16px, 1.5): prose kept to 65ch; dense rows step down 14 → 13 → 11px.
 - **Label** (600, 14px): nav links, field labels, batch counts.
 - **Badge** (600, 11px, 0.05em, uppercase): status tags.
+- **Activity** (600, 12px, sentence case): the operation in a job or activity row, beside the status chip. Never uppercase, never a second chip.
 
 ### Named Rules
 **The Two-Voice Rule.** Public Sans carries the headings (h1–h3, including record titles) and the wordmark; body, labels, and row content stay on the system face, and mono is reserved for paths, IDs, and output.
 
 ## Layout
 
-One operator at one surface. Content is a full-width composition capped at 90rem, padded 2rem/2.5rem (1.25rem/1rem under 900px). The sticky gold header rides on top (4.25rem + 1px); below 900px it becomes a fixed two-row 6.5625rem header with the destinations moved to a scrollable second row. Pages open with the page header — title, optional description, hairline rule — then the route's own working surface. The Queue keeps its hierarchy: ready work and active jobs in two columns (1fr / 21rem, collapsing at 1050px), job history as collapsible sections below. Buttons, nav links, and inputs share a 44px (2.75rem) minimum.
+One operator at one surface. Content is a full-width composition capped at 90rem, padded 2rem/2.5rem (1.25rem/1rem under 900px). The sticky gold header rides on top (4.25rem + 1px); below 900px it becomes a fixed two-row 6.5625rem header with the destinations moved to a scrollable second row. Pages open with the page header — title, optional description, hairline rule — then the route's own working surface. The Queue keeps its hierarchy: ready work and active jobs in two columns (1fr / 21rem, collapsing at 1050px), recent activity as collapsible sections below. Buttons, nav links, and inputs share a 44px (2.75rem) minimum.
 
 ## Elevation & Depth
 
@@ -234,7 +239,10 @@ Title in the display face with an optional 15px secondary description (65ch) abo
 - **Checkboxes / radios:** 16px, 6px-corner squares (circles for radios); the checked checkbox is solid dark gold `#705413` with a white tick, while the checked radio keeps a white face with a dark-gold border and dot — dark controls deliberately distinct from gold primary actions; indeterminate is a white dash on the dark-gold field.
 
 ### Status Badge
-11px 600, 0.05em uppercase, 1.5px border, 6px corner (`rounded-sm`), 12px icon + word, never color alone: pending (graphite) · processing (amber) · done (green) · error (red) · ready (gold wash + strong border).
+11px 600, 0.05em uppercase, 1.5px border, 6px corner (`rounded-sm`), 12px icon + word, never color alone: pending (graphite) · processing (amber) · done (green) · error (red) · ready (gold wash + strong border). A job row carries exactly one chip: the status.
+
+### Activity Label
+Sentence case, 12px 600, `--text-secondary`, no fill, border, or uppercase. It names what happened (`M4B merge`, `Metadata update`, `Import`) beside the status chip, which names the outcome; the two are one wrapping unit, so a long book title never separates operation from state. Unknown stored actions read "Unknown action" rather than being guessed as merges. Use the shared `JobActionLabel` component; never restyle it per route.
 
 ### Alert
 `role="alert"` panel, 2px state border, 14px copy, 14px padding; success/warning/error take their state washes; Retry is a dark-gold text action.
@@ -260,6 +268,7 @@ Square always: 3rem row thumbnails (6px corner) and the 16rem record-page hero (
 - **Do** render StatusBadge as glyph + word + color (never color alone), and label absent state plainly ("No catalog match", "details unavailable") — never hidden.
 - **Do** collapse all animation under `prefers-reduced-motion` (shimmer, transitions, chase).
 - **Do** keep the original develop branding: the stacked-books mark at `/images/logo-small-black.svg`, `favicon.ico`, and the Public Sans OFL license living beside the font file.
+- **Do** pair the status chip with a quiet sentence-case activity label, grouped so a long title never separates operation from outcome.
 - **Do** keep destructive selection in its own mode: the include-in-save box never doubles as a removal selector, and a multi-record delete always lists the exact source names before it runs.
 
 ### Don't:
@@ -267,4 +276,5 @@ Square always: 3rem row thumbnails (6px corner) and the 16rem record-page hero (
 - **Don't** style focus, selection, or secondary state blue or cobalt.
 - **Don't** use shadow for decorative depth — it has named roles (button seat, picker, modal, inset selection outline); and keep radii to the 4-step scale.
 - **Don't** redraw, replace, or invent the logo or favicon.
+- **Don't** give a job operation its own chip or uppercase it; the status is the row's only chip, and an unknown stored operation is never guessed as a merge.
 - **Don't** render raw JSON in operator-facing errors — the sentence walks the payload; the raw data stays under the ErrorDetail expander.

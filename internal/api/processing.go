@@ -190,6 +190,7 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 		ID:           id,
 		BookID:       sql.NullInt64{Int64: bookID, Valid: true},
 		M4bMergeArgs: string(argsJSON),
+		Action:       "merge",
 		Status:       "queued",
 		Error:        nil,
 		OutputFile:   nil,
@@ -199,8 +200,8 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 
 	// Insert into DB
 	_, err = s.db.Exec(
-		"INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status) VALUES (?, ?, ?, ?)",
-		job.ID, job.BookID.Int64, job.M4bMergeArgs, job.Status,
+		"INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action) VALUES (?, ?, ?, ?, ?)",
+		job.ID, job.BookID.Int64, job.M4bMergeArgs, job.Status, job.Action,
 	)
 	if err != nil {
 		return "", fmt.Errorf("insert processing job: %w", err)
@@ -229,6 +230,32 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	// preserved as-is.)
 	s.workerCh <- job
 	return id, nil
+}
+
+// RecordBookAction writes a terminal-only audit row for a non-processing book
+// action (import, metadata update). status is always jobStatusDone: the row is
+// history, not a worker job, so it never touches queuing (hasActiveJobForBook
+// counts only queued/running) and never the orphan sweep (which updates only
+// queued/running). m4b_merge_args stays NULL — the column holds serialized
+// CLI args ({"src_paths": [...]}) that processJob decodes, and audit rows are
+// not worker jobs; the detail (import path, book title) lives in the dedicated
+// detail column instead. Best-effort: a write failure is logged ("record book
+// action") — a stuck audit row must not sink the book operation it decorates,
+// matching the existing best-effort auxiliary writes (attachSourceCover); the
+// failure stays operator-visible via the missing history row plus the log
+// line.
+func (s *ProcessingService) RecordBookAction(bookID int64, action, detail string) {
+	if s == nil {
+		return
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO processing_jobs (id, book_id, status, action, detail, started_at, completed_at)
+		 VALUES (?, ?, 'done', ?, ?, datetime('now'), datetime('now'))`,
+		uuid.New().String(), bookID, action, detail,
+	)
+	if err != nil {
+		log.Printf("record book action: insert: %v", err)
+	}
 }
 
 // hasActiveJobForBook reports whether the book already has a job that has
@@ -748,9 +775,53 @@ type ListJobsResponse struct {
 	Jobs []map[string]any `json:"jobs"`
 }
 
+// jobResp converts a jobs-table row to its clean JSON shape, shared by the
+// list and active endpoints so the two payloads stay identical. sql.Null* is
+// what the columns carry, hence the per-field nil/unwrapping.
+func jobResp(job models.ProcessingJob) map[string]any {
+	resp := map[string]any{
+		"id":           job.ID,
+		"book_id":      nil,
+		"status":       job.Status,
+		"action":       job.Action,
+		"detail":       nil,
+		"output":       job.Output,
+		"error":        nil,
+		"output_file":  nil,
+		"started_at":   nil,
+		"completed_at": nil,
+		"created_at":   job.CreatedAt,
+	}
+	if job.BookID.Valid {
+		resp["book_id"] = job.BookID.Int64
+	}
+	if job.Detail != nil {
+		resp["detail"] = *job.Detail
+	}
+	if job.Error != nil {
+		resp["error"] = *job.Error
+	}
+	if job.OutputFile != nil {
+		resp["output_file"] = *job.OutputFile
+	}
+	if job.StartedAt != nil {
+		resp["started_at"] = *job.StartedAt
+	}
+	if job.CompletedAt != nil {
+		resp["completed_at"] = *job.CompletedAt
+	}
+	return resp
+}
+
+const jobsColumns = "id, book_id, status, action, detail, output, error, output_file, started_at, completed_at, created_at"
+
 // ListJobs handles GET /api/jobs?limit=N&book_id=B.
 // Returns recent jobs newest-first with clean JSON matching the single-job contract.
 // When book_id is present and positive, only that book's jobs are returned.
+// Active (queued/running) jobs are appended after the capped recent history:
+// a batch of audit rows (imports, metadata saves) must not push a running
+// merge — the state the page's live counters and cancel action rely on — out
+// of the limit window (the queue page derives its active set from this list).
 func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 	limit := parseIntQueryParam(r, "limit", 20)
 	if limit <= 0 {
@@ -766,62 +837,75 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 		bookID, _ = strconv.ParseInt(v[0], 10, 64)
 	}
 
-	query := "SELECT id, book_id, status, output, error, output_file, started_at, completed_at, created_at FROM processing_jobs"
-	args := make([]any, 0, 2)
+	recentQuery := "SELECT " + jobsColumns + " FROM processing_jobs"
+	recentArgs := make([]any, 0, 3)
 	if bookID > 0 {
-		query += " WHERE book_id = ?"
-		args = append(args, bookID)
+		recentQuery += " WHERE book_id = ?"
+		recentArgs = append(recentArgs, bookID)
 	}
-	query += " ORDER BY created_at DESC LIMIT ?"
-	args = append(args, limit)
-
-	rows, err := h.svc.DB.Query(query, args...)
+	recentQuery += " ORDER BY created_at DESC LIMIT ?"
+	recentArgs = append(recentArgs, limit)
+	recent, err := h.queryJobs(recentQuery, recentArgs)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("query jobs: %v", err))
 		return
 	}
+
+	// The active set honors the same book scope as the history, so a
+	// book-scoped page only surfaces that book's live work.
+	activeQuery := "SELECT " + jobsColumns + " FROM processing_jobs"
+	activeArgs := make([]any, 0, 3)
+	if bookID > 0 {
+		activeQuery += " WHERE book_id = ? AND status IN (?, ?)"
+		activeArgs = append(activeArgs, bookID)
+	} else {
+		activeQuery += " WHERE status IN (?, ?)"
+	}
+	activeQuery += " ORDER BY started_at DESC"
+	activeArgs = append(activeArgs, jobStatusQueued, jobStatusRunning)
+	active, err := h.queryJobs(activeQuery, activeArgs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("query active jobs: %v", err))
+		return
+	}
+
+	response := make([]map[string]any, 0, len(recent)+len(active))
+	seen := make(map[string]bool, len(recent)+len(active))
+	for _, job := range recent {
+		seen[job.ID] = true
+		response = append(response, jobResp(job))
+	}
+	for _, job := range active {
+		if seen[job.ID] {
+			continue
+		}
+		response = append(response, jobResp(job))
+	}
+
+	writeJSON(w, http.StatusOK, ListJobsResponse{Jobs: response})
+}
+
+// queryJobs runs a jobs SELECT over the shared column list, scanning every
+// row with sql.Null*-safe destinations (active jobs carry several NULLs a
+// plain string scan would reject).
+func (h *Handler) queryJobs(query string, args []any) ([]models.ProcessingJob, error) {
+	rows, err := h.svc.DB.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 
-	jobs := make([]map[string]any, 0)
+	jobs := make([]models.ProcessingJob, 0, 10)
 	for rows.Next() {
 		var job models.ProcessingJob
-		err := rows.Scan(&job.ID, &job.BookID, &job.Status, &job.Output,
-			&job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt)
+		err := rows.Scan(&job.ID, &job.BookID, &job.Status, &job.Action, &job.Detail,
+			&job.Output, &job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt)
 		if err != nil {
 			continue
 		}
-
-		resp := map[string]any{
-			"id":           job.ID,
-			"book_id":      nil,
-			"status":       job.Status,
-			"output":       job.Output,
-			"error":        nil,
-			"output_file":  nil,
-			"started_at":   nil,
-			"completed_at": nil,
-			"created_at":   job.CreatedAt,
-		}
-		if job.BookID.Valid {
-			resp["book_id"] = job.BookID.Int64
-		}
-		if job.Error != nil {
-			resp["error"] = *job.Error
-		}
-		if job.OutputFile != nil {
-			resp["output_file"] = *job.OutputFile
-		}
-		if job.StartedAt != nil {
-			resp["started_at"] = *job.StartedAt
-		}
-		if job.CompletedAt != nil {
-			resp["completed_at"] = *job.CompletedAt
-		}
-
-		jobs = append(jobs, resp)
+		jobs = append(jobs, job)
 	}
-
-	writeJSON(w, http.StatusOK, ListJobsResponse{Jobs: jobs})
+	return jobs, nil
 }
 
 // GetJobStatus handles GET /api/jobs/:id.
@@ -829,12 +913,13 @@ func (h *Handler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chiURLParam(r, "id")
 
 	row := h.svc.DB.QueryRow(
-		"SELECT id, book_id, m4b_merge_args, status, output, error, output_file, started_at, completed_at, created_at FROM processing_jobs WHERE id = ?",
+		"SELECT id, book_id, m4b_merge_args, status, action, detail, output, error, output_file, started_at, completed_at, created_at FROM processing_jobs WHERE id = ?",
 		jobID,
 	)
 	var job models.ProcessingJob
-	err := row.Scan(&job.ID, &job.BookID, &job.M4bMergeArgs, &job.Status, &job.Output,
-		&job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt)
+	var jobArgs sql.NullString // audit rows have no m4b-merge args (details live in the detail column)
+	err := row.Scan(&job.ID, &job.BookID, &jobArgs, &job.Status, &job.Action, &job.Detail,
+		&job.Output, &job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "job not found")
 		return
@@ -843,37 +928,9 @@ func (h *Handler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("query job: %v", err))
 		return
 	}
-
-	// Build clean JSON response (sql.NullXxx fields serialize as objects, not scalars)
-	resp := map[string]any{
-		"id":           job.ID,
-		"status":       job.Status,
-		"output":       job.Output,
-		"error":        nil,
-		"output_file":  nil,
-		"started_at":   nil,
-		"completed_at": nil,
-		"created_at":   job.CreatedAt,
-	}
-	if job.BookID.Valid {
-		resp["book_id"] = job.BookID.Int64
-	} else {
-		resp["book_id"] = nil
-	}
-	if job.Error != nil {
-		resp["error"] = *job.Error
-	}
-	if job.OutputFile != nil {
-		resp["output_file"] = *job.OutputFile
-	}
-	if job.StartedAt != nil {
-		resp["started_at"] = *job.StartedAt
-	}
-	if job.CompletedAt != nil {
-		resp["completed_at"] = *job.CompletedAt
-	}
-
-	writeJSON(w, http.StatusOK, resp)
+	// Clean JSON shared with the list endpoints (jobResp unwraps the
+	// sql.NullXxx fields that would serialize as objects).
+	writeJSON(w, http.StatusOK, jobResp(job))
 }
 
 // StreamJob handles GET /api/jobs/:id/stream (SSE endpoint).

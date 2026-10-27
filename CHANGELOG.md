@@ -22,6 +22,13 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Features & Improvements
 
+- **Recorded activity shows what happened** (#440)
+  - `processing_jobs` now carries a stable `action` key (`merge` | `metadata_update` | `import`); the migration backfills existing rows as `merge`.
+  - Imports and metadata saves write terminal `done` audit rows, so the record's activity list no longer only shows processing runs. These rows never affect queuing or the orphan sweep, which key on `queued`/`running`.
+  - `GET /api/jobs` and `GET /api/jobs/:id` expose `action`; the Queue cards and the book record's activity list show a quiet sentence-case operation label (M4B merge / Metadata update / Import) beside the status chip. Unknown stored operations read "Unknown action" instead of being guessed as merges.
+  - `processing_jobs` gains a `detail` column (migration v8) exposed by `GET /api/jobs` and `GET /api/jobs/:id`; pre-v8 rows are NULL, and import rows show their source path.
+  - Job completion reads "Completed" across merges, imports, and metadata saves; an empty record reads "No recorded activity yet."
+
 - **Saved output profiles with queue-time snapshots**
   - Added named output profiles (output directory and/or relative path format) managed on the Settings page via `/api/output-profiles` (list, create, update, delete). Blank fields inherit the global values.
   - The Queue page and the Books bulk requeue action select one profile per batch. The selection is resolved once at queue time, snapshotted into each created job's arguments, so already-queued jobs are unaffected by later profile or Settings changes; no profile is stored on a book.

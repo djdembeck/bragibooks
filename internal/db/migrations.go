@@ -132,15 +132,35 @@ ALTER TABLE settings ADD COLUMN legacy_token_migrated BOOLEAN NOT NULL DEFAULT 0
 `,
 	},
 	{
-		// v7 is an empty marker. Its original two book override columns were
-		// replaced by named output profiles (v8) before the schema shipped,
-		// so re-adding them here would resurrect columns v8 drops.
 		version: 7,
+		sql: `
+ALTER TABLE processing_jobs ADD COLUMN action TEXT NOT NULL DEFAULT 'merge';
+
+`,
+	},
+	{
+		// v8: the audit detail (import path, book title) lives in its own
+		// column. Until v7 the detail was stuffed into m4b_merge_args as
+		// {"detail": ...}, which collides with the merge args contract
+		// ({"src_paths": [...]}) that processJob decodes. Pre-existing rows
+		// keep NULL: they predate the audit rows the column exists for, and
+		// the UI renders no detail for them — same as for merge jobs.
+		version: 8,
+		sql: `
+ALTER TABLE processing_jobs ADD COLUMN detail TEXT;
+
+`,
+	},
+	{
+		// v9 is an empty marker. Its original two book override columns were
+		// replaced by named output profiles (v10) before the schema shipped,
+		// so re-adding them here would resurrect columns v10 drops.
+		version: 9,
 		sql: `
 `,
 	},
 	{
-		version: 8,
+		version: 10,
 		sql: `
 CREATE TABLE IF NOT EXISTS output_profiles (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -297,12 +317,12 @@ func columnExistsInTable(tx *sql.Tx, table, column string) bool {
 // bare ALTER TABLE column statements:
 //   - "ADD COLUMN" (migrations v2-v5): skipped when the column already
 //     exists, making a re-invocation after a lost log row safe.
-//   - "DROP COLUMN" (migration v8's cleanup of the superseded v7 book
+//   - "DROP COLUMN" (migration v10's cleanup of the superseded v9 book
 //     columns): skipped when the column is already absent, so re-applying
-//     v8 — or healing a lost v7 log row after v8 has run — never fails on
-//     the already-dropped column. A fresh database (v7 never applied)
+//     v10 — or healing a lost v9 log row after v10 has run — never fails on
+//     the already-dropped column. A fresh database (v9 never applied)
 //     simply has no such columns and the drops are skipped too; a database
-//     that already ran the old unreleased v7 gets them removed.
+//     that already ran the old unreleased v9 gets them removed.
 //
 // Any other bare, non-idempotent statement is executed and would fail
 // loudly if its object already exists — the intended behavior for a
