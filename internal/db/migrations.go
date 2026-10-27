@@ -138,6 +138,19 @@ ALTER TABLE processing_jobs ADD COLUMN action TEXT NOT NULL DEFAULT 'merge';
 
 `,
 	},
+	{
+		// v8: the audit detail (import path, book title) lives in its own
+		// column. Until v7 the detail was stuffed into m4b_merge_args as
+		// {"detail": ...}, which collides with the merge args contract
+		// ({"src_paths": [...]}) that processJob decodes. Pre-existing rows
+		// keep NULL: they predate the audit rows the column exists for, and
+		// the UI renders no detail for them — same as for merge jobs.
+		version: 8,
+		sql: `
+ALTER TABLE processing_jobs ADD COLUMN detail TEXT;
+
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

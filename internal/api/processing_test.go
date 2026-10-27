@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
 	book_id INTEGER REFERENCES books(id) ON DELETE SET NULL,
 	m4b_merge_args TEXT,
 	action TEXT NOT NULL DEFAULT 'merge',
+	detail TEXT,
 	status TEXT DEFAULT 'queued',
 	output TEXT DEFAULT '',
 	error TEXT DEFAULT '',
@@ -323,7 +324,13 @@ func TestListJobsCarriesAction(t *testing.T) {
 
 func TestGetJobStatusCarriesAction(t *testing.T) {
 	h, _ := newTestJobsHandler(t)
-	h.svc.DB.Exec("INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action) VALUES ('j1', 1, '{\"detail\":\"/in/a.m4b\"}', 'done', 'import')")
+	// Audit rows have no merge args (NULL); the pre-v8 fixture stuffed the
+	// detail into m4b_merge_args, which the scan would reject.
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, status, action, detail) VALUES ('j1', 1, 'done', 'import', '/in/a.m4b')",
+	); err != nil {
+		t.Fatalf("seed audit row: %v", err)
+	}
 
 	req := httptest.NewRequest("GET", "/api/jobs/j1", nil)
 	rctx := chi.NewRouteContext()
@@ -343,6 +350,9 @@ func TestGetJobStatusCarriesAction(t *testing.T) {
 	if resp["action"] != "import" {
 		t.Fatalf("action = %v; want import", resp["action"])
 	}
+	if resp["detail"] != "/in/a.m4b" {
+		t.Errorf("detail = %v; want /in/a.m4b", resp["detail"])
+	}
 }
 
 func TestRecordBookActionWritesTerminalRow(t *testing.T) {
@@ -352,14 +362,13 @@ func TestRecordBookActionWritesTerminalRow(t *testing.T) {
 	svc.RecordBookAction(7, "import", "/in/a.m4b")
 
 	var (
-		status     string
-		action     string
-		bookID     int64
-		args, done string
+		status, action, detail, done string
+		bookID                       int64
+		args                         sql.NullString
 	)
 	err := h.svc.DB.QueryRow(
-		"SELECT status, action, book_id, m4b_merge_args, completed_at FROM processing_jobs WHERE action = 'import'",
-	).Scan(&status, &action, &bookID, &args, &done)
+		"SELECT status, action, book_id, m4b_merge_args, detail, completed_at FROM processing_jobs WHERE action = 'import'",
+	).Scan(&status, &action, &bookID, &args, &detail, &done)
 	if err != nil {
 		t.Fatalf("read row: %v", err)
 	}
@@ -372,12 +381,11 @@ func TestRecordBookActionWritesTerminalRow(t *testing.T) {
 	if done == "" {
 		t.Errorf("completed_at empty; want set")
 	}
-	var detail map[string]any
-	if err := json.Unmarshal([]byte(args), &detail); err != nil {
-		t.Fatalf("args not JSON: %v (args: %s)", err, args)
+	if detail != "/in/a.m4b" {
+		t.Errorf("detail = %q; want /in/a.m4b", detail)
 	}
-	if detail["detail"] != "/in/a.m4b" {
-		t.Errorf("detail = %v; want /in/a.m4b", detail["detail"])
+	if args.Valid {
+		t.Errorf("m4b_merge_args = %q; want NULL (the args column belongs to merge jobs)", args.String)
 	}
 }
 
@@ -628,6 +636,226 @@ func TestStreamJobActiveJobPayload(t *testing.T) {
 	body := w.Body.String()
 	if !strings.Contains(body, `"status":"queued"`) {
 		t.Errorf("stream body = %q; want the queued status payload", body)
+	}
+}
+
+// seedAuditRows inserts n terminal import audit rows at 10-minute intervals
+// from "2026-01-02 09:00:00", to simulate a batch of imports landing while a
+// merge is in flight. For n >= 5 the whole recent window (last 5 rows) sits
+// on 01-02, and every job seeded on 01-01 sorts out of it.
+func seedAuditRows(t *testing.T, db *sql.DB, n int) {
+	t.Helper()
+	for i := 1; i <= n; i++ {
+		mins := 10 * (i - 1)
+		if _, err := db.Exec(
+			"INSERT INTO processing_jobs (id, book_id, status, action, detail, created_at) VALUES (?, 1, 'done', 'import', ?, ?)",
+			fmt.Sprintf("audit-%02d", i), fmt.Sprintf("/in/%02d.m4b", i), fmt.Sprintf("2026-01-02 %02d:%02d:00", 9+mins/60, mins%60),
+		); err != nil {
+			t.Fatalf("seed audit %d: %v", i, err)
+		}
+	}
+}
+
+// jobIDsFromList decodes a ListJobsResponse body into an id->status map and
+// the ordered job id sequence.
+func jobIDsFromList(t *testing.T, body *httptest.ResponseRecorder) (map[string]string, []string) {
+	t.Helper()
+	var resp ListJobsResponse
+	if err := json.NewDecoder(body.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	byID := make(map[string]string, len(resp.Jobs))
+	ids := make([]string, 0, len(resp.Jobs))
+	for _, j := range resp.Jobs {
+		id, _ := j["id"].(string)
+		byID[id] = j["status"].(string)
+		ids = append(ids, id)
+	}
+	return byID, ids
+}
+
+// Regression: the Queue page derives its active set from GET /jobs. When a
+// batch of audit rows (imports/metadata saves) lands while a merge is in
+// flight, the recent-history LIMIT used to push the active job out of the
+// response; it must now be appended after the pointed-at window.
+func TestListJobsAppendsActiveJobs(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (1, 'Book', 'processing')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	// The active merge, created before the audit batch (created_at 01-01,
+	// then audits at 01-02 ...) so it sorts OUT of a 5-row recent window.
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action, created_at, started_at) VALUES ('m1', 1, '{\"src_paths\":[\"/in/a.m4b\"]}', 'running', 'merge', '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+	); err != nil {
+		t.Fatalf("seed active job: %v", err)
+	}
+	// A second active merge created INSIDE the top-5 window (between
+	// audit-24 and audit-25 on 01-02): the append must skip it without
+	// duplicating it.
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action, created_at, started_at) VALUES ('m2', 1, '{\"src_paths\":[\"/in/b.m4b\"]}', 'running', 'merge', '2026-01-02 12:55:00', '2026-01-02 12:55:00')",
+	); err != nil {
+		t.Fatalf("seed in-window active job: %v", err)
+	}
+	seedAuditRows(t, h.svc.DB, 25)
+
+	w := httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=5", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	byID, ids := jobIDsFromList(t, w)
+
+	if status, ok := byID["m1"]; !ok || status != "running" {
+		t.Fatalf("active job m1 missing from list (got %d jobs); the limit must not push running work out", len(byID))
+	}
+	if status, ok := byID["m2"]; !ok || status != "running" {
+		t.Fatalf("in-window active job m2 missing from list (got %d jobs)", len(byID))
+	}
+	// No duplicates from the append: 5 recent (incl. in-window m2) + 1
+	// appended (m1) = 6 list entries. The raw length — not the id map —
+	// grows if the append re-emits a job the window already carried.
+	if n := len(ids); n != 6 {
+		t.Errorf("list len = %d; want 5 recent + 1 appended active", n)
+	}
+	// The recent window stays newest-first, with the active job appended last.
+	if len(ids) == 0 || ids[0] != "audit-25" {
+		t.Errorf("first job = %v; want the newest audit row", ids)
+	}
+	if len(ids) == 0 || ids[len(ids)-1] != "m1" {
+		t.Errorf("last job = %v; want the appended active job", ids)
+	}
+}
+
+// Regression: the book_id scope must apply to BOTH the recent-history LIMIT
+// and the active append. A scoped list carries only that book's history and
+// that book's live work — another book's running merge and audit rows must
+// never leak in.
+func TestListJobsBookScopeAppliesToAppend(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (1, 'Book One', 'processing'), (2, 'Book Two', 'processing')",
+	); err != nil {
+		t.Fatalf("seed books: %v", err)
+	}
+	// Book 1's active merge, created before the audit batch (created_at
+	// 01-01) so it sorts OUT of the 5-row recent window and surfaces only
+	// via the book-scoped active append.
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action, created_at, started_at) VALUES ('m1', 1, '{\"src_paths\":[\"/in/a.m4b\"]}', 'running', 'merge', '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+	); err != nil {
+		t.Fatalf("seed active job: %v", err)
+	}
+	// Book 2's active merge, created INSIDE its own recent window (like m2
+	// in the unscoped test), so it appears via the window — not the append.
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action, created_at, started_at) VALUES ('m2b', 2, '{\"src_paths\":[\"/in/b.m4b\"]}', 'running', 'merge', '2026-01-02 12:55:00', '2026-01-02 12:55:00')",
+	); err != nil {
+		t.Fatalf("seed in-window active job: %v", err)
+	}
+	// Book 1's audit rows fill its recent window (5 rows on 01-02).
+	seedAuditRows(t, h.svc.DB, 5)
+	// Book 2 gets the same shape of audit rows under its own books and ids.
+	for i := 1; i <= 5; i++ {
+		if _, err := h.svc.DB.Exec(
+			"INSERT INTO processing_jobs (id, book_id, status, action, detail, created_at) VALUES (?, 2, 'done', 'import', ?, ?)",
+			fmt.Sprintf("audit2-%02d", i), fmt.Sprintf("/in2/%02d.m4b", i), fmt.Sprintf("2026-01-02 09:%02d:00", 10*(i-1)),
+		); err != nil {
+			t.Fatalf("seed book-2 audit %d: %v", i, err)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=5&book_id=1", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	byID, ids := jobIDsFromList(t, w)
+
+	// Book 1's running job must be appended despite sorting out of its own window.
+	if status, ok := byID["m1"]; !ok || status != "running" {
+		t.Fatalf("book-1 active job m1 missing from list (got %d jobs)", len(byID))
+	}
+	// Book 2's active job and history must not leak into book 1's scope,
+	// which means both the recent query and the active append honor book_id.
+	if _, ok := byID["m2b"]; ok {
+		t.Errorf("book-2 active job m2b present in book-1 list")
+	}
+	for id := range byID {
+		if strings.HasPrefix(id, "audit2-") {
+			t.Errorf("book-2 audit row %s present in book-1 list", id)
+		}
+	}
+	// 5 book-1 audits (recent window, newest-first) + 1 appended active.
+	if n := len(ids); n != 6 {
+		t.Errorf("book-1 list len = %d; want 5 recent + 1 appended active", n)
+	}
+	if len(ids) == 0 || ids[0] != "audit-05" {
+		t.Errorf("first job = %v; want the newest book-1 audit row", ids)
+	}
+	if len(ids) == 0 || ids[len(ids)-1] != "m1" {
+		t.Errorf("last job = %v; want the appended active job", ids)
+	}
+
+	// Mirror image: book 2's scope carries its in-window active job and
+	// none of book 1's rows.
+	w = httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=5&book_id=2", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	byID, ids = jobIDsFromList(t, w)
+
+	if status, ok := byID["m2b"]; !ok || status != "running" {
+		t.Fatalf("book-2 active job m2b missing from list (got %d jobs)", len(byID))
+	}
+	if _, ok := byID["m1"]; ok {
+		t.Errorf("book-1 active job m1 present in book-2 list")
+	}
+	for id := range byID {
+		if strings.HasPrefix(id, "audit-") {
+			t.Errorf("book-1 audit row %s present in book-2 list", id)
+		}
+	}
+	// 5 in-window rows (m2b + 4 audits) — m2b is already in the window, so
+	// the append adds nothing.
+	if n := len(ids); n != 5 {
+		t.Errorf("book-2 list len = %d; want 5 in-window, nothing appended", n)
+	}
+	if len(ids) == 0 || ids[0] != "m2b" {
+		t.Errorf("first job = %v; want the in-window active merge", ids)
+	}
+}
+
+// The jobs routes resolve after the route-registration cleanup: the list
+// endpoint answers, and an unknown id still reaches GetJobStatus with 404.
+func TestJobsRoutesResolve(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+
+	router := chi.NewRouter()
+	h.RegisterRoutes(router, func(next http.Handler) http.Handler { return next })
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/api/jobs", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("/jobs status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	var resp ListJobsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(resp.Jobs) != 0 {
+		t.Errorf("empty db list = %d jobs; want 0", len(resp.Jobs))
+	}
+
+	// An unknown id still reaches the single-job handler: 404.
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/api/jobs/does-not-exist", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("/jobs/{bad id} status = %d; want 404 — body: %s", w.Code, w.Body.String())
 	}
 }
 

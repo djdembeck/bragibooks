@@ -410,7 +410,18 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.svc.ProcessingSvc.RecordBookAction(bookID, "metadata_update", book.Title)
+	// Only genuine metadata edits are history-worthy: re-matching a book
+	// resets {status: 'pending'} and a lifecycle touch (status, dest paths,
+	// format) would otherwise flood the record timeline with indistinguishable
+	// 'metadata update' rows. Only Authors/Narrators + catalog fields count as
+	// metadata; provenance IDs, src/dest paths, format, status and
+	// status_message are excluded pipeline bookkeeping.
+	if req.Title != nil || req.ASIN != nil || req.Description != nil ||
+		req.ReleaseDate != nil || req.Series != nil || req.Publisher != nil ||
+		req.Language != nil || req.RuntimeLengthMinutes != nil || req.CoverImageURL != nil ||
+		req.Authors != nil || req.Narrators != nil {
+		h.svc.ProcessingSvc.RecordBookAction(bookID, "metadata_update", book.Title)
+	}
 
 	people, err := h.getPeopleByBookID(bookID)
 	if err != nil {

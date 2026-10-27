@@ -26,6 +26,7 @@ All notable changes to this project will be documented in this file. See [standa
   - `processing_jobs` now carries a stable `action` key (`merge` | `metadata_update` | `import`); the migration backfills existing rows as `merge`.
   - Imports and metadata saves write terminal `done` audit rows, so the record's activity list no longer only shows processing runs. These rows never affect queuing or the orphan sweep, which key on `queued`/`running`.
   - `GET /api/jobs` and `GET /api/jobs/:id` expose `action`; the Queue cards and the book record's activity list show a quiet sentence-case operation label (M4B merge / Metadata update / Import) beside the status chip. Unknown stored operations read "Unknown action" instead of being guessed as merges.
+  - `processing_jobs` gains a `detail` column (migration v8) exposed by `GET /api/jobs` and `GET /api/jobs/:id`; pre-v8 rows are NULL, and import rows show their source path.
   - Job completion reads "Completed" across merges, imports, and metadata saves; an empty record reads "No recorded activity yet."
 
 - **Record workspace rollout**

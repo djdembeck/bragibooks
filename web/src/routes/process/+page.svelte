@@ -13,6 +13,8 @@
 		bookTitle?: string;
 		status: string;
 		action: string | null;
+		/** Audit detail (import source path, book title). Absent for merge jobs. */
+		detail: string | null;
 		output: string;
 		error: string | null;
 		startedAt: string | null;
@@ -82,6 +84,7 @@
 				bookTitle: books.find((book) => book.id === j.book_id)?.title,
 				status: j.status,
 				action: j.action ?? null,
+				detail: j.detail ?? null,
 				output: j.output || '',
 				error: j.error || null,
 				startedAt: j.started_at,
@@ -231,6 +234,7 @@
 					bookTitle: selected.find((book) => book.id === job.book_id)?.title,
 					status: 'queued',
 					action: 'merge',
+					detail: null,
 					output: '',
 					error: null,
 					startedAt: null,
@@ -410,6 +414,9 @@
 				<div class="job-timestamp"><dt>Created</dt><dd>{formatJobTime(job.createdAt)}</dd></div>
 			{/if}
 		</dl>
+		{#if job.detail}
+			<p class="job-detail">{job.detail}</p>
+		{/if}
 		{#if job.error}
 			{@const error = cleanAdbError(job.error)}
 			<div class="job-message" class:job-message--error={job.status !== 'cancelled'} role={job.status === 'cancelled' ? 'note' : 'alert'}>{error.message}</div>
@@ -486,6 +493,7 @@
 	.job-timestamp { display: flex; align-items: baseline; gap: 0.35rem; }
 	.job-timestamp dt { font-size: 0.65rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
 	.job-timestamp dd { margin: 0; font-variant-numeric: tabular-nums; }
+	.job-detail { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.35rem; overflow-wrap: anywhere; }
 	.job-message { overflow-wrap: anywhere; font-size: 0.8125rem; line-height: 1.55; margin: 0.75rem 0; color: var(--text-secondary); }
 	.job-message--error { color: var(--state-red); }
 	.job-output { margin-top: 0.5rem; }

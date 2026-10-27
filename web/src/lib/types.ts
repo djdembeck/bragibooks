@@ -123,6 +123,8 @@ export interface ProcessingJob {
 	book_id: number | null;
 	status: 'queued' | 'running' | 'done' | 'error' | 'cancelled';
 	action: JobAction;
+	/** Audit detail (import source path, book title). Absent for merge jobs. */
+	detail?: string | null;
 	output: string;
 	error: string | null;
 	output_file: string | null;

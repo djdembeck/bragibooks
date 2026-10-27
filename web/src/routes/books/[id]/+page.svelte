@@ -565,6 +565,9 @@
 								</div>
 							{/if}
 						</dl>
+						{#if job.detail}
+							<p class="joblist__detail">{job.detail}</p>
+						{/if}
 						{#if job.error}
 							{@const jerr = cleanAdbError(job.error)}
 							<p class="joblist__error">{jerr.message}</p>
@@ -1052,6 +1055,13 @@
 		margin: 0.375rem 0 0;
 		font-size: 0.85rem;
 		color: var(--state-red);
+	}
+
+	.joblist__detail {
+		margin: 0.375rem 0 0;
+		font-size: 0.85rem;
+		color: var(--text-secondary);
+		overflow-wrap: anywhere;
 	}
 
 	.joblist__file {
