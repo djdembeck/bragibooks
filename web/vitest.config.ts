@@ -8,6 +8,9 @@ export default defineConfig({
 	resolve: { conditions: ['browser'] },
 	test: {
 		environment: 'happy-dom',
-		include: ['src/**/*.test.ts']
+		include: ['src/**/*.test.ts'],
+		// Naive-UTC parsing only diverges from a local parse away from UTC;
+		// pin a non-UTC zone so a UTC runner cannot vacate the guard.
+		env: { TZ: 'America/New_York' }
 	}
 });

@@ -244,6 +244,9 @@ Title in the display face with an optional 15px secondary description (65ch) abo
 ### Activity Label
 Sentence case, 12px 600, `--text-secondary`, no fill, border, or uppercase. It names what happened (`M4B merge`, `Metadata update`, `Import`) beside the status chip, which names the outcome; the two are one wrapping unit, so a long book title never separates operation from state. Unknown stored actions read "Unknown action" rather than being guessed as merges. Use the shared `JobActionLabel` component; never restyle it per route.
 
+### Job Timing
+Queue cards and book-record job history list Started, Done, Created, and the duration in one `dl` row: 11px+ uppercase labels on the dense-row tier, 12px tabular values. Before a job starts — including one cancelled while waiting — the duration is labelled **Queued** and measures time since creation; once processing starts it is **Elapsed**. Active durations tick once per second; finished ones keep seconds under an hour (`4m 30s`) and step to hours and minutes above (`27h 14m`).
+
 ### Alert
 `role="alert"` panel, 2px state border, 14px copy, 14px padding; success/warning/error take their state washes; Retry is a dark-gold text action.
 

@@ -37,6 +37,7 @@ All notable changes to this project will be documented in this file. See [standa
   - Preserved keyboard selection, source-removal confirmation, error recovery, and folder-picker cancellation. Added truthful loading/removal states, executed-search labels, and same-folder retry after a directory error.
   - Kept catalog publication dates stable across time zones, made mobile Overview and Books titles readable on two lines, and rebalanced helper-text wrapping.
   - Corrected AudiobookDB book links to `/books/{id}` and account-creation links to `/users/signup`.
+  - Queue job cards and book job history now show elapsed time per job. Queued jobs report time spent waiting, running jobs tick each second, and finished jobs keep second precision up to an hour.
 
 - **Match removal**
   - Remove a single match from its row, or enter the removal pass, select several sources, and delete their records in one confirmed action. The confirmation lists every source name; only Bragi Books records are deleted and files on disk stay untouched.
