@@ -916,20 +916,19 @@
 			</div>
 		</section>
 
-		<!-- Save -->
+		<!-- Save — the status region sits after the button and stays mounted in
+		     both states, so the button never moves or changes width while saving. -->
 		<div class="settings-save">
-			{#if saving}
-				<span class="settings-save__status" aria-live="polite">
-					<Spinner size="1rem" />
-					Saving…
-				</span>
-			{/if}
-			<Button variant="primary" type="submit" loading={saving}>
-				{#if !saving}
-					<Save class="h-4 w-4" aria-hidden="true" />
-				{/if}
+			<Button variant="primary" type="submit" disabled={saving} aria-busy={saving}>
+				<Save class="h-4 w-4" aria-hidden="true" />
 				Save settings
 			</Button>
+			<span class="settings-save__status" aria-live="polite">
+				{#if saving}
+					<Spinner size="1rem" />
+					Saving…
+				{/if}
+			</span>
 		</div>
 	</form>
 
@@ -1378,15 +1377,19 @@
 		text-wrap: balance;
 	}
 
-	/* Save bar — end of the form, reachable without scrolling */
+	/* Save bar — end of the form, reachable without scrolling. The layout must
+	   not depend on the saving state: the action sits first and the live status
+	   region is always mounted beside it, so the button never relocates. */
 	.settings-save {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
+		justify-content: flex-start;
 		gap: 0.75rem;
 		flex-wrap: wrap;
 	}
 
+	/* Always rendered (empty when idle) so the live region exists before the
+	   text arrives and the bar keeps the same children in both states. */
 	.settings-save__status {
 		display: inline-flex;
 		align-items: center;
