@@ -6,7 +6,7 @@
 	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '#lib/types.js';
 	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { formatJobTime } from '#lib/datetime.js';
-	import { StatusBadge, AbdTag, EmptyState, Button, Alert, ErrorDetail, Skeleton, CoverArt } from '#lib/components/index.js';
+	import { StatusBadge, AbdTag, EmptyState, Button, Alert, ErrorDetail, Skeleton, CoverArt, JobActionLabel } from '#lib/components/index.js';
 	import { ExternalLink, ArrowLeft } from '@lucide/svelte';
 
 	let { data }: { data: PageData } = $props();
@@ -20,7 +20,7 @@
 	const abdHref = $derived(abdBookId ? `https://audiobookdb.org/books/${abdBookId}` : null);
 	const asinStr = $derived(normStr(book?.asin));
 
-	/* ── Job history ─────────────────────────────────────────────
+	/* ── Recorded activity ───────────────────────────────────────
 	 * Newest-first from the queue API, filtered server-side by book_id.
 	 * While any job is queued/running the list re-fetches every 8s so
 	 * the lock note and history stay live without a manual reload.  */
@@ -523,26 +523,26 @@
 		{/if}
 	</section>
 
-	<!-- ── Job history, newest first ───────────────────────────── -->
-	<section class="card record-section" aria-label="Job history">
-		<h2 class="detail__section-title">Job history</h2>
+	<!-- ── Recorded activity, newest first ─────────────────────── -->
+	<section class="card record-section" aria-label="Recorded activity">
+		<h2 class="detail__section-title">Recorded activity</h2>
 		{#if jobsError}
 			<div class="mb-3">
 				<Alert variant="error" onretry={() => (jobsReload += 1)}>
-					Could not load job history: {jobsError.message}
+					Could not load recorded activity: {jobsError.message}
 					<ErrorDetail raw={jobsError.raw} needsSettings={jobsError.needsSettings} />
 				</Alert>
 			</div>
 		{/if}
 		{#if jobs.length === 0 && !jobsError}
-			<p class="record-section__note">No processing jobs yet.</p>
+			<p class="record-section__note">No recorded activity yet.</p>
 		{/if}
 		{#if jobs.length > 0}
 			<ol class="joblist">
 				{#each jobs as job}
 					<li class="joblist__item">
 						<div class="joblist__head">
-							<StatusBadge status={job.status} />
+							<div class="joblist__state"><StatusBadge status={job.status} /><JobActionLabel action={job.action} /></div>
 							<code class="joblist__id">{job.id}</code>
 						</div>
 						<dl class="joblist__times">
@@ -565,6 +565,9 @@
 								</div>
 							{/if}
 						</dl>
+						{#if job.detail}
+							<p class="joblist__detail">{job.detail}</p>
+						{/if}
 						{#if job.error}
 							{@const jerr = cleanAdbError(job.error)}
 							<p class="joblist__error">{jerr.message}</p>
@@ -826,7 +829,7 @@
 	}
 
 	/* One header class for every section title
-	 * (Actions / Compare / Job history / File paths / Description). */
+	 * (Actions / Compare / Recorded activity / File paths / Description). */
 	.detail__section-title {
 		margin: 0;
 		font-size: 0.8rem;
@@ -984,7 +987,7 @@
 		white-space: nowrap;
 	}
 
-	/* Job history — one entry per processing attempt */
+	/* Recorded activity — one entry per run or record change */
 	.joblist {
 		margin: 0.75rem 0 0;
 		padding: 0;
@@ -1006,6 +1009,13 @@
 		align-items: center;
 		gap: 0.75rem;
 		flex-wrap: wrap;
+	}
+
+	.joblist__state {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 0.5rem;
 	}
 
 	.joblist__id {
@@ -1045,6 +1055,13 @@
 		margin: 0.375rem 0 0;
 		font-size: 0.85rem;
 		color: var(--state-red);
+	}
+
+	.joblist__detail {
+		margin: 0.375rem 0 0;
+		font-size: 0.85rem;
+		color: var(--text-secondary);
+		overflow-wrap: anywhere;
 	}
 
 	.joblist__file {

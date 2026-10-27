@@ -48,6 +48,8 @@ type ProcessingJob struct {
 	ID           string        `db:"id" json:"id"`
 	BookID       sql.NullInt64 `db:"book_id" json:"book_id"`
 	M4bMergeArgs string        `db:"m4b_merge_args" json:"-"` // serialized CLI args
+	Action       string        `db:"action" json:"action"`    // merge | metadata_update | import
+	Detail       *string       `db:"detail" json:"detail,omitempty"`
 	Status       string        `db:"status" json:"status"`
 	Output       string        `db:"output" json:"output"`
 	Error        *string       `db:"error" json:"error"`
