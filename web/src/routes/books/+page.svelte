@@ -3,7 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { page as pageStore } from '$app/state';
 	import type { BooksListResponse, BookWithPeople, OutputProfile, OutputProfilesResponse } from '#lib/types.js';
-	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt } from '#lib/components/index.js';
+	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt, OutputProfileSelector } from '#lib/components/index.js';
 	import { formatRuntime } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
@@ -52,10 +52,6 @@
 			profilesError = 'Saved profiles unavailable — queuing uses global settings.';
 		}
 	}
-	const selectedBulkProfile = $derived(
-		selectedProfileId === null ? null : profiles.find((p) => p.id === selectedProfileId) ?? null
-	);
-
 	function normalizedFilter(value: string | null): string {
 		return value && validFilters.has(value) ? value : 'all';
 	}
@@ -319,30 +315,18 @@
 			</p>
 			<div class="flex flex-wrap items-center gap-x-4 gap-y-1">
 				<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-					<label class="text-sm text-[var(--text-secondary)]" for="bulk-output-profile-select">Output profile</label>
-					<select
-						id="bulk-output-profile-select"
-						class="min-h-11 border border-[var(--border)] bg-[var(--bg-panel)] px-2 text-sm text-[var(--text)]"
-						value={selectedProfileId === null ? '' : String(selectedProfileId)}
-						onchange={(event) => {
-							const value = event.currentTarget.value;
-							selectedProfileId = value === '' ? null : Number(value);
-						}}
-						aria-describedby={selectedBulkProfile || profilesError ? 'bulk-profile-summary' : undefined}
-					>
-						<option value="">Global settings</option>
-						{#each profiles as profile (profile.id)}
-							<option value={profile.id}>{profile.name}</option>
-						{/each}
-					</select>
-					{#if selectedBulkProfile}
-						<p
-							id="bulk-profile-summary" class="w-full text-xs text-[var(--text-muted)]" aria-live="polite">
-							{selectedBulkProfile.output_dir || 'Uses the global output directory'} · {selectedBulkProfile.output_scheme || 'Uses the global path format'} — applies only to these {allMatchedTotal} books in this queue.
-						</p>
-					{:else if profilesError}
-						<p id="bulk-profile-summary" class="w-full text-xs text-[var(--text-secondary)]" aria-live="polite">{profilesError}</p>
-					{/if}
+					<OutputProfileSelector
+						{profiles}
+						bind:selectedProfileId
+						{profilesError}
+						batchCount={allMatchedTotal}
+						batchScope="queue"
+						selectId="bulk-output-profile-select"
+						summaryId="bulk-profile-summary"
+						labelClass="text-sm"
+						selectClass="min-h-11 border border-[var(--border)] bg-[var(--bg-panel)] px-2 text-sm text-[var(--text)]"
+						summaryClass="w-full text-xs"
+					/>
 				</div>
 				<div class="flex items-center gap-2">
 					<Button loading={bulkRequeueing} onclick={bulkRequeue}>Start requeue</Button>

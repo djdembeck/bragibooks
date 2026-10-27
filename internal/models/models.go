@@ -68,6 +68,8 @@ type OutputProfile struct {
 	Name         string `db:"name" json:"name"`
 	OutputDir    string `db:"output_dir" json:"output_dir"`
 	OutputScheme string `db:"output_scheme" json:"output_scheme"`
+	CreatedAt    string `db:"created_at" json:"created_at"`
+	UpdatedAt    string `db:"updated_at" json:"updated_at"`
 }
 
 // Settings holds application configuration persisted in the database.

@@ -142,7 +142,15 @@ function isGoSpace(ch: string): boolean {
 	);
 }
 
-function trimSegment(s: string): string {
+/**
+ * Trim a path segment with Go's strings.TrimSpace semantics (unicode.IsSpace:
+ * tab/LF/VT/FF/CR/space, U+0085, U+00A0, U+1680, U+2000–U+200A, U+2028, U+2029,
+ * U+202F, U+205F, U+3000). Exported so callers that mirror the Go validator's
+ * segment rules elsewhere (e.g. the settings page's ".." parity check) agree
+ * with the server — String.prototype.trim accepts more, so it must not be
+ * used there.
+ */
+export function trimSegment(s: string): string {
 	let a = 0;
 	let b = s.length;
 	while (a < b && isGoSpace(s[a])) a++;

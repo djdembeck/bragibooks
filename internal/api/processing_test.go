@@ -1226,3 +1226,55 @@ func TestQueueSingleBookReprocessUsesGlobals(t *testing.T) {
 		t.Errorf("stored args leak a destination snapshot for an unprofiled job: %s", stored)
 	}
 }
+
+// TestQueueResponseCarriesEffectiveDestination: the POST /process response
+// reports the effective destination pair (absolute root + format) the batch
+// was snapshotted under, so the web's freshly queued job shows the queue-time
+// destination independent of any client-cached profile. A global-settings
+// batch carries neither field.
+func TestQueueResponseCarriesEffectiveDestination(t *testing.T) {
+	fx := setupProfileSuite(t)
+	rootB := t.TempDir()
+	if _, err := fx.h.svc.DB.Exec(
+		"UPDATE output_profiles SET output_dir = ? WHERE id = ?", rootB, fx.profileB,
+	); err != nil {
+		t.Fatalf("set profile B dir: %v", err)
+	}
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+
+	w := fx.postProcess(t, []string{src}, int64Ptr(fx.profileB), 1)
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status = %d — body: %s", w.Code, w.Body.String())
+	}
+	var resp StartProcessingResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil || len(resp.Jobs) != 1 {
+		t.Fatalf("decode response: %v (jobs %d)", err, len(resp.Jobs))
+	}
+	// Profile supplies the dir, the global config supplies the format.
+	if resp.OutputDir != rootB || resp.OutputScheme != "{author}/{title}" {
+		t.Errorf("response destination = (%q, %q); want (%q, %q)", resp.OutputDir, resp.OutputScheme, rootB, "{author}/{title}")
+	}
+
+	// Global-settings batch (no profile): both fields absent from the JSON.
+	src2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src2, "b.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	w = fx.postProcess(t, []string{src2}, nil, 2)
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status = %d — body: %s", w.Code, w.Body.String())
+	}
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(w.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode raw response: %v", err)
+	}
+	if _, ok := raw["output_dir"]; ok {
+		t.Errorf("global-settings batch response carries output_dir: %s", w.Body.String())
+	}
+	if _, ok := raw["output_scheme"]; ok {
+		t.Errorf("global-settings batch response carries output_scheme: %s", w.Body.String())
+	}
+}

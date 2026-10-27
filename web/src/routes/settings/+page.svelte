@@ -2,7 +2,7 @@
 	import { get, post, put, del, ApiError } from '#lib/api.js';
 	import { Pencil, Trash2 } from '@lucide/svelte';
 	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker, Modal, PathFormatBuilder } from '#lib/components/index.js';
-	import { parseParts, validateScheme } from '#lib/scheme.js';
+	import { parseParts, validateScheme, trimSegment } from '#lib/scheme.js';
 	import type { Settings, OutputProfile } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
@@ -424,7 +424,7 @@
 			if (scheme.startsWith('/')) {
 				profileFieldErrors.output_scheme = 'Must be relative to the output directory (no leading /).';
 				valid = false;
-			} else if (scheme.split('/').some((seg) => seg === '..')) {
+			} else if (scheme.split('/').some((seg) => trimSegment(seg) === '..')) {
 				profileFieldErrors.output_scheme = 'Must not contain a “..” path segment.';
 				valid = false;
 			} else if (!PROFILE_SCHEME_TOKENS.some((t) => scheme.includes(`{${t}}`))) {

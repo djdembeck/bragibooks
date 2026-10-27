@@ -248,6 +248,9 @@ export interface ProcessingRequest {
 
 export interface ProcessingResponse {
 	jobs: Array<{ id: string; book_id: number }>;
+	/** Queue-time destination snapshot of the started batch (profile-backed batches only); absent for global-settings batches. */
+	output_dir?: string;
+	output_scheme?: string;
 }
 
 /** Wire shape of models.OutputProfile. */

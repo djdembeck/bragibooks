@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/bragibooks/bragibooks/internal/models"
 )
 
 // profileRoute injects a chi route context with the given {id} param.
@@ -41,6 +43,9 @@ func TestListOutputProfilesSortedCaseInsensitive(t *testing.T) {
 	var names []string
 	for _, p := range resp.Profiles {
 		names = append(names, p.Name)
+		if p.CreatedAt == "" || p.UpdatedAt == "" {
+			t.Errorf("profile %q timestamps = (%q, %q); want both non-empty", p.Name, p.CreatedAt, p.UpdatedAt)
+		}
 	}
 	if strings.Join(names, ",") != "apple,Mango,zebra" {
 		t.Errorf("sorted names = %v; want [apple Mango zebra]", names)
@@ -63,6 +68,8 @@ func TestCreateOutputProfileTrimmingAndFields(t *testing.T) {
 		Name         string `json:"name"`
 		OutputDir    string `json:"output_dir"`
 		OutputScheme string `json:"output_scheme"`
+		CreatedAt    string `json:"created_at"`
+		UpdatedAt    string `json:"updated_at"`
 	}
 	if err := json.NewDecoder(w.Body).Decode(&p); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -72,6 +79,9 @@ func TestCreateOutputProfileTrimmingAndFields(t *testing.T) {
 	}
 	if p.ID <= 0 {
 		t.Errorf("id = %d; want positive", p.ID)
+	}
+	if p.CreatedAt == "" || p.UpdatedAt == "" {
+		t.Errorf("create response timestamps = (%q, %q); want both non-empty", p.CreatedAt, p.UpdatedAt)
 	}
 }
 
@@ -156,6 +166,13 @@ func TestUpdateOutputProfilePersistsAndRefreshes(t *testing.T) {
 	h.UpdateOutputProfile(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("update status = %d — body: %s", w.Code, w.Body.String())
+	}
+	var updated models.OutputProfile
+	if err := json.NewDecoder(w.Body).Decode(&updated); err != nil {
+		t.Fatalf("decode update: %v (body %s)", err, w.Body.String())
+	}
+	if updated.CreatedAt == "" || updated.UpdatedAt == "" {
+		t.Errorf("update response timestamps = (%q, %q); want both non-empty", updated.CreatedAt, updated.UpdatedAt)
 	}
 	var name, dir, scheme string
 	if err := h.svc.DB.QueryRow("SELECT name, output_dir, output_scheme FROM output_profiles WHERE id = 1").

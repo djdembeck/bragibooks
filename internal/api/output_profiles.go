@@ -77,11 +77,11 @@ func (h *Handler) getOutputProfile(id int64) (*models.OutputProfile, error) {
 		return nil, fmt.Errorf("%w: %d", errProfileNotFound, id)
 	}
 	row := h.svc.DB.QueryRow(
-		"SELECT id, name, output_dir, output_scheme FROM output_profiles WHERE id = ?",
+		"SELECT id, name, output_dir, output_scheme, created_at, updated_at FROM output_profiles WHERE id = ?",
 		id,
 	)
 	var p models.OutputProfile
-	if err := row.Scan(&p.ID, &p.Name, &p.OutputDir, &p.OutputScheme); err != nil {
+	if err := row.Scan(&p.ID, &p.Name, &p.OutputDir, &p.OutputScheme, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, errProfileNotFound
 		}
@@ -94,7 +94,7 @@ func (h *Handler) getOutputProfile(id int64) (*models.OutputProfile, error) {
 // case-insensitively.
 func (h *Handler) ListOutputProfiles(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.svc.DB.Query(
-		"SELECT id, name, output_dir, output_scheme FROM output_profiles",
+		"SELECT id, name, output_dir, output_scheme, created_at, updated_at FROM output_profiles",
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "query output profiles: "+err.Error())
@@ -105,7 +105,7 @@ func (h *Handler) ListOutputProfiles(w http.ResponseWriter, r *http.Request) {
 	profiles := make([]models.OutputProfile, 0)
 	for rows.Next() {
 		var p models.OutputProfile
-		if err := rows.Scan(&p.ID, &p.Name, &p.OutputDir, &p.OutputScheme); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.OutputDir, &p.OutputScheme, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "read output profile: "+err.Error())
 			return
 		}
@@ -152,9 +152,16 @@ func (h *Handler) CreateOutputProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "create output profile: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, models.OutputProfile{
-		ID: id, Name: name, OutputDir: dir, OutputScheme: scheme,
-	})
+	// Re-read so the response carries the DB-stamped created_at/updated_at
+	// instead of zero values.
+	profile, err := h.getOutputProfile(id)
+	if err != nil {
+		// The row was just inserted by this request; a read failure is a
+		// server fault, not a client error.
+		writeError(w, http.StatusInternalServerError, "read created profile: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, profile)
 }
 
 // UpdateOutputProfile handles PUT /api/output-profiles/:id, replacing the
@@ -193,9 +200,15 @@ func (h *Handler) UpdateOutputProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "output profile not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, models.OutputProfile{
-		ID: id, Name: name, OutputDir: dir, OutputScheme: scheme,
-	})
+	// Re-read so the response carries the refreshed updated_at and the
+	// DB-stamped created_at.
+	profile, err := h.getOutputProfile(id)
+	if err != nil {
+		// RowsAffected > 0 just above; a read failure is a server fault.
+		writeError(w, http.StatusInternalServerError, "read updated profile: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
 }
 
 // DeleteOutputProfile handles DELETE /api/output-profiles/:id. Jobs already

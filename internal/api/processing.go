@@ -596,6 +596,18 @@ type ProcessingJobCreated struct {
 	BookID int64  `json:"book_id"`
 }
 
+// StartProcessingResponse is the JSON shape returned by StartProcessing:
+// the created jobs plus the effective destination pair the batch was
+// snapshotted under at queue time (both omitted for global-settings
+// batches). The web derives each fresh job's Destination line from this
+// pair instead of a client-cached profile, which may have been edited
+// since the page loaded.
+type StartProcessingResponse struct {
+	Jobs         []ProcessingJobCreated `json:"jobs"`
+	OutputDir    string                 `json:"output_dir,omitempty"`
+	OutputScheme string                 `json:"output_scheme,omitempty"`
+}
+
 // StartProcessing handles POST /api/process.
 // Accepts {"book_ids": [1,2], "src_dirs": ["/input/dir1", "/input/dir2"]}.
 // Each pair creates a ProcessingJob. Returns {"jobs": [{"id": "uuid", "book_id": 1}, ...]}.
@@ -724,7 +736,11 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeJSON(w, http.StatusOK, map[string][]ProcessingJobCreated{"jobs": jobs})
+	writeJSON(w, http.StatusOK, StartProcessingResponse{
+		Jobs:         jobs,
+		OutputDir:    runOpts.OutputDirOverride,
+		OutputScheme: runOpts.PathFormatOverride,
+	})
 }
 
 // ListJobsResponse is the JSON shape returned by GET /api/jobs.

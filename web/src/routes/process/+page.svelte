@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { get, post, streamEvents } from '#lib/api.js';
 	import type { BookWithPeople, BooksListResponse, ProcessingResponse, ProcessingJob, JobsListResponse, OutputProfile, OutputProfilesResponse } from '#lib/types.js';
-	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, StatusBadge, CoverArt } from '#lib/components/index.js';
+	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, StatusBadge, CoverArt, OutputProfileSelector } from '#lib/components/index.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { cleanAdbError, toCleanedError } from '#lib/adbError.js';
 	import { formatJobTime } from '#lib/datetime.js';
@@ -242,13 +242,16 @@
 				src_dirs: selected.map((b) => b.src_path),
 			};
 			if (selectedProfileId !== null) payload.output_profile_id = selectedProfileId;
-			// The resolved destination of record for this batch: once the
-			// selector resets, this line is what tells two back-to-back
-			// batches (profile then global) apart.
-			const destination = selectedProfile
-				? `${selectedProfile.output_dir || 'Uses the global output directory'} · ${selectedProfile.output_scheme || 'Uses the global path format'}`
-				: undefined;
 			const response = await post<ProcessingResponse>('/process', payload);
+			// The resolved destination of record for this batch: the server's
+			// queue-time snapshot (absolute dir + effective format), not the
+			// page's cached profile, which may have been edited since load.
+			// Once the selector resets, this line is what tells two
+			// back-to-back batches (profile then global) apart.
+			const destination =
+				response.output_dir || response.output_scheme
+					? `${response.output_dir} · ${response.output_scheme}`
+					: undefined;
 			for (const job of response.jobs) {
 				const item = $state<JobItem>({
 					id: job.id,
@@ -283,9 +286,6 @@
 	}
 
 	const matchedBooks = $derived(books.filter((b) => b.status === 'matched'));
-	const selectedProfile = $derived(
-		selectedProfileId === null ? null : profiles.find((p) => p.id === selectedProfileId) ?? null
-	);
 	const selectedReadyCount = $derived(
 		matchedBooks.reduce((count, book) => count + Number(selectedIds.has(book.id)), 0)
 	);
@@ -384,29 +384,12 @@
 							}} aria-label="Select all matched books" /><span>{selectedReadyCount} selected of {matchedBooks.length}</span></label>
 							{#if selectedReadyCount > 0}
 								<div class="profile-pick">
-									<label class="profile-label" for="output-profile-select">Output profile</label>
-									<select
-										id="output-profile-select"
-										class="profile-select"
-										value={selectedProfileId === null ? '' : String(selectedProfileId)}
-										onchange={(event) => {
-											const value = event.currentTarget.value;
-											selectedProfileId = value === '' ? null : Number(value);
-										}}
-										aria-describedby={selectedProfile || profilesError ? 'profile-summary' : undefined}
-									>
-										<option value="">Global settings</option>
-										{#each profiles as profile (profile.id)}
-											<option value={profile.id}>{profile.name}</option>
-										{/each}
-									</select>
-									{#if selectedProfile}
-										<p id="profile-summary" class="profile-summary" aria-live="polite">
-											{selectedProfile.output_dir || 'Uses the global output directory'} · {selectedProfile.output_scheme || 'Uses the global path format'} — applies only to these {selectedReadyCount} books in this batch.
-										</p>
-									{:else if profilesError}
-										<p id="profile-summary" class="profile-summary profile-summary--warn" aria-live="polite">{profilesError}</p>
-									{/if}
+									<OutputProfileSelector
+										{profiles}
+										bind:selectedProfileId
+										{profilesError}
+										batchCount={selectedReadyCount}
+									/>
 								</div>
 							{/if}
 							<Button loading={starting} disabled={selectedReadyCount === 0} onclick={start}>Start processing <ArrowRight size={16} aria-hidden="true" /></Button>
@@ -501,11 +484,7 @@
 	.section-heading p { color: var(--text-muted); font-size: 0.8125rem; margin-top: 0.35rem; }
 	.selection-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.75rem 1.5rem; background: var(--surface); border-top: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); }
 	.select-all { display: flex; align-items: center; gap: 0.75rem; min-height: 2.75rem; font-size: 0.8125rem; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-	.profile-pick { display: flex; align-items: center; gap: 0.75rem; min-width: 0; flex-wrap: wrap; }
-	.profile-label { font-size: 0.8125rem; color: var(--text-secondary); white-space: nowrap; }
-	.profile-select { min-height: 2.75rem; padding: 0 0.5rem; font-size: 0.8125rem; color: var(--text); background: var(--bg-panel); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); }
-	.profile-summary { margin: 0; width: 100%; font-size: 0.75rem; color: var(--text-muted); overflow-wrap: anywhere; }
-	.profile-summary--warn { color: var(--state-amber, var(--text-secondary)); }
+	.profile-pick { min-width: 0; }
 	.queue-row { display: grid; grid-template-columns: 2.75rem 3rem minmax(0, 1fr) auto; align-items: center; gap: 0.75rem; padding: 0.875rem 1.5rem 0.875rem 0.75rem; border-bottom: 1px solid var(--border-subtle); }
 	.queue-row:last-child { border-bottom: 0; }
 	.queue-row:hover { background: var(--surface); }
