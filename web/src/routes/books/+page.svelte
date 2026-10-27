@@ -314,7 +314,7 @@
 			: `Showing ${startIndex} to ${endIndex} of ${response.total} ${activeFilterLabel.toLowerCase()} books.`}
 	</p>
 {/if}
-{#if dl.showSkeleton}
+{#if !dl.hasLoaded || dl.showSkeleton}
 	<div class="overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]" aria-label="Catalog loading">
 		{#each Array(5) as _}
 			<div class="flex items-center gap-4 border-b border-[var(--border-subtle)] px-4 py-3 last:border-b-0">
@@ -326,6 +326,8 @@
 			</div>
 		{/each}
 	</div>
+{:else if dl.error && (!response || response.books.length === 0)}
+	<!-- The failure alert above owns this space; do not also claim "empty". -->
 {:else if !response || response.books.length === 0}
 	<EmptyState
 		title="No books found"

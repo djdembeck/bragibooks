@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-25T18:38:37-05:00",
+  "generatedAt": "2026-10-26T16:54:51-05:00",
   "title": "Design System: Bragi Books",
   "extensions": {
     "colorMeta": {
@@ -672,6 +672,14 @@
       "css": ".ds-badge { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.125rem 0.5rem; border-radius: var(--radius-sm, 6px); font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; border: 1.5px solid; white-space: nowrap; } .ds-badge--pending { color: var(--text-secondary, #4c4c43); background: var(--surface, #f8f8f6); border-color: var(--border, #d7d7d0); } .ds-badge--processing { color: var(--state-amber, #80530b); background: var(--state-amber-bg, #fff4d6); border-color: var(--state-amber-border, #dfc58d); } .ds-badge--done { color: var(--state-green, #286442); background: var(--state-green-bg, #eaf3eb); border-color: var(--state-green-border, #b6d0bc); } .ds-badge--error { color: var(--state-red, #b3261e); background: var(--state-red-bg, #fdecea); border-color: var(--state-red-border, #e7b9b5); } .ds-badge--ready { color: var(--text, #292923); background: var(--accent-wash, #fff4d3); border-color: var(--border-strong, #92928a); }"
     },
     {
+      "name": "Activity Label",
+      "kind": "custom",
+      "refersTo": "activity-label",
+      "description": "Quiet sentence-case operation beside the status chip; the status stays the row's only chip.",
+      "html": "<span class=\"ds-activity\">M4B merge</span> <span class=\"ds-activity\">Metadata update</span> <span class=\"ds-activity\">Unknown action</span>",
+      "css": ".ds-activity { font-size: 0.75rem; font-weight: 600; color: var(--text-secondary, #4c4c43); white-space: nowrap; }"
+    },
+    {
       "name": "Mode Toggle",
       "kind": "chip",
       "refersTo": null,
@@ -739,6 +747,7 @@
       "Do draw secondary actions and keyboard focus from the dark gold/graphite family (#705413, 3px outline, 3px offset).",
       "Do build work surfaces neutral: #ffffff panels on the #f5f5f4 ground, 1px #d7d7d0 hairlines, radii within the 4\u201312px scale by role.",
       "Do render StatusBadge as glyph + word + color (never color alone), and label absent state plainly (\"No catalog match\", \"details unavailable\") \u2014 never hidden.",
+      "Do pair the status chip with a quiet sentence-case activity label, grouped so a long title never separates operation from outcome.",
       "Do collapse all animation under prefers-reduced-motion (shimmer, transitions, chase).",
       "Do keep the original develop branding: the stacked-books mark at /images/logo-small-black.svg, favicon.ico, and the Public Sans OFL license living beside the font file.",
       "Do keep destructive selection in its own mode: the include-in-save box never doubles as a removal selector, and a multi-record delete always lists the exact source names before it runs."
@@ -748,7 +757,8 @@
       "Don't style focus, selection, or secondary state blue or cobalt.",
       "Don't use shadow for decorative depth \u2014 it has named roles (button seat, picker, modal, inset selection outline); and keep radii to the 4-step scale.",
       "Don't redraw, replace, or invent the logo or favicon.",
-      "Don't render raw JSON in operator-facing errors \u2014 the sentence walks the payload; the raw data stays under the ErrorDetail expander."
+      "Don't render raw JSON in operator-facing errors \u2014 the sentence walks the payload; the raw data stays under the ErrorDetail expander.",
+      "Don't give a job operation its own chip or uppercase it; the status is the row's only chip, and an unknown stored operation is never guessed as a merge."
     ]
   }
 }

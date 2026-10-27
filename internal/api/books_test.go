@@ -16,6 +16,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/bragibooks/bragibooks/internal/audio"
 	"github.com/bragibooks/bragibooks/internal/models"
 )
 
@@ -49,10 +50,10 @@ CREATE TABLE people (
     book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('author', 'narrator')),
-    audiobookdb_person_id TEXT,
+	audiobookdb_person_id TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
-`
+` + processingSchemaSQL
 
 // newTestDB opens an in-memory SQLite database and creates the schema.
 func newTestDB(t *testing.T) *sql.DB {
@@ -375,5 +376,153 @@ func TestDeriveTitleStripsOnlyAudioExtensions(t *testing.T) {
 				t.Errorf("deriveTitle(%q) = %q; want %q", tc.path, got, tc.want)
 			}
 		})
+	}
+}
+
+// newTestHandlerWithJobs returns a handler whose ProcessingService is real,
+// so RecordBookAction writes (and tests can assert) terminal audit rows.
+func newTestHandlerWithJobs(t *testing.T) *Handler {
+	t.Helper()
+	db := newTestDB(t)
+	return &Handler{svc: &Services{DB: db, ProcessingSvc: NewProcessingService(db, &audio.Processor{}, 1)}}
+}
+
+func TestCreateBooksRecordsImportAuditRow(t *testing.T) {
+	h := newTestHandlerWithJobs(t)
+	srcPath := "/some/path/Author_Book_Title.m4b"
+	reqBody, err := json.Marshal(CreateBooksRequest{Books: []CreateBookEntry{{SrcPath: srcPath}}})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/api/books", bytes.NewReader(reqBody))
+	w := httptest.NewRecorder()
+	h.CreateBooks(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create status = %d; want 201 — body: %s", w.Code, w.Body.String())
+	}
+
+	var count int
+	if err = h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&count); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("processing_jobs rows = %d; want exactly 1", count)
+	}
+	var dbStatus, dbAction, dbDetail string
+	var dbBookID int64
+	err = h.svc.DB.QueryRow("SELECT status, action, book_id, detail FROM processing_jobs").Scan(&dbStatus, &dbAction, &dbBookID, &dbDetail)
+	if err != nil {
+		t.Fatalf("read audit row: %v", err)
+	}
+	if dbStatus != "done" {
+		t.Errorf("status = %q; want done", dbStatus)
+	}
+	if dbAction != "import" {
+		t.Errorf("action = %q; want import", dbAction)
+	}
+	if dbBookID != 1 {
+		t.Errorf("book_id = %d; want 1", dbBookID)
+	}
+	if dbDetail != srcPath {
+		t.Errorf("detail = %q; want the source path %q", dbDetail, srcPath)
+	}
+}
+
+func TestUpdateBookRecordsMetadataAuditRow(t *testing.T) {
+	h := newTestHandlerWithJobs(t)
+	h.svc.DB.Exec(`INSERT INTO books (id, title, status) VALUES (1, 'Original Title', 'pending')`)
+
+	newTitle := "Changed Title"
+	reqBody, err := json.Marshal(UpdateBookRequest{Title: &newTitle})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest("PUT", "/api/books/1", bytes.NewReader(reqBody))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Keys = append(rctx.URLParams.Keys, "id")
+	rctx.URLParams.Values = append(rctx.URLParams.Values, "1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	w := httptest.NewRecorder()
+	h.UpdateBook(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("update status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+
+	var count int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&count); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("processing_jobs rows = %d; want exactly 1", count)
+	}
+	var dbStatus, dbAction, dbDetail string
+	var dbBookID int64
+	if err := h.svc.DB.QueryRow("SELECT status, action, book_id, detail FROM processing_jobs").Scan(&dbStatus, &dbAction, &dbBookID, &dbDetail); err != nil {
+		t.Fatalf("read audit row: %v", err)
+	}
+	if dbStatus != "done" {
+		t.Errorf("status = %q; want done", dbStatus)
+	}
+	if dbAction != "metadata_update" {
+		t.Errorf("action = %q; want metadata_update", dbAction)
+	}
+	if dbBookID != 1 {
+		t.Errorf("book_id = %d; want 1", dbBookID)
+	}
+	if dbDetail != "Changed Title" {
+		t.Errorf("detail = %q; want the book title", dbDetail)
+	}
+}
+
+func TestUpdateBookLifecycleOnlyWritesNoAuditRow(t *testing.T) {
+	h := newTestHandlerWithJobs(t)
+	h.svc.DB.Exec(`INSERT INTO books (id, title, status) VALUES (1, 'My Book', 'matched')`)
+
+	// The book page's re-match action: a bare status flip, plus the other
+	// lifecycle fields (status message, dest path, format). None of these is
+	// catalog metadata, so the record timeline must stay quiet.
+	newStatus := "pending"
+	newStatusMessage := "re-matching"
+	newDestPath := "/out/My_Book.m4b"
+	formatType := "m4b"
+	reqBody, err := json.Marshal(UpdateBookRequest{
+		Status:        &newStatus,
+		StatusMessage: &newStatusMessage,
+		DestPath:      &newDestPath,
+		FormatType:    &formatType,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest("PUT", "/api/books/1", bytes.NewReader(reqBody))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Keys = append(rctx.URLParams.Keys, "id")
+	rctx.URLParams.Values = append(rctx.URLParams.Values, "1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	w := httptest.NewRecorder()
+	h.UpdateBook(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("update status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+
+	// The lifecycle fields still landed (the gate must not swallow the update)
+	// — it only skips history for them.
+	var status, dest, format string
+	if err := h.svc.DB.QueryRow("SELECT status, dest_path, format_type FROM books WHERE id = 1").
+		Scan(&status, &dest, &format); err != nil {
+		t.Fatalf("read book: %v", err)
+	}
+	if status != newStatus || dest != newDestPath || format != formatType {
+		t.Errorf("book update lost: (%q, %q, %q)", status, dest, format)
+	}
+
+	var count int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&count); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("processing_jobs rows = %d; want 0 (lifecycle-only update recorded no audit row)", count)
 	}
 }
