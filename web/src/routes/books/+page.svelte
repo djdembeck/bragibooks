@@ -336,15 +336,16 @@
 						{/each}
 					</select>
 					{#if selectedBulkProfile}
-						<p id="bulk-profile-summary" class="w-full text-xs text-[var(--text-muted)]" aria-live="polite">
-							{selectedBulkProfile.output_dir || 'Uses global setting'} · {selectedBulkProfile.output_scheme || 'Uses global setting'} — applies only to these {allMatchedTotal} books in this queue.
+						<p
+							id="bulk-profile-summary" class="w-full text-xs text-[var(--text-muted)]" aria-live="polite">
+							{selectedBulkProfile.output_dir || 'Uses the global output directory'} · {selectedBulkProfile.output_scheme || 'Uses the global path format'} — applies only to these {allMatchedTotal} books in this queue.
 						</p>
 					{:else if profilesError}
 						<p id="bulk-profile-summary" class="w-full text-xs text-[var(--text-secondary)]" aria-live="polite">{profilesError}</p>
 					{/if}
 				</div>
 				<div class="flex items-center gap-2">
-					<Button loading={bulkRequeueing} onclick={bulkRequeue}>Requeue selected</Button>
+					<Button loading={bulkRequeueing} onclick={bulkRequeue}>Start requeue</Button>
 					<Button variant="ghost" disabled={bulkRequeueing} onclick={clearSelection}>Clear</Button>
 				</div>
 			</div>

@@ -375,6 +375,7 @@
 		profileFieldErrors = {};
 		profileServerError = null;
 		profileModalOpen = true;
+		profileNameFocus();
 	}
 
 	function openEditProfile(profile: OutputProfile) {
@@ -387,6 +388,14 @@
 		profileFieldErrors = {};
 		profileServerError = null;
 		profileModalOpen = true;
+		profileNameFocus();
+	}
+
+	// Native <dialog> focuses its first focusable element (the Close
+	// button); land on the name field instead so the form, not the
+	// dismissal, is the first keyboard stop.
+	function profileNameFocus() {
+		requestAnimationFrame(() => document.getElementById('profile-name')?.focus());
 	}
 
 	function validateProfile(): boolean {
@@ -458,7 +467,10 @@
 		if (profileDeleting) return;
 		profilePendingDelete = profile;
 		profileDeleteMsg = null;
-		requestAnimationFrame(() => document.getElementById('profile-delete-confirm')?.focus());
+		// The confirmation's job is to make the operator read the
+		// consequence; the focused default is Cancel so an unthinking
+		// Enter cannot fire the destructive action.
+		requestAnimationFrame(() => document.getElementById('profile-delete-cancel')?.focus());
 	}
 
 	function cancelProfileDelete() {
@@ -639,8 +651,8 @@
 										<div class="profile-row__info">
 											<span class="profile-row__name">{profile.name}</span>
 											<span class="profile-row__values">
-												<code>{profile.output_dir || 'Use global output directory'}</code>
-												<code>{profile.output_scheme || 'Use global path format'}</code>
+												<code>{profile.output_dir || 'Uses the global output directory'}</code>
+												<code>{profile.output_scheme || 'Uses the global path format'}</code>
 											</span>
 										</div>
 										{#if profilePendingDelete?.id === profile.id}
@@ -660,6 +672,7 @@
 														Yes, delete
 													</Button>
 													<Button
+														id="profile-delete-cancel"
 														variant="ghost"
 														disabled={profileDeleting}
 														onclick={cancelProfileDelete}
@@ -1074,6 +1087,7 @@
 				<PathFormatBuilder
 					bind:value={profileDraft.output_scheme}
 					outputDir={profileDraft.output_dir || settings?.output_dir || ''}
+					allowEmpty
 				/>
 				<p class="settings-help">
 					Relative format, e.g. {`{author}/{title}`}. Leave empty to use the global path format.

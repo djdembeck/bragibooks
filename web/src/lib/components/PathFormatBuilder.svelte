@@ -2,12 +2,23 @@
 	import { tick } from 'svelte';
 	import { MARTIAN, parseParts, resolveExample, serializeParts, TOKEN_META, TOKEN_ORDER, validateScheme, type Part, type TokenKey } from '#lib/scheme.js';
 
-	let { value = $bindable(''), outputDir = '' }: { value?: string; outputDir?: string } = $props();
+	let { value = $bindable(''), outputDir = '', allowEmpty = false }: {
+		value?: string;
+		outputDir?: string;
+		allowEmpty?: boolean;
+	} = $props();
 
 	let parts = $state<Part[]>(parseParts(value));
 	let sel = $state<number | null>(null);
-	const errors = $derived(validateScheme(parts).errors);
-	const warnings = $derived(validateScheme(parts).warnings);
+	// With allowEmpty (an optional override field) an empty format is a
+	// valid state that inherits the global at queue time; the builder's
+	// "add at least one element" and the empty-state "not applied" verdict
+	// would contradict the field's "leave empty" help. Real validation for
+	// non-empty values is unchanged.
+	const isEmpty = $derived(serializeParts(parts) === '');
+	const { errors: allErrors, warnings: allWarnings } = $derived(validateScheme(parts));
+	const errors = $derived(allowEmpty && isEmpty ? [] : allErrors);
+	const warnings = $derived(allowEmpty && isEmpty ? [] : allWarnings);
 	const example = $derived(resolveExample(parts, MARTIAN.values, outputDir));
 
 	// Single sync point: external writes to `value` (page load, other
@@ -180,7 +191,7 @@
 			{/if}
 		{/each}
 		{#if parts.length === 0}
-			<span class="pbf-empty">Click a part above to start.</span>
+			<span class="pbf-empty">{allowEmpty ? 'Leave empty to inherit the global path format, or click a part above to start.' : 'Click a part above to start.'}</span>
 		{/if}
 	</div>
 
@@ -192,7 +203,7 @@
 	{/each}
 
 	<p class="pbf-preview-label">
-		Example — {MARTIAN.label} · <a href={MARTIAN.link} target="_blank" rel="noopener noreferrer">release page</a>{errors.length > 0 ? ' — format is invalid, not applied' : outputDir ? '' : ' — output folder not set'}:
+		Example — {MARTIAN.label} · <a href={MARTIAN.link} target="_blank" rel="noopener noreferrer">release page</a>{allowEmpty && isEmpty ? ' — leaving this empty uses the global path format' : errors.length > 0 ? ' — format is invalid, not applied' : outputDir ? '' : ' — output folder not set'}:
 	</p>
 	<code class="pbf-preview">{example || '—'}</code>
 </div>

@@ -19,6 +19,8 @@
 		createdAt: string | null;
 		/** Local cancellation in flight: badge is optimistic until the backend terminal state lands. */
 		cancelRequested: boolean;
+		/** Queue-time output destination this batch was queued under (profile-backed queues only), e.g. "output/archive · {author}/{title}". HTML-escaped by Svelte. */
+		destination?: string;
 	}
 
 	let books: BookWithPeople[] = $state([]);
@@ -240,6 +242,12 @@
 				src_dirs: selected.map((b) => b.src_path),
 			};
 			if (selectedProfileId !== null) payload.output_profile_id = selectedProfileId;
+			// The resolved destination of record for this batch: once the
+			// selector resets, this line is what tells two back-to-back
+			// batches (profile then global) apart.
+			const destination = selectedProfile
+				? `${selectedProfile.output_dir || 'Uses the global output directory'} · ${selectedProfile.output_scheme || 'Uses the global path format'}`
+				: undefined;
 			const response = await post<ProcessingResponse>('/process', payload);
 			for (const job of response.jobs) {
 				const item = $state<JobItem>({
@@ -253,6 +261,7 @@
 					completedAt: null,
 					createdAt: null,
 					cancelRequested: false,
+					destination,
 				});
 				jobs = [item, ...jobs];
 				connectSSE(item);
@@ -393,7 +402,7 @@
 									</select>
 									{#if selectedProfile}
 										<p id="profile-summary" class="profile-summary" aria-live="polite">
-											{selectedProfile.output_dir || 'Uses global setting'} · {selectedProfile.output_scheme || 'Uses global setting'} — applies only to these {selectedReadyCount} books in this batch.
+											{selectedProfile.output_dir || 'Uses the global output directory'} · {selectedProfile.output_scheme || 'Uses the global path format'} — applies only to these {selectedReadyCount} books in this batch.
 										</p>
 									{:else if profilesError}
 										<p id="profile-summary" class="profile-summary profile-summary--warn" aria-live="polite">{profilesError}</p>
@@ -445,6 +454,9 @@
 {#snippet JobRecord(job: JobItem, active: boolean)}
 	<article class="job-record">
 		<div class="job-record__heading"><div class="job-identity">{#if job.bookId}<a href="/books/{job.bookId}">{job.bookTitle || `Book #${job.bookId}`}</a>{:else}<strong>Unlinked job</strong>{/if}<code title={job.id}>{job.id.slice(0, 8)}</code></div><StatusBadge status={job.status} /></div>
+		{#if job.destination}
+			<p class="job-destination">Destination: {job.destination}</p>
+		{/if}
 		<p class="job-description">{jobStatusLabel(job.status)}</p>
 		<dl class="job-timestamps">
 			{#if job.startedAt}
@@ -530,6 +542,7 @@
 	.job-identity { display: grid; gap: 0.35rem; min-width: 0; }
 	.job-identity a, .job-identity strong { font-size: 0.875rem; font-weight: 600; overflow-wrap: anywhere; }
 	.job-identity code { font-size: 0.75rem; color: var(--text-muted); }
+	.job-destination { color: var(--text-secondary); font-family: ui-monospace, 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace; font-size: 0.75rem; margin-top: 0.65rem; overflow-wrap: anywhere; }
 	.job-description { color: var(--text-muted); font-size: 0.75rem; margin-top: 0.65rem; }
 	.job-timestamps { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin-top: 0.35rem; font-size: 0.75rem; color: var(--text-secondary); }
 	.job-timestamp { display: flex; align-items: baseline; gap: 0.35rem; }

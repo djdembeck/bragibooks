@@ -292,12 +292,13 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 		warnings.push('This format can produce the same file for different books — include {title}.');
 	}
 
-	// W3: literal text sharing a segment with a token concatenates against
-	// the resolved value (the engine joins segments without separators),
-	// producing paths like The MartianFavorites.m4b.
+	// W3: unseparated parts sharing a segment concatenate against the
+	// resolved values (the engine joins segments without separators),
+	// producing paths like "The MartianFavorites.m4b" — and two adjacent
+	// tokens merge into one name, e.g. {author}{title} -> "Andy WeirThe Martian.m4b".
 	for (const seg of segs) {
-		if (seg.tokens.length > 0 && trimSegment(seg.text) !== '') {
-			warnings.push('Literal text joins an adjacent {token} — add a separator to keep them apart.');
+		if (seg.tokens.length > 0 && (trimSegment(seg.text) !== '' || seg.tokens.length > 1)) {
+			warnings.push('Parts in this segment join without a separator and will merge — add a "/" or text to keep them apart.');
 			break;
 		}
 	}
