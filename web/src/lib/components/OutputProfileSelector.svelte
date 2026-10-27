@@ -81,7 +81,11 @@
 	>
 		<option value="">Global settings</option>
 		{#each profiles as profile (profile.id)}
-			<option value={profile.id}>{profile.name}</option>
+			<!-- String, matching the select's string value above: Svelte compares
+			     an option's internal __value with the select value through strict
+			     Object.is, so a numeric id here leaves every option unmatched and
+			     the select renders blank (selectedIndex = -1). -->
+			<option value={String(profile.id)}>{profile.name}</option>
 		{/each}
 	</select>
 	{#if selectedProfile}

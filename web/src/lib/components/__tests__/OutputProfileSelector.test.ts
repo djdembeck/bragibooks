@@ -17,6 +17,7 @@ function makeProfile(overrides: Partial<OutputProfile> & { id: number }): Output
 interface ProbeHandle {
 	boundText: () => string;
 	summaryText: () => string | null;
+	select: () => HTMLSelectElement;
 	refreshProfiles: (next: OutputProfile[], error?: string | null) => void;
 	teardown: () => void;
 }
@@ -24,9 +25,9 @@ interface ProbeHandle {
 /**
  * Mount the probe and settle rendering. The probe echoes its bound
  * selectedProfileId — the parent-side value two-way binding writes — which is
- * what the reconciliation effect mutates. The select's own value is driven by
- * the null-safe derived and stays valid-looking even with a stale id, so it
- * must not be asserted.
+ * what the reconciliation effect mutates. It also exposes the real <select>,
+ * whose rendered selection is the user-visible half of the same state and is
+ * asserted alongside the bound id.
  */
 function mountProbe(props: {
 	initialId: number | null;
@@ -40,6 +41,7 @@ function mountProbe(props: {
 	return {
 		boundText: () => target.querySelector('#probe-bound')?.textContent?.trim() ?? '',
 		summaryText: () => target.querySelector('#probe-summary')?.textContent?.trim() ?? null,
+		select: () => target.querySelector('#probe-select') as HTMLSelectElement,
 		refreshProfiles: (next, error = null) => {
 			component.refreshProfiles(next, error);
 			flushSync();
@@ -95,6 +97,60 @@ describe('OutputProfileSelector bound-id reconciliation', () => {
 	it('stays null without a spurious write', () => {
 		const probe = mountProbe({ initialId: null, profiles: [], profilesError: null });
 		expect(probe.boundText()).toBe('null');
+		probe.teardown();
+	});
+});
+
+describe('OutputProfileSelector rendered selection', () => {
+	it('shows a saved profile that arrives as the initial bound id', () => {
+		const probe = mountProbe({
+			initialId: 7,
+			profiles: [makeProfile({ id: 7, name: 'Erotica' }), makeProfile({ id: 3 })],
+			profilesError: null
+		});
+		// The select is the only place the chosen profile is named, so a blank
+		// select hides the selection even though the summary row below renders.
+		expect(probe.boundText()).toBe('7');
+		const select = probe.select();
+		expect(select.selectedIndex).toBe(1);
+		expect(select.value).toBe('7');
+		expect(select.options[select.selectedIndex].textContent?.trim()).toBe('Erotica');
+		probe.teardown();
+	});
+
+	it('shows the picked profile after switching away from Global settings', () => {
+		const probe = mountProbe({
+			initialId: null,
+			profiles: [makeProfile({ id: 7, name: 'Erotica' })],
+			profilesError: null
+		});
+		const select = probe.select();
+		expect(select.selectedIndex).toBe(0);
+		select.value = '7';
+		select.dispatchEvent(new Event('change', { bubbles: true }));
+		flushSync();
+		// The reported bug: bound id and summary move to the profile while the
+		// select itself renders blank.
+		expect(probe.boundText()).toBe('7');
+		expect(probe.summaryText()).toContain('applies only to these 2 books');
+		expect(select.selectedIndex).toBe(1);
+		expect(select.options[select.selectedIndex].textContent?.trim()).toBe('Erotica');
+		probe.teardown();
+	});
+
+	it('falls back to Global settings when the bound id is cleared', () => {
+		const probe = mountProbe({
+			initialId: 7,
+			profiles: [makeProfile({ id: 7, name: 'Erotica' })],
+			profilesError: null
+		});
+		// A concurrent deletion drops the id; both the select and the bound
+		// state must return to Global settings together.
+		probe.refreshProfiles([]);
+		expect(probe.boundText()).toBe('null');
+		const select = probe.select();
+		expect(select.selectedIndex).toBe(0);
+		expect(select.value).toBe('');
 		probe.teardown();
 	});
 });
