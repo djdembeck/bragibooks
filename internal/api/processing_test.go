@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1471,6 +1472,60 @@ func TestQueueProfileEmptyEffectiveDir400(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("jobs created = %d; want 0 (no Abs('') into cwd)", n)
+	}
+}
+
+// TestQueueWriteAccessProbeRejectsBeforeQueueing: a stored destination the
+// server can no longer create subdirectories in 400s the whole request with
+// zero jobs — settings-save probing cannot cover a remount or uid change.
+func TestQueueWriteAccessProbeRejectsBeforeQueueing(t *testing.T) {
+	fx := setupProfileSuite(t)
+	locked := readOnlyTestDir(t)
+
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+
+	// Profile whose stored root became unwritable after it was saved.
+	if _, err := fx.h.svc.DB.Exec("UPDATE output_profiles SET output_dir = ? WHERE id = ?",
+		filepath.Join(locked, "books"), fx.profileB); err != nil {
+		t.Fatalf("point profile at locked dir: %v", err)
+	}
+	w := fx.postProcess(t, []string{src}, int64Ptr(fx.profileB), 1)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("profile destination status = %d; want 400 — body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "output directory ") {
+		t.Errorf("body = %q; want it to name the output directory setting", w.Body.String())
+	}
+
+	// Global completed directory became unwritable: the profile-less path
+	// must fail the same way, before QueueJob.
+	yamlPath := filepath.Join(t.TempDir(), "completed.yaml")
+	yamlText := "directories:\n  output_dir: " + strconv.Quote(fx.rootA) +
+		"\n  completed_dir: " + strconv.Quote(filepath.Join(locked, "completed")) + "\n"
+	if err := os.WriteFile(yamlPath, []byte(yamlText), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := fx.cm.LoadFrom(yamlPath); err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	fx.svc.proc.ApplyConfig(fx.cm.Config())
+	w = fx.postProcess(t, []string{src}, nil, 1)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("completed dir status = %d; want 400 — body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "completed directory ") {
+		t.Errorf("body = %q; want it to name the completed directory setting", w.Body.String())
+	}
+
+	var n int
+	if err := fx.h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&n); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("jobs created = %d; want 0 for unwritable destinations", n)
 	}
 }
 
