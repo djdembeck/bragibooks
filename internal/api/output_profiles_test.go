@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,6 +23,23 @@ func profileRoute(t *testing.T, id string) context.Context {
 	ctx.URLParams.Keys = append(ctx.URLParams.Keys, "id")
 	ctx.URLParams.Values = append(ctx.URLParams.Values, id)
 	return context.WithValue(context.Background(), chi.RouteCtxKey, ctx)
+}
+
+// readOnlyTestDir creates a directory the test process cannot write to and
+// restores it for cleanup. Root bypasses the permission bits, so the
+// callers that need the failure skip under root.
+func readOnlyTestDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("chmod %s: %v", dir, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if err := os.WriteFile(filepath.Join(dir, "probe"), nil, 0o644); err == nil {
+		_ = os.Remove(filepath.Join(dir, "probe"))
+		t.Skip("process can write to a 0555 directory (root); cannot test denial")
+	}
+	return dir
 }
 
 func TestListOutputProfilesSortedCaseInsensitive(t *testing.T) {
@@ -54,8 +73,9 @@ func TestListOutputProfilesSortedCaseInsensitive(t *testing.T) {
 
 func TestCreateOutputProfileTrimmingAndFields(t *testing.T) {
 	h := newTestHandler(t)
+	dir := filepath.Join(t.TempDir(), "Books")
 	body, _ := json.Marshal(OutputProfileRequest{
-		Name: "  My Shelf  ", OutputDir: " /Media/Books ", OutputScheme: " {author}/{title} ",
+		Name: "  My Shelf  ", OutputDir: " " + dir + " ", OutputScheme: " {author}/{title} ",
 	})
 	req := httptest.NewRequest("POST", "/api/output-profiles", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -74,7 +94,7 @@ func TestCreateOutputProfileTrimmingAndFields(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&p); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if p.Name != "My Shelf" || p.OutputDir != "/Media/Books" || p.OutputScheme != "{author}/{title}" {
+	if p.Name != "My Shelf" || p.OutputDir != dir || p.OutputScheme != "{author}/{title}" {
 		t.Errorf("stored profile = %+v; want trimmed values", p)
 	}
 	if p.ID <= 0 {
@@ -94,12 +114,14 @@ func TestCreateOutputProfileDuplicateName409(t *testing.T) {
 		h.CreateOutputProfile(w, req)
 		return w
 	}
-	if w := mk("Shelf", "/a"); w.Code != http.StatusCreated {
+	a := filepath.Join(t.TempDir(), "a")
+	b := filepath.Join(t.TempDir(), "b")
+	if w := mk("Shelf", a); w.Code != http.StatusCreated {
 		t.Fatalf("first create status = %d — body: %s", w.Code, w.Body.String())
 	}
 	// Case-insensitive UNIQUE (COLLATE NOCASE) is authoritative: "shelf"
 	// must 409, and so must a concurrently-created identical name.
-	if w := mk("  shelf  ", "/b"); w.Code != http.StatusConflict {
+	if w := mk("  shelf  ", b); w.Code != http.StatusConflict {
 		t.Fatalf("duplicate create status = %d; want 409 — body: %s", w.Code, w.Body.String())
 	}
 	var n int
@@ -125,7 +147,10 @@ func TestCreateOutputProfileValidationErrors(t *testing.T) {
 		{"absolute scheme", OutputProfileRequest{Name: "N", OutputScheme: "/abs/{title}"}, http.StatusBadRequest, "must not start with '/'"},
 		{"dotdot scheme", OutputProfileRequest{Name: "N", OutputScheme: "../x/{title}"}, http.StatusBadRequest, "'..' path segments"},
 		{"placeholder-free scheme", OutputProfileRequest{Name: "N", OutputScheme: "plain"}, http.StatusBadRequest, "placeholder"},
-		{"nonexistent dir is valid", OutputProfileRequest{Name: "N", OutputDir: "/does/not/exist"}, http.StatusCreated, ""},
+		// A directory that does not exist yet is accepted as long as the
+		// nearest existing ancestor is writable: the job creates it later.
+		{"nonexistent dir under writable parent is valid", OutputProfileRequest{Name: "N", OutputDir: filepath.Join(t.TempDir(), "new", "shelf")}, http.StatusCreated, ""},
+		{"nonexistent dir under read-only parent rejected", OutputProfileRequest{Name: "N", OutputDir: filepath.Join(readOnlyTestDir(t), "shelf")}, http.StatusBadRequest, "is not writable"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -145,7 +170,9 @@ func TestCreateOutputProfileValidationErrors(t *testing.T) {
 
 func TestUpdateOutputProfilePersistsAndRefreshes(t *testing.T) {
 	h := newTestHandler(t)
-	body, _ := json.Marshal(OutputProfileRequest{Name: "One", OutputDir: "/one"})
+	first := filepath.Join(t.TempDir(), "one")
+	second := filepath.Join(t.TempDir(), "two")
+	body, _ := json.Marshal(OutputProfileRequest{Name: "One", OutputDir: first})
 	req := httptest.NewRequest("POST", "/api/output-profiles", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	h.CreateOutputProfile(w, req)
@@ -159,7 +186,7 @@ func TestUpdateOutputProfilePersistsAndRefreshes(t *testing.T) {
 		t.Fatalf("created id = %d; test assumes 1", created.ID)
 	}
 
-	upd, _ := json.Marshal(OutputProfileRequest{Name: "One", OutputDir: "/two", OutputScheme: "F/{title}"})
+	upd, _ := json.Marshal(OutputProfileRequest{Name: "One", OutputDir: second, OutputScheme: "F/{title}"})
 	req = httptest.NewRequest("PUT", "/api/output-profiles/1", bytes.NewReader(upd))
 	req = req.WithContext(profileRoute(t, "1"))
 	w = httptest.NewRecorder()
@@ -179,7 +206,7 @@ func TestUpdateOutputProfilePersistsAndRefreshes(t *testing.T) {
 		Scan(&name, &dir, &scheme); err != nil {
 		t.Fatalf("read profile: %v", err)
 	}
-	if name != "One" || dir != "/two" || scheme != "F/{title}" {
+	if name != "One" || dir != second || scheme != "F/{title}" {
 		t.Errorf("updated profile = (%q, %q, %q); want (One, /two, F/{title})", name, dir, scheme)
 	}
 }
@@ -211,7 +238,7 @@ func TestDeleteOutputProfileUnknownAndInvalidID(t *testing.T) {
 	}
 
 	// Valid delete: create then delete -> 204, then 404 on re-delete.
-	body, _ := json.Marshal(OutputProfileRequest{Name: "Doomed", OutputDir: "/d"})
+	body, _ := json.Marshal(OutputProfileRequest{Name: "Doomed", OutputDir: filepath.Join(t.TempDir(), "d")})
 	req := httptest.NewRequest("POST", "/api/output-profiles", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	h.CreateOutputProfile(w, req)
@@ -231,5 +258,59 @@ func TestDeleteOutputProfileUnknownAndInvalidID(t *testing.T) {
 	h.DeleteOutputProfile(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("re-delete status = %d; want 404 — body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestOutputProfileWriteAccess covers the save-time rule: a submitted
+// destination the server cannot create subdirectories in is a 400 naming the
+// path, while an unchanged stored value is not re-probed (a mount that went
+// away must not block renaming the profile).
+func TestOutputProfileWriteAccess(t *testing.T) {
+	h := newTestHandler(t)
+	locked := readOnlyTestDir(t)
+	blocked := filepath.Join(locked, "books")
+
+	body, _ := json.Marshal(OutputProfileRequest{Name: "Locked", OutputDir: blocked})
+	req := httptest.NewRequest("POST", "/api/output-profiles", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.CreateOutputProfile(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("create with unwritable dir status = %d; want 400 — body: %s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{blocked, "is not writable", "permission denied"} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("body = %q; want it to contain %q", w.Body.String(), want)
+		}
+	}
+	var n int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM output_profiles").Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("profile count = %d; want 0 after a rejected create", n)
+	}
+
+	// Seed a profile directly so the stored output_dir can point at a path
+	// that is no longer writable (the mount-went-away case).
+	if _, err := h.svc.DB.Exec(`INSERT INTO output_profiles (name, output_dir, output_scheme) VALUES ('Locked', ?, '')`, blocked); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+
+	upd, _ := json.Marshal(OutputProfileRequest{Name: "Renamed", OutputDir: blocked})
+	req = httptest.NewRequest("PUT", "/api/output-profiles/1", bytes.NewReader(upd))
+	req = req.WithContext(profileRoute(t, "1"))
+	w = httptest.NewRecorder()
+	h.UpdateOutputProfile(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unchanged unwritable dir status = %d; want 200 (rename must stay possible) — body: %s", w.Code, w.Body.String())
+	}
+
+	moved, _ := json.Marshal(OutputProfileRequest{Name: "Renamed", OutputDir: filepath.Join(locked, "other")})
+	req = httptest.NewRequest("PUT", "/api/output-profiles/1", bytes.NewReader(moved))
+	req = req.WithContext(profileRoute(t, "1"))
+	w = httptest.NewRecorder()
+	h.UpdateOutputProfile(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("changed unwritable dir status = %d; want 400 — body: %s", w.Code, w.Body.String())
 	}
 }

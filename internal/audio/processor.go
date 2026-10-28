@@ -180,6 +180,18 @@ func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, 
 		effFormat = f
 	}
 
+	// Probe the completed directory before touching the filesystem or
+	// spawning the child. m4b-merge runs its own create_dir_all on
+	// --completed-directory at startup and only reports
+	// "Completed directory is not writable: <io error>" — no path — which
+	// the web then could only render as a generic permission sentence.
+	// Failing here names the setting before the per-job subtree exists.
+	if completedDir != "" {
+		if err := CheckDirWritable(completedDir); err != nil {
+			return nil, fmt.Errorf("completed directory %w", err)
+		}
+	}
+
 	outputDir := outputRoot
 	workDir := ""
 	// An empty output root (misconfiguration or a test processor) would put

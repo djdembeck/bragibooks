@@ -134,6 +134,14 @@ func (h *Handler) CreateOutputProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
+	// validateProfile is deliberately pure; the write-access probe runs here
+	// because it touches the filesystem. A destination the server cannot
+	// create subdirectories in would otherwise be accepted and only fail at
+	// job time. An empty dir inherits the global setting and is not probed.
+	if err := audio.CheckDirWritable(dir); err != nil {
+		writeError(w, http.StatusBadRequest, "output directory "+err.Error())
+		return
+	}
 
 	res, err := h.svc.DB.Exec(
 		"INSERT INTO output_profiles (name, output_dir, output_scheme) VALUES (?, ?, ?)",
@@ -182,6 +190,25 @@ func (h *Handler) UpdateOutputProfile(w http.ResponseWriter, r *http.Request) {
 	if msg != "" {
 		writeError(w, http.StatusBadRequest, msg)
 		return
+	}
+	// Load the stored profile first: an unknown ID is a 404 even when the
+	// body is valid, and the stored output_dir lets the write probe skip an
+	// unchanged value so a mount that went away cannot block an unrelated
+	// edit (renaming the profile) — the user must still be able to fix it.
+	existing, err := h.getOutputProfile(id)
+	if err != nil {
+		if errors.Is(err, errProfileNotFound) {
+			writeError(w, http.StatusNotFound, "output profile not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "load output profile: "+err.Error())
+		return
+	}
+	if dir != existing.OutputDir {
+		if err := audio.CheckDirWritable(dir); err != nil {
+			writeError(w, http.StatusBadRequest, "output directory "+err.Error())
+			return
+		}
 	}
 
 	res, err := h.svc.DB.Exec(

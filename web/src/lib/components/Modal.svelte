@@ -80,7 +80,7 @@
 				<h2 id={titleId} class="text-base font-bold text-[var(--enamel)]">{title}</h2>
 				<button
 					type="button"
-					class="min-h-11 min-w-11 rounded-sm p-1.5 text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-[var(--text-muted)]"
+					class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-sm p-1.5 text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-[var(--text-muted)]"
 					onclick={requestClose}
 					disabled={closeDisabled}
 					aria-label="Close dialog"

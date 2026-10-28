@@ -435,6 +435,38 @@ func TestRunMergeFailureCleansJobSubtree(t *testing.T) {
 	}
 }
 
+// TestRunProbesCompletedDir: an unwritable --completed-directory is reported
+// by bragibooks with the path named, before the child runs and before the
+// per-job subtree is created. m4b-merge's own startup validation only says
+// "Completed directory is not writable: <io error>", with no path.
+func TestRunProbesCompletedDir(t *testing.T) {
+	skipIfRoot(t)
+	out := t.TempDir()
+	completed := filepath.Join(readOnlyDir(t), "completed")
+	marker := filepath.Join(t.TempDir(), "child-ran")
+	bin := filepath.Join(t.TempDir(), "fake")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\ntouch "+marker+"\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+
+	proc := NewProcessor(bin, out, completed, 1, "{author}/{title}", "info")
+	_, err := proc.Run(context.Background(), "cd1", []string{"/tmp/x/a.m4b"}, "", RunOptions{})
+	if err == nil {
+		t.Fatal("Run succeeded; want a completed-directory error")
+	}
+	for _, want := range []string{"completed directory ", completed, "is not writable"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Run error = %q; want it to contain %q", err, want)
+		}
+	}
+	if _, serr := os.Stat(marker); !os.IsNotExist(serr) {
+		t.Errorf("m4b-merge was executed despite the unwritable completed dir (stat err = %v)", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(out, "cd1.tmp")); !os.IsNotExist(serr) {
+		t.Errorf("per-job subtree created before the completed-directory check (stat err = %v)", serr)
+	}
+}
+
 // writeVersionFake writes an executable shell script that answers
 // "--version" by printing a line whose last token is the given version.
 func writeVersionFake(t *testing.T, dir, version string) string {

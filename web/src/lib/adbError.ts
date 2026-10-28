@@ -69,8 +69,39 @@ function backendMessage(working: string): string | null {
 	if (denied) {
 		return `The server can’t read "${denied[1].trim()}" — permission denied. Check that the directory is readable by the Bragi Books service.`;
 	}
+	// Write/create failures. The API names the setting it probed
+	// (`completed directory "/x" is not writable: permission denied`), while
+	// m4b-merge reports `... is not writable` with no path. The cause after
+	// the colon decides the sentence: only a real permission denial gets the
+	// permissions advice — a regular file, a read-only mount, or a full disk
+	// keeps its cause, since changing permissions cannot fix those.
+	const notWritable = working.match(/(?:"([^"]+)"|'([^']+)')?\s*is not writable:?\s*([^\n]*)/i);
+	if (notWritable) {
+		const path = (notWritable[1] ?? notWritable[2] ?? '').trim();
+		const cause = notWritable[3].trim();
+		const target = path ? `"${path}"` : 'a configured directory';
+		if (/permission denied|EACCES/i.test(cause)) {
+			return `The server can’t write to ${target} — permission denied. Check that the directory is writable by the Bragi Books service.`;
+		}
+		if (/not a directory|ENOTDIR/i.test(cause)) {
+			return 'That path exists but is not a directory — pick a directory in Settings.';
+		}
+		if (/read-only file system|EROFS/i.test(cause)) {
+			return `The server can’t write to ${target} — the file system is read-only. Remount it writable or pick another directory in Settings.`;
+		}
+		if (/no space left on device|ENOSPC|quota exceeded|EDQUOT/i.test(cause)) {
+			return `The server can’t write to ${target} — the disk is full. Free space or pick another directory in Settings.`;
+		}
+		return `The server can’t write to ${target}${cause ? ` — ${cause}` : ''}. Check the output and completed directory paths in Settings.`;
+	}
+	const writeDenied = working.match(
+		/(?:mkdir|create|rename|write|chmod|remove)\s+([^:]+):\s*permission denied/i
+	);
+	if (writeDenied) {
+		return `The server can’t write to "${writeDenied[1].trim()}" — permission denied. Check that the directory is writable by the Bragi Books service.`;
+	}
 	if (/permission denied/i.test(working)) {
-		return 'The server has no permission to read that path — check its permissions in Settings.';
+		return 'The server has no permission to access that path — check its permissions in Settings.';
 	}
 
 	// `not a directory` from the stdlib; `invalid argument` is what

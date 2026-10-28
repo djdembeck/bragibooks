@@ -270,6 +270,25 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Directories the server creates subdirectories in are probed before
+	// persisting, but only when this request CHANGES the value: the stored
+	// value is not re-probed, so a mount that went away cannot block
+	// unrelated saves (including the save that clears or fixes it), while a
+	// newly submitted path the server cannot write is rejected here instead
+	// of failing 0s into a job. Blank completed_dir clears the setting.
+	if req.OutputDir != nil {
+		if err := probeChangedDir("output directory", *req.OutputDir, h.svc.Config.Config().Directories.OutputDir); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.CompletedDir != nil {
+		if err := probeChangedDir("completed directory", *req.CompletedDir, h.svc.Config.Config().Directories.CompletedDir); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	// Serialize with the external-API state flows (same full-row
 	// read-modify-write; see persistAPIEndpointState). The lock covers
 	// snapshot-read through row-write, so a concurrent save cannot
@@ -459,4 +478,19 @@ func expandTilde(path string) string {
 		}
 	}
 	return path
+}
+
+// probeChangedDir checks a submitted directory setting the server must write
+// to, but only when it differs from the live (tilde-expanded) value. label
+// names the settings field in the returned 400 message. An empty submitted
+// value always passes: clearing an optional directory never needs access.
+func probeChangedDir(label, submitted, live string) error {
+	v := expandTilde(strings.TrimSpace(submitted))
+	if v == "" || v == live {
+		return nil
+	}
+	if err := audio.CheckDirWritable(v); err != nil {
+		return fmt.Errorf("%s %w", label, err)
+	}
+	return nil
 }
