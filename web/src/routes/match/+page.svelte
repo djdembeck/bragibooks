@@ -955,6 +955,17 @@
 		return roleNames(candidate.details.book, candidate.details.release, 'narrator');
 	}
 
+	/** The quiet credit line under a batch record; also its tooltip, so a
+	 *  clipped narrator list stays recoverable without opening Focused. */
+	function recordCredits(candidate: MatchCandidate): string {
+		const parts = [selectedAuthors(candidate)];
+		const narrators = selectedNarrators(candidate);
+		if (narrators) parts.push(narrators);
+		const runtime = runtimeLabel(releaseRuntimeMs(candidate.details.release));
+		if (runtime) parts.push(runtime);
+		return parts.join(' · ');
+	}
+
 	function selectedCover(candidate: MatchCandidate): string {
 		return (
 			pickCover(candidate.details.release?.images) ||
@@ -1146,10 +1157,9 @@
 
 	function statusKind(
 		candidate: MatchCandidate
-	): 'auto' | 'manual' | 'none' | 'loading' | 'error' | 'excluded' {
-		const kind = matchState(candidate).kind;
+	): 'auto' | 'manual' | 'none' | 'low' | 'loading' | 'error' | 'excluded' {
 		if (candidate.details.book && isReady(candidate) && !candidate.included) return 'excluded';
-		return kind === 'low' ? 'none' : kind;
+		return matchState(candidate).kind;
 	}
 
 	// ── Rich option metadata (hydrated, cached) ────────────────
@@ -1380,12 +1390,14 @@
 	}}
 />
 
-{#snippet matchChip(kind: MatchStateKind, text: string)}
+{#snippet matchChip(kind: MatchStateKind | 'excluded', text: string)}
 	<span class="match__label match__label--{kind}">
 		{#if kind === 'auto' || kind === 'manual'}
 			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4 10-10" /></svg>
 		{:else if kind === 'loading'}
 			<span class="match__label-dot" aria-hidden="true"></span>
+		{:else if kind === 'excluded'}
+			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /></svg>
 		{:else}
 			<svg viewBox="0 0 24 24" aria-hidden="true">
 				<path d="M12 8v4m0 4h.01M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z" />
@@ -1444,7 +1456,13 @@
 							disabled={includedReadyCount === 0 || removingMany}
 							onclick={saveMatches}
 						>
-							{saving ? 'Saving…' : `Save ${includedReadyCount} → Queue`}
+							{#if saving}
+								Saving…
+							{:else}
+								Save {includedReadyCount}<span class="sr-only">
+									matches to the queue</span
+								><span aria-hidden="true"> → Queue</span>
+							{/if}
 						</Button>
 					</div>
 				</div>
@@ -1558,6 +1576,10 @@
 					/>
 					<span>Select all ready</span>
 				</label>
+				<span class="batch__count">
+					{readyCandidates.length} ready · {includedReadyCount} of {candidates.length}
+					{candidates.length === 1 ? 'book' : 'books'} included
+				</span>
 			</div>
 			{#if removeFailure}
 				<div class="batch__alert">
@@ -1588,7 +1610,8 @@
 					{@const ready = isReady(c)}
 					{@const selected = c.details.book}
 					{@const proposed = proposedRelativeName(c)}
-					{@const match = matchState(c)}
+					{@const rowKind = statusKind(c)}
+					{@const rowText = statusText(c)}
 					<li
 						class="batch__row"
 						class:batch__row--excluded={ready && !c.included}
@@ -1676,15 +1699,9 @@
 										<AbdTag href={`https://audiobookdb.org/books/${selected.id}`} />
 									</span>
 									<span class="batch__record-meta-line">
-										{@render matchChip(match.kind, match.text)}
-										<span class="batch__record-meta">
-											{selectedAuthors(c)}
-											{#if selectedNarrators(c)}
-												· {selectedNarrators(c)}
-											{/if}
-											{#if runtimeLabel(releaseRuntimeMs(c.details.release))}
-												· {runtimeLabel(releaseRuntimeMs(c.details.release))}
-											{/if}
+										{@render matchChip(rowKind, rowText)}
+										<span class="batch__record-meta" title={recordCredits(c)}>
+											{recordCredits(c)}
 										</span>
 									</span>
 									{#if editionLine(c)}
@@ -1693,7 +1710,7 @@
 								</span>
 							{:else}
 								<span class="batch__record-body">
-									{@render matchChip(match.kind, match.text)}
+									{@render matchChip(rowKind, rowText)}
 								</span>
 							{/if}
 						</div>
@@ -1759,6 +1776,11 @@
 				{/each}
 			</ul>
 
+			<p class="batch__foot">
+				Approval saves every included ready match and opens the Queue. Proposed names are
+				previews; the processor builds the final name from the ASIN and scheme and reports
+				the actual output path.
+			</p>
 			</section>
 	{:else}
 		<!-- ── Focused review — index + inspector ─────────────── -->
@@ -1802,6 +1824,7 @@
 											class="match__dot"
 											class:match__dot--gold={kind === 'auto'}
 											class:match__dot--green={kind === 'manual'}
+											class:match__dot--amber={kind === 'low'}
 											class:match__dot--red={kind === 'error'}
 											class:match__dot--bare={kind === 'none' || kind === 'excluded'}
 											aria-hidden="true"
@@ -1966,14 +1989,10 @@
 							{@const catalogCover = selectedCover(c)}
 							<div class="match__sechead">
 								<h2>Selected catalog record</h2>
-								<span
-									class="match__label"
-									class:match__label--manual={c.manualPick}
-									class:match__label--auto={!c.manualPick}
-								>
-									<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4 10-10" /></svg>
-									{c.manualPick ? 'Manually selected · not saved' : 'Auto-selected · not saved'}
-								</span>
+								{@render matchChip(
+									c.manualPick ? 'manual' : 'auto',
+									c.manualPick ? 'Matched manually · not saved' : 'Auto-matched · not saved'
+								)}
 							</div>
 							<div class="match__record">
 								<figure class="match__art">
@@ -2391,6 +2410,7 @@
 	<Modal
 		bind:open={removeDialogOpen}
 		title="Remove sources"
+		closeDisabled={removingMany}
 		beforeClose={() => {
 			if (removingMany) return false;
 			cancelRemoveDialog();
@@ -2410,7 +2430,7 @@
 					disabled={removingMany || candidates.length === 0}
 					onchange={toggleAllRemovePicks}
 				/>
-				<span>Select all</span>
+				<span>Select all sources</span>
 			</label>
 			<span class="batch-dialog__pick-count" aria-live="polite">
 				{removeCount} of {candidates.length} selected
@@ -2418,7 +2438,10 @@
 		</div>
 		<ul class="batch-dialog__list">
 			{#each candidates as target (target.bookId)}
-				<li class="batch-dialog__item">
+				<li
+					class="batch-dialog__item"
+					class:batch-dialog__item--picked={removePick.has(target.bookId)}
+				>
 					<label class="batch-dialog__pick">
 						<input
 							id={`remove-pick-${target.bookId}`}
@@ -2654,7 +2677,7 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 9px;
-		min-height: 36px;
+		min-height: 44px;
 		padding: 0 4px;
 		font-size: 14px;
 		font-weight: 600;
@@ -2671,6 +2694,22 @@
 
 	.batch__all input:disabled {
 		cursor: not-allowed;
+	}
+
+	.batch__count {
+		font-size: 13px;
+		color: var(--m-muted);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.batch__foot {
+		margin: 0;
+		padding: 12px 18px;
+		border-top: 1px solid var(--m-border-soft);
+		font-size: 12.5px;
+		line-height: 1.45;
+		color: var(--m-muted);
+		max-width: 90ch;
 	}
 
 	.batch__list {
@@ -2752,7 +2791,7 @@
 		height: 44px;
 		object-fit: cover;
 		border: 1px solid var(--m-border);
-		border-radius: 3px;
+		border-radius: 4px;
 		background: var(--elevated);
 		flex-shrink: 0;
 	}
@@ -2868,7 +2907,7 @@
 		overflow: hidden;
 		background: var(--elevated);
 		border: 1px solid var(--m-border);
-		border-radius: 3px;
+		border-radius: 4px;
 	}
 
 	.batch__record-art img {
@@ -2959,6 +2998,7 @@
 	}
 
 	.batch__actions :global(.batch__remove) {
+		min-height: 36px;
 		padding: 0 12px;
 		font-size: 13px;
 	}
@@ -3132,7 +3172,7 @@
 		width: 40px;
 		height: 40px;
 		object-fit: cover;
-		border-radius: 3px;
+		border-radius: 4px;
 		border: 1px solid var(--m-border);
 		flex-shrink: 0;
 		background: var(--elevated);
@@ -3176,6 +3216,10 @@
 		color: var(--state-red);
 	}
 
+	.match__src-status[data-kind='low'] {
+		color: var(--state-amber);
+	}
+
 	.match__dot {
 		width: 7px;
 		height: 7px;
@@ -3190,6 +3234,10 @@
 
 	.match__dot--green {
 		background: var(--state-green);
+	}
+
+	.match__dot--amber {
+		background: var(--state-amber);
 	}
 
 	.match__dot--red {
@@ -3279,7 +3327,7 @@
 		height: 56px;
 		object-fit: cover;
 		border: 1px solid var(--m-border);
-		border-radius: 3px;
+		border-radius: 4px;
 		background: var(--elevated);
 	}
 
@@ -3493,6 +3541,12 @@
 		background: var(--m-surface);
 		border: 1px solid var(--m-border);
 		color: var(--m-muted);
+	}
+
+	.match__label--excluded {
+		background: var(--m-surface);
+		border: 1px solid var(--m-border);
+		color: var(--m-ink-2);
 	}
 
 	.match__label--low {
@@ -3834,7 +3888,7 @@
 		width: 38px;
 		height: 38px;
 		flex-shrink: 0;
-		border-radius: 3px;
+		border-radius: 4px;
 		object-fit: cover;
 		border: 1px solid var(--m-border);
 		background: var(--elevated);
@@ -4149,6 +4203,14 @@
 		background: var(--m-panel);
 	}
 
+	.batch-dialog__item--picked {
+		background: var(--m-selected);
+	}
+
+	.batch-dialog__item--picked .batch-dialog__pick:hover {
+		background: transparent;
+	}
+
 	.batch-dialog__item:last-child {
 		border-bottom: 0;
 	}
@@ -4182,7 +4244,7 @@
 		object-fit: cover;
 		background: var(--elevated);
 		border: 1px solid var(--m-border);
-		border-radius: 3px;
+		border-radius: 4px;
 	}
 
 	.batch-dialog__thumb--empty {
@@ -4299,12 +4361,12 @@
 
 		.match__mode {
 			flex: 1;
-			min-height: 40px;
+			min-height: 44px;
 		}
 
 		.match__head :global(.match__save) {
 			width: 100%;
-			min-height: 46px;
+			min-height: 44px;
 		}
 
 		.match__grid {
@@ -4382,7 +4444,8 @@
 			flex-direction: row;
 			align-items: center;
 			justify-content: space-between;
-			padding: 12px 14px;
+			gap: 4px 12px;
+			padding: 10px 14px;
 		}
 
 		.batch__alert {
@@ -4462,7 +4525,15 @@
 
 		.batch__check {
 			align-self: start;
-			min-height: 40px;
+			min-height: 44px;
+		}
+
+		.batch__actions :global(.btn) {
+			min-height: 44px;
+		}
+
+		.batch__foot {
+			padding: 12px 14px;
 		}
 
 		.match__record {

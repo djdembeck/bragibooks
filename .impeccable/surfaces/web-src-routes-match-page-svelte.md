@@ -57,7 +57,9 @@ The user subsequently approved refreshing all 19 sample records after inspection
 
 Both public book-link constructors now use `/books/{id}`. Settings account creation uses `/users/signup`, verified against the catalog's own login link; `/users/register` was a profile route. All 19 stored public book destinations returned HTTP 200 with their expected canonical URLs and actual book titles. Browser smoke showed Random House Audio on record detail and Tantor Audio in focused Match, with valid plural book links. Frontend check and production build passed with zero errors and warnings. These are data/link corrections; the visual system is unchanged.
 
-## Batch removal pass
+## Batch removal pass — SUPERSEDED
+
+> **Superseded.** The removal pass was replaced by dialog-owned bulk removal (see the last section). No pass mode, red checkbox faces, or destructive row selection remain; the paragraphs below are historical evidence only.
 
 The user asked for a "remove selected" action on Match so a batch of unwanted sources does not need one click per row. Per the user's two choices, selection is a **deliberate pass** entered from the batch bar, and the final delete is confirmed in a **dialog that lists every source name**.
 
@@ -71,7 +73,9 @@ The user asked for a "remove selected" action on Match so a batch of unwanted so
 
 **Observed, not changed.** `stripExtension` (pre-existing) strips everything after the last period when a source title contains author initials, so `Ursula K. Le Guin - …` searches for `Ursula K`. That row correctly shows "No catalog match" and was used as a removal target; the truncation is out of scope here.
 
-## Follow-up polish after critique
+## Follow-up polish after critique (removal pass — historical)
+
+> **Superseded.** This records the retired pass. The current dialog model is documented in the last section.
 
 The critique's three P2 findings and both minor notes were applied; `impeccable doctor` was run for the sidecar drift.
 
@@ -88,3 +92,17 @@ The critique's three P2 findings and both minor notes were applied; `impeccable 
 **Dialog anchoring (found by the re-critique, fixed).** Opening the confirmation dialog from a scrolled list moved the page because the shared `<dialog>` carried a `relative` class, overriding the native modal positioning: the dialog was page-anchored (`position: absolute` at the end of the document) and the browser scrolled to reveal it. Removing that class restores the native fixed top layer: the dialog is centered in the viewport (measured top 211px for a 277px dialog in a 700px viewport), opening no longer changes scroll position, cancelling preserves the list position (scroll 450 → 450) and returns focus to the commit control. Verified in Match and in the Settings directory picker (also `position: fixed`, centered).
 
 **Re-critique.** A second dual-agent critique measured the polished surface at 35/40 (up from 30/40). Detector and in-page overlays were clean in the base, desktop pass, mobile pass, and dialog states. The dialog-scroll finding from that assessment was fixed immediately after measurement, as above. The normal-review source ellipsis was then resolved by applying the two-line wrap in both modes (user's choice); the mobile normal-mode Save stays as chosen (scrolling with the header, no extra dock).
+
+## Dialog-owned batch removal (current)
+
+The pass above is retired. The include checkbox always means "include in this save"; destructive selection lives in the dialog and nowhere else.
+
+**Direction contract.** The red-wash **Remove…** sits in the sticky head's commit row (batch review only) and opens the native dialog "Remove sources". The dialog owns a separate checked set that starts empty, or with the failed survivors after a retry. It lists every source — 32px source art, folder name, and the selected record or match state — above a tri-state "Select all sources" and an "N of M selected" count. Picked rows take the pale-gold selection wash. The lead states records are deleted and files on disk are not touched; the footer's red "Remove N records" is disabled at zero. While the sequential DELETE loop runs, every dialog control (close X, Cancel, select-all, rows, commit) is disabled, Escape is refused, and the page's mode switch, Save, include boxes, and per-row actions are disabled. Focus returns to the Remove… trigger (or Save/title) when the loop ends. A partial failure closes the dialog, keeps exactly the survivors checked, reports `N of M records were not removed` plus the cleaned cause and raw detail in the alert above the list, and focuses Retry, which reopens the dialog with the survivors preselected. Success announces `Removed N records.`.
+
+**Batch row.** Source art, Before (two-line wrap), Proposed output (scheme preview), then the catalog record: cover, title, AbDB mark, match-state chip, credits/runtime (full line in the tooltip), and the edition line. The chip is the shared row state: auto, manual, low ("No confident match", amber), none, error, loading, and "Excluded from save" (neutral, minus glyph) for a ready row whose include box is unchecked. The bar holds "Select all ready" plus the tabular `N ready · M of X books included`; a quiet footnote states proposed names are previews and the processor reports the actual path. Phones use the stacked row layout, 44px targets, a scrolling head, and a full-width Remove…/Save row.
+
+**Polished after critique + audit.** Dual-agent critique 32/40; audit 14/20 with 0 P0/P1. Applied: exclusion stated per row and counted in the bar; one match-state vocabulary and colour mapping across batch, focused index, and inspector ("Auto-matched", "Matched manually", "Excluded from save"; low-confidence amber in both modes); the dialog X disabled and muted mid-flight; pale-gold selected rows; 44px select-all, row check, Review/Remove, mode, Remove…, and Save targets on phones (compact 36px row actions on desktop); the preview footnote restored; full credit line as a tooltip; "Select all sources" in the dialog; Save named "Save N matches to the queue" for assistive tech; `Modal` gained `closeDisabled` for the refusal state. Verified live in the session at 1440×900, 1100×800, 760×900, and 390×844 in a disposable 8-source fixture with a local catalog stub: mid-flight dialog open with X disabled at 0.5 opacity, Escape ignored, commit "Removing…", all picks disabled; after resolve two rows gone, notice "Removed 2 records.", focus returned to Remove…; excluded row chip and bar count correct; low state amber in both modes. `svelte-check` 0 errors/0 warnings; vitest 35/35; `impeccable detect` no findings. Pre-polish review images: `.impeccable/review/match-batch-2026-10-28-*.webp`.
+
+**Accepted limit.** Phone rows remain ~275px because the two-line source identity and the edition line are direction-contract requirements; the pass improved the bar (89px, count visible) and every control to 44px rather than hiding record detail. The alternative — dropping the edition on phones — was rejected to keep edition differences visible in batch review.
+
+**Observed, not changed.** `stripExtension` (pre-existing) strips everything after the last period when a source title contains author initials, so `Ursula K. Le Guin - …` searches for `Ursula K`. That row correctly shows "No catalog match" and was used as a removal target; the truncation is out of scope here.
