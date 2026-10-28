@@ -557,7 +557,11 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		// A cancellation during the run kills m4b-merge via its context;
 		// that is 'cancelled', not 'error'.
 		if state != nil && state.jobCtx != nil && state.jobCtx.Err() != nil {
-			s.finalizeCancelled(job)
+			stdout := ""
+			if result != nil {
+				stdout = result.Stdout
+			}
+			s.finalizeCancelled(job, stdout)
 			return
 		}
 		if job.BookID.Valid {
@@ -609,18 +613,12 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 }
 
 // finalizeCancelled marks a running job cancelled in the DB after its
-// m4b-merge process was killed via the job context, resets the book to
-// 'matched' (only if it is still 'processing'), and emits the terminal
-// progress signal. The queued-cancel path resets the book in CancelJob
-// instead; this is the running path.
-func (s *ProcessingService) finalizeCancelled(job *models.ProcessingJob) {
-	var stdout string
-	if job.BookID.Valid {
-		var out sql.NullString
-		if err := s.db.QueryRow("SELECT output FROM processing_jobs WHERE id = ?", job.ID).Scan(&out); err == nil {
-			stdout = out.String
-		}
-	}
+// m4b-merge process was killed via the job context, persists the stdout the
+// killed run had already produced, resets the book to 'matched' (only if it
+// is still 'processing'), and emits the terminal progress signal. The
+// queued-cancel path resets the book in CancelJob instead; this is the
+// running path.
+func (s *ProcessingService) finalizeCancelled(job *models.ProcessingJob, stdout string) {
 	s.db.Exec(
 		"UPDATE processing_jobs SET status = ?, error = ?, output = ?, completed_at = datetime('now') WHERE id = ?",
 		jobStatusCancelled, "cancelled by user", stdout, job.ID,

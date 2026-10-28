@@ -88,6 +88,18 @@ func writeSleepingBinary(t *testing.T, dir string) string {
 	return p
 }
 
+// writeStreamingSleepBinary prints one line before sleeping, so a running
+// job has live stdout in memory when it is cancelled.
+func writeStreamingSleepBinary(t *testing.T, dir string) string {
+	t.Helper()
+	p := filepath.Join(dir, "stream-sleep-bin")
+	script := "#!/bin/sh\nprintf 'partial live line\\n'\nexec sleep 300 1>&- 2>&-\n"
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatalf("write streaming sleeping binary: %v", err)
+	}
+	return p
+}
+
 // setJobStatus directly overwrites a job's DB status, to place a job in a
 // terminal state for the 409 path.
 func setJobStatus(t *testing.T, db *sql.DB, id, status string) {
@@ -251,6 +263,49 @@ func TestCancelRunningJob(t *testing.T) {
 	}
 	if got := bookStatusFromDB(t, h.svc.DB, 1); got != "matched" {
 		t.Errorf("final book status = %q; want matched", got)
+	}
+}
+
+func TestCancelRunningJobPersistsLiveOutput(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+
+	bin := writeStreamingSleepBinary(t, t.TempDir())
+	svc.proc = &audio.Processor{Binary: bin}
+
+	ctx := t.Context()
+	svc.RunWorkers(ctx, 1)
+
+	id, err := svc.QueueJob(ctx, 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	waitJobStatus(t, h.svc.DB, id, "running")
+
+	// Wait until the child's line reached the live buffer; cancelling before
+	// stdout exists would test nothing.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if st := svc.GetJob(id); st != nil && strings.Contains(st.outputSnapshot(), "partial live line") {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if st := svc.GetJob(id); st == nil || !strings.Contains(st.outputSnapshot(), "partial live line") {
+		t.Fatal("live stdout never reached the job state before cancellation")
+	}
+
+	w := doCancel(t, h, id)
+	if w.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	waitJobStatus(t, h.svc.DB, id, "cancelled")
+
+	var output string
+	if err := h.svc.DB.QueryRow("SELECT output FROM processing_jobs WHERE id = ?", id).Scan(&output); err != nil {
+		t.Fatalf("cancelled output query: %v", err)
+	}
+	if !strings.Contains(output, "partial live line") {
+		t.Errorf("cancelled output = %q; want the stdout produced before cancellation", output)
 	}
 }
 

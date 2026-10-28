@@ -34,6 +34,7 @@ All notable changes to this project will be documented in this file. See [standa
   - Queue cards show the book cover and author, an indeterminate processing rail and the current engine stage, and the destination `m4b-merge` reports (the completed `output_file`, or the live path with its per-job `.tmp` segment removed). Until the engine resolves the path, the queue-time profile is labeled "Output profile", never "Destination".
   - `GET /api/jobs` and `GET /api/jobs/:id` expose a profiled job's stored output directory and path format, so a restored active job keeps its destination context.
   - The live log stays where the operator scrolls it (re-pinning only at the bottom) and is keyboard-scrollable; running jobs lead the active section, and a book with a queued job no longer remains selectable in Ready to process.
+  - A transient stream drop reconnects with the server's accumulated output instead of freezing the log, and cancelling a running job keeps the output it produced before the process was killed.
 
 - **Saved output profiles with queue-time snapshots**
   - Added named output profiles (output directory and/or relative path format) managed on the Settings page via `/api/output-profiles` (list, create, update, delete). Blank fields inherit the global values.

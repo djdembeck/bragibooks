@@ -22,6 +22,8 @@
 		startedAt: string | null;
 		completedAt: string | null;
 		createdAt: string | null;
+		/** Explicit FIFO position; SQLite's second-precision timestamps can tie. */
+		queueOrder: number;
 		/** Local cancellation in flight: badge is optimistic until the backend terminal state lands. */
 		cancelRequested: boolean;
 		/** Final .m4b reported by the API once the job finishes. */
@@ -45,15 +47,18 @@
 	let loading = $state(true);
 	let starting = $state(false);
 	let jobs = $state<JobItem[]>([]);
+	let queueSequence = 0;
 	let cancelling = $state<Set<string>>(new Set());
 	const cleanupMap = $state(new Map<string, () => void>());
 	const pollTimers = $state(new Map<string, number>());
+	const retryTimers = $state(new Map<string, number>());
 
 	$effect(() => {
 		load();
 		return () => {
 			cleanupMap.forEach((fn) => fn());
 			pollTimers.forEach((timer) => clearInterval(timer));
+			retryTimers.forEach((timer) => clearTimeout(timer));
 		};
 	});
 
@@ -109,12 +114,17 @@
 	function restoreJobs(jobList: ProcessingJob[]) {
 		cleanupMap.forEach((fn) => fn());
 		pollTimers.forEach((timer) => clearInterval(timer));
+		retryTimers.forEach((timer) => clearTimeout(timer));
 		cleanupMap.clear();
 		pollTimers.clear();
+		retryTimers.clear();
 
 		const items: JobItem[] = [];
 		const bookRequests = new Map<number, Promise<BookWithPeople>>();
-		for (const j of jobList) {
+		// The API is newest-first. Rebuild FIFO positions so tied second-level
+		// timestamps cannot reverse a batch; new jobs continue from here.
+		queueSequence = jobList.length;
+		for (const [index, j] of jobList.entries()) {
 			const known = j.book_id !== null ? books.find((book) => book.id === j.book_id) : undefined;
 			const item = $state<JobItem>({
 				id: j.id,
@@ -131,6 +141,7 @@
 				startedAt: j.started_at,
 				completedAt: j.completed_at,
 				createdAt: j.created_at ?? null,
+				queueOrder: jobList.length - index,
 				cancelRequested: false,
 				outputDir: j.output_dir,
 				outputScheme: j.output_scheme,
@@ -161,7 +172,30 @@
 	const JOB_STATUSES = new Set(['queued', 'running', 'done', 'error', 'cancelled']);
 	const TERMINAL_STATUSES = new Set(['done', 'error', 'cancelled']);
 
-	function connectSSE(item: JobItem) {
+	function clearRetry(id: string) {
+		const timer = retryTimers.get(id);
+		if (timer) clearTimeout(timer);
+		retryTimers.delete(id);
+	}
+
+	/** Re-open the live stream after a transient failure. Polling keeps the
+	 *  canonical job state current in the meantime, but only the SSE snapshot
+	 *  restores the in-memory log; retrying is what keeps the log live. */
+	function scheduleReconnect(item: JobItem, attempt: number) {
+		clearRetry(item.id);
+		const delay = Math.min(1000 * 2 ** Math.min(attempt, 3), 10000);
+		retryTimers.set(
+			item.id,
+			window.setTimeout(() => {
+				retryTimers.delete(item.id);
+				if (!isActiveJob(item) || TERMINAL_STATUSES.has(item.status)) return;
+				connectSSE(item, attempt + 1);
+			}, delay)
+		);
+	}
+
+	function connectSSE(item: JobItem, attempt = 0) {
+		clearRetry(item.id);
 		const stop = streamEvents(
 			`/api/jobs/${item.id}/stream`,
 			(raw) => {
@@ -179,6 +213,7 @@
 					if (parsed.message && !parsed.output && !item.output) item.output += parsed.message + '\n';
 					if (parsed.error) item.error = parsed.error;
 					if (TERMINAL_STATUSES.has(item.status)) {
+						clearRetry(item.id);
 						stop();
 						cleanupMap.delete(item.id);
 						// The SSE payload carries no clock fields and a running cancel
@@ -194,8 +229,14 @@
 			() => {
 				stop();
 				cleanupMap.delete(item.id);
-				pollJob(item);
+				void pollJob(item);
+				if (TERMINAL_STATUSES.has(item.status) || !isActiveJob(item)) {
+					clearRetry(item.id);
+					startPolling(item);
+					return;
+				}
 				startPolling(item);
+				scheduleReconnect(item, attempt);
 			}
 		);
 		cleanupMap.set(item.id, stop);
@@ -232,6 +273,7 @@
 				return;
 			}
 			item.cancelRequested = false;
+			clearRetry(item.id);
 			stopPolling(item.id);
 			refreshAfterTerminal(item.id);
 		} catch {
@@ -248,6 +290,7 @@
 	async function refreshAfterTerminal(jobId: string) {
 		const item = jobs.find((j) => j.id === jobId);
 		if (item) {
+			clearRetry(jobId);
 			const existing = cleanupMap.get(jobId);
 			if (existing) {
 				existing();
@@ -293,6 +336,7 @@
 					startedAt: null,
 					completedAt: null,
 					createdAt: null,
+					queueOrder: ++queueSequence,
 					cancelRequested: false,
 					outputDir: response.output_dir,
 					outputScheme: response.output_scheme,
@@ -324,9 +368,7 @@
 		return active.sort((a, b) => {
 			const runningFirst = Number(isRunning(b)) - Number(isRunning(a));
 			if (runningFirst !== 0) return runningFirst;
-			const aCreated = a.createdAt ? Date.parse(a.createdAt) : 0;
-			const bCreated = b.createdAt ? Date.parse(b.createdAt) : 0;
-			return aCreated - bCreated;
+			return a.queueOrder - b.queueOrder;
 		});
 	});
 	/** A queued book has not started yet, so its status is still "matched". It
@@ -436,6 +478,7 @@
 			job.status = 'cancelled';
 			job.error = null;
 			job.cancelRequested = true;
+			clearRetry(job.id);
 			const existing = cleanupMap.get(job.id);
 			if (existing) {
 				existing();
