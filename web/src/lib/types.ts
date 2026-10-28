@@ -131,6 +131,8 @@ export interface ProcessingJob {
 	started_at: string | null;
 	completed_at: string | null;
 	created_at: string;
+	/** Durable enqueue order; SQLite created_at is second-precision. */
+	queue_order?: number;
 	/** Queue-time destination snapshot (profiled batches only). */
 	output_dir?: string;
 	output_scheme?: string;

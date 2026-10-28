@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
 	output_file TEXT,
 	started_at TEXT,
 	completed_at TEXT,
-	created_at TEXT DEFAULT (datetime('now'))
+	created_at TEXT DEFAULT (datetime('now')),
+	queue_seq INTEGER
 );
 `
 
@@ -1076,6 +1077,48 @@ func TestStreamJobStreamsLiveOutput(t *testing.T) {
 	}
 	if body := w.body(); !strings.Contains(body, `{"status":"done"}`) {
 		t.Errorf("stream body = %q; want the trailing done line", body)
+	}
+}
+
+// TestJobsExposeDurableQueueOrder covers the tie-breaker for jobs queued in
+// the same second: the DB sequence is monotonic and reaches the jobs API so
+// a reload can rebuild FIFO order.
+func TestJobsExposeDurableQueueOrder(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+
+	first, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	if err != nil {
+		t.Fatalf("queue first job: %v", err)
+	}
+	second, err := svc.QueueJob(t.Context(), 0, []string{"/x/b.m4b"}, audio.RunOptions{})
+	if err != nil {
+		t.Fatalf("queue second job: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/jobs?limit=10", nil)
+	w := httptest.NewRecorder()
+	h.ListJobs(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list jobs status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Jobs []struct {
+			ID         string `json:"id"`
+			QueueOrder int64  `json:"queue_order"`
+		} `json:"jobs"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode jobs: %v", err)
+	}
+	orders := make(map[string]int64, len(resp.Jobs))
+	for _, job := range resp.Jobs {
+		orders[job.ID] = job.QueueOrder
+	}
+	if orders[first] <= 0 || orders[second] <= 0 {
+		t.Fatalf("queue_order missing: first=%d second=%d", orders[first], orders[second])
+	}
+	if orders[second] <= orders[first] {
+		t.Errorf("queue_order first=%d second=%d; want second after first", orders[first], orders[second])
 	}
 }
 

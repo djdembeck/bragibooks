@@ -208,7 +208,8 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 
 	// Insert into DB
 	_, err = s.db.Exec(
-		"INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action) VALUES (?, ?, ?, ?, ?)",
+		`INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action, queue_seq)
+		 VALUES (?, ?, ?, ?, ?, (SELECT COALESCE(MAX(queue_seq), 0) + 1 FROM processing_jobs))`,
 		job.ID, job.BookID.Int64, job.M4bMergeArgs, job.Status, job.Action,
 	)
 	if err != nil {
@@ -258,8 +259,8 @@ func (s *ProcessingService) RecordBookAction(bookID int64, action, detail string
 		return
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO processing_jobs (id, book_id, status, action, detail, started_at, completed_at)
-		 VALUES (?, ?, 'done', ?, ?, datetime('now'), datetime('now'))`,
+		`INSERT INTO processing_jobs (id, book_id, status, action, detail, started_at, completed_at, queue_seq)
+		 VALUES (?, ?, 'done', ?, ?, datetime('now'), datetime('now'), (SELECT COALESCE(MAX(queue_seq), 0) + 1 FROM processing_jobs))`,
 		uuid.New().String(), bookID, action, detail,
 	)
 	if err != nil {
@@ -847,6 +848,7 @@ func jobResp(job models.ProcessingJob) map[string]any {
 		"started_at":   nil,
 		"completed_at": nil,
 		"created_at":   job.CreatedAt,
+		"queue_order":  job.QueueSeq,
 	}
 	if job.BookID.Valid {
 		resp["book_id"] = job.BookID.Int64
@@ -882,7 +884,7 @@ func jobResp(job models.ProcessingJob) map[string]any {
 	return resp
 }
 
-const jobsColumns = "id, book_id, status, action, detail, output, error, output_file, started_at, completed_at, created_at, m4b_merge_args"
+const jobsColumns = "id, book_id, status, action, detail, output, error, output_file, started_at, completed_at, created_at, m4b_merge_args, COALESCE(queue_seq, rowid) AS queue_seq"
 
 // ListJobs handles GET /api/jobs?limit=N&book_id=B.
 // Returns recent jobs newest-first with clean JSON matching the single-job contract.
@@ -912,7 +914,7 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 		recentQuery += " WHERE book_id = ?"
 		recentArgs = append(recentArgs, bookID)
 	}
-	recentQuery += " ORDER BY created_at DESC LIMIT ?"
+	recentQuery += " ORDER BY created_at DESC, queue_seq DESC LIMIT ?"
 	recentArgs = append(recentArgs, limit)
 	recent, err := h.queryJobs(recentQuery, recentArgs)
 	if err != nil {
@@ -930,7 +932,7 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 	} else {
 		activeQuery += " WHERE status IN (?, ?)"
 	}
-	activeQuery += " ORDER BY started_at DESC"
+	activeQuery += " ORDER BY queue_seq ASC"
 	activeArgs = append(activeArgs, jobStatusQueued, jobStatusRunning)
 	active, err := h.queryJobs(activeQuery, activeArgs)
 	if err != nil {
@@ -969,7 +971,7 @@ func (h *Handler) queryJobs(query string, args []any) ([]models.ProcessingJob, e
 		var job models.ProcessingJob
 		var mergeArgs sql.NullString
 		err := rows.Scan(&job.ID, &job.BookID, &job.Status, &job.Action, &job.Detail,
-			&job.Output, &job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt, &mergeArgs)
+			&job.Output, &job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt, &mergeArgs, &job.QueueSeq)
 		if err != nil {
 			continue
 		}
@@ -984,13 +986,13 @@ func (h *Handler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chiURLParam(r, "id")
 
 	row := h.svc.DB.QueryRow(
-		"SELECT id, book_id, m4b_merge_args, status, action, detail, output, error, output_file, started_at, completed_at, created_at FROM processing_jobs WHERE id = ?",
+		"SELECT id, book_id, m4b_merge_args, status, action, detail, output, error, output_file, started_at, completed_at, created_at, COALESCE(queue_seq, rowid) FROM processing_jobs WHERE id = ?",
 		jobID,
 	)
 	var job models.ProcessingJob
 	var jobArgs sql.NullString // audit rows have no m4b-merge args (details live in the detail column)
 	err := row.Scan(&job.ID, &job.BookID, &jobArgs, &job.Status, &job.Action, &job.Detail,
-		&job.Output, &job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt)
+		&job.Output, &job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt, &job.QueueSeq)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "job not found")
 		return

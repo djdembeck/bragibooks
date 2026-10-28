@@ -121,9 +121,9 @@
 
 		const items: JobItem[] = [];
 		const bookRequests = new Map<number, Promise<BookWithPeople>>();
-		// The API is newest-first. Rebuild FIFO positions so tied second-level
-		// timestamps cannot reverse a batch; new jobs continue from here.
-		queueSequence = jobList.length;
+		// Use the API's durable enqueue order; fall back to API position for
+		// legacy rows so tied second-level timestamps cannot reverse a batch.
+		queueSequence = Math.max(0, ...jobList.map((j) => j.queue_order ?? 0), jobList.length);
 		for (const [index, j] of jobList.entries()) {
 			const known = j.book_id !== null ? books.find((book) => book.id === j.book_id) : undefined;
 			const item = $state<JobItem>({
@@ -141,7 +141,7 @@
 				startedAt: j.started_at,
 				completedAt: j.completed_at,
 				createdAt: j.created_at ?? null,
-				queueOrder: jobList.length - index,
+				queueOrder: j.queue_order ?? (jobList.length - index),
 				cancelRequested: false,
 				outputDir: j.output_dir,
 				outputScheme: j.output_scheme,
@@ -264,6 +264,7 @@
 			item.startedAt = job.started_at;
 			item.completedAt = job.completed_at;
 			item.createdAt = job.created_at ?? null;
+			if (job.queue_order !== undefined) item.queueOrder = job.queue_order;
 			item.outputFile = job.output_file ?? null;
 			item.outputDir = job.output_dir ?? item.outputDir;
 			item.outputScheme = job.output_scheme ?? item.outputScheme;
