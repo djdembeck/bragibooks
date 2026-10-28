@@ -111,6 +111,16 @@
 		white-space: nowrap;
 	}
 	.output-profile-selector__select {
+		/* Content-sized: the global width:100% rule would make the select
+		 * fill its parent, wrapping the label onto its own line and — with
+		 * the summary row inside the same flex container — inflating the
+		 * whole selector to the summary sentence's width. A small flex basis
+		 * keeps the label beside the select even when a long profile name
+		 * would otherwise raise the select's max-content width. */
+		flex: 1 1 8rem;
+		width: auto;
+		max-width: 100%;
+		min-width: 0;
 		min-height: 2.75rem;
 		padding: 0 0.5rem;
 		font-size: 0.8125rem;
@@ -121,7 +131,7 @@
 	}
 	.output-profile-selector__summary {
 		margin: 0;
-		width: 100%;
+		flex: 0 0 100%;
 		font-size: 0.75rem;
 		color: var(--text-muted);
 		overflow-wrap: anywhere;

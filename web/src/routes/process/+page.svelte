@@ -385,22 +385,24 @@
 					<section class="ready-list" aria-labelledby="ready-title">
 						<div class="section-heading"><div><h2 id="ready-title">Ready to process <span>{matchedBooks.length}</span></h2><p>Metadata matched. Select the books to include in this batch.</p></div></div>
 						<div class="selection-toolbar">
-							<label class="select-all"><input bind:this={selectAllControl} type="checkbox" checked={matchedBooks.length > 0 && selectedReadyCount === matchedBooks.length} onchange={(event) => {
-								const checked = event.currentTarget.checked;
-								const next = new Set(selectedIds);
-								matchedBooks.forEach((book) => { if (checked) next.add(book.id); else next.delete(book.id); });
-								selectedIds = next;
-							}} aria-label="Select all matched books" /><span>{selectedReadyCount} selected of {matchedBooks.length}</span></label>
-							{#if selectedReadyCount > 0}
-								<div class="profile-pick">
-									<OutputProfileSelector
-										{profiles}
-										bind:selectedProfileId
-										{profilesError}
-										batchCount={selectedReadyCount}
-									/>
-								</div>
-							{/if}
+							<div class="toolbar-lead">
+								<label class="select-all"><input bind:this={selectAllControl} type="checkbox" checked={matchedBooks.length > 0 && selectedReadyCount === matchedBooks.length} onchange={(event) => {
+									const checked = event.currentTarget.checked;
+									const next = new Set(selectedIds);
+									matchedBooks.forEach((book) => { if (checked) next.add(book.id); else next.delete(book.id); });
+									selectedIds = next;
+								}} aria-label="Select all matched books" /><span>{selectedReadyCount} selected of {matchedBooks.length}</span></label>
+								{#if selectedReadyCount > 0}
+									<div class="profile-pick">
+										<OutputProfileSelector
+											{profiles}
+											bind:selectedProfileId
+											{profilesError}
+											batchCount={selectedReadyCount}
+										/>
+									</div>
+								{/if}
+							</div>
 							<Button loading={starting} disabled={selectedReadyCount === 0} onclick={start}>Start processing <ArrowRight size={16} aria-hidden="true" /></Button>
 						</div>
 						<div class="ready-rows">
@@ -499,9 +501,11 @@
 	.section-heading h2 { display: flex; align-items: center; gap: 0.6rem; margin: 0; font-size: 1.0625rem; font-weight: 650; }
 	.section-heading h2 span, .count { color: var(--text-muted); font-size: 0.8125rem; font-weight: 500; font-variant-numeric: tabular-nums; }
 	.section-heading p { color: var(--text-muted); font-size: 0.8125rem; margin-top: 0.35rem; }
-	.selection-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.75rem 1.5rem; background: var(--surface); border-top: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); }
-	.select-all { display: flex; align-items: center; gap: 0.75rem; min-height: 2.75rem; font-size: 0.8125rem; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-	.profile-pick { min-width: 0; }
+	.selection-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem 1rem; padding: 0.75rem 1.5rem; background: var(--surface); border-top: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); }
+	.toolbar-lead { display: flex; align-items: center; flex-wrap: nowrap; gap: 0.75rem 1rem; flex: 1 1 24rem; min-width: 0; }
+	.select-all { display: flex; align-items: center; gap: 0.75rem; flex: 0 0 auto; min-height: 2.75rem; font-size: 0.8125rem; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+	.profile-pick { flex: 0 1 22rem; min-width: 0; max-width: 22rem; }
+	.selection-toolbar :global(.btn) { margin-left: auto; }
 	.queue-row { display: grid; grid-template-columns: 2.75rem 3rem minmax(0, 1fr) auto; align-items: center; gap: 0.75rem; padding: 0.875rem 1.5rem 0.875rem 0.75rem; border-bottom: 1px solid var(--border-subtle); }
 	.queue-row:last-child { border-bottom: 0; }
 	.queue-row:hover { background: var(--surface); }
@@ -564,7 +568,9 @@
 		.section-heading h2 { font-size: 1rem; }
 		.selection-toolbar { padding: 0.75rem 1.125rem; gap: 0.5rem; flex-wrap: wrap; }
 		.selection-toolbar :global(.btn) { flex: 1; min-width: 10rem; }
+		.toolbar-lead { flex: 1 1 100%; gap: 0.5rem; flex-wrap: wrap; }
 		.select-all { flex: 1; white-space: nowrap; }
+		.profile-pick { flex: 1 1 100%; max-width: none; }
 		.queue-row { grid-template-columns: 2.75rem 3rem minmax(0, 1fr); padding: 0.875rem 1.125rem 0.875rem 0.25rem; gap: 0.5rem; }
 		.ready-state { grid-column: 3; margin-top: -0.25rem; }
 		.pending-intro { align-items: flex-start; flex-direction: column; gap: 0; }
