@@ -231,7 +231,7 @@ Rounding runs on four steps by role: 6px (`sm`) for buttons, inputs, checkboxes,
 - **Mobile:** destinations move to a horizontally scrollable second row; targets stay ≥44px.
 
 ### Page Header
-Title in the display face with an optional 15px secondary description (65ch) above a 1px `#d7d7d0` rule; 1.5rem below the rule. Match's head is sticky on desktop with the mode controls and one commit row on the right: the red-wash **Remove N** (only while sources are excluded from the save) and the gold counted **Save N matches → Queue**; on phones the head scrolls with the list and the two actions share a full-width row.
+Title in the display face with an optional 15px secondary description (65ch) above a 1px `#d7d7d0` rule; 1.5rem below the rule. Match's head is sticky on desktop with the mode controls and one commit row on the right: the red-wash **Remove…** action (batch review only) and the gold counted **Save N → Queue**; on phones the head scrolls with the list and the two actions share a full-width row.
 
 ### Inputs / Fields
 - **Style:** `#f8f8f6` fill, 1px `#92928a` border, 6px radius, 44px min-height.
@@ -254,7 +254,7 @@ Queue cards and book-record job history list Started, Done, Created, and the dur
 Segmented pair (Batch / Focused) on Match: `#f8f8f6` track, 1px border, 6px outer / 4px inner radius; the pressed segment takes the pale gold `#fff4d3` fill with a 1px inset hairline.
 
 ### Batch removal (Match)
-The row checkbox always means "include in this save"; unchecked sources are the removal set, and their rows sit dimmed. The red-wash **Remove N** action lives in the head's commit row, appears only while the set is non-empty, and opens the native dialog headed "Remove N records?" with an uppercase "N sources" line above a scrollable list of every source name and its selected record title, the files-on-disk sentence in the footer, and Cancel focused on open; files on disk are not touched. Sources with no match or a failed lookup are not in that set; they keep the per-row Remove button and its inline two-step band for single removals.
+The row checkbox only means "include in this save" and never authorizes a delete; unchecked ready rows sit dimmed as not in this save. The red-wash **Remove…** action lives in the head's commit row and opens the native dialog "Remove sources": a checkbox list of every source (source art, folder name, and selected record or match state) starts empty, or with the failed survivors after a retry, above a select-all row and an "N of M selected" count. The dialog lead states that records are deleted and files on disk are not touched; the footer's red "Remove N records" action is disabled until at least one source is checked. The dialog owns the destructive selection, so the include boxes stay untouched. Per-row Remove keeps its inline two-step band for single removals.
 
 ### Provenance Tag
 "AbDB" chip: `#f8edf5` fill, 1px `#dcc2d5` border, `#8a286d` 12px 600 uppercase; hover draws the full-provenance border; the full "AudiobookDB" label is secondary ink, un-cased. An anchor when a record URL exists.
@@ -272,7 +272,7 @@ Square always: 3rem row thumbnails (6px corner) and the 16rem record-page hero (
 - **Do** collapse all animation under `prefers-reduced-motion` (shimmer, transitions, chase).
 - **Do** keep the original develop branding: the stacked-books mark at `/images/logo-small-black.svg`, `favicon.ico`, and the Public Sans OFL license living beside the font file.
 - **Do** pair the status chip with a quiet sentence-case activity label, grouped so a long title never separates operation from outcome.
-- **Do** keep removal explicit: the include-in-save box never deletes; the red Remove action names its set, and a multi-record delete lists every affected source in a confirmation dialog before records are deleted, while files on disk stay untouched.
+- **Do** keep removal explicit: the include-in-save box never deletes; the red Remove… action opens a dialog whose own checkboxes select the records, and that dialog lists every affected source before records are deleted, while files on disk stay untouched.
 
 ### Don't:
 - **Don't** reintroduce tape-editor framing — no station rail, equipment, meters, tape strips, or kickers/eyebrows; the Merge Bench vocabulary is retired.

@@ -89,16 +89,18 @@
 	// right. Switching sources never discards any candidate's state.
 	let activeId = $state<number | null>(null);
 
-	// Bulk removal — the unchecked set is the removal set; the red head action
-	// deletes it with a dialog that lists every source and record first.
+	// Bulk removal — the dialog carries its own checked set. The page's
+	// include boxes choose the save set and never authorize a delete.
 	let removeDialogOpen = $state(false);
-	/** What the open confirmation dialog is about to remove (a snapshot). */
-	let removeTargets = $state<MatchCandidate[]>([]);
+	let removePick = $state<Set<number>>(new Set());
 	let removingMany = $state(false);
 	let removingNow = $state<number | null>(null);
-	let removeFailure = $state<{ failed: number; attempted: number; error: CleanedAdbError } | null>(
-		null
-	);
+	let removeFailure = $state<{
+		failed: number;
+		attempted: number;
+		error: CleanedAdbError;
+		ids: number[];
+	} | null>(null);
 	/** Transient completion sentence for the polite live region. */
 	let removalNotice = $state('');
 
@@ -159,8 +161,11 @@
 	);
 	const someReadyIncluded = $derived(readyCandidates.some((c) => c.included));
 
-	const excludedCandidates = $derived(candidates.filter((c) => !c.included));
-	const excludedCount = $derived(excludedCandidates.length);
+	const removeCount = $derived(candidates.filter((c) => removePick.has(c.bookId)).length);
+	const allRemovePicked = $derived(
+		candidates.length > 0 && candidates.every((c) => removePick.has(c.bookId))
+	);
+	const someRemovePicked = $derived(removeCount > 0);
 	/** A per-row delete is already committing; a bulk removal waits for it. */
 	const removalInFlight = $derived(candidates.some((c) => c.removingConfirming));
 
@@ -692,44 +697,45 @@
 		document.getElementById(`batch-remove-${id}`)?.focus();
 	}
 
-	// ── Batch removal — the unchecked set ─────────────────────
-	// Unchecked sources are the removal set; the head's red action deletes them
-	// with a dialog that lists every source and record first. It cannot run
-	// while a save, a bulk delete, or a per-row delete is in flight.
+	// ── Batch removal — the dialog's checked set ───────────────
+	// The removal dialog owns the destructive selection. The page's include
+	// boxes only choose the save set. The dialog opens empty (or with failed
+	// survivors after a retry) and cannot run while a save, a bulk delete, or
+	// a per-row delete is in flight.
 
 	function resetRemovalState() {
 		removeDialogOpen = false;
-		removeTargets = [];
+		removePick = new Set();
 		removeFailure = null;
 		removalNotice = '';
 	}
 
-	async function openRemoveDialog() {
-		if (removingMany || saving || removalInFlight || excludedCount === 0) return;
+	async function openRemoveDialog(preselect: number[] = []) {
+		if (removingMany || saving || removalInFlight || candidates.length === 0) return;
 		// Retire any inline per-row confirmation so two removal flows never
 		// share a row.
 		for (const candidate of candidates) {
 			if (candidate.removing) cancelRemoveCandidate(candidate);
 		}
-		removeTargets = excludedCandidates;
+		removeFailure = null;
+		removePick = new Set(preselect.filter((id) => candidates.some((c) => c.bookId === id)));
 		removeDialogOpen = true;
 		await tick();
-		// A destructive dialog opens with the safe action focused.
-		document.getElementById('batch-remove-cancel')?.focus();
+		const first = candidates.find((c) => removePick.has(c.bookId)) ?? candidates[0];
+		if (first) document.getElementById(`remove-pick-${first.bookId}`)?.focus();
 	}
 
 	async function cancelRemoveDialog() {
 		removeDialogOpen = false;
-		removeTargets = [];
+		removePick = new Set();
 		await focusBatchActions();
 	}
 
-	/** Return focus to whichever head action is live: the red Remove while the
-	 *  set is non-empty, the gold Save otherwise. Never focus a disabled
-	 *  button. */
+	/** Return focus to the head's red action (always present in batch review),
+	 *  or the gold Save when it is not live. Never focus a disabled button. */
 	async function focusBatchActions() {
 		await tick();
-		const remove = document.getElementById('batch-remove-excluded') as HTMLButtonElement | null;
+		const remove = document.getElementById('batch-remove-open') as HTMLButtonElement | null;
 		if (remove && !remove.disabled) {
 			remove.focus();
 			return;
@@ -742,17 +748,33 @@
 		document.getElementById('match-title')?.focus();
 	}
 
-	/** Delete the confirmed set one record at a time. A failure never hides the
-	 *  records that did not go: survivors stay unchecked, ready to retry. */
+	function toggleRemovePick(candidate: MatchCandidate) {
+		if (removingMany) return;
+		const next = new Set(removePick);
+		if (next.has(candidate.bookId)) next.delete(candidate.bookId);
+		else next.add(candidate.bookId);
+		removePick = next;
+	}
+
+	function toggleAllRemovePicks(event: Event) {
+		if (removingMany) return;
+		const input = event.currentTarget as HTMLInputElement;
+		removePick = input.checked ? new Set(candidates.map((c) => c.bookId)) : new Set();
+	}
+
+	/** Delete the checked set one record at a time. A failure never hides the
+	 *  records that did not go: their ids stay checked for the retry. */
 	async function confirmRemoveMany() {
-		if (removingMany || removeTargets.length === 0) return;
-		const targets = removeTargets;
+		if (removingMany) return;
+		const targets = candidates.filter((c) => removePick.has(c.bookId));
+		if (targets.length === 0) return;
 		removingMany = true;
 		removeFailure = null;
 		removalNotice = '';
 		let removed = 0;
 		let failed = 0;
 		let failure: CleanedAdbError | null = null;
+		const failedIds: number[] = [];
 		for (const target of targets) {
 			removingNow = target.bookId;
 			try {
@@ -761,18 +783,24 @@
 				candidates = candidates.filter((c) => c.bookId !== target.bookId);
 			} catch (e) {
 				failed += 1;
+				failedIds.push(target.bookId);
 				failure ??= toCleanedError(e);
 			}
 		}
 		removingNow = null;
 		removingMany = false;
 		removeDialogOpen = false;
-		removeTargets = [];
 		if (removed > 0) {
 			removalNotice = `Removed ${removed} ${removed === 1 ? 'record' : 'records'}.`;
 		}
 		if (failed > 0 && failure) {
-			removeFailure = { failed, attempted: targets.length, error: failure };
+			removePick = new Set(failedIds);
+			removeFailure = {
+				failed,
+				attempted: targets.length,
+				error: failure,
+				ids: failedIds
+			};
 			await tick();
 			// The alert carries the retry action; bring the cause and the recovery
 			// below the docked toolbar before focusing it.
@@ -782,6 +810,7 @@
 				?.focus({ preventScroll: true });
 			return;
 		}
+		removePick = new Set();
 		await focusBatchActions();
 	}
 
@@ -1029,17 +1058,14 @@
 			if (isReady(candidate)) candidate.included = include;
 		}
 		removalNotice = '';
-		removeFailure = null;
 	}
 
 	/** Inclusion is the save set; changing it re-arms the live region so a
-	 *  stale removal sentence never narrates the new count. The removal set
-	 *  changed, so any outstanding bulk failure report is stale too. */
+	 *  stale removal sentence never narrates the new count. */
 	function setIncluded(candidate: MatchCandidate, included: boolean) {
 		if (removingMany || saving) return;
 		candidate.included = included;
 		removalNotice = '';
-		removeFailure = null;
 	}
 
 	function measureDescriptionOverflow(
@@ -1354,6 +1380,21 @@
 	}}
 />
 
+{#snippet matchChip(kind: MatchStateKind, text: string)}
+	<span class="match__label match__label--{kind}">
+		{#if kind === 'auto' || kind === 'manual'}
+			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4 10-10" /></svg>
+		{:else if kind === 'loading'}
+			<span class="match__label-dot" aria-hidden="true"></span>
+		{:else}
+			<svg viewBox="0 0 24 24" aria-hidden="true">
+				<path d="M12 8v4m0 4h.01M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z" />
+			</svg>
+		{/if}
+		{text}
+	</span>
+{/snippet}
+
 <div class="match" style="--head-h: {headHeight}px">
 	<p class="sr-only" aria-live="polite">{removalNotice || announcements}</p>
 	<div class="match__head" bind:this={headEl}>
@@ -1384,18 +1425,17 @@
 						</button>
 					</div>
 					<div class="match__commit-row">
-						{#if mode === 'batch' && excludedCount > 0}
+						{#if mode === 'batch'}
 							<Button
 								variant="danger"
 								class="match__remove"
-								id="batch-remove-excluded"
-								aria-label={`Remove ${excludedCount} ${
-									excludedCount === 1 ? 'source' : 'sources'
-								} not included in this save`}
+								id="batch-remove-open"
+								aria-haspopup="dialog"
+								aria-label="Remove sources"
 								disabled={saving || removingMany || removalInFlight}
-								onclick={openRemoveDialog}
+								onclick={() => openRemoveDialog()}
 							>
-								Remove {excludedCount}
+								Remove…
 							</Button>
 						{/if}
 						<Button
@@ -1404,11 +1444,7 @@
 							disabled={includedReadyCount === 0 || removingMany}
 							onclick={saveMatches}
 						>
-							{saving
-								? 'Saving…'
-								: `Save ${includedReadyCount} ${
-										includedReadyCount === 1 ? 'match' : 'matches'
-									} → Queue`}
+							{saving ? 'Saving…' : `Save ${includedReadyCount} → Queue`}
 						</Button>
 					</div>
 				</div>
@@ -1435,7 +1471,6 @@
 			<div class="batch" aria-busy="true" aria-label="Loading sources">
 				<div class="batch__bar">
 					<Skeleton height="1rem" width="9rem" />
-					<Skeleton height="0.85rem" width="6rem" />
 				</div>
 				{#each Array(6) as _}
 					<div class="batch__row batch__row--skeleton">
@@ -1523,11 +1558,13 @@
 					/>
 					<span>Select all ready</span>
 				</label>
-				<span class="batch__count">{includedReadyCount} of {candidates.length} included</span>
 			</div>
-			{#if removeFailure && excludedCount > 0}
+			{#if removeFailure}
 				<div class="batch__alert">
-					<Alert variant="error" onretry={openRemoveDialog}>
+					<Alert
+						variant="error"
+						onretry={() => openRemoveDialog(removeFailure?.ids ?? [])}
+					>
 						<p class="batch__alert-lead">
 							{#if removeFailure.failed === removeFailure.attempted}
 								No records were removed.
@@ -1638,14 +1675,17 @@
 										>
 										<AbdTag href={`https://audiobookdb.org/books/${selected.id}`} />
 									</span>
-									<span class="batch__record-meta">
-										{selectedAuthors(c)}
-										{#if selectedNarrators(c)}
-											· {selectedNarrators(c)}
-										{/if}
-										{#if runtimeLabel(releaseRuntimeMs(c.details.release))}
-											· {runtimeLabel(releaseRuntimeMs(c.details.release))}
-										{/if}
+									<span class="batch__record-meta-line">
+										{@render matchChip(match.kind, match.text)}
+										<span class="batch__record-meta">
+											{selectedAuthors(c)}
+											{#if selectedNarrators(c)}
+												· {selectedNarrators(c)}
+											{/if}
+											{#if runtimeLabel(releaseRuntimeMs(c.details.release))}
+												· {runtimeLabel(releaseRuntimeMs(c.details.release))}
+											{/if}
+										</span>
 									</span>
 									{#if editionLine(c)}
 										<span class="batch__record-edition">{editionLine(c)}</span>
@@ -1653,29 +1693,12 @@
 								</span>
 							{:else}
 								<span class="batch__record-body">
-									<span class="batch__record-title batch__record-title--empty">
-										{c.loading ? 'Loading record…' : 'No record selected'}
-									</span>
-									<span class="batch__record-meta">
-										{c.loading ? 'Searching the catalog' : 'Open focused review to search and choose'}
-									</span>
+									{@render matchChip(match.kind, match.text)}
 								</span>
 							{/if}
 						</div>
 
 						<div class="batch__actions">
-							<span class="match__label match__label--{match.kind}">
-								{#if match.kind === 'auto' || match.kind === 'manual'}
-									<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4 10-10" /></svg>
-								{:else if match.kind === 'loading'}
-									<span class="match__label-dot" aria-hidden="true"></span>
-								{:else}
-									<svg viewBox="0 0 24 24" aria-hidden="true">
-										<path d="M12 8v4m0 4h.01M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z" />
-									</svg>
-								{/if}
-								{match.text}
-							</span>
 							<div class="batch__btns">
 								<Button
 									variant="secondary"
@@ -2367,9 +2390,7 @@
 
 	<Modal
 		bind:open={removeDialogOpen}
-		title={`Remove ${removeTargets.length} ${
-			removeTargets.length === 1 ? 'record' : 'records'
-		}?`}
+		title="Remove sources"
 		beforeClose={() => {
 			if (removingMany) return false;
 			cancelRemoveDialog();
@@ -2377,24 +2398,66 @@
 		}}
 	>
 		<p class="batch-dialog__lead">
-			These sources leave the Match list and their book records are deleted from Bragi Books.
+			Check the sources to remove. Their book records are deleted from Bragi Books; files on
+			disk are not touched.
 		</p>
-		<p class="batch-dialog__list-label">
-			{removeTargets.length} {removeTargets.length === 1 ? 'source' : 'sources'}
-		</p>
+		<div class="batch-dialog__pick-head">
+			<label class="batch__all">
+				<input
+					type="checkbox"
+					checked={allRemovePicked}
+					use:setIndeterminate={someRemovePicked && !allRemovePicked}
+					disabled={removingMany || candidates.length === 0}
+					onchange={toggleAllRemovePicks}
+				/>
+				<span>Select all</span>
+			</label>
+			<span class="batch-dialog__pick-count" aria-live="polite">
+				{removeCount} of {candidates.length} selected
+			</span>
+		</div>
 		<ul class="batch-dialog__list">
-			{#each removeTargets as target (target.bookId)}
+			{#each candidates as target (target.bookId)}
 				<li class="batch-dialog__item">
-					<span class="batch-dialog__name" title={target.srcPath}>{sourceBase(target)}</span>
-					{#if target.details.book}
-						<span class="batch-dialog__record">{selectedTitle(target)}</span>
-					{/if}
+					<label class="batch-dialog__pick">
+						<input
+							id={`remove-pick-${target.bookId}`}
+							type="checkbox"
+							checked={removePick.has(target.bookId)}
+							disabled={removingMany}
+							onchange={() => toggleRemovePick(target)}
+							aria-label={`Remove ${sourceBase(target)}`}
+						/>
+						{#if target.coverUrl}
+							<img
+								class="batch-dialog__thumb"
+								src={bookCoverUrl(target.coverUrl, 'small')}
+								alt=""
+								loading="lazy"
+								decoding="async"
+							/>
+						{:else}
+							<span
+								class="batch-dialog__thumb batch-dialog__thumb--empty"
+								aria-hidden="true"
+							></span>
+						{/if}
+						<span class="batch-dialog__pick-body">
+							<span class="batch-dialog__name" title={target.srcPath}
+								>{sourceBase(target)}</span
+							>
+							<span class="batch-dialog__record">
+								{target.details.book
+									? selectedTitle(target)
+									: matchState(target).text}
+							</span>
+						</span>
+					</label>
 				</li>
 			{/each}
 		</ul>
 		{#snippet footer()}
 			<div class="batch-dialog__foot">
-				<p class="batch-dialog__hint">Files on disk are not touched.</p>
 				<div class="batch-dialog__actions">
 					<Button
 						variant="ghost"
@@ -2404,11 +2467,16 @@
 					>
 						Cancel
 					</Button>
-					<Button variant="danger" loading={removingMany} onclick={confirmRemoveMany}>
+					<Button
+						variant="danger"
+						loading={removingMany}
+						disabled={removeCount === 0}
+						onclick={confirmRemoveMany}
+					>
 						{removingMany
 							? 'Removing…'
-							: `Remove ${removeTargets.length} ${
-									removeTargets.length === 1 ? 'record' : 'records'
+							: `Remove ${removeCount} ${
+									removeCount === 1 ? 'record' : 'records'
 								}`}
 					</Button>
 				</div>
@@ -2605,12 +2673,6 @@
 		cursor: not-allowed;
 	}
 
-	.batch__count {
-		font-size: 13px;
-		color: var(--m-muted);
-		font-variant-numeric: tabular-nums;
-	}
-
 	.batch__list {
 		list-style: none;
 		margin: 0;
@@ -2626,7 +2688,7 @@
 
 	.batch__row {
 		display: grid;
-		grid-template-columns: 20px 44px minmax(0, 1.1fr) minmax(0, 1.25fr) auto;
+		grid-template-columns: 20px 44px minmax(0, 1fr) minmax(0, 1.45fr) auto;
 		grid-template-areas: 'check thumb names record actions';
 		align-items: center;
 		gap: 14px;
@@ -2842,13 +2904,21 @@
 		flex-shrink: 0;
 	}
 
-	.batch__record-title--empty {
-		color: var(--m-muted);
-		font-weight: 500;
-		font-style: italic;
+	.batch__record-meta-line {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+		min-width: 0;
+	}
+
+	.batch__record-meta-line .match__label {
+		flex-shrink: 0;
 	}
 
 	.batch__record-meta {
+		flex: 1 1 auto;
+		min-width: 0;
 		font-size: 12.5px;
 		line-height: 1.4;
 		color: var(--m-muted);
@@ -4019,7 +4089,7 @@
 		max-width: 52ch;
 	}
 
-	/* ── Batch removal confirmation ──────────────────────────── */
+	/* ── Batch removal selection ─────────────────────────────── */
 	.batch-dialog__lead {
 		margin: 0 0 12px;
 		font-size: 13.5px;
@@ -4028,13 +4098,19 @@
 		max-width: 58ch;
 	}
 
-	.batch-dialog__list-label {
-		margin: 0 0 6px;
-		font-size: 11.5px;
-		font-weight: 600;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
+	.batch-dialog__pick-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px 12px;
+		flex-wrap: wrap;
+		margin: 0 0 8px;
+	}
+
+	.batch-dialog__pick-count {
+		font-size: 12.5px;
 		color: var(--m-muted);
+		font-variant-numeric: tabular-nums;
 	}
 
 	.batch-dialog__list {
@@ -4043,21 +4119,81 @@
 		padding: 0;
 		border: 1px solid var(--m-border);
 		border-radius: var(--m-r-sm);
-		max-height: 13.5rem;
+		max-height: 20rem;
 		overflow-y: auto;
+		overscroll-behavior: contain;
+		scrollbar-color: var(--m-border) transparent;
+		scrollbar-width: thin;
+	}
+
+	.batch-dialog__list::-webkit-scrollbar {
+		width: 10px;
+	}
+
+	.batch-dialog__list::-webkit-scrollbar-track {
+		background: transparent;
+	}
+
+	.batch-dialog__list::-webkit-scrollbar-thumb {
+		background: var(--m-border);
+		border-radius: 5px;
+		border: 2px solid var(--m-panel);
+	}
+
+	.batch-dialog__list::-webkit-scrollbar-thumb:hover {
+		background: var(--m-border-strong);
 	}
 
 	.batch-dialog__item {
-		display: flex;
-		flex-direction: column;
-		gap: 1px;
-		padding: 8px 12px;
 		border-bottom: 1px solid var(--m-border-soft);
 		background: var(--m-panel);
 	}
 
 	.batch-dialog__item:last-child {
 		border-bottom: 0;
+	}
+
+	.batch-dialog__pick {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		min-height: 48px;
+		padding: 8px 12px;
+		cursor: pointer;
+	}
+
+	.batch-dialog__pick:hover {
+		background: var(--m-surface);
+	}
+
+	.batch-dialog__pick input {
+		width: 18px;
+		height: 18px;
+		flex-shrink: 0;
+		accent-color: var(--focus-ring);
+		cursor: pointer;
+	}
+
+	.batch-dialog__thumb {
+		display: block;
+		width: 32px;
+		height: 32px;
+		flex-shrink: 0;
+		object-fit: cover;
+		background: var(--elevated);
+		border: 1px solid var(--m-border);
+		border-radius: 3px;
+	}
+
+	.batch-dialog__thumb--empty {
+		background: linear-gradient(135deg, var(--elevated) 50%, var(--m-border-soft) 50%);
+	}
+
+	.batch-dialog__pick-body {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
 	}
 
 	.batch-dialog__name {
@@ -4078,21 +4214,14 @@
 	.batch-dialog__foot {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
+		justify-content: flex-end;
 		gap: 12px;
 		flex-wrap: wrap;
-	}
-
-	.batch-dialog__hint {
-		margin: 0;
-		font-size: 12.5px;
-		color: var(--m-muted);
 	}
 
 	.batch-dialog__actions {
 		display: flex;
 		gap: 8px;
-		margin-left: auto;
 	}
 
 	/* ── Screen-reader live region ───────────────────────────── */
@@ -4111,7 +4240,7 @@
 	/* ── Responsive ──────────────────────────────────────────── */
 	@media (max-width: 1100px) {
 		.batch__row {
-			grid-template-columns: 20px 40px minmax(0, 1fr) minmax(0, 1.1fr);
+			grid-template-columns: 20px 40px minmax(0, 0.95fr) minmax(0, 1.25fr);
 			grid-template-areas:
 				'check thumb names record'
 				'check thumb names actions';
@@ -4263,10 +4392,6 @@
 		.batch-dialog__foot {
 			flex-direction: column;
 			align-items: stretch;
-		}
-
-		.batch-dialog__actions {
-			margin-left: 0;
 		}
 
 		.batch-dialog__actions :global(.btn) {
