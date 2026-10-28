@@ -27,12 +27,48 @@ describe('cleanAdbError write-permission mapping', () => {
 		expect(cleaned.needsSettings).toBe(true);
 	});
 
-	it('still falls back to a write message when the child names no path', () => {
+	it('still reports a write failure when the child names no path', () => {
 		const cleaned = cleanAdbError(M4B_MERGE_NOT_WRITABLE);
 		expect(cleaned.message).toBe(
-			'The server can’t write to a configured directory — check the output and completed directory permissions in Settings.'
+			'The server can’t write to a configured directory — permission denied. Check that the directory is writable by the Bragi Books service.'
 		);
 		expect(cleaned.message).not.toContain('read');
+	});
+
+	it('keeps a not-a-directory cause instead of blaming permissions', () => {
+		const cleaned = cleanAdbError(
+			'completed directory "/erotica/books/file" is not writable: /erotica/books/file is not a directory'
+		);
+		expect(cleaned.message).toBe(
+			'That path exists but is not a directory — pick a directory in Settings.'
+		);
+	});
+
+	it('keeps a read-only mount cause', () => {
+		const cleaned = cleanAdbError(
+			'output directory "/media/books" is not writable: read-only file system'
+		);
+		expect(cleaned.message).toBe(
+			'The server can’t write to "/media/books" — the file system is read-only. Remount it writable or pick another directory in Settings.'
+		);
+	});
+
+	it('keeps a full-disk cause', () => {
+		const cleaned = cleanAdbError(
+			'completed directory "/media/books" is not writable: no space left on device'
+		);
+		expect(cleaned.message).toBe(
+			'The server can’t write to "/media/books" — the disk is full. Free space or pick another directory in Settings.'
+		);
+	});
+
+	it('passes any other write-cause detail through', () => {
+		const cleaned = cleanAdbError(
+			'output directory "/mnt/nfs" is not writable: input/output error'
+		);
+		expect(cleaned.message).toBe(
+			'The server can’t write to "/mnt/nfs" — input/output error. Check the output and completed directory paths in Settings.'
+		);
 	});
 
 	it('keeps read denials read-oriented', () => {
