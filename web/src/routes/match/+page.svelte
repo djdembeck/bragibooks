@@ -1646,8 +1646,19 @@
 								</span>
 								<span
 									class="batch__name-value batch__name-value--source"
-									title={c.srcPath}>{sourceBase(c)}</span
+									title={c.srcPath}
 								>
+									{#if c.coverUrl}
+										<img
+											class="batch__name-art"
+											src={bookCoverUrl(c.coverUrl, 'small')}
+											alt=""
+											loading="lazy"
+											decoding="async"
+										/>
+									{/if}
+									<span class="batch__name-source-text">{sourceBase(c)}</span>
+								</span>
 							</div>
 							<svg class="batch__arrow" viewBox="0 0 24 24" aria-hidden="true">
 								<path d="M5 12h13m-5-5 5 5-5 5" />
@@ -2868,12 +2879,28 @@
 
 	/* Source identity wraps in both batch and removal review. */
 	.batch__name-value--source {
+		display: block;
 		white-space: normal;
 		overflow-wrap: anywhere;
+	}
+
+	.batch__name-source-text {
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
 		line-clamp: 2;
 		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+
+	.batch__name-art {
+		display: none;
+		width: 24px;
+		height: 24px;
+		flex-shrink: 0;
+		object-fit: cover;
+		border: 1px solid var(--m-border);
+		border-radius: 4px;
+		background: var(--elevated);
 	}
 
 	.batch__name-link {
@@ -4473,13 +4500,18 @@
 
 		.batch__row,
 		.batch__row--skeleton {
-			grid-template-columns: 20px 40px minmax(0, 1fr);
+			grid-template-columns: 20px minmax(0, 1fr);
 			grid-template-areas:
-				'check thumb names'
-				'record record record'
-				'actions actions actions';
+				'check names'
+				'record record'
+				'actions actions';
 			row-gap: 8px;
 			padding: 12px 14px;
+		}
+
+		.batch__thumb,
+		.batch__skel-thumb {
+			display: none;
 		}
 
 		.batch__names {
@@ -4529,6 +4561,20 @@
 			-webkit-line-clamp: 2;
 			line-clamp: 2;
 			-webkit-box-orient: vertical;
+		}
+
+		.batch__name-value.batch__name-value--source {
+			display: flex;
+			align-items: center;
+			gap: 6px;
+		}
+
+		.batch__name-source-text {
+			min-width: 0;
+		}
+
+		.batch__name-art {
+			display: block;
 		}
 
 		.batch__record {
