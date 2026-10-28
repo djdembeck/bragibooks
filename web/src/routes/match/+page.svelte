@@ -1641,7 +1641,9 @@
 
 						<div class="batch__names">
 							<div class="batch__name">
-								<span class="batch__name-label">Before</span>
+								<span class="batch__name-head">
+									<span class="batch__name-label">Before</span>
+								</span>
 								<span
 									class="batch__name-value batch__name-value--source"
 									title={c.srcPath}>{sourceBase(c)}</span
@@ -1652,7 +1654,8 @@
 							</svg>
 							<div class="batch__name">
 								<span class="batch__name-head">
-									<span class="batch__name-label">Proposed output</span>
+									<span class="batch__name-label">After</span>
+									<span class="batch__name-note">proposed</span>
 								</span>
 								{#if !outputScheme}
 									<a class="batch__name-link" href="/settings">
@@ -1864,7 +1867,7 @@
 								<h2>{sourceBase(c)}</h2>
 								{#if outputScheme}
 									<p class="match__proposed">
-										<span>Proposed output — processor reports the final path</span>
+										<span>After (proposed) — processor reports the final path</span>
 										<code title={fullOutputPath(c)}>
 											{proposedRelativeName(c) || '—'}
 										</code>
@@ -2828,6 +2831,13 @@
 		align-items: center;
 		gap: 6px;
 		min-width: 0;
+	}
+
+	.batch__name-note {
+		font-size: 11px;
+		font-weight: 500;
+		color: var(--m-muted);
+		white-space: nowrap;
 	}
 
 	.batch__name-value {
@@ -4474,11 +4484,42 @@
 
 		.batch__names {
 			grid-template-columns: minmax(0, 1fr);
-			gap: 4px;
+			gap: 2px;
+		}
+
+		.batch__name {
+			display: grid;
+			grid-template-columns: 46px minmax(0, 1fr);
+			align-items: baseline;
+			column-gap: 4px;
+			row-gap: 0;
+		}
+
+		.batch__name-head {
+			grid-column: 1;
+			flex-wrap: nowrap;
+		}
+
+		.batch__name-note {
+			display: none;
+		}
+
+		.batch__name-value {
+			grid-column: 2;
 		}
 
 		.batch__arrow {
-			display: none;
+			display: block;
+			width: 12px;
+			height: 12px;
+			transform: rotate(90deg);
+			justify-self: start;
+			margin-left: 16px;
+			margin-block: -2px;
+		}
+
+		.batch__thumb {
+			align-self: start;
 		}
 
 		.batch__name-value {
