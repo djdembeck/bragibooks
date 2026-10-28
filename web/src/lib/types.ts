@@ -131,6 +131,9 @@ export interface ProcessingJob {
 	started_at: string | null;
 	completed_at: string | null;
 	created_at: string;
+	/** Queue-time destination snapshot (profiled batches only). */
+	output_dir?: string;
+	output_scheme?: string;
 }
 
 export interface JobsListResponse {

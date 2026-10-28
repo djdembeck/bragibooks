@@ -29,6 +29,12 @@ All notable changes to this project will be documented in this file. See [standa
   - `processing_jobs` gains a `detail` column (migration v8) exposed by `GET /api/jobs` and `GET /api/jobs/:id`; pre-v8 rows are NULL, and import rows show their source path.
   - Job completion reads "Completed" across merges, imports, and metadata saves; an empty record reads "No recorded activity yet."
 
+- **Live Queue output and real destinations**
+  - Active Queue cards now stream `m4b-merge` stdout over SSE as it runs, with a reconnect snapshot from the in-memory job state instead of waiting for the terminal row.
+  - Queue cards show the book cover and author, an indeterminate processing rail and the current engine stage, and the destination `m4b-merge` reports (the completed `output_file`, or the live path with its per-job `.tmp` segment removed). Until the engine resolves the path, the queue-time profile is labeled "Output profile", never "Destination".
+  - `GET /api/jobs` and `GET /api/jobs/:id` expose a profiled job's stored output directory and path format, so a restored active job keeps its destination context.
+  - The live log stays where the operator scrolls it (re-pinning only at the bottom) and is keyboard-scrollable; running jobs lead the active section, and a book with a queued job no longer remains selectable in Ready to process.
+
 - **Saved output profiles with queue-time snapshots**
   - Added named output profiles (output directory and/or relative path format) managed on the Settings page via `/api/output-profiles` (list, create, update, delete). Blank fields inherit the global values.
   - The Queue page and the Books bulk requeue action select one profile per batch. The selection is resolved once at queue time, snapshotted into each created job's arguments, so already-queued jobs are unaffected by later profile or Settings changes; no profile is stored on a book.

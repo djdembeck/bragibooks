@@ -51,6 +51,14 @@ type jobState struct {
 	// finalized ensures the terminal progress/done signal is sent exactly once,
 	// no matter how many components (cancel request, worker, timeout) finalize.
 	finalized sync.Once
+	// outputMu guards liveOutput. The buffer holds m4b-merge stdout for an
+	// active job so a reconnecting stream can recover lines it missed; the
+	// terminal row still persists the complete output.
+	outputMu   sync.Mutex
+	liveOutput string
+	// outputNotify wakes an open stream after liveOutput changes. Buffered at
+	// one: a stream that has not caught up needs only one more snapshot.
+	outputNotify chan struct{}
 }
 
 // NewProcessingService creates a ProcessingService backed by the given database
@@ -214,11 +222,12 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	jobCtx, jobCancel := context.WithCancel(context.Background())
 	s.mu.Lock()
 	s.jobs[id] = &jobState{
-		job:      *job,
-		progress: make(chan string, 10),
-		done:     make(chan error, 1),
-		jobCtx:   jobCtx,
-		cancel:   jobCancel,
+		job:          *job,
+		progress:     make(chan string, 10),
+		done:         make(chan error, 1),
+		jobCtx:       jobCtx,
+		cancel:       jobCancel,
+		outputNotify: make(chan struct{}, 1),
 	}
 	s.mu.Unlock()
 
@@ -314,6 +323,26 @@ func (st *jobState) sendProgress(msg string) {
 	case st.progress <- msg:
 	default:
 	}
+}
+
+// appendOutput adds one stripped m4b-merge stdout line to the live buffer and
+// wakes any open stream. The channel send is non-blocking: a missing or slow
+// reader must never stall the child's stdout drain.
+func (st *jobState) appendOutput(line string) {
+	st.outputMu.Lock()
+	st.liveOutput += line + "\n"
+	st.outputMu.Unlock()
+	select {
+	case st.outputNotify <- struct{}{}:
+	default:
+	}
+}
+
+// outputSnapshot returns the live stdout accumulated so far.
+func (st *jobState) outputSnapshot() string {
+	st.outputMu.Lock()
+	defer st.outputMu.Unlock()
+	return st.liveOutput
 }
 
 // finalize sends the terminal progress event, closes the progress channel,
@@ -498,6 +527,9 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 	opts := audio.RunOptions{
 		OutputDirOverride:  strings.TrimSpace(args.OutputDir),
 		PathFormatOverride: strings.TrimSpace(args.OutputScheme),
+	}
+	if state != nil {
+		opts.OnOutput = state.appendOutput
 	}
 	if opts.PathFormatOverride != "" {
 		if err := audio.ValidateRelativePathFormat(opts.PathFormatOverride); err != nil {
@@ -836,10 +868,23 @@ func jobResp(job models.ProcessingJob) map[string]any {
 	if job.CompletedAt != nil {
 		resp["completed_at"] = *job.CompletedAt
 	}
+	// Queue-time destination snapshot (profiled batches only). Decoding is
+	// best-effort: audit rows and legacy rows without merge args stay bare.
+	if job.M4bMergeArgs != "" {
+		var args jobArgs
+		if err := json.Unmarshal([]byte(job.M4bMergeArgs), &args); err == nil {
+			if args.OutputDir != "" {
+				resp["output_dir"] = args.OutputDir
+			}
+			if args.OutputScheme != "" {
+				resp["output_scheme"] = args.OutputScheme
+			}
+		}
+	}
 	return resp
 }
 
-const jobsColumns = "id, book_id, status, action, detail, output, error, output_file, started_at, completed_at, created_at"
+const jobsColumns = "id, book_id, status, action, detail, output, error, output_file, started_at, completed_at, created_at, m4b_merge_args"
 
 // ListJobs handles GET /api/jobs?limit=N&book_id=B.
 // Returns recent jobs newest-first with clean JSON matching the single-job contract.
@@ -924,11 +969,13 @@ func (h *Handler) queryJobs(query string, args []any) ([]models.ProcessingJob, e
 	jobs := make([]models.ProcessingJob, 0, 10)
 	for rows.Next() {
 		var job models.ProcessingJob
+		var mergeArgs sql.NullString
 		err := rows.Scan(&job.ID, &job.BookID, &job.Status, &job.Action, &job.Detail,
-			&job.Output, &job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt)
+			&job.Output, &job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt, &mergeArgs)
 		if err != nil {
 			continue
 		}
+		job.M4bMergeArgs = mergeArgs.String
 		jobs = append(jobs, job)
 	}
 	return jobs, nil
@@ -954,6 +1001,7 @@ func (h *Handler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("query job: %v", err))
 		return
 	}
+	job.M4bMergeArgs = jobArgs.String
 	// Clean JSON shared with the list endpoints (jobResp unwraps the
 	// sql.NullXxx fields that would serialize as objects).
 	writeJSON(w, http.StatusOK, jobResp(job))
@@ -1018,11 +1066,27 @@ func (h *Handler) StreamJob(w http.ResponseWriter, r *http.Request) {
 	// Get the in-memory job state and stream progress
 	state := h.svc.ProcessingSvc.GetJob(jobID)
 	if state == nil {
-		// No in-memory state; stream DB state
-		fmt.Fprintf(w, "data: %s\n\n", json.RawMessage(`{"status":"`+status+`"}`))
+		// No in-memory state; stream DB state (including any output a
+		// terminal-but-not-yet-polled row already has).
+		initial := map[string]string{"status": status}
+		if output != "" {
+			initial["output"] = output
+		}
+		b, _ := json.Marshal(initial)
+		fmt.Fprintf(w, "data: %s\n\n", b)
 		flusher.Flush()
 		return
 	}
+
+	// A reconnecting client replaces its local log with the server's
+	// accumulated stdout, then follows new lines.
+	initial := map[string]string{"status": status}
+	if live := state.outputSnapshot(); live != "" {
+		initial["output"] = live
+	}
+	b, _ := json.Marshal(initial)
+	fmt.Fprintf(w, "data: %s\n\n", b)
+	flusher.Flush()
 
 	// Stream progress
 	ctx := r.Context()
@@ -1035,6 +1099,11 @@ func (h *Handler) StreamJob(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			fmt.Fprintf(w, "data: %s\n\n", msg)
+			flusher.Flush()
+		case <-state.outputNotify:
+			snapshot := state.outputSnapshot()
+			b, _ := json.Marshal(map[string]string{"output": snapshot})
+			fmt.Fprintf(w, "data: %s\n\n", b)
 			flusher.Flush()
 		case <-time.After(30 * time.Second):
 			// Periodic heartbeat

@@ -5,6 +5,7 @@
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { cleanAdbError, toCleanedError } from '#lib/adbError.js';
 	import { formatJobTime, formatElapsed, elapsedLabel } from '#lib/datetime.js';
+	import { jobStage, reportedDestination } from '#lib/jobDestination.js';
 	import { liveNow } from '#lib/liveNow.svelte.js';
 	import { CheckCircle, Clock, ArrowRight, FileText } from '@lucide/svelte';
 
@@ -23,8 +24,14 @@
 		createdAt: string | null;
 		/** Local cancellation in flight: badge is optimistic until the backend terminal state lands. */
 		cancelRequested: boolean;
-		/** Queue-time output destination this batch was queued under (profile-backed queues only), e.g. "output/archive · {author}/{title}". HTML-escaped by Svelte. */
-		destination?: string;
+		/** Final .m4b reported by the API once the job finishes. */
+		outputFile: string | null;
+		/** Book art and author line for the active card; hydrated from the book record. */
+		coverUrl?: string;
+		authorNames?: string;
+		/** Queue-time output destination snapshot (profiled batches only). */
+		outputDir?: string;
+		outputScheme?: string;
 	}
 
 	let books: BookWithPeople[] = $state([]);
@@ -89,6 +96,16 @@
 		}
 	}
 
+	function authorLabel(book: BookWithPeople): string {
+		return book.authors.map((author) => author.name).join(', ');
+	}
+
+	function applyJobBook(item: JobItem, book: BookWithPeople) {
+		item.bookTitle = book.title;
+		item.coverUrl = book.cover_image_url;
+		item.authorNames = authorLabel(book);
+	}
+
 	function restoreJobs(jobList: ProcessingJob[]) {
 		cleanupMap.forEach((fn) => fn());
 		pollTimers.forEach((timer) => clearInterval(timer));
@@ -96,40 +113,47 @@
 		pollTimers.clear();
 
 		const items: JobItem[] = [];
-		const untitledJobs = new Map<number, JobItem[]>();
+		const bookRequests = new Map<number, Promise<BookWithPeople>>();
 		for (const j of jobList) {
+			const known = j.book_id !== null ? books.find((book) => book.id === j.book_id) : undefined;
 			const item = $state<JobItem>({
 				id: j.id,
 				bookId: j.book_id,
-				bookTitle: books.find((book) => book.id === j.book_id)?.title,
+				bookTitle: known?.title,
+				coverUrl: known?.cover_image_url,
+				authorNames: known ? authorLabel(known) : undefined,
 				status: j.status,
 				action: j.action ?? null,
 				detail: j.detail ?? null,
 				output: j.output || '',
+				outputFile: j.output_file ?? null,
 				error: j.error || null,
 				startedAt: j.started_at,
 				completedAt: j.completed_at,
 				createdAt: j.created_at ?? null,
 				cancelRequested: false,
+				outputDir: j.output_dir,
+				outputScheme: j.output_scheme,
 			});
 			items.push(item);
-			if (item.bookId !== null && !item.bookTitle) {
-				const relatedJobs = untitledJobs.get(item.bookId);
-				if (relatedJobs) relatedJobs.push(item);
-				else untitledJobs.set(item.bookId, [item]);
+			// Active jobs need the book's cover and author even though the book
+			// has already left the matched/pending lists. History only fetches
+			// when the job row arrived without a title.
+			if (item.bookId !== null && !known && (isActiveJob(item) || !item.bookTitle)) {
+				let request = bookRequests.get(item.bookId);
+				if (!request) {
+					request = get<BookWithPeople>(`/books/${item.bookId}`);
+					bookRequests.set(item.bookId, request);
+				}
+				void request
+					.then((book) => applyJobBook(item, book))
+					.catch(() => {
+						// Deleted or temporarily unavailable books retain the ID fallback.
+					});
 			}
 			if (isActiveJob(item)) connectSSE(item);
 		}
 		jobs = items;
-		for (const [bookId, relatedJobs] of untitledJobs) {
-			void get<BookWithPeople>(`/books/${bookId}`)
-				.then((book) => {
-					for (const item of relatedJobs) item.bookTitle = book.title;
-				})
-				.catch(() => {
-					// Deleted or temporarily unavailable books retain the ID fallback.
-				});
-		}
 	}
 
 	// Heartbeats ("alive") and unknown payloads must not clobber the job
@@ -152,7 +176,7 @@
 						}
 					}
 					if (parsed.output) item.output = parsed.output;
-					if (parsed.message && !parsed.output) item.output += parsed.message + '\n';
+					if (parsed.message && !parsed.output && !item.output) item.output += parsed.message + '\n';
 					if (parsed.error) item.error = parsed.error;
 					if (TERMINAL_STATUSES.has(item.status)) {
 						stop();
@@ -199,6 +223,9 @@
 			item.startedAt = job.started_at;
 			item.completedAt = job.completed_at;
 			item.createdAt = job.created_at ?? null;
+			item.outputFile = job.output_file ?? null;
+			item.outputDir = job.output_dir ?? item.outputDir;
+			item.outputScheme = job.output_scheme ?? item.outputScheme;
 			if (!backendTerminal) {
 				// Still running (e.g. a cancelled process the worker has not reaped
 				// yet): keep the poll loop so the terminal row lands eventually.
@@ -249,30 +276,26 @@
 			};
 			if (selectedProfileId !== null) payload.output_profile_id = selectedProfileId;
 			const response = await post<ProcessingResponse>('/process', payload);
-			// The resolved destination of record for this batch: the server's
-			// queue-time snapshot (absolute dir + effective format), not the
-			// page's cached profile, which may have been edited since load.
-			// Once the selector resets, this line is what tells two
-			// back-to-back batches (profile then global) apart.
-			const destination =
-				response.output_dir || response.output_scheme
-					? `${response.output_dir} · ${response.output_scheme}`
-					: undefined;
 			for (const job of response.jobs) {
+				const selectedBook = selected.find((book) => book.id === job.book_id);
 				const item = $state<JobItem>({
 					id: job.id,
 					bookId: job.book_id,
-					bookTitle: selected.find((book) => book.id === job.book_id)?.title,
+					bookTitle: selectedBook?.title,
+					coverUrl: selectedBook?.cover_image_url,
+					authorNames: selectedBook ? authorLabel(selectedBook) : undefined,
 					status: 'queued',
 					action: 'merge',
 					detail: null,
 					output: '',
+					outputFile: null,
 					error: null,
 					startedAt: null,
 					completedAt: null,
 					createdAt: null,
 					cancelRequested: false,
-					destination,
+					outputDir: response.output_dir,
+					outputScheme: response.output_scheme,
 				});
 				jobs = [item, ...jobs];
 				connectSSE(item);
@@ -293,7 +316,28 @@
 		return status === 'running' || status === 'queued';
 	}
 
-	const matchedBooks = $derived(books.filter((b) => b.status === 'matched'));
+	/** Running jobs lead the active section; queued jobs follow in queue order.
+	 *  The live card is the reason to look here, so it must not sit below a
+	 *  waiting card just because the waiting job was created later. */
+	const activeJobs = $derived.by(() => {
+		const active = jobs.filter(isActiveJob);
+		return active.sort((a, b) => {
+			const runningFirst = Number(isRunning(b)) - Number(isRunning(a));
+			if (runningFirst !== 0) return runningFirst;
+			const aCreated = a.createdAt ? Date.parse(a.createdAt) : 0;
+			const bCreated = b.createdAt ? Date.parse(b.createdAt) : 0;
+			return aCreated - bCreated;
+		});
+	});
+	/** A queued book has not started yet, so its status is still "matched". It
+	 *  already has a card in the active section; offering it for another batch
+	 *  would only produce the backend's active-job 409. */
+	const activeBookIds = $derived(
+		new Set(activeJobs.map((job) => job.bookId).filter((id): id is number => id !== null))
+	);
+	const matchedBooks = $derived(
+		books.filter((book) => book.status === 'matched' && !activeBookIds.has(book.id))
+	);
 	const selectedReadyCount = $derived(
 		matchedBooks.reduce((count, book) => count + Number(selectedIds.has(book.id)), 0)
 	);
@@ -303,7 +347,6 @@
 		}
 	});
 	const pendingBooks = $derived(books.filter((b) => b.status === 'pending'));
-	const activeJobs = $derived(jobs.filter(isActiveJob));
 	const pastJobs = $derived(jobs.filter((job) => !isActiveJob(job)));
 	const clock = liveNow(() => activeJobs.length > 0);
 	const failedJobs = $derived(pastJobs.filter((job) => job.status === 'error' || job.status === 'failed').length);
@@ -321,6 +364,63 @@
 			case 'failed': return 'Processing failed';
 			default: return status;
 		}
+	}
+
+	function isRunning(job: JobItem): boolean {
+		return job.status.toLowerCase() === 'running';
+	}
+
+	/** The final path once known: the API's completed output file, or the
+	 *  destination m4b-merge itself reported while the run is in flight.
+	 *  Empty otherwise, so a failed or finished job never borrows a working
+	 *  path from its log. */
+	function destinationFor(job: JobItem): string {
+		if (job.outputFile) return job.outputFile;
+		if (isRunning(job)) return reportedDestination(job.output, job.id);
+		return '';
+	}
+
+	/** Queue-time profile snapshot, shown as context until the engine reports
+	 *  the real path. Never presented as the destination itself. */
+	function outputProfileLabel(job: JobItem): string {
+		const dir = job.outputDir?.trim() ?? '';
+		const scheme = job.outputScheme?.trim() ?? '';
+		if (dir && scheme) return `${dir} · ${scheme}`;
+		return dir || scheme;
+	}
+
+	function activeStageLabel(job: JobItem): string {
+		if (job.status.toLowerCase() === 'queued') return 'Waiting for a processing slot';
+		return jobStage(job.output) || 'Starting m4b-merge';
+	}
+
+	type AutoscrollParams = { text: string; active: boolean };
+
+	/** Keep the live log pinned to its newest line while the job runs, but
+	 *  never yank an operator who has scrolled up to read earlier output.
+	 *  Pinned is re-armed when they return to the bottom. */
+	function autoscroll(node: HTMLElement, params: AutoscrollParams) {
+		let lastText = '';
+		let pinned = true;
+		const onScroll = () => {
+			pinned = node.scrollHeight - node.scrollTop - node.clientHeight <= 4;
+		};
+		const update = (next: AutoscrollParams) => {
+			if (!next.active || next.text === lastText) return;
+			lastText = next.text;
+			if (!pinned) return;
+			queueMicrotask(() => {
+				node.scrollTop = node.scrollHeight;
+			});
+		};
+		node.addEventListener('scroll', onScroll, { passive: true });
+		update(params);
+		return {
+			update,
+			destroy() {
+				node.removeEventListener('scroll', onScroll);
+			}
+		};
 	}
 
 	async function cancelJob(job: JobItem) {
@@ -433,7 +533,7 @@
 
 			<aside class="queue-activity" id="active-jobs" aria-labelledby="activity-title">
 				{#if activeJobs.length > 0}
-					<section class="active-jobs"><div class="section-heading"><h2 id="activity-title">Processing now <span>{activeJobs.length}</span></h2><p>Open a job to follow its live output.</p></div>{#each activeJobs as job (job.id)}{@render JobRecord(job, true)}{/each}</section>
+					<section class="active-jobs"><div class="section-heading"><h2 id="activity-title">Active jobs <span>{activeJobs.length}</span></h2><p>Running and waiting jobs. Live output streams as each starts.</p></div>{#each activeJobs as job (job.id)}{@render JobRecord(job, true)}{/each}</section>
 				{:else}
 					<section class="queue-idle"><Clock size={21} aria-hidden="true" /><h2 id="activity-title">Nothing processing</h2><p>Ready books stay in the list until you start a batch.</p></section>
 				{/if}
@@ -446,38 +546,78 @@
 </div>
 
 {#snippet JobRecord(job: JobItem, active: boolean)}
-	<article class="job-record">
-		<div class="job-record__heading"><div class="job-identity">{#if job.bookId}<a href="/books/{job.bookId}">{job.bookTitle || `Book #${job.bookId}`}</a>{:else}<strong>Unlinked job</strong>{/if}<code title={job.id}>{job.id.slice(0, 8)}</code></div><div class="job-record__state"><StatusBadge status={job.status} /><JobActionLabel action={job.action} /></div></div>
-		{#if job.destination}
-			<p class="job-destination">Destination: {job.destination}</p>
+	{@const destination = destinationFor(job)}
+	{@const profile = outputProfileLabel(job)}
+	{@const running = isRunning(job)}
+	{@const stage = activeStageLabel(job)}
+	<article class="job-record" class:job-record--active={active} aria-busy={active && running}>
+		{#if active && running}
+			<div class="job-progress" role="progressbar" aria-label="Processing {job.bookTitle || 'book'}" aria-valuetext={stage}><span></span></div>
 		{/if}
-		<p class="job-description">{jobStatusLabel(job.status)}</p>
-		<dl class="job-timestamps">
-			{#if job.startedAt}
-				<div class="job-timestamp"><dt>Started</dt><dd>{formatJobTime(job.startedAt)}</dd></div>
+		<div class="job-record__heading">
+			<div class="job-heading__lead">
+				{#if active}<CoverArt url={job.coverUrl} title={job.bookTitle} size="sm" />{/if}
+				<div class="job-identity">
+					{#if job.bookId}<a href="/books/{job.bookId}">{job.bookTitle || `Book #${job.bookId}`}</a>{:else}<strong>Unlinked job</strong>{/if}
+					{#if active && job.authorNames}<p class="job-author">{job.authorNames}</p>{/if}
+					<code title={job.id}>{job.id.slice(0, 8)}</code>
+				</div>
+			</div>
+			<div class="job-record__state"><StatusBadge status={job.status} /><JobActionLabel action={job.action} /></div>
+		</div>
+		<div class="job-record__body">
+			<div class="job-facts">
+				{#if destination}
+					<p class="job-destination"><span class="job-label">Destination</span><code>{destination}</code></p>
+				{:else if profile}
+					<p class="job-destination job-destination--target"><span class="job-label">Output profile</span><code>{profile}</code></p>
+				{/if}
+				{#if active}
+					<p class="job-stage" class:job-stage--queued={!running} role="status" aria-live="polite"><span class="job-stage__dot" aria-hidden="true"></span>{stage}</p>
+				{:else}
+					<p class="job-description">{jobStatusLabel(job.status)}</p>
+				{/if}
+				<dl class="job-timestamps">
+					{#if job.startedAt}
+						<div class="job-timestamp"><dt>Started</dt><dd>{formatJobTime(job.startedAt)}</dd></div>
+					{/if}
+					{#if job.completedAt}
+						<div class="job-timestamp"><dt>Done</dt><dd>{formatJobTime(job.completedAt)}</dd></div>
+					{/if}
+					{#if job.startedAt || job.createdAt}
+						<div class="job-timestamp"><dt>{elapsedLabel(job.startedAt)}</dt><dd>{formatElapsed(job.startedAt ?? job.createdAt, job.completedAt, clock.now)}</dd></div>
+					{/if}
+					{#if !job.startedAt && !job.completedAt && job.createdAt}
+						<div class="job-timestamp"><dt>Created</dt><dd>{formatJobTime(job.createdAt)}</dd></div>
+					{/if}
+				</dl>
+				{#if job.detail}
+					<p class="job-detail">{job.detail}</p>
+				{/if}
+				{#if job.error}
+					{@const error = cleanAdbError(job.error)}
+					<div class="job-message" class:job-message--error={job.status !== 'cancelled'} role={job.status === 'cancelled' ? 'note' : 'alert'}>{error.message}</div>
+					<ErrorDetail raw={job.error} needsSettings={error.needsSettings} />
+				{/if}
+			</div>
+			{#if job.action === 'merge' || job.output}
+				<details class="job-output" open={active && running}>
+					<summary><FileText size={14} aria-hidden="true" />{active ? 'Live output' : 'Job output'}</summary>
+					{#if job.output}
+						<!-- The log is a scrollable reading surface; keyboard focus is required to scroll it. -->
+						<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+						<pre use:autoscroll={{ text: job.output, active: active && running }} role="log" aria-label="Job {job.id.slice(0, 8)} output" aria-live="off" tabindex="0">{job.output}</pre>
+					{:else}
+						<p>{active ? 'Waiting for the first line…' : 'No output recorded yet.'}</p>
+					{/if}
+				</details>
 			{/if}
-			{#if job.completedAt}
-				<div class="job-timestamp"><dt>Done</dt><dd>{formatJobTime(job.completedAt)}</dd></div>
-			{/if}
-			{#if job.startedAt || job.createdAt}
-				<div class="job-timestamp"><dt>{elapsedLabel(job.startedAt)}</dt><dd>{formatElapsed(job.startedAt ?? job.createdAt, job.completedAt, clock.now)}</dd></div>
-			{/if}
-			{#if !job.startedAt && !job.completedAt && job.createdAt}
-				<div class="job-timestamp"><dt>Created</dt><dd>{formatJobTime(job.createdAt)}</dd></div>
-			{/if}
-		</dl>
-		{#if job.detail}
-			<p class="job-detail">{job.detail}</p>
+		</div>
+		{#if active}
+			<div class="job-actions">
+				<Button variant="ghost" class="cancel-job" loading={cancelling.has(job.id)} disabled={cancelling.has(job.id)} aria-label={job.bookTitle ? `Cancel job for ${job.bookTitle} (${job.id.slice(0, 8)})` : `Cancel job ${job.id.slice(0, 8)}`} onclick={() => cancelJob(job)}>{cancelling.has(job.id) ? 'Cancelling…' : 'Cancel job'}</Button>
+			</div>
 		{/if}
-		{#if job.error}
-			{@const error = cleanAdbError(job.error)}
-			<div class="job-message" class:job-message--error={job.status !== 'cancelled'} role={job.status === 'cancelled' ? 'note' : 'alert'}>{error.message}</div>
-			<ErrorDetail raw={job.error} needsSettings={error.needsSettings} />
-		{/if}
-		{#if job.action === 'merge' || job.output}
-			<details class="job-output" open={active && job.status === 'running'}><summary><FileText size={14} aria-hidden="true" />{active ? 'Live output' : 'Job output'}</summary>{#if job.output}<pre role="log" aria-label="Job {job.id.slice(0, 8)} output" aria-live={active ? 'polite' : 'off'}>{job.output}</pre>{:else}<p>No output recorded yet.</p>{/if}</details>
-		{/if}
-		{#if active}<Button variant="ghost" class="cancel-job" loading={cancelling.has(job.id)} disabled={cancelling.has(job.id)} aria-label="Cancel job {job.id}" onclick={() => cancelJob(job)}>{cancelling.has(job.id) ? 'Cancelling…' : 'Cancel job'}</Button>{/if}
 	</article>
 {/snippet}
 
@@ -490,7 +630,7 @@
 	.queue-live > span, .queue-live a { display: inline-flex; align-items: center; gap: 0.5rem; }
 	.queue-live a { color: var(--workspace-action); min-height: 2.75rem; }
 	.live-dot { width: 0.45rem; height: 0.45rem; border-radius: 50%; background: var(--text-muted); }
-	.live-dot--running { background: var(--state-green); }
+	.live-dot--running { background: var(--state-amber); }
 	.queue-loading { display: grid; gap: 0.75rem; }
 	.queue-columns { display: grid; grid-template-columns: minmax(0, 1fr) 21rem; align-items: start; gap: 1.5rem; margin-top: 1.5rem; }
 	.queue-columns--single { grid-template-columns: minmax(0, 1fr); }
@@ -500,7 +640,7 @@
 	.section-heading { padding: 1.25rem 1.5rem; }
 	.section-heading h2 { display: flex; align-items: center; gap: 0.6rem; margin: 0; font-size: 1.0625rem; font-weight: 650; }
 	.section-heading h2 span, .count { color: var(--text-muted); font-size: 0.8125rem; font-weight: 500; font-variant-numeric: tabular-nums; }
-	.section-heading p { color: var(--text-muted); font-size: 0.8125rem; margin-top: 0.35rem; }
+	.section-heading p { color: var(--text-muted); font-size: 0.8125rem; margin-top: 0.35rem; text-wrap: pretty; }
 	.selection-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem 1rem; padding: 0.75rem 1.5rem; background: var(--surface); border-top: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); }
 	.toolbar-lead { display: flex; align-items: center; flex-wrap: nowrap; gap: 0.75rem 1rem; flex: 1 1 24rem; min-width: 0; }
 	.select-all { display: flex; align-items: center; gap: 0.75rem; flex: 0 0 auto; min-height: 2.75rem; font-size: 0.8125rem; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -537,25 +677,49 @@
 	.failure-count { font-size: 0.75rem; color: var(--state-red); font-weight: 500; margin-left: auto; }
 	.history-hint { margin: 0 0 1rem; }
 	.job-record { min-width: 0; padding: 1.25rem 1.5rem; border-top: 1px solid var(--border-subtle); }
+	.job-record--active { container-type: inline-size; padding-top: 1rem; }
 	.job-history .job-record { padding: 1rem 0; }
+	.job-progress { height: 4px; margin: -0.15rem 0 1rem; overflow: hidden; border-radius: 9999px; background: var(--state-amber-border); }
+	.job-progress > span { display: block; width: 35%; height: 100%; border-radius: inherit; background: var(--state-amber); animation: job-progress 1.5s linear infinite; }
+	@keyframes job-progress { 0% { transform: translateX(-105%); } 100% { transform: translateX(300%); } }
 	.job-record__heading { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 0.5rem; }
+	.job-heading__lead { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
 	.job-record__state { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
+	.job-record__body { display: grid; gap: 0.75rem; min-width: 0; margin-top: 0.65rem; }
+	.job-facts { display: grid; gap: 0.55rem; min-width: 0; }
 	.job-identity { display: grid; gap: 0.35rem; min-width: 0; }
 	.job-identity a, .job-identity strong { font-size: 0.875rem; font-weight: 600; overflow-wrap: anywhere; }
+	.job-record--active .job-identity a, .job-record--active .job-identity strong { font-size: 0.9375rem; line-height: 1.35; }
 	.job-identity code { font-size: 0.75rem; color: var(--text-muted); }
-	.job-destination { color: var(--text-secondary); font-family: ui-monospace, 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace; font-size: 0.75rem; margin-top: 0.65rem; overflow-wrap: anywhere; }
-	.job-description { color: var(--text-muted); font-size: 0.75rem; margin-top: 0.65rem; }
-	.job-timestamps { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin-top: 0.35rem; font-size: 0.75rem; color: var(--text-secondary); }
+	.job-author { color: var(--text-muted); font-size: 0.8125rem; line-height: 1.4; overflow-wrap: anywhere; }
+	.job-destination { display: grid; gap: 0.25rem; min-width: 0; margin: 0; }
+	.job-label { color: var(--text-muted); font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+	.job-destination code { color: var(--text-secondary); font-size: 0.75rem; line-height: 1.5; overflow-wrap: anywhere; }
+	.job-destination--target code { color: var(--text-muted); }
+	.job-stage { display: flex; align-items: center; gap: 0.5rem; margin: 0; color: var(--state-amber); font-size: 0.75rem; font-weight: 600; }
+	.job-stage--queued { color: var(--text-muted); }
+	.job-stage__dot { width: 0.45rem; height: 0.45rem; flex-shrink: 0; border-radius: 50%; background: currentColor; }
+	.job-description { color: var(--text-muted); font-size: 0.75rem; margin: 0; }
+	.job-timestamps { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin: 0; font-size: 0.75rem; color: var(--text-secondary); }
 	.job-timestamp { display: flex; align-items: baseline; gap: 0.35rem; }
 	.job-timestamp dt { font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
 	.job-timestamp dd { margin: 0; font-variant-numeric: tabular-nums; }
-	.job-detail { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.35rem; overflow-wrap: anywhere; }
-	.job-message { overflow-wrap: anywhere; font-size: 0.8125rem; line-height: 1.55; margin: 0.75rem 0; color: var(--text-secondary); }
+	.job-detail { font-size: 0.75rem; color: var(--text-muted); margin: 0; overflow-wrap: anywhere; }
+	.job-message { overflow-wrap: anywhere; font-size: 0.8125rem; line-height: 1.55; margin: 0; color: var(--text-secondary); }
 	.job-message--error { color: var(--state-red); }
-	.job-output { margin-top: 0.5rem; }
+	.job-output { margin-top: 0; }
 	.job-output > summary { display: flex; align-items: center; gap: 0.4rem; cursor: pointer; min-height: 2.75rem; font-size: 0.75rem; color: var(--text-secondary); }
 	.job-output pre { max-height: 16rem; overflow: auto; border-radius: var(--radius-sm); padding: 0.875rem; background: var(--surface); font-size: 0.75rem; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-secondary); }
 	.job-output > p { font-size: 0.8125rem; color: var(--text-muted); padding: 0 0 0.75rem; }
+	/* Svelte's snippet CSS pruning drops this plain selector; keep the
+	 * page-scoped footer layout explicit. */
+	:global(.job-actions) { display: flex; justify-content: flex-end; margin-top: 0.5rem; }
+	@container (min-width: 44rem) {
+		.job-record--active .job-record__body { grid-template-columns: minmax(15rem, 0.82fr) minmax(0, 1.18fr); gap: 1.5rem; align-items: start; margin-top: 0.9rem; }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.job-progress { display: none; }
+	}
 	:global(.app-shell--workspace .cancel-job) { color: var(--state-red); margin-top: 0.25rem; }
 	@media (max-width: 1050px) { .queue-columns { grid-template-columns: minmax(0, 1fr); } .queue-heading { align-items: flex-start; } .queue-live { justify-content: flex-end; } }
 	@media (max-width: 640px) {
@@ -574,6 +738,9 @@
 		.queue-row { grid-template-columns: 2.75rem 3rem minmax(0, 1fr); padding: 0.875rem 1.125rem 0.875rem 0.25rem; gap: 0.5rem; }
 		.ready-state { grid-column: 3; margin-top: -0.25rem; }
 		.pending-intro { align-items: flex-start; flex-direction: column; gap: 0; }
+		.job-record--active { padding: 1.125rem; }
+		.job-record--active .job-record__heading { align-items: flex-start; }
+		.job-output pre { max-height: 12rem; }
 
 		.queue-idle { padding: 1.125rem; }
 	}

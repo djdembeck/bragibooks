@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -924,6 +925,102 @@ func TestStreamJobProgressCloseEndsStream(t *testing.T) {
 	}
 	if !strings.Contains(body, `{"status":"done"}`) {
 		t.Errorf("stream body = %q; want the trailing done line from the done channel", body)
+	}
+}
+
+// streamRecorder is a concurrency-safe SSE sink: the stream handler writes
+// from its goroutine while the test waits for a payload.
+type streamRecorder struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	header http.Header
+	writes chan struct{}
+}
+
+func newStreamRecorder() *streamRecorder {
+	return &streamRecorder{header: make(http.Header), writes: make(chan struct{}, 1)}
+}
+
+func (w *streamRecorder) Header() http.Header { return w.header }
+func (w *streamRecorder) WriteHeader(int)     {}
+func (w *streamRecorder) Flush()              {}
+
+func (w *streamRecorder) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	n, err := w.buf.Write(p)
+	w.mu.Unlock()
+	select {
+	case w.writes <- struct{}{}:
+	default:
+	}
+	return n, err
+}
+
+func (w *streamRecorder) body() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+func (w *streamRecorder) waitFor(substr string, timeout time.Duration) bool {
+	deadline := time.After(timeout)
+	for {
+		if strings.Contains(w.body(), substr) {
+			return true
+		}
+		select {
+		case <-w.writes:
+		case <-deadline:
+			return false
+		}
+	}
+}
+
+// TestStreamJobStreamsLiveOutput covers the live log: stdout appended to the
+// in-memory job state is pushed to an open SSE stream before the job ends,
+// so the page shows progress while m4b-merge is still running.
+func TestStreamJobStreamsLiveOutput(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	st := svc.GetJob(id)
+	if st == nil {
+		t.Fatal("no in-memory state for queued job")
+	}
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Keys = append(rctx.URLParams.Keys, "id")
+	rctx.URLParams.Values = append(rctx.URLParams.Values, id)
+	req := httptest.NewRequest("GET", "/api/jobs/"+id+"/stream", nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	w := newStreamRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.StreamJob(w, req)
+	}()
+
+	if !w.waitFor(`"status":"queued"`, time.Second) {
+		t.Fatalf("initial SSE payload missing; body = %q", w.body())
+	}
+	st.appendOutput("first line")
+	st.appendOutput("second line")
+	if !w.waitFor(`"output":"first line\nsecond line\n"`, 2*time.Second) {
+		t.Fatalf("live output missing from SSE; body = %q", w.body())
+	}
+
+	st.finalize(`{"status":"done","message":"processing complete"}`, nil)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not terminate after finalize")
+	}
+	if body := w.body(); !strings.Contains(body, `{"status":"done"}`) {
+		t.Errorf("stream body = %q; want the trailing done line", body)
 	}
 }
 

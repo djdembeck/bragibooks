@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -142,6 +143,49 @@ func escapeSequenceEnd(s string, i int) int {
 type RunOptions struct {
 	OutputDirOverride  string
 	PathFormatOverride string
+	// OnOutput receives complete stdout lines as m4b-merge writes them,
+	// with ANSI/VT100 sequences stripped. It runs on the goroutine draining
+	// the child's stdout, so it must not block for long; nil disables live
+	// streaming while leaving the captured result intact.
+	OnOutput func(line string)
+}
+
+// lineStreamWriter buffers stdout until a complete line is available, strips
+// escape sequences, and hands each line to onLine. Buffering by line is safe
+// for escape sequences: none contain a newline, so a sequence split across
+// writes stays in the buffer until the line ends.
+type lineStreamWriter struct {
+	buf    []byte
+	onLine func(string)
+}
+
+func (w *lineStreamWriter) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for {
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			break
+		}
+		w.emit(w.buf[:i])
+		w.buf = w.buf[i+1:]
+	}
+	return len(p), nil
+}
+
+// Flush emits a final line that arrived without a trailing newline.
+func (w *lineStreamWriter) Flush() {
+	if len(w.buf) == 0 {
+		return
+	}
+	w.emit(w.buf)
+	w.buf = nil
+}
+
+func (w *lineStreamWriter) emit(line []byte) {
+	text := strings.TrimSuffix(stripEscapeSequences(string(line)), "\r")
+	if text != "" {
+		w.onLine(text)
+	}
 }
 
 // Run executes m4b-merge with the given input file paths.
@@ -249,7 +293,13 @@ func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, 
 	// Wait returns. Manual StdoutPipe/StderrPipe + io.Copy goroutines
 	// raced with Wait closing the read ends and lost large stderr output.
 	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
+	var stream *lineStreamWriter
+	if opts.OnOutput != nil {
+		stream = &lineStreamWriter{onLine: opts.OnOutput}
+		cmd.Stdout = io.MultiWriter(&stdoutBuf, stream)
+	} else {
+		cmd.Stdout = &stdoutBuf
+	}
 	cmd.Stderr = &stderrBuf
 
 	start := time.Now()
@@ -261,6 +311,9 @@ func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, 
 	}
 
 	waitErr := cmd.Wait()
+	if stream != nil {
+		stream.Flush()
+	}
 
 	// m4b-merge colorizes its tracing output unconditionally (no TTY check,
 	// no --no-color flag), so the pipes receive ANSI SGR sequences. Strip
