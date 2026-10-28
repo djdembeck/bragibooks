@@ -627,6 +627,10 @@
 			candidate.removing = false;
 			candidate.removingConfirming = false;
 			candidates = candidates.filter((c) => c.bookId !== id);
+			// The row is gone from every set — a failure report about it is
+			// stale, and per-row deletes never run while a bulk delete is
+			// in flight, so clearing cannot lose a fresh report.
+			removeFailure = null;
 			if (wasActive) {
 				activeId =
 					candidates[Math.min(Math.max(removedIndex, 0), candidates.length - 1)]?.bookId ??
@@ -1025,14 +1029,17 @@
 			if (isReady(candidate)) candidate.included = include;
 		}
 		removalNotice = '';
+		removeFailure = null;
 	}
 
 	/** Inclusion is the save set; changing it re-arms the live region so a
-	 *  stale removal sentence never narrates the new count. */
+	 *  stale removal sentence never narrates the new count. The removal set
+	 *  changed, so any outstanding bulk failure report is stale too. */
 	function setIncluded(candidate: MatchCandidate, included: boolean) {
 		if (removingMany || saving) return;
 		candidate.included = included;
 		removalNotice = '';
+		removeFailure = null;
 	}
 
 	function measureDescriptionOverflow(
@@ -1518,7 +1525,7 @@
 				</label>
 				<span class="batch__count">{includedReadyCount} of {candidates.length} included</span>
 			</div>
-			{#if removeFailure}
+			{#if removeFailure && excludedCount > 0}
 				<div class="batch__alert">
 					<Alert variant="error" onretry={openRemoveDialog}>
 						<p class="batch__alert-lead">
