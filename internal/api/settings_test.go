@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/bragibooks/bragibooks/internal/audio"
 	"github.com/bragibooks/bragibooks/internal/audiobookdb"
 	"github.com/bragibooks/bragibooks/internal/config"
@@ -680,7 +681,8 @@ func TestUpdateSettingsOutputSchemeValidation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestSettingsHandler(t)
-			rec := doPutSettings(t, h, `{"input_dir":"/i","output_dir":"/o","output_scheme":`+`"`+tc.scheme+`"}`)
+			out := t.TempDir()
+			rec := doPutSettings(t, h, fmt.Sprintf(`{"input_dir":"/i","output_dir":%q,"output_scheme":%q}`, out, tc.scheme))
 			if rec.Code != tc.want {
 				t.Fatalf("PUT output_scheme=%q: status = %d, want %d (body %s)", tc.scheme, rec.Code, tc.want, rec.Body.String())
 			}
@@ -695,7 +697,8 @@ func TestUpdateSettingsOutputSchemeValidation(t *testing.T) {
 // string is stored and returned unchanged.
 func TestUpdateSettingsSchemeRoundTrip(t *testing.T) {
 	h := newTestSettingsHandler(t)
-	rec := doPutSettings(t, h, `{"input_dir":"/i","output_dir":"/o","output_scheme":"{author}/vol. {title}"}`)
+	out := t.TempDir()
+	rec := doPutSettings(t, h, fmt.Sprintf(`{"input_dir":"/i","output_dir":%q,"output_scheme":"{author}/vol. {title}"}`, out))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -720,12 +723,13 @@ func TestUpdateSettingsSchemeRoundTrip(t *testing.T) {
 // stored path format untouched.
 func TestUpdateSettingsOmittedOutputSchemeRetained(t *testing.T) {
 	h := newTestSettingsHandler(t)
-	if rec := doPutSettings(t, h, `{"input_dir":"/i","output_dir":"/o","output_scheme":"{author}/vol. {title}"}`); rec.Code != http.StatusOK {
+	out := t.TempDir()
+	if rec := doPutSettings(t, h, fmt.Sprintf(`{"input_dir":"/i","output_dir":%q,"output_scheme":"{author}/vol. {title}"}`, out)); rec.Code != http.StatusOK {
 		t.Fatalf("seed PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
 
 	// No output_scheme in the body.
-	if rec := doPutSettings(t, h, `{"input_dir":"/in","output_dir":"/out"}`); rec.Code != http.StatusOK {
+	if rec := doPutSettings(t, h, fmt.Sprintf(`{"input_dir":"/in","output_dir":%q}`, t.TempDir())); rec.Code != http.StatusOK {
 		t.Fatalf("partial PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
 
@@ -748,11 +752,12 @@ func TestUpdateSettingsOmittedOutputSchemeRetained(t *testing.T) {
 // a 400 on one field must leave the other fields' stored values unchanged.
 func TestUpdateSettingsRejectedRequestChangesNothing(t *testing.T) {
 	h := newTestSettingsHandler(t)
-	if rec := doPutSettings(t, h, `{"input_dir":"/i","output_dir":"/o","output_scheme":"{author}/vol. {title}"}`); rec.Code != http.StatusOK {
+	out := t.TempDir()
+	if rec := doPutSettings(t, h, fmt.Sprintf(`{"input_dir":"/i","output_dir":%q,"output_scheme":"{author}/vol. {title}"}`, out)); rec.Code != http.StatusOK {
 		t.Fatalf("seed PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
 
-	rec := doPutSettings(t, h, `{"input_dir":"/in","output_dir":"/out","output_scheme":"{con}"}`)
+	rec := doPutSettings(t, h, fmt.Sprintf(`{"input_dir":"/in","output_dir":%q,"output_scheme":"{con}"}`, t.TempDir()))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("rejected PUT: status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -773,10 +778,64 @@ func TestUpdateSettingsRejectedRequestChangesNothing(t *testing.T) {
 	if got["input_dir"] != "/i" {
 		t.Fatalf("GET input_dir = %v, want %q (should be unchanged after rejection)", got["input_dir"], "/i")
 	}
-	if got["output_dir"] != "/o" {
-		t.Fatalf("GET output_dir = %v, want %q (should be unchanged after rejection)", got["output_dir"], "/o")
+	if got["output_dir"] != out {
+		t.Fatalf("GET output_dir = %v, want %q (should be unchanged after rejection)", got["output_dir"], out)
 	}
 	if got["output_scheme"] != "{author}/vol. {title}" {
 		t.Fatalf("GET output_scheme = %v, want %q (should be unchanged after rejection)", got["output_scheme"], "{author}/vol. {title}")
+	}
+}
+
+// TestUpdateSettingsDirectoryWriteAccess covers the save-time rule for the
+// directories the server writes to: a CHANGED value the server cannot create
+// entries in is a 400 naming the path, an unchanged stored value is not
+// re-probed (so a mount that went away cannot block unrelated saves), and a
+// blank completed_dir always clears.
+func TestUpdateSettingsDirectoryWriteAccess(t *testing.T) {
+	h := newTestSettingsHandler(t)
+	locked := readOnlyTestDir(t)
+	out := t.TempDir()
+
+	// Seed a valid output dir; completed_dir starts empty.
+	seedBody := fmt.Sprintf(`{"input_dir":"/i","output_dir":%q}`, out)
+	if rec := doPutSettings(t, h, seedBody); rec.Code != http.StatusOK {
+		t.Fatalf("seed PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	blocked := filepath.Join(locked, "completed")
+	rec := doPutSettings(t, h, fmt.Sprintf(`{"completed_dir":%q}`, blocked))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT completed_dir: status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{"completed directory ", blocked, "is not writable", "permission denied"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("body = %q; want it to contain %q", rec.Body.String(), want)
+		}
+	}
+
+	rec = doPutSettings(t, h, fmt.Sprintf(`{"output_dir":%q}`, filepath.Join(locked, "out")))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT output_dir: status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "output directory ") {
+		t.Errorf("body = %q; want it to name the output directory setting", rec.Body.String())
+	}
+
+	// Persist the bad value directly (the mount-went-away case): an
+	// unrelated save that re-sends it unchanged must still succeed, as must
+	// clearing it.
+	if _, err := h.svc.DB.Exec(`UPDATE settings SET completed_dir = ? WHERE id = 1`, blocked); err != nil {
+		t.Fatalf("seed completed_dir: %v", err)
+	}
+	cm := h.svc.Config
+	live := cm.Config()
+	live.Directories.CompletedDir = blocked
+	cm.Store(live)
+
+	if rec := doPutSettings(t, h, fmt.Sprintf(`{"completed_dir":%q}`, blocked)); rec.Code != http.StatusOK {
+		t.Fatalf("unchanged completed_dir: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if rec := doPutSettings(t, h, `{"completed_dir":""}`); rec.Code != http.StatusOK {
+		t.Fatalf("clearing completed_dir: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
 }

@@ -69,8 +69,26 @@ function backendMessage(working: string): string | null {
 	if (denied) {
 		return `The server can’t read "${denied[1].trim()}" — permission denied. Check that the directory is readable by the Bragi Books service.`;
 	}
+	// Write/create denials, which the read-verb patterns above miss. The API
+	// names the setting it probed (`completed directory "/x" is not writable:
+	// permission denied`); m4b-merge reports `... is not writable` with no
+	// path; Go's own frames (`create job output dir /x: mkdir /x: permission
+	// denied`) keep the innermost verb+path so the real target is reported.
+	const notWritable = working.match(/["']([^"']+)["']\s+is not writable/i);
+	if (notWritable) {
+		return `The server can’t write to "${notWritable[1].trim()}" — permission denied. Check that the directory is writable by the Bragi Books service.`;
+	}
+	const writeDenied = working.match(
+		/(?:mkdir|create|rename|write|chmod|remove)\s+([^:]+):\s*permission denied/i
+	);
+	if (writeDenied) {
+		return `The server can’t write to "${writeDenied[1].trim()}" — permission denied. Check that the directory is writable by the Bragi Books service.`;
+	}
+	if (/is not writable/i.test(working)) {
+		return 'The server can’t write to a configured directory — check the output and completed directory permissions in Settings.';
+	}
 	if (/permission denied/i.test(working)) {
-		return 'The server has no permission to read that path — check its permissions in Settings.';
+		return 'The server has no permission to access that path — check its permissions in Settings.';
 	}
 
 	// `not a directory` from the stdlib; `invalid argument` is what

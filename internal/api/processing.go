@@ -714,6 +714,32 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 		runOpts = audio.RunOptions{OutputDirOverride: absDir, PathFormatOverride: effFormat}
 	}
 
+	// Probe every directory this request's jobs will write to before the
+	// first job exists: a profile or global destination whose mount changed
+	// after it was saved must 400 the whole request with zero jobs instead
+	// of queueing one that dies at run time. Save-time probing cannot cover
+	// a later remount, uid change, or env-var override, so this is the
+	// second, request-level gate.
+	if cm := h.svc.Config; cm != nil {
+		cfg := cm.Config()
+		effDir := strings.TrimSpace(cfg.Directories.OutputDir)
+		if runOpts.OutputDirOverride != "" {
+			effDir = runOpts.OutputDirOverride
+		}
+		if effDir != "" {
+			if err := audio.CheckDirWritable(effDir); err != nil {
+				writeError(w, http.StatusBadRequest, "output directory "+err.Error())
+				return
+			}
+		}
+		if completed := strings.TrimSpace(cfg.Directories.CompletedDir); completed != "" {
+			if err := audio.CheckDirWritable(completed); err != nil {
+				writeError(w, http.StatusBadRequest, "completed directory "+err.Error())
+				return
+			}
+		}
+	}
+
 	jobs := make([]ProcessingJobCreated, 0)
 	for i, bookID := range req.BookIDs {
 		// Use the corresponding src_dir (or wrap around if fewer dirs than books)
