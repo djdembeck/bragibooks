@@ -1612,6 +1612,8 @@
 					{@const proposed = proposedRelativeName(c)}
 					{@const rowKind = statusKind(c)}
 					{@const rowText = statusText(c)}
+					{@const edition = editionLine(c)}
+					{@const metaTitle = edition ? `${recordCredits(c)} · ${edition}` : recordCredits(c)}
 					<li
 						class="batch__row"
 						class:batch__row--excluded={ready && !c.included}
@@ -1646,19 +1648,8 @@
 								</span>
 								<span
 									class="batch__name-value batch__name-value--source"
-									title={c.srcPath}
+									title={c.srcPath}>{sourceBase(c)}</span
 								>
-									{#if c.coverUrl}
-										<img
-											class="batch__name-art"
-											src={bookCoverUrl(c.coverUrl, 'small')}
-											alt=""
-											loading="lazy"
-											decoding="async"
-										/>
-									{/if}
-									<span class="batch__name-source-text">{sourceBase(c)}</span>
-								</span>
 							</div>
 							<svg class="batch__arrow" viewBox="0 0 24 24" aria-hidden="true">
 								<path d="M5 12h13m-5-5 5 5-5 5" />
@@ -1666,7 +1657,7 @@
 							<div class="batch__name">
 								<span class="batch__name-head">
 									<span class="batch__name-label">After</span>
-									<span class="batch__name-note">proposed</span>
+									<span class="batch__name-note">preview</span>
 								</span>
 								{#if !outputScheme}
 									<a class="batch__name-link" href="/settings">
@@ -1714,12 +1705,15 @@
 									</span>
 									<span class="batch__record-meta-line">
 										{@render matchChip(rowKind, rowText)}
-										<span class="batch__record-meta" title={recordCredits(c)}>
+										<span class="batch__record-meta" title={metaTitle}>
 											{recordCredits(c)}
+											{#if edition}
+												<span class="batch__record-edition-inline"> · {edition}</span>
+											{/if}
 										</span>
 									</span>
-									{#if editionLine(c)}
-										<span class="batch__record-edition">{editionLine(c)}</span>
+									{#if edition}
+										<span class="batch__record-edition">{edition}</span>
 									{/if}
 								</span>
 							{:else}
@@ -2484,9 +2478,12 @@
 								>{sourceBase(target)}</span
 							>
 							<span class="batch-dialog__record">
-								{target.details.book
-									? selectedTitle(target)
-									: matchState(target).text}
+								{#if target.details.book}
+									<span class="batch-dialog__record-label">Matched as:</span>
+									{selectedTitle(target)}
+								{:else}
+									{matchState(target).text}
+								{/if}
 							</span>
 						</span>
 					</label>
@@ -2723,7 +2720,7 @@
 		font-size: 12.5px;
 		line-height: 1.45;
 		color: var(--m-muted);
-		max-width: 90ch;
+		max-width: 72ch;
 	}
 
 	.batch__list {
@@ -2879,28 +2876,12 @@
 
 	/* Source identity wraps in both batch and removal review. */
 	.batch__name-value--source {
-		display: block;
 		white-space: normal;
 		overflow-wrap: anywhere;
-	}
-
-	.batch__name-source-text {
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
 		line-clamp: 2;
 		-webkit-box-orient: vertical;
-		overflow: hidden;
-	}
-
-	.batch__name-art {
-		display: none;
-		width: 24px;
-		height: 24px;
-		flex-shrink: 0;
-		object-fit: cover;
-		border: 1px solid var(--m-border);
-		border-radius: 4px;
-		background: var(--elevated);
 	}
 
 	.batch__name-link {
@@ -3011,6 +2992,12 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	.batch__record-edition-inline {
+		display: none;
+		font-style: italic;
+		color: var(--m-ink-2);
 	}
 
 	.batch__actions {
@@ -3231,8 +3218,12 @@
 		line-height: 1.3;
 		color: var(--m-ink);
 		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		overflow-wrap: anywhere;
+		white-space: normal;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
 	}
 
 	.match__src-status {
@@ -3467,8 +3458,8 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: 34px;
-		height: 34px;
+		width: 44px;
+		height: 44px;
 		padding: 0;
 		border: 1px solid var(--m-border-strong);
 		border-radius: var(--m-r-sm);
@@ -3487,7 +3478,7 @@
 	}
 
 	.match__position :global(.btn) {
-		min-height: 34px;
+		min-height: 44px;
 		padding: 0 10px;
 		font-size: 13px;
 	}
@@ -4310,6 +4301,12 @@
 		overflow-wrap: anywhere;
 	}
 
+	.batch-dialog__record-label {
+		font-size: 11px;
+		font-weight: 600;
+		color: var(--m-ink-2);
+	}
+
 	.batch-dialog__foot {
 		display: flex;
 		align-items: center;
@@ -4505,8 +4502,8 @@
 				'check names'
 				'record record'
 				'actions actions';
-			row-gap: 8px;
-			padding: 12px 14px;
+			row-gap: 6px;
+			padding: 10px 14px;
 		}
 
 		.batch__thumb,
@@ -4521,7 +4518,7 @@
 
 		.batch__name {
 			display: grid;
-			grid-template-columns: 46px minmax(0, 1fr);
+			grid-template-columns: 78px minmax(0, 1fr);
 			align-items: baseline;
 			column-gap: 4px;
 			row-gap: 0;
@@ -4529,11 +4526,15 @@
 
 		.batch__name-head {
 			grid-column: 1;
+			flex-direction: column;
+			align-items: flex-start;
 			flex-wrap: nowrap;
+			gap: 0;
 		}
 
 		.batch__name-note {
-			display: none;
+			display: block;
+			font-size: 10.5px;
 		}
 
 		.batch__name-value {
@@ -4563,20 +4564,6 @@
 			-webkit-box-orient: vertical;
 		}
 
-		.batch__name-value.batch__name-value--source {
-			display: flex;
-			align-items: center;
-			gap: 6px;
-		}
-
-		.batch__name-source-text {
-			min-width: 0;
-		}
-
-		.batch__name-art {
-			display: block;
-		}
-
 		.batch__record {
 			align-items: flex-start;
 		}
@@ -4597,6 +4584,14 @@
 		.batch__record-meta,
 		.batch__record-edition {
 			white-space: normal;
+		}
+
+		.batch__record-edition {
+			display: none;
+		}
+
+		.batch__record-edition-inline {
+			display: inline;
 		}
 
 		.batch__actions {
