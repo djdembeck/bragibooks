@@ -33,7 +33,7 @@
 		OutputProfileSelector,
 		PathFormatBuilder,
 	} from '#lib/components/index.js';
-	import { parseParts, validateScheme } from '#lib/scheme.js';
+	import { parseParts, trimSegment, validateScheme } from '#lib/scheme.js';
 	import { ExternalLink, ArrowLeft, CheckCircle, ChevronDown, FolderOpen } from '@lucide/svelte';
 
 	let { data }: { data: PageData } = $props();
@@ -237,7 +237,7 @@
 			profilesError = null;
 		} else {
 			profiles = [];
-			profilesError = 'Saved profiles unavailable — re-processing uses global settings.';
+			profilesError = 'Saved profiles unavailable — set the destination with the fields below.';
 		}
 		globals = settingsResult.status === 'fulfilled' ? settingsResult.value : null;
 		previewLoading = false;
@@ -249,13 +249,33 @@
 	// two competing answers.
 	const profileActive = $derived(selectedProfileId !== null);
 
+	// The builder mirrors ValidatePathFormat, but the reprocess endpoint also
+	// requires a RELATIVE format (no leading "/", no ".." segment) — the same
+	// extra pair the Settings profile form checks. Surface those here instead
+	// of letting the API answer with a 400 after submit.
+	const formatExtraError = $derived.by(() => {
+		if (profileActive || overrideFormat === '') return null;
+		const scheme = overrideFormat.trim();
+		if (scheme.startsWith('/')) {
+			return 'Must be relative to the output directory (no leading /).';
+		}
+		if (scheme.split('/').some((segment) => trimSegment(segment) === '..')) {
+			return 'Must not contain a “..” path segment.';
+		}
+		return null;
+	});
+
 	// The shared builder reports its own errors; mirror its validity into
 	// Start so an invalid custom format cannot reach the API. With a profile
 	// selected the override is not sent, so it cannot block the run.
+	// A whitespace-only value is not "blank" to the builder (it surfaces
+	// "Add at least one path element"), so it blocks too rather than sitting
+	// in a state where the builder errors but Start stays enabled.
 	const formatInvalid = $derived(
 		!profileActive &&
-			overrideFormat.trim() !== '' &&
-			validateScheme(parseParts(overrideFormat)).errors.length > 0
+			overrideFormat !== '' &&
+			(formatExtraError !== null ||
+				validateScheme(parseParts(overrideFormat)).errors.length > 0)
 	);
 
 	/** Base the builder's example on the directory this run would use. */
@@ -754,9 +774,8 @@
 						/>
 					</div>
 					{#if profileActive}
-						<p class="reprocess__help">
-							The selected profile supplies the output directory and path format. Choose
-							Global settings to override them here.
+						<p class="reprocess__help" role="status">
+							Choose Global settings to edit the output directory and path format.
 						</p>
 					{:else}
 						<div class="reprocess__field">
@@ -779,7 +798,7 @@
 								</Button>
 							</div>
 							<p id="reprocess-override-dir-help" class="reprocess__help">
-								Leave blank to use the global output directory.
+								Absolute path. Leave blank to use the global output directory.
 							</p>
 						</div>
 						<details
@@ -808,6 +827,9 @@
 									outputDir={effectiveBaseDir}
 									allowEmpty
 								/>
+								{#if formatExtraError}
+									<p class="reprocess__field-error" role="alert">{formatExtraError}</p>
+								{/if}
 								<p class="reprocess__help">
 									Tap a part to add it. Within a part, Arrows move, Delete removes,
 									Alt+Arrows reorders.
@@ -1759,5 +1781,13 @@
 		line-height: 1.45;
 		color: var(--text-muted);
 		text-wrap: pretty;
+	}
+
+	.reprocess__field-error {
+		margin: 0;
+		font-size: 0.75rem;
+		font-weight: 500;
+		line-height: 1.45;
+		color: var(--state-red);
 	}
 </style>
