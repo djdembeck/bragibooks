@@ -309,6 +309,25 @@ func TestReprocessNoRun(t *testing.T) {
 		t.Fatalf("preview = %+v; want available=false with reason and no last_run/inputs", prev)
 	}
 
+	// The SQL-NULL args row (book 3) is refusal state, not a server error:
+	// the same no-inputs sentence as book 2, last_run/inputs omitted.
+	rec = getReprocess(t, h, 3)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("null-args preview status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&prev); err != nil {
+		t.Fatalf("decode null-args preview: %v", err)
+	}
+	if prev.Available || prev.Reason == "" {
+		t.Fatalf("null-args preview = %+v; want available=false with a reason", prev)
+	}
+	if !strings.Contains(prev.Reason, "No original input files were recorded") {
+		t.Errorf("null-args preview reason = %q; want the no-inputs sentence", prev.Reason)
+	}
+	if prev.LastRun != nil || prev.Inputs != nil {
+		t.Errorf("null-args preview = %+v; want last_run/inputs omitted", prev)
+	}
+
 	// Unknown book is a 404 on the preview.
 	if rec := getReprocess(t, h, 99); rec.Code != http.StatusNotFound {
 		t.Errorf("preview unknown book = %d; want 404", rec.Code)
@@ -493,6 +512,128 @@ func TestReprocessOverrideValidation(t *testing.T) {
 	if strings.Contains(raw, "output_dir") || strings.Contains(raw, "output_scheme") {
 		t.Errorf("global-settings args = %q; want no destination fields", raw)
 	}
+}
+
+// TestReprocessOverrideDirFormatRejects pins the override-branch refusals:
+// a RELATIVE output_dir 400s (destination roots are absolute; blank inherits
+// the global) and a WHITESPACE-ONLY path_format 400s (a sent field is an
+// override, not blank), and an absolute dir alone is stored as accepted.
+func TestReprocessOverrideDirFormatRejects(t *testing.T) {
+	completed := t.TempDir()
+	h := newReprocessHandler(t, t.TempDir(), completed, "{author}/{title}", "")
+	if err := os.WriteFile(filepath.Join(completed, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write completed: %v", err)
+	}
+	seedReprocessBook(t, h, 1, "done", t.TempDir())
+	seedMergeRow(t, h, "seeded-rejects", 1, `{"src_paths":["`+filepath.Join(completed, "a.m4b")+`"]}`, "2026-07-03 10:00:00")
+	absAlt := filepath.Join(t.TempDir(), "alt-out")
+	if err := os.MkdirAll(absAlt, 0o755); err != nil {
+		t.Fatalf("mkdir alt: %v", err)
+	}
+
+	t.Run("relative dir", func(t *testing.T) {
+		w := postReprocess(t, h, StartReprocessRequest{BookID: 1, OutputDir: "relative/out"})
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "output directory must be an absolute path") {
+			t.Fatalf("status %d body %q; want 400 + absolute-path sentence", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("whitespace-only format", func(t *testing.T) {
+		w := postReprocess(t, h, StartReprocessRequest{BookID: 1, PathFormat: "   \t "})
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "output path format is empty") {
+			t.Fatalf("status %d body %q; want 400 + empty-format sentence", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("absolute dir accepted", func(t *testing.T) {
+		clearQueuedJobs(t, h.svc.DB, 1) // t.Run is non-parallel: order is stable
+		w := postReprocess(t, h, StartReprocessRequest{BookID: 1, OutputDir: absAlt})
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+		}
+		args := newestJobArgs(t, h.svc.DB, 1)
+		if args.OutputDir != absAlt {
+			t.Errorf("stored output_dir = %q; want %q", args.OutputDir, absAlt)
+		}
+	})
+}
+
+// TestReprocessDestinationProbeRejectsBeforeQueueing: an effective output
+// destination (profile, explicit-override-free global) that is an EXISTING
+// REGULAR FILE — plus a completed dir that is — must 400 the request,
+// naming the failing destination, with no reprocess job row created
+// (mirrors the queue-endpoint probe test on the reprocess path).
+func TestReprocessDestinationProbeRejectsBeforeQueueing(t *testing.T) {
+	remain := t.TempDir()
+	origA := filepath.Join(remain, "a.m4b")
+	if err := os.WriteFile(origA, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write original: %v", err)
+	}
+	aRegularFile := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(aRegularFile, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write regular-file destination: %v", err)
+	}
+
+	seedAndPost := func(h *Handler, req StartReprocessRequest) *httptest.ResponseRecorder {
+		seedReprocessBook(t, h, 1, "done", remain)
+		seedMergeRow(t, h, "seeded-probe", 1, `{"src_paths":["`+origA+`"]}`, "2026-07-03 10:00:00")
+		return postReprocess(t, h, req)
+	}
+
+	t.Run("profile output dir", func(t *testing.T) {
+		h := newReprocessHandler(t, t.TempDir(), t.TempDir(), "{author}/{title}", "")
+		var profileID int64
+		if _, err := h.svc.DB.Exec(
+			"INSERT INTO output_profiles (name, output_dir) VALUES ('probe-blockaded', ?)", aRegularFile,
+		); err != nil {
+			t.Fatalf("seed profile: %v", err)
+		}
+		if err := h.svc.DB.QueryRow("SELECT id FROM output_profiles WHERE name = 'probe-blockaded'").Scan(&profileID); err != nil {
+			t.Fatalf("read profile id: %v", err)
+		}
+
+		w := seedAndPost(h, StartReprocessRequest{BookID: 1, OutputProfileID: &profileID})
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "output directory") || !strings.Contains(w.Body.String(), aRegularFile) {
+			t.Errorf("body = %q; want it naming the failing profile destination", w.Body.String())
+		}
+		if n := jobCountForBook(t, h.svc.DB, 1); n != 1 {
+			t.Errorf("job count = %d; want 1 (seeded only — probe runs before queueing)", n)
+		}
+	})
+
+	t.Run("global output dir", func(t *testing.T) {
+		h := newReprocessHandler(t, aRegularFile, t.TempDir(), "{author}/{title}", "")
+		w := seedAndPost(h, StartReprocessRequest{BookID: 1})
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "output directory") || !strings.Contains(w.Body.String(), aRegularFile) {
+			t.Errorf("body = %q; want it naming the failing global destination", w.Body.String())
+		}
+		if n := jobCountForBook(t, h.svc.DB, 1); n != 1 {
+			t.Errorf("job count = %d; want 1 (seeded only — probe runs before queueing)", n)
+		}
+	})
+
+	t.Run("completed dir", func(t *testing.T) {
+		// The output dir is a healthy temp dir so the probe reaches the
+		// completed-dir check; the input resolves at its recorded path
+		// (stat under a regular-file "dir" fails, original wins).
+		h := newReprocessHandler(t, t.TempDir(), aRegularFile, "{author}/{title}", "")
+		w := seedAndPost(h, StartReprocessRequest{BookID: 1})
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "completed directory") || !strings.Contains(w.Body.String(), aRegularFile) {
+			t.Errorf("body = %q; want it naming the failing completed directory", w.Body.String())
+		}
+		if n := jobCountForBook(t, h.svc.DB, 1); n != 1 {
+			t.Errorf("job count = %d; want 1 (seeded only — probe runs before queueing)", n)
+		}
+	})
 }
 
 // TestReprocessPreview pins the preview wire shape on mixed locations:

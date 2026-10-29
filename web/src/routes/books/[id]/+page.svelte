@@ -56,6 +56,28 @@
 	// Bumped by the retry button to force the effect below to re-run.
 	let jobsReload = $state(0);
 
+	// The preview endpoint is the source of truth for "this book has recorded
+	// merge inputs" — a REMATCHED, ERRORED, OR DONE book whose merge already
+	// consumed its inputs still reprocesses through the dialog.
+	let reprocessLoadToken = 0;
+	$effect(() => {
+		const id = book?.id;
+		if (!id) return;
+		reprocessLoadToken++;
+		const token = reprocessLoadToken;
+		previewSettled = false;
+		get<ReprocessPreview>(`/books/${id}/reprocess`)
+			.then((prev) => {
+				if (reprocessLoadToken === token && book?.id === id) preview = prev;
+			})
+			.catch((e) => {
+				if (reprocessLoadToken === token && book?.id === id) previewError = toCleanedError(e);
+			})
+			.finally(() => {
+				if (reprocessLoadToken === token && book?.id === id) previewSettled = true;
+			});
+	});
+
 	$effect(() => {
 		jobsReload; // dependency — retry re-runs this effect
 		const id = book?.id;
@@ -165,18 +187,23 @@
 		}
 	}
 
-	/* ── Reprocess dialog (done books) ───────────────────────────
+	/* ── Reprocess dialog (books with recorded merge inputs) ──────
 	 * Reruns the M4B merge from the located original input files: each
 	 * recorded path is looked up in the completed directory first, then at
 	 * its recorded original path. Settings default to BLANK = current
 	 * global settings (the same blank-inherit rule as the queue page). */
-	const isDone = $derived(book?.status === 'done');
 	let reprocessOpen = $state(false);
 	let reprocessSubmitting = $state(false);
 	let reprocessError = $state<CleanedAdbError | null>(null);
 	let preview = $state<ReprocessPreview | null>(null);
 	let previewError = $state<CleanedAdbError | null>(null);
 	let previewLoading = $state(false);
+	// The page-level $effect's preview request has settled for the current
+	// book. While it is in flight, eligibility cannot be known from the
+	// preview, so the action section must not fall through to the legacy
+	// /process route (a book with recorded merge inputs would re-run from
+	// src_path instead of the dialog).
+	let previewSettled = $state(false);
 	let profiles = $state<OutputProfile[]>([]);
 	let profilesError = $state<string | null>(null);
 	let profilesLoading = $state(false);
@@ -188,10 +215,23 @@
 	let overrideFormat = $state('');
 	let dirPickerOpen = $state(false);
 
+	// The page-level preview load (above) is the source of truth for
+	// "this book's merge recorded input files": a book that failed, was
+	// cancelled (matched), or finished still reprocesses through the dialog
+	// once the last run consumed its inputs. The preview is deliberately NOT
+	// consulted here while the button is disabled, so it stays the preview;
+	// eligibility comes from `available + inputs`, never from guessing which
+	// status qualifies. A preview fetch that failed (previewError) is not
+	// "no inputs" — the old status-based button is the safe fallback.
+	const canReprocessDialog = $derived(
+		preview !== null &&
+			preview.available === true &&
+			preview.inputs !== undefined &&
+			preview.inputs.total > 0
+	);
+
 	function openReprocess() {
 		reprocessError = null;
-		preview = null;
-		previewError = null;
 		selectedProfileId = null;
 		overrideDir = '';
 		overrideFormat = '';
@@ -216,6 +256,11 @@
 	async function loadReprocessData() {
 		const id = book?.id;
 		if (!id) return;
+		// Per-call token: a newer load (page effect re-run for a fresh book,
+		// or a retry) makes this settle stale, and a stale settle must not
+		// clobber the newer state — silent success would hide the newer
+		// load's pending skeleton.
+		const token = ++reprocessLoadToken;
 		previewLoading = true;
 		profilesLoading = true;
 		const [previewResult, profilesResult, settingsResult] = await Promise.allSettled([
@@ -223,7 +268,7 @@
 			get<OutputProfilesResponse>('/output-profiles'),
 			get<Settings>('/settings')
 		]);
-		if (book?.id !== id) return;
+		if (book?.id !== id || reprocessLoadToken !== token) return;
 
 		if (previewResult.status === 'fulfilled') {
 			preview = previewResult.value;
@@ -646,16 +691,29 @@
 						>
 							{cancellingJob ? 'Cancelling…' : 'Cancel job'}
 						</Button>
-					{:else if isDone}
-						<!-- Done books reprocess from their located original inputs (completed
-							directory first), not from src_path — the dialog previews what it
-							will find before the run. -->
+					{:else if canReprocessDialog}
+						<!-- Books whose last merge run recorded input files reprocess from the
+							located originals (completed directory first), not from src_path —
+							the dialog previews what it will find before the run. Eligibility
+							comes from the preview endpoint, not book status: a reprocess that
+							failed (error) or was cancelled (matched) still owns its consumed
+							inputs and stays eligible. -->
 						<Button variant="primary" onclick={openReprocess}>Re-process</Button>
 					{:else if isFileBacked}
 						<Button variant="primary" disabled>Re-process</Button>
 						<p class="record-section__note">Source is a single file — re-process from the Queue.</p>
 					{:else}
-						<Button variant="primary" onclick={() => beginAction('reprocess')}>Re-process</Button>
+						{#if previewSettled}
+							<Button variant="primary" onclick={() => beginAction('reprocess')}>Re-process</Button>
+						{:else}
+							<!-- The preview request for the current book is still in flight: a book
+								with recorded merge inputs must go through the dialog, so the legacy
+								/process route is unsafe until eligibility is known (not guessed
+								from status). A settled failure (previewError) re-enables this
+								button — the preview unavailable is not "no inputs". -->
+							<Button variant="primary" disabled>Re-process</Button>
+							<p class="record-section__note">Checking…</p>
+						{/if}
 					{/if}
 					{#if inFlightJob}
 						<Button variant="ghost" disabled>Re-match</Button>
@@ -710,7 +768,7 @@
 						<p class="reprocess__ready-detail">{foundBreakdown(preview.inputs)}</p>
 					</div>
 				{:else}
-					<Alert variant="error" onretry={loadReprocessData}>
+					<Alert variant="error" onretry={loadReprocessData} retryDisabled={previewLoading || profilesLoading}>
 						<p class="reprocess__alert-lead">
 							{preview.inputs.missing.length} original input
 							{fileNoun(preview.inputs.missing.length)} not found
@@ -752,7 +810,7 @@
 			{/if}
 
 			{#if previewError}
-				<Alert variant="warning" onretry={loadReprocessData}>
+				<Alert variant="warning" onretry={loadReprocessData} retryDisabled={previewLoading || !previewSettled}>
 					Could not check the original input files — {previewError.message}
 				</Alert>
 			{/if}

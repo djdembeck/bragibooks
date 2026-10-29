@@ -731,7 +731,11 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 // may inherit independently). Writes the response on failure and returns ok
 // false; runOpts is valid (zero = full globals) when ok is true.
 func (h *Handler) resolveDestination(w http.ResponseWriter, profileID *int64, overrideDir, overrideFormat string) (runOpts audio.RunOptions, ok bool) {
-	overridesSet := strings.TrimSpace(overrideDir) != "" || strings.TrimSpace(overrideFormat) != ""
+	// A field the client sent with ANY characters is an override, even
+	// whitespace-only (which the empty-inherit branches below reject
+	// explicitly): counting trimmed emptiness as "set" would let a sent
+	// whitespace-only format slip past validation and inherit the global.
+	overridesSet := overrideDir != "" || overrideFormat != ""
 	if profileID != nil && overridesSet {
 		writeError(w, http.StatusBadRequest, "Choose either an output profile or explicit output overrides, not both.")
 		return audio.RunOptions{}, false
@@ -791,6 +795,14 @@ func (h *Handler) resolveDestination(w http.ResponseWriter, profileID *int64, ov
 	}
 	if overridesSet {
 		if dir := strings.TrimSpace(overrideDir); dir != "" {
+			// An explicit dir is a destination root and must be absolute,
+			// mirroring validateProfile's save-time rule (the queue page and
+			// the record-page dialog copy it too). Empty dir is "inherit the
+			// global", not an override.
+			if !strings.HasPrefix(dir, "/") {
+				writeError(w, http.StatusBadRequest, "output directory must be an absolute path")
+				return audio.RunOptions{}, false
+			}
 			absDir, err := filepath.Abs(dir)
 			if err != nil {
 				writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot resolve output directory %s: %v", dir, err))
@@ -798,7 +810,15 @@ func (h *Handler) resolveDestination(w http.ResponseWriter, profileID *int64, ov
 			}
 			runOpts.OutputDirOverride = absDir
 		}
-		if format := strings.TrimSpace(overrideFormat); format != "" {
+		// A field the client sent with any characters is an override — a
+		// whitespace-only format is not blank, so it must not silently
+		// inherit the global format.
+		if overrideFormat != "" {
+			format := strings.TrimSpace(overrideFormat)
+			if format == "" {
+				writeError(w, http.StatusBadRequest, "output path format is empty")
+				return audio.RunOptions{}, false
+			}
 			if err := audio.ValidateRelativePathFormat(format); err != nil {
 				writeError(w, http.StatusBadRequest, "output path format: "+err.Error())
 				return audio.RunOptions{}, false
@@ -1068,12 +1088,16 @@ func (h *Handler) StartReprocess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Keep the provenance of the run visible in the history row.
+	// Keep the provenance of the run visible in the history row. The job is
+	// already queued and may already be running: a detail-write failure is a
+	// log line, not a 500 that would fake the run as failed.
 	detail := fmt.Sprintf("reprocess: %d of %d inputs from completed directory", foundCompleted, len(args.SrcPaths))
 	if foundCompleted == 0 {
 		detail = "reprocess: inputs from original source paths"
 	}
-	h.svc.DB.Exec("UPDATE processing_jobs SET detail = ? WHERE id = ?", detail, jobID)
+	if _, err := h.svc.DB.Exec("UPDATE processing_jobs SET detail = ? WHERE id = ?", detail, jobID); err != nil {
+		log.Printf("record reprocess provenance for job %s: %v", jobID, err)
+	}
 
 	writeJSON(w, http.StatusOK, StartProcessingResponse{
 		Jobs:         []ProcessingJobCreated{{ID: jobID, BookID: req.BookID}},
