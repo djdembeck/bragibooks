@@ -29,9 +29,12 @@
 		CoverArt,
 		JobActionLabel,
 		Modal,
+		DirPicker,
 		OutputProfileSelector,
+		PathFormatBuilder,
 	} from '#lib/components/index.js';
-	import { ExternalLink, ArrowLeft, CheckCircle } from '@lucide/svelte';
+	import { parseParts, validateScheme } from '#lib/scheme.js';
+	import { ExternalLink, ArrowLeft, CheckCircle, ChevronDown, FolderOpen } from '@lucide/svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -183,6 +186,7 @@
 	let selectedProfileId = $state<number | null>(null);
 	let overrideDir = $state('');
 	let overrideFormat = $state('');
+	let dirPickerOpen = $state(false);
 
 	function openReprocess() {
 		reprocessError = null;
@@ -191,6 +195,7 @@
 		selectedProfileId = null;
 		overrideDir = '';
 		overrideFormat = '';
+		dirPickerOpen = false;
 		reprocessOpen = true;
 		void loadReprocessData();
 	}
@@ -239,6 +244,34 @@
 		profilesLoading = false;
 	}
 
+	// A selected profile supplies BOTH destination values (the backend
+	// ignores manual overrides then); hide them so the form cannot present
+	// two competing answers.
+	const profileActive = $derived(selectedProfileId !== null);
+
+	// The shared builder reports its own errors; mirror its validity into
+	// Start so an invalid custom format cannot reach the API. With a profile
+	// selected the override is not sent, so it cannot block the run.
+	const formatInvalid = $derived(
+		!profileActive &&
+			overrideFormat.trim() !== '' &&
+			validateScheme(parseParts(overrideFormat)).errors.length > 0
+	);
+
+	/** Base the builder's example on the directory this run would use. */
+	const effectiveBaseDir = $derived(overrideDir.trim() || globals?.output_dir || '');
+
+	function pickOutputDir(path: string) {
+		overrideDir = path;
+		dirPickerOpen = false;
+	}
+
+	/** Expanding the builder can open below the dialog's scroll fold. */
+	function onFormatToggle(event: Event) {
+		const el = event.currentTarget as HTMLDetailsElement;
+		if (el.open) el.scrollIntoView({ block: 'nearest' });
+	}
+
 	// Availability AND every recorded input file found: the backend refuses
 	// 400 on any missing file, so the button mirrors that rule. Non-blank
 	// overrides are validated server-side on submit (dialog stays open).
@@ -249,13 +282,9 @@
 			preview.inputs !== undefined &&
 			preview.inputs.found === preview.inputs.total &&
 			!previewLoading &&
-			!profilesLoading
+			!profilesLoading &&
+			!formatInvalid
 	);
-
-	// A selected profile supplies BOTH destination values (the backend
-	// ignores manual overrides then); disable them so the form cannot
-	// present two competing answers.
-	const profileActive = $derived(selectedProfileId !== null);
 
 	function fileNoun(count: number): string {
 		return count === 1 ? 'file' : 'files';
@@ -289,9 +318,14 @@
 		reprocessSubmitting = true;
 		reprocessError = null;
 		const payload: ReprocessRequest = { book_id: book.id };
-		if (selectedProfileId !== null) payload.output_profile_id = selectedProfileId;
-		if (overrideDir.trim()) payload.output_dir = overrideDir.trim();
-		if (overrideFormat.trim()) payload.path_format = overrideFormat.trim();
+		if (selectedProfileId !== null) {
+			// A profile and the manual fields are alternatives, never a pair:
+			// the backend ignores overrides when a profile is set.
+			payload.output_profile_id = selectedProfileId;
+		} else {
+			if (overrideDir.trim()) payload.output_dir = overrideDir.trim();
+			if (overrideFormat.trim()) payload.path_format = overrideFormat.trim();
+		}
 		try {
 			await post('/process/reprocess', payload);
 			reprocessOpen = false;
@@ -719,42 +753,68 @@
 							summaryClass="w-full text-xs"
 						/>
 					</div>
-					<div class="reprocess__field">
-						<label class="reprocess__label" for="reprocess-override-dir">Output directory</label>
-						<input
-							id="reprocess-override-dir"
-							class="w-full font-mono"
-							placeholder={globals?.output_dir || 'Inherit global directory'}
-							bind:value={overrideDir}
-							disabled={profileActive}
-							aria-describedby="reprocess-override-dir-help"
-						/>
-						<p id="reprocess-override-dir-help" class="reprocess__help">
-							{#if profileActive}
-								The selected profile sets the output directory.
-							{:else}
-								Absolute path. Empty inherits the global output directory.
-							{/if}
+					{#if profileActive}
+						<p class="reprocess__help">
+							The selected profile supplies the output directory and path format. Choose
+							Global settings to override them here.
 						</p>
-					</div>
-					<div class="reprocess__field">
-						<label class="reprocess__label" for="reprocess-override-format">Output path format</label>
-						<input
-							id="reprocess-override-format"
-							class="w-full font-mono"
-							placeholder={globals?.output_scheme || 'Inherit global path format'}
-							bind:value={overrideFormat}
-							disabled={profileActive}
-							aria-describedby="reprocess-override-format-help"
-						/>
-						<p id="reprocess-override-format-help" class="reprocess__help">
-							{#if profileActive}
-								The selected profile sets the path format.
-							{:else}
-								Relative path. Empty inherits the global path format.
-							{/if}
-						</p>
-					</div>
+					{:else}
+						<div class="reprocess__field">
+							<label class="reprocess__label" for="reprocess-override-dir">Output directory</label>
+							<div class="reprocess__input-row">
+								<input
+									id="reprocess-override-dir"
+									class="font-mono"
+									placeholder={globals?.output_dir || 'Absolute path'}
+									bind:value={overrideDir}
+									aria-describedby="reprocess-override-dir-help"
+								/>
+								<Button
+									variant="secondary"
+									class="shrink-0"
+									onclick={() => (dirPickerOpen = true)}
+								>
+									<FolderOpen class="h-4 w-4" aria-hidden="true" />
+									Browse
+								</Button>
+							</div>
+							<p id="reprocess-override-dir-help" class="reprocess__help">
+								Leave blank to use the global output directory.
+							</p>
+						</div>
+						<details
+							class="reprocess__disclosure"
+							class:reprocess__disclosure--invalid={formatInvalid}
+							ontoggle={onFormatToggle}
+						>
+							<summary class="reprocess__disclosure-summary">
+								<span class="reprocess__label">Output path format</span>
+								<span
+									class="reprocess__disclosure-state"
+									class:reprocess__disclosure-state--error={formatInvalid}
+								>
+									{formatInvalid ? 'Invalid' : overrideFormat ? 'Custom' : 'Inherited'}
+								</span>
+								<code class="reprocess__disclosure-value">
+									{overrideFormat || globals?.output_scheme || 'Global path format'}
+								</code>
+								<span class="reprocess__disclosure-icon">
+									<ChevronDown class="h-4 w-4" aria-hidden="true" />
+								</span>
+							</summary>
+							<div class="reprocess__disclosure-body">
+								<PathFormatBuilder
+									bind:value={overrideFormat}
+									outputDir={effectiveBaseDir}
+									allowEmpty
+								/>
+								<p class="reprocess__help">
+									Tap a part to add it. Within a part, Arrows move, Delete removes,
+									Alt+Arrows reorders.
+								</p>
+							</div>
+						</details>
+					{/if}
 				</div>
 			{/if}
 
@@ -785,6 +845,13 @@
 			</div>
 		{/snippet}
 	</Modal>
+
+	<DirPicker
+		bind:open={dirPickerOpen}
+		startPath={effectiveBaseDir || '/'}
+		title="Choose reprocess output directory"
+		onselect={pickOutputDir}
+	/>
 
 	<!-- ── Compare with AudiobookDB ────────────────────────────── -->
 	<section class="card record-section" aria-label="Compare with AudiobookDB">
@@ -1591,11 +1658,99 @@
 		color: var(--text-secondary);
 	}
 
-	.reprocess__field input:disabled {
-		background: var(--elevated);
-		border-color: var(--border-subtle);
+	.reprocess__input-row {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: flex-start;
+		gap: 0.5rem;
+	}
+
+	.reprocess__input-row input {
+		flex: 1 1 12rem;
+		width: auto;
+		min-width: 0;
+	}
+
+	/* Optional format override — a disclosure, closed until the operator
+	 * wants the builder. The summary still names the effective format. */
+	.reprocess__disclosure {
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		background: var(--bg-panel);
+	}
+
+	.reprocess__disclosure--invalid {
+		border-color: var(--state-red-border);
+	}
+
+	.reprocess__disclosure-summary {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.375rem 0.5rem;
+		min-height: 2.75rem;
+		padding: 0.5rem 0.75rem;
+		border-radius: var(--radius-sm);
+		cursor: pointer;
+		list-style: none;
+	}
+
+	.reprocess__disclosure-summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.reprocess__disclosure-summary:hover {
+		background: var(--surface-hover);
+	}
+
+	.reprocess__disclosure-state {
+		font-size: 0.6875rem;
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
 		color: var(--text-muted);
-		cursor: not-allowed;
+		white-space: nowrap;
+	}
+
+	.reprocess__disclosure-state--error {
+		color: var(--state-red);
+	}
+
+	.reprocess__disclosure-value {
+		flex: 1 1 8rem;
+		min-width: 0;
+		margin-left: auto;
+		font-family: ui-monospace, 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace;
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+		text-align: right;
+		overflow-wrap: anywhere;
+	}
+
+	.reprocess__disclosure-icon {
+		display: inline-flex;
+		align-items: center;
+		flex-shrink: 0;
+		color: var(--text-muted);
+		transition: transform var(--duration-fast) var(--ease-out);
+	}
+
+	.reprocess__disclosure[open] .reprocess__disclosure-icon {
+		transform: rotate(180deg);
+	}
+
+	.reprocess__disclosure-body {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		padding: 0.75rem;
+		border-top: 1px solid var(--border-subtle);
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.reprocess__disclosure-icon {
+			transition: none;
+		}
 	}
 
 	.reprocess__help {
