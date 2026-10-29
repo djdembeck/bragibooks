@@ -854,10 +854,13 @@ var (
 // Malformed legacy args never surface as a server error.
 func (h *Handler) latestMergeJob(bookID int64) (jobArgs, models.ProcessingJob, error) {
 	var job models.ProcessingJob
+	// Legacy merge rows predate the column and carry NULL: scan through a
+	// nullable type so NULL maps to the no-inputs path, never to a 500.
+	var argsJSON sql.NullString
 	err := h.svc.DB.QueryRow(
 		"SELECT id, m4b_merge_args, status, created_at FROM processing_jobs WHERE book_id = ? AND action = 'merge' ORDER BY created_at DESC, rowid DESC LIMIT 1",
 		bookID,
-	).Scan(&job.ID, &job.M4bMergeArgs, &job.Status, &job.CreatedAt)
+	).Scan(&job.ID, &argsJSON, &job.Status, &job.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		job.M4bMergeArgs = ""
 		return jobArgs{}, job, errReprocessNoRun
@@ -865,6 +868,7 @@ func (h *Handler) latestMergeJob(bookID int64) (jobArgs, models.ProcessingJob, e
 	if err != nil {
 		return jobArgs{}, job, err
 	}
+	job.M4bMergeArgs = argsJSON.String
 	var args jobArgs
 	if err := json.Unmarshal([]byte(job.M4bMergeArgs), &args); err != nil || len(args.SrcPaths) == 0 {
 		return jobArgs{}, job, errReprocessNoInputs
@@ -883,15 +887,12 @@ func locateInputs(srcPaths []string, completedDir string) (resolved []string, fo
 	resolved = make([]string, 0, len(srcPaths))
 	for _, p := range srcPaths {
 		base := filepath.Base(p)
-		if completedDir != "" {
-			cand := filepath.Join(completedDir, base)
-			if _, err := os.Stat(cand); err == nil {
-				resolved = append(resolved, cand)
-				foundCompleted++
-				continue
-			}
+		if completedDir != "" && isLocatedInput(filepath.Join(completedDir, base)) {
+			resolved = append(resolved, filepath.Join(completedDir, base))
+			foundCompleted++
+			continue
 		}
-		if _, err := os.Stat(p); err == nil {
+		if isLocatedInput(p) {
 			resolved = append(resolved, p)
 			foundOriginal++
 			continue
@@ -899,6 +900,15 @@ func locateInputs(srcPaths []string, completedDir string) (resolved []string, fo
 		missing = append(missing, base)
 	}
 	return resolved, foundCompleted, foundOriginal, missing
+}
+
+// isLocatedInput reports whether path exists as a REGULAR FILE: a directory
+// in the completed dir named like a recorded input must not shadow the
+// original file (m4b-merge reads inputs as files), and a recorded path that
+// now holds a directory is equally not an input.
+func isLocatedInput(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // GetBookReprocess handles GET /api/books/{id}/reprocess — the preview the

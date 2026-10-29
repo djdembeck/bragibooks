@@ -277,7 +277,15 @@ func TestReprocessNoRun(t *testing.T) {
 	h := newReprocessHandler(t, t.TempDir(), t.TempDir(), "{author}/{title}", "")
 	seedReprocessBook(t, h, 1, "done", t.TempDir())
 	seedReprocessBook(t, h, 2, "done", t.TempDir())
+	seedReprocessBook(t, h, 3, "done", t.TempDir())
 	seedMergeRow(t, h, "seeded-empty", 2, `{"src_paths":[]}`, "2026-07-03 10:00:00")
+	// Legacy rows predate the m4b_merge_args column and carry SQL NULL.
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action, created_at) VALUES (?, ?, NULL, 'done', 'merge', '2026-07-03 10:00:00')",
+		"seeded-null", 3,
+	); err != nil {
+		t.Fatalf("seed null-args row: %v", err)
+	}
 
 	w := postReprocess(t, h, StartReprocessRequest{BookID: 1})
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "No recorded processing run for this book") {
@@ -286,6 +294,10 @@ func TestReprocessNoRun(t *testing.T) {
 	w = postReprocess(t, h, StartReprocessRequest{BookID: 2})
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "No original input files were recorded") {
 		t.Fatalf("no-inputs: status %d body %q; want 400 + no-inputs sentence", w.Code, w.Body.String())
+	}
+	w = postReprocess(t, h, StartReprocessRequest{BookID: 3})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "No original input files were recorded") {
+		t.Fatalf("null-args: status %d body %q; want the no-inputs sentence, not a 500", w.Code, w.Body.String())
 	}
 
 	rec := getReprocess(t, h, 1)
@@ -327,6 +339,55 @@ func TestReprocessActiveJob409(t *testing.T) {
 	}
 	if n := jobCountForBook(t, h.svc.DB, 1); n != 2 {
 		t.Errorf("job count = %d; want 2 (seeded merge + active)", n)
+	}
+}
+
+// TestReprocessDirectoryShadowsInput: a DIRECTORY in the completed dir named
+// like a recorded input (or at its recorded path) is not an input — the real
+// file at the other location must win, or the input counts as missing.
+func TestReprocessDirectoryShadowsInput(t *testing.T) {
+	remain, completed := t.TempDir(), t.TempDir()
+	h := newReprocessHandler(t, t.TempDir(), completed, "{author}/{title}", "")
+	// a.m4b: a directory in completed must NOT shadow the real file in remain.
+	if err := os.Mkdir(filepath.Join(completed, "a.m4b"), 0o755); err != nil {
+		t.Fatalf("mkdir completed a.m4b: %v", err)
+	}
+	origA := filepath.Join(remain, "a.m4b")
+	if err := os.WriteFile(origA, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write a.m4b: %v", err)
+	}
+	// b.m4b: a directory at the recorded path, nowhere else — not an input.
+	if err := os.Mkdir(filepath.Join(remain, "b.m4b"), 0o755); err != nil {
+		t.Fatalf("mkdir recorded b.m4b: %v", err)
+	}
+	seedReprocessBook(t, h, 1, "done", remain)
+	seedMergeRow(t, h, "seeded-dir", 1, `{"src_paths":["`+origA+`","`+filepath.Join(remain, "b.m4b")+`"]}`, "2026-07-03 10:00:00")
+
+	rec := getReprocess(t, h, 1)
+	var prev reprocessPreviewWire
+	if err := json.NewDecoder(rec.Body).Decode(&prev); err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	if !prev.Available || prev.LastRun == nil || prev.Inputs == nil {
+		t.Fatalf("preview = %+v; want available with a last run", prev)
+	}
+	if got := prev.Inputs.FoundInCompleted; got != 0 {
+		t.Errorf("found_in_completed = %d; want 0 (a directory is not an input)", got)
+	}
+	if got := prev.Inputs.FoundInOriginal; got != 1 {
+		t.Errorf("found_in_original = %d; want 1 (the real a.m4b file)", got)
+	}
+	if len(prev.Inputs.Missing) != 1 || prev.Inputs.Missing[0] != "b.m4b" {
+		t.Errorf("missing = %v; want [b.m4b]", prev.Inputs.Missing)
+	}
+
+	// The same rule blocks the run: b.m4b is a directory, so it is missing.
+	w := postReprocess(t, h, StartReprocessRequest{BookID: 1})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "b.m4b") {
+		t.Fatalf("status %d body %q; want 400 naming b.m4b", w.Code, w.Body.String())
+	}
+	if n := jobCountForBook(t, h.svc.DB, 1); n != 1 {
+		t.Errorf("job count = %d; want 1 (seeded only)", n)
 	}
 }
 
