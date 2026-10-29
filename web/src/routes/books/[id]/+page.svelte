@@ -12,6 +12,7 @@
 		OutputProfilesResponse,
 		ReprocessPreview,
 		ReprocessRequest,
+		Settings,
 	} from '#lib/types.js';
 	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '#lib/types.js';
 	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
@@ -30,7 +31,7 @@
 		Modal,
 		OutputProfileSelector,
 	} from '#lib/components/index.js';
-	import { ExternalLink, ArrowLeft } from '@lucide/svelte';
+	import { ExternalLink, ArrowLeft, CheckCircle } from '@lucide/svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -172,8 +173,13 @@
 	let reprocessError = $state<CleanedAdbError | null>(null);
 	let preview = $state<ReprocessPreview | null>(null);
 	let previewError = $state<CleanedAdbError | null>(null);
+	let previewLoading = $state(false);
 	let profiles = $state<OutputProfile[]>([]);
 	let profilesError = $state<string | null>(null);
+	let profilesLoading = $state(false);
+	/** Live global output settings, shown as the inherited placeholder/help
+	 *  so a blank field states what it will use instead of hiding it. */
+	let globals = $state<Settings | null>(null);
 	let selectedProfileId = $state<number | null>(null);
 	let overrideDir = $state('');
 	let overrideFormat = $state('');
@@ -189,30 +195,93 @@
 		void loadReprocessData();
 	}
 
+	/** The dialog must not be dismissible while the POST is in flight: closing
+	 *  would hide a failure the request still needs to report. */
+	function mayCloseReprocess(): boolean {
+		return !reprocessSubmitting;
+	}
+
+	function closeReprocess() {
+		if (!mayCloseReprocess()) return;
+		reprocessOpen = false;
+	}
+
+	// All three reads are independent: run them together so the dialog reaches
+	// its settled state once, and a failure in one never blanks the others.
 	async function loadReprocessData() {
-		try {
-			preview = await get<ReprocessPreview>(`/books/${book!.id}/reprocess`);
+		const id = book?.id;
+		if (!id) return;
+		previewLoading = true;
+		profilesLoading = true;
+		const [previewResult, profilesResult, settingsResult] = await Promise.allSettled([
+			get<ReprocessPreview>(`/books/${id}/reprocess`),
+			get<OutputProfilesResponse>('/output-profiles'),
+			get<Settings>('/settings')
+		]);
+		if (book?.id !== id) return;
+
+		if (previewResult.status === 'fulfilled') {
+			preview = previewResult.value;
 			previewError = null;
-		} catch (e) {
+		} else {
 			preview = null;
-			previewError = toCleanedError(e);
+			previewError = toCleanedError(previewResult.reason);
 		}
-		try {
-			const res = await get<OutputProfilesResponse>('/output-profiles');
-			profiles = res.profiles || [];
+		if (profilesResult.status === 'fulfilled') {
+			profiles = profilesResult.value.profiles || [];
 			profilesError = null;
-		} catch {
-			profilesError = 'Saved profiles unavailable — reprocess uses global settings.';
+		} else {
+			profiles = [];
+			profilesError = 'Saved profiles unavailable — re-processing uses global settings.';
 		}
+		globals = settingsResult.status === 'fulfilled' ? settingsResult.value : null;
+		previewLoading = false;
+		profilesLoading = false;
 	}
 
 	// Availability AND every recorded input file found: the backend refuses
 	// 400 on any missing file, so the button mirrors that rule. Non-blank
 	// overrides are validated server-side on submit (dialog stays open).
+	// Start also waits for the profile list, so "Global settings" is never
+	// the only visible option while saved profiles are still loading.
 	const canStart = $derived(
 		preview?.available === true &&
 			preview.inputs !== undefined &&
-			preview.inputs.found === preview.inputs.total
+			preview.inputs.found === preview.inputs.total &&
+			!previewLoading &&
+			!profilesLoading
+	);
+
+	// A selected profile supplies BOTH destination values (the backend
+	// ignores manual overrides then); disable them so the form cannot
+	// present two competing answers.
+	const profileActive = $derived(selectedProfileId !== null);
+
+	function fileNoun(count: number): string {
+		return count === 1 ? 'file' : 'files';
+	}
+
+	function foundBreakdown(inputs: NonNullable<ReprocessPreview['inputs']>): string {
+		const parts: string[] = [];
+		if (inputs.found_in_completed > 0) {
+			parts.push(`${inputs.found_in_completed} in the completed directory`);
+		}
+		if (inputs.found_in_original > 0) {
+			parts.push(`${inputs.found_in_original} in the recorded source path`);
+		}
+		return parts.join(', ');
+	}
+
+	function destinationLabel(dir?: string, scheme?: string): string {
+		return [dir, scheme].filter(Boolean).join(' · ') || 'Global settings';
+	}
+
+	const searchPaths = $derived(
+		Array.from(
+			new Set(
+				[preview?.completed_dir, book?.src_path].filter((path): path is string => Boolean(path?.trim()))
+			)
+		)
 	);
 
 	async function doReprocessFromDialog() {
@@ -558,97 +627,134 @@
 		{/if}
 	</section>
 
-	<!-- ── Reprocess dialog — done books, settings pop-up ─────── -->
-	<Modal bind:open={reprocessOpen} title="Reprocess">
+	<!-- ── Re-process dialog — done books, destination settings ── -->
+	<Modal bind:open={reprocessOpen} title="Re-process" beforeClose={mayCloseReprocess}>
 		<div class="reprocess">
-			<p class="reprocess__title">{book.title}</p>
-			<p class="reprocess__intro">
-				Re-runs the M4B merge for this book from its original input files. Each file is
-				found in the completed directory first, then in the source path recorded for the
-				book; a file in neither blocks the run before it starts.
-			</p>
-
-			{#if preview?.available && preview.last_run}
-				<div class="reprocess__row">
-					<span class="reprocess__label">Last run</span>
-					<span class="reprocess__value">
-						<code class="font-mono">{formatJobTime(preview.last_run.created_at)}</code>
-						<code class="font-mono">
-							{preview.last_run.output_dir && preview.last_run.output_scheme
-								? `${preview.last_run.output_dir} · ${preview.last_run.output_scheme}`
-								: preview.last_run.output_dir
-								? preview.last_run.output_dir
-								: preview.last_run.output_scheme
-								? preview.last_run.output_scheme
-								: 'Global settings'}
-						</code>
-					</span>
-				</div>
+			<p class="reprocess__book">{book.title}</p>
+			{#if preview?.available !== false}
+				<p class="reprocess__intro">
+					Re-runs the M4B merge from the original input files recorded by this book's last
+					processing run.
+				</p>
 			{/if}
 
-			{#if preview?.available && preview.inputs}
-				<p class="reprocess__found">
-					{preview.inputs.found} of {preview.inputs.total} original input files found
-					({preview.inputs.found_in_completed} in completed directory,
-					{preview.inputs.found_in_original} in source path)
-				</p>
-				{#if preview.inputs.missing.length > 0}
-					<Alert variant="error">
-						Original input files not found: {preview.inputs.missing.join(', ')}. They
-						are not in the completed directory or the recorded source path — restore
-						the file(s) to reprocess.
-						<code class="reprocess__locations font-mono">
-							{(preview.completed_dir ? [preview.completed_dir, book.src_path] : [book.src_path]).join(' · ')}
-						</code>
+			{#if previewLoading}
+				<div class="reprocess__checking" role="status" aria-label="Checking the original input files">
+					<Skeleton variant="line" height="1rem" width="64%" />
+					<Skeleton variant="line" height="1rem" width="42%" />
+				</div>
+			{:else if preview?.available === false}
+				<!-- No-history / no-inputs: a book fact, not transient — no retry. -->
+				<Alert variant="warning">{preview.reason}</Alert>
+			{:else if preview?.available && preview.inputs}
+				{#if preview.inputs.missing.length === 0}
+					<div class="reprocess__ready" role="status">
+						<p class="reprocess__ready-line">
+							<CheckCircle class="h-3.5 w-3.5" aria-hidden="true" />
+							All {preview.inputs.total} original input {fileNoun(preview.inputs.total)} found
+						</p>
+						<p class="reprocess__ready-detail">{foundBreakdown(preview.inputs)}</p>
+					</div>
+				{:else}
+					<Alert variant="error" onretry={loadReprocessData}>
+						<p class="reprocess__alert-lead">
+							{preview.inputs.missing.length} original input
+							{fileNoun(preview.inputs.missing.length)} not found
+							{#if preview.inputs.found > 0}
+								— {preview.inputs.found} of {preview.inputs.total} located
+							{/if}
+						</p>
+						<ul class="reprocess__missing">
+							{#each preview.inputs.missing as name (name)}
+								<li><code>{name}</code></li>
+							{/each}
+						</ul>
+						<p class="reprocess__alert-help">
+							{#if searchPaths.length > 0}
+								Restore {preview.inputs.missing.length === 1 ? 'it' : 'them'} in
+								{#each searchPaths as path, index (path)}{#if index > 0}{' or '}{/if}<code>{path}</code>{/each}, then retry.
+							{:else}
+								Restore {preview.inputs.missing.length === 1 ? 'it' : 'them'} to the recorded
+								source path, then retry.
+							{/if}
+						</p>
 					</Alert>
 				{/if}
-			{:else if preview && preview.available === false}
-				<!-- No-history / no-inputs: a book fact, not transient — no retry. -->
-				<Alert variant="error">{preview.reason}</Alert>
+			{/if}
+
+			{#if preview?.available && preview.last_run}
+				<dl class="reprocess__facts">
+					<div class="reprocess__fact">
+						<dt>Last run</dt>
+						<dd>{formatJobTime(preview.last_run.created_at)}</dd>
+					</div>
+					<div class="reprocess__fact">
+						<dt>Wrote to</dt>
+						<dd class="reprocess__dest">
+							{destinationLabel(preview.last_run.output_dir, preview.last_run.output_scheme)}
+						</dd>
+					</div>
+				</dl>
 			{/if}
 
 			{#if previewError}
 				<Alert variant="warning" onretry={loadReprocessData}>
-					Could not check the original input files — {previewError.message}. Retry to
-					re-check; Start re-enables once the check succeeds.
+					Could not check the original input files — {previewError.message}
 				</Alert>
 			{/if}
 
 			{#if preview?.available}
-				<div class="reprocess__field">
-					<OutputProfileSelector
-						selectId="reprocess-output-profile-select"
-						summaryId="reprocess-profile-summary"
-						{profiles}
-						bind:selectedProfileId
-						{profilesError}
-						batchCount={1}
-						batchNoun="book"
-						batchScope="reprocess"
-						summaryClass="w-full text-xs"
-					/>
-				</div>
-				<div class="reprocess__field">
-					<label class="reprocess__label" for="reprocess-override-dir">Output directory</label>
-					<input
-						id="reprocess-override-dir"
-						class="w-full font-mono"
-						placeholder="Inherit"
-						bind:value={overrideDir}
-					/>
-					<p class="reprocess__help">
-						Absolute path. Empty — and no profile — inherits the global output directory.
-					</p>
-				</div>
-				<div class="reprocess__field">
-					<label class="reprocess__label" for="reprocess-override-format">Output path format</label>
-					<input
-						id="reprocess-override-format"
-						class="w-full font-mono"
-						placeholder="Inherit"
-						bind:value={overrideFormat}
-					/>
-					<p class="reprocess__help">Relative, e.g. {`{author}/{title}`}. Empty inherits the path format.</p>
+				<div class="reprocess__destination" role="group" aria-labelledby="reprocess-destination-title">
+					<h3 id="reprocess-destination-title" class="reprocess__section-title">Destination</h3>
+					<div class="reprocess__field">
+						<OutputProfileSelector
+							selectId="reprocess-output-profile-select"
+							summaryId="reprocess-profile-summary"
+							{profiles}
+							bind:selectedProfileId
+							{profilesError}
+							batchCount={1}
+							batchNoun="book"
+							batchScope="run"
+							summaryClass="w-full text-xs"
+						/>
+					</div>
+					<div class="reprocess__field">
+						<label class="reprocess__label" for="reprocess-override-dir">Output directory</label>
+						<input
+							id="reprocess-override-dir"
+							class="w-full font-mono"
+							placeholder={globals?.output_dir || 'Inherit global directory'}
+							bind:value={overrideDir}
+							disabled={profileActive}
+							aria-describedby="reprocess-override-dir-help"
+						/>
+						<p id="reprocess-override-dir-help" class="reprocess__help">
+							{#if profileActive}
+								The selected profile sets the output directory.
+							{:else}
+								Absolute path. Empty inherits the global output directory.
+							{/if}
+						</p>
+					</div>
+					<div class="reprocess__field">
+						<label class="reprocess__label" for="reprocess-override-format">Output path format</label>
+						<input
+							id="reprocess-override-format"
+							class="w-full font-mono"
+							placeholder={globals?.output_scheme || 'Inherit global path format'}
+							bind:value={overrideFormat}
+							disabled={profileActive}
+							aria-describedby="reprocess-override-format-help"
+						/>
+						<p id="reprocess-override-format-help" class="reprocess__help">
+							{#if profileActive}
+								The selected profile sets the path format.
+							{:else}
+								Relative path. Empty inherits the global path format.
+							{/if}
+						</p>
+					</div>
 				</div>
 			{/if}
 
@@ -661,15 +767,21 @@
 		</div>
 		{#snippet footer()}
 			<div class="record-section__confirm">
-				<Button
-					variant="primary"
-					loading={reprocessSubmitting}
-					disabled={!canStart}
-					onclick={doReprocessFromDialog}
-				>
-					Start reprocess
-				</Button>
-				<Button variant="ghost" onclick={() => (reprocessOpen = false)}>Cancel</Button>
+				{#if preview?.available === false}
+					<Button variant="secondary" onclick={closeReprocess}>Close</Button>
+				{:else}
+					<Button
+						variant="primary"
+						loading={reprocessSubmitting}
+						disabled={!canStart}
+						onclick={doReprocessFromDialog}
+					>
+						Re-process
+					</Button>
+					<Button variant="ghost" disabled={reprocessSubmitting} onclick={closeReprocess}>
+						Cancel
+					</Button>
+				{/if}
 			</div>
 		{/snippet}
 	</Modal>
@@ -1336,57 +1448,135 @@
 		overflow-y: auto;
 	}
 
-	/* ── Reprocess dialog content ───────────────────────────────── */
+	/* ── Re-process dialog content ──────────────────────────────── */
 	.reprocess {
 		display: flex;
 		flex-direction: column;
-		gap: 0.75rem;
+		gap: 0.875rem;
 	}
 
-	.reprocess__title {
+	.reprocess__book {
 		margin: 0;
-		font-size: 1rem;
+		font-size: 0.9375rem;
 		font-weight: 600;
+		line-height: 1.35;
+		letter-spacing: -0.01em;
+		color: var(--text);
+		text-wrap: balance;
 	}
 
 	.reprocess__intro {
 		margin: 0;
+		max-width: 60ch;
 		font-size: 0.875rem;
+		line-height: 1.55;
+		color: var(--text-secondary);
+		text-wrap: pretty;
+	}
+
+	/* File check — the first answer the operator needs */
+	.reprocess__checking {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		padding: 0.5rem 0;
+	}
+
+	.reprocess__ready {
+		display: flex;
+		flex-direction: column;
+		gap: 0.125rem;
+	}
+
+	.reprocess__ready-line {
+		margin: 0;
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+		font-size: 0.8125rem;
+		font-weight: 600;
+		color: var(--state-green);
+	}
+
+	.reprocess__ready-detail {
+		margin: 0;
+		padding-left: 1.25rem;
+		font-size: 0.75rem;
+		line-height: 1.45;
+		color: var(--text-muted);
+	}
+
+	.reprocess__alert-lead {
+		margin: 0;
+		font-weight: 600;
+	}
+
+	.reprocess__missing {
+		margin: 0.375rem 0 0;
+		padding-left: 1.1rem;
+		font-size: 0.75rem;
+		line-height: 1.5;
+	}
+
+	.reprocess__missing code,
+	.reprocess__alert-help code {
+		font-family: ui-monospace, 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace;
+		overflow-wrap: anywhere;
+	}
+
+	.reprocess__alert-help {
+		margin: 0.5rem 0 0;
+		font-size: 0.75rem;
 		line-height: 1.5;
 		color: var(--text-secondary);
 	}
 
-	.reprocess__row {
+	/* Last-run facts — the record meta's label-over-value grammar, stacked
+	 * so a long date or path never breaks into three columns of fragments. */
+	.reprocess__facts {
+		margin: 0;
 		display: flex;
-		align-items: baseline;
+		flex-direction: column;
 		gap: 0.5rem;
 	}
 
-	.reprocess__value {
-		display: inline-flex;
-		gap: 0.375rem;
-		font-size: 0.75rem;
-		color: var(--text-secondary);
-		overflow-wrap: anywhere;
-	}
-
-	.reprocess__label {
-		font-size: 0.75rem;
+	.reprocess__fact dt {
+		font-size: 0.7rem;
 		font-weight: 600;
-		color: var(--text-secondary);
-	}
-
-	.reprocess__found {
-		margin: 0;
-		font-size: 0.75rem;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
 		color: var(--text-muted);
 	}
 
-	.reprocess__locations {
-		display: block;
-		margin-top: 0.375rem;
+	.reprocess__fact dd {
+		margin: 0.125rem 0 0;
+		font-size: 0.8125rem;
+		color: var(--text-secondary);
+	}
+
+	.reprocess__dest {
+		font-family: ui-monospace, 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace;
 		font-size: 0.75rem;
+		line-height: 1.5;
 		overflow-wrap: anywhere;
+	}
+
+	.reprocess__destination {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		margin-top: 0.25rem;
+		padding-top: 0.875rem;
+		border-top: 1px solid var(--border-subtle);
+	}
+
+	.reprocess__section-title {
+		margin: 0;
+		font-size: 0.8rem;
+		font-weight: 700;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		color: var(--text-secondary);
 	}
 
 	.reprocess__field {
@@ -1395,13 +1585,24 @@
 		gap: 0.25rem;
 	}
 
-	.reprocess__field + .reprocess__field {
-		margin-top: 0.5rem;
+	.reprocess__label {
+		font-size: 0.8rem;
+		font-weight: 600;
+		color: var(--text-secondary);
+	}
+
+	.reprocess__field input:disabled {
+		background: var(--elevated);
+		border-color: var(--border-subtle);
+		color: var(--text-muted);
+		cursor: not-allowed;
 	}
 
 	.reprocess__help {
 		margin: 0;
 		font-size: 0.75rem;
+		line-height: 1.45;
 		color: var(--text-muted);
+		text-wrap: pretty;
 	}
 </style>
