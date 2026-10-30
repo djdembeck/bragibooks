@@ -3,8 +3,6 @@ name: CI
 on:
   push:
     branches: [main, develop]
-    tags:
-      - 'v*'
     paths-ignore: ['*.md', 'docs/**', '.gitignore', 'LICENSE']
   pull_request:
     branches: [main, develop]
@@ -93,6 +91,9 @@ jobs:
       - name: Run Go tests
         run: go test ./internal/...
 
+      - name: Verify immutable release reservation boundaries
+        run: python3 -m unittest discover -s scripts -p test_release.py
+
   docker-build:
     name: Build and Push Docker Image
     needs: [test]
@@ -155,13 +156,12 @@ jobs:
           images: |
             djdembeck/bragibooks
             ghcr.io/${{ github.repository }}
+          labels: |
+            org.opencontainers.image.version=dev-${{ github.sha }}
+            org.opencontainers.image.revision=${{ github.sha }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
             type=sha,enable=${{ github.event_name != 'pull_request' }}
             type=raw,value=pr-${{ steps.pr-number.outputs.number }},enable=${{ github.event_name == 'workflow_dispatch' && steps.pr-number.outputs.number != '' }}
 
@@ -172,7 +172,8 @@ jobs:
           file: docker/Dockerfile
           context: .
           build-args: |
-            VERSION=${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+            VERSION=dev-${{ github.sha }}
+            GIT_COMMIT=${{ github.sha }}
           push: ${{ github.event_name != 'pull_request' || env.PR_IS_SAME_REPO == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

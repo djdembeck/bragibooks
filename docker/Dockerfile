@@ -26,7 +26,7 @@ RUN apt-get update && \
     mkdir -p /config /input /output
 WORKDIR /app
 COPY --from=builder /build/bragibooks /usr/local/bin/
-COPY --from=ghcr.io/djdembeck/m4b-merge:main-amd64 /usr/local/bin/m4b-merge /usr/local/bin/
+COPY --from=ghcr.io/djdembeck/m4b-merge:main-amd64@sha256:f36864ceba5867bd10f36ad8574ac9f4e2cf45d97a94c6c7c13b63015f80cfff /usr/local/bin/m4b-merge /usr/local/bin/
 COPY docker/entrypoint.sh /usr/local/bin/bragibooks-entrypoint
 RUN chmod 0755 /usr/local/bin/bragibooks-entrypoint
 # The image runs as root by default (matching the legacy image); the
@@ -39,4 +39,8 @@ RUN chmod 0755 /usr/local/bin/bragibooks-entrypoint
 ENV DATABASE_PATH=/config/bragibooks.db
 EXPOSE 8080
 VOLUME ["/config", "/input", "/output"]
+ARG VERSION=dev
+ARG GIT_COMMIT=unknown
+LABEL org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${GIT_COMMIT}"
 ENTRYPOINT ["/usr/local/bin/bragibooks-entrypoint"]

@@ -32,6 +32,7 @@ It is an operations board for a personal audiobook pipeline, not a cloud library
 - [Migrating from the Python (Django) app](#migrating-from-the-python-django-app)
 - [API](#api)
 - [Contributing](#contributing)
+- [Releases](#releases)
 - [Building](#building)
   - [Make](#make)
   - [Explicit build steps](#explicit-build-steps)
@@ -252,6 +253,16 @@ curl -N http://localhost:8888/api/jobs/<job-id>/stream
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow, bug reports, enhancement proposals, and style guidance.
 
 Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). Feature work normally targets `develop`; releases are made from `main`. The CI pipeline checks formatting, vetting, module tidiness, frontend type checks, builds, and tests.
+
+## Releases
+
+Promote `develop` to `main` with one normal merge-commit PR. Release runs automatically; **Actions → Release → Run workflow** on `main` uses the same publisher with optional version/bump overrides. Manual-only installations remove the push trigger once. No release-preparation branch, manifest commit or merge-back is required.
+
+The immutable `vX.Y.Z` tag reserves the exact source SHA before publication. Retry the original run after a partial failure, including when main has advanced; a conflicting version/source, image digest or asset provenance fails instead of overwriting an output. The existing Go linker input supplies the normalised application version consumed by `/health` and Settings. GoReleaser still builds Linux/macOS amd64/arm64 archives and checksums. GHCR and Docker Hub receive the same verified image bytes with `vX.Y.Z` and `X.Y.Z` tags, copied without changing digests; production consumers pin one of those tags or the digest.
+
+CI remains the sole branch/PR-preview writer with dev/SHA identities. Release owns named version outputs; mutable latest/major/minor aliases are no longer written. The Docker build also pins its consumed m4b-merge binary image by digest. After outputs complete, the existing Annalist App fills notes from the previous published ancestor release rather than an unfinished reservation.
+
+Automatic/manual runs share a non-cancelling GitHub `queue: max` (up to 100 pending). Current actionlint v1.7.12 lacks that documented key ([upstream issue](https://github.com/rhysd/actionlint/issues/657)); do not remove queue retention or suppress unrelated diagnostics. Main protections remain unchanged; develop keeps required CI without base freshness.
 
 ## Building
 
