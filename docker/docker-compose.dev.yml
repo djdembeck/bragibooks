@@ -8,18 +8,22 @@ services:
     volumes:
       - ..:/app
       - ./config:/app/config
-      - /home/djdembeck:/home/djdembeck
+      - ${BRAGIBOOKS_INPUT_DIR:-./books/input}:/input
+      - ${BRAGIBOOKS_OUTPUT_DIR:-./books/output}:/output
     environment:
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8080
       - DATABASE_PATH=config/bragibooks.db
+      - DIRECTORIES_INPUT_DIR=/input
+      - DIRECTORIES_OUTPUT_DIR=/output
+      - DIRECTORIES_COMPLETED_DIR=/input/done
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO /dev/null http://localhost:8080/api/health || exit 1']
       interval: 10s
       start_period: 90s
 
   bragibooks-vite:
-    image: oven/bun:1-alpine
+    image: oven/bun:1-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a
     working_dir: /app/web
     ports:
       - '5175:5175'
