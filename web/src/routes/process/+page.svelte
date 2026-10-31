@@ -5,7 +5,8 @@
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { cleanAdbError, toCleanedError } from '#lib/adbError.js';
 	import { formatJobTime, formatElapsed, elapsedLabel } from '#lib/datetime.js';
-	import { jobStage, reportedDestination } from '#lib/jobDestination.js';
+	import { createJobLogTracker, type JobLogTracker } from '#lib/jobDestination.js';
+	import { mergeOutputEvent } from '#lib/jobOutput.js';
 	import { liveNow } from '#lib/liveNow.svelte.js';
 	import { CheckCircle, Clock, ArrowRight, FileText } from '@lucide/svelte';
 
@@ -28,6 +29,10 @@
 		cancelRequested: boolean;
 		/** Final .m4b reported by the API once the job finishes. */
 		outputFile: string | null;
+		/** Buffer-end offset of the log this item holds; null until the first
+		 *  offset-carrying SSE event. Suffix events APPEND; a full snapshot
+		 *  (initial/reconnect/poll) replaces and resets it. */
+		outputOffset: number | null;
 		/** Book art and author line for the active card; hydrated from the book record. */
 		coverUrl?: string;
 		authorNames?: string;
@@ -52,6 +57,20 @@
 	const cleanupMap = $state(new Map<string, () => void>());
 	const pollTimers = $state(new Map<string, number>());
 	const retryTimers = $state(new Map<string, number>());
+	// Per-job cache over the streaming log: stage/destination re-scan only the
+	// lines a new suffix event added, so a long conversion doesn't re-split the
+	// whole accumulated log on every line. Rebuilt on reload.
+	const logTrackers = new Map<string, JobLogTracker>();
+
+	/** The job's log tracker, seeded from the current item on first use. */
+	function trackerFor(item: JobItem): JobLogTracker {
+		let tracker = logTrackers.get(item.id);
+		if (!tracker) {
+			tracker = createJobLogTracker(item.id, item.output);
+			logTrackers.set(item.id, tracker);
+		}
+		return tracker;
+	}
 
 	$effect(() => {
 		load();
@@ -118,6 +137,8 @@
 		cleanupMap.clear();
 		pollTimers.clear();
 		retryTimers.clear();
+		// The REST log has no SSE offset; trackers are rebuilt lazily per job.
+		logTrackers.clear();
 
 		const items: JobItem[] = [];
 		const bookRequests = new Map<number, Promise<BookWithPeople>>();
@@ -136,6 +157,7 @@
 				action: j.action ?? null,
 				detail: j.detail ?? null,
 				output: j.output || '',
+				outputOffset: null,
 				outputFile: j.output_file ?? null,
 				error: j.error || null,
 				startedAt: j.started_at,
@@ -196,6 +218,11 @@
 
 	function connectSSE(item: JobItem, attempt = 0) {
 		clearRetry(item.id);
+		// Each connection's first offset event is the server's FULL log
+		// snapshot: dropping the previous connection's cursor hands the
+		// replace branch the re-sync, so a reconnect never appends the
+		// snapshot onto the old log nor misses the suffixes after it.
+		item.outputOffset = null;
 		const stop = streamEvents(
 			`/api/jobs/${item.id}/stream`,
 			(raw) => {
@@ -209,8 +236,25 @@
 							void pollJob(item);
 						}
 					}
-					if (parsed.output) item.output = parsed.output;
-					if (parsed.message && !parsed.output && !item.output) item.output += parsed.message + '\n';
+					// Output events are offset-carried (snapshot vs. suffix
+					// vs. replay); the tracker mirrors whichever merge won.
+					const merged = mergeOutputEvent(
+						{ output: item.output, offset: item.outputOffset },
+						parsed
+					);
+					if (merged.action === 'replace') {
+						item.output = merged.output;
+						item.outputOffset = merged.offset;
+						trackerFor(item).replace(item.output);
+					} else if (merged.action === 'append') {
+						item.output = merged.output;
+						item.outputOffset = merged.offset;
+						trackerFor(item).append(parsed.output);
+					}
+					if (parsed.message && !parsed.output && !item.output) {
+						item.output += parsed.message + '\n';
+						trackerFor(item).append(parsed.message + '\n');
+					}
 					if (parsed.error) item.error = parsed.error;
 					if (TERMINAL_STATUSES.has(item.status)) {
 						clearRetry(item.id);
@@ -224,6 +268,7 @@
 					}
 				} catch {
 					item.output += raw + '\n';
+					trackerFor(item).append(raw + '\n');
 				}
 			},
 			() => {
@@ -258,7 +303,14 @@
 				if (job.status !== item.status || job.error !== item.error || (job.output && job.output !== item.output)) {
 					item.status = job.status;
 					item.error = job.error;
-					if (job.output) item.output = job.output;
+					if (job.output) {
+						// The REST log is a full snapshot: replace, and the
+						// next offset event (initial SSE payload) re-syncs the
+						// cursor against the server buffer.
+						item.output = job.output;
+						item.outputOffset = null;
+						trackerFor(item).replace(item.output);
+					}
 				}
 			}
 			item.startedAt = job.started_at;
@@ -332,6 +384,7 @@
 					action: 'merge',
 					detail: null,
 					output: '',
+					outputOffset: null,
 					outputFile: null,
 					error: null,
 					startedAt: null,
@@ -419,7 +472,13 @@
 	 *  path from its log. */
 	function destinationFor(job: JobItem): string {
 		if (job.outputFile) return job.outputFile;
-		if (isRunning(job)) return reportedDestination(job.output, job.id);
+		if (isRunning(job)) {
+			// Read job.output so the {@const} derived depends on the log: the
+			// tracker's cache makes the return value stale until this read
+			// dirties the derivation on every appended suffix.
+			void job.output;
+			return trackerFor(job).destination();
+		}
 		return '';
 	}
 
@@ -434,7 +493,11 @@
 
 	function activeStageLabel(job: JobItem): string {
 		if (job.status.toLowerCase() === 'queued') return 'Waiting for a processing slot';
-		return jobStage(job.output) || 'Starting m4b-merge';
+		// Read job.output so the {@const} derived depends on the log: the
+		// tracker's cache makes the return value stale until this read
+		// dirties the derivation on every appended suffix.
+		void job.output;
+		return trackerFor(job).stage() || 'Starting m4b-merge';
 	}
 
 	type AutoscrollParams = { text: string; active: boolean };

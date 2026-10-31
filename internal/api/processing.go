@@ -44,21 +44,35 @@ type jobState struct {
 	progressMu sync.Mutex
 	// closed marks that finalize has closed the progress channel.
 	closed bool
-	done   chan error
+	// doneSync is the terminal-result broadcast that every open SSE stream
+	// reads after its progress loop ends. It is a condition variable, not a
+	// buffered channel, because a channel's value is single-reader: with two
+	// tabs streaming one job, the first stream to finish would eat the done
+	// value and the second would block. finalize reports exactly once; any
+	// number of streams may await it. Pointer: a doneSync contains a
+	// sync.Mutex (via its Cond) and must never be copied.
+	doneSync *doneSync
 	// jobCtx/cancel let the API kill the job's m4b-merge process mid-run.
 	jobCtx context.Context
 	cancel context.CancelFunc
 	// finalized ensures the terminal progress/done signal is sent exactly once,
 	// no matter how many components (cancel request, worker, timeout) finalize.
 	finalized sync.Once
-	// outputMu guards liveOutput. The buffer holds m4b-merge stdout for an
-	// active job so a reconnecting stream can recover lines it missed; the
-	// terminal row still persists the complete output.
-	outputMu   sync.Mutex
-	liveOutput string
-	// outputNotify wakes an open stream after liveOutput changes. Buffered at
-	// one: a stream that has not caught up needs only one more snapshot.
-	outputNotify chan struct{}
+	// outputMu guards liveOutput/outputOffset and outputSubs. The buffer
+	// holds m4b-merge stdout for an active job so a reconnecting stream can
+	// recover lines it missed; the terminal row still persists the complete
+	// output.
+	outputMu     sync.Mutex
+	liveOutput   string
+	outputOffset int
+	// outputSubs is the per-connection wake set: every open SSE stream
+	// registers a one-slot channel before its select loop. appendOutput fans
+	// the wake out to ALL of them, so two tabs streaming the same job both
+	// see live output. The buffered one slot coalesces wakes — each wake
+	// makes the reader resend the current full state, so a dropped
+	// notification loses nothing, and a slow reader can never stall the
+	// child's stdout drain.
+	outputSubs map[chan struct{}]struct{}
 }
 
 // NewProcessingService creates a ProcessingService backed by the given database
@@ -223,12 +237,12 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	jobCtx, jobCancel := context.WithCancel(context.Background())
 	s.mu.Lock()
 	s.jobs[id] = &jobState{
-		job:          *job,
-		progress:     make(chan string, 10),
-		done:         make(chan error, 1),
-		jobCtx:       jobCtx,
-		cancel:       jobCancel,
-		outputNotify: make(chan struct{}, 1),
+		job:        *job,
+		progress:   make(chan string, 10),
+		doneSync:   newDoneSync(),
+		jobCtx:     jobCtx,
+		cancel:     jobCancel,
+		outputSubs: make(map[chan struct{}]struct{}),
 	}
 	s.mu.Unlock()
 
@@ -327,31 +341,114 @@ func (st *jobState) sendProgress(msg string) {
 }
 
 // appendOutput adds one stripped m4b-merge stdout line to the live buffer and
-// wakes any open stream. The channel send is non-blocking: a missing or slow
+// wakes every open stream. Each wake send is non-blocking: a missing or slow
 // reader must never stall the child's stdout drain.
 func (st *jobState) appendOutput(line string) {
 	st.outputMu.Lock()
 	st.liveOutput += line + "\n"
+	st.outputOffset = len(st.liveOutput)
+	subscribers := make([]chan struct{}, 0, len(st.outputSubs))
+	for ch := range st.outputSubs {
+		subscribers = append(subscribers, ch)
+	}
 	st.outputMu.Unlock()
-	select {
-	case st.outputNotify <- struct{}{}:
-	default:
+	for _, ch := range subscribers {
+		select {
+		case ch <- struct{}{}:
+		default: // Wake already pending; the reader resends full state on each.
+		}
 	}
 }
 
-// outputSnapshot returns the live stdout accumulated so far.
-func (st *jobState) outputSnapshot() string {
+// outputSnapshot returns the live stdout accumulated so far, plus the byte
+// offset the next suffix starts at — the reconnect/initial payload shape.
+func (st *jobState) outputSnapshot() (string, int) {
 	st.outputMu.Lock()
 	defer st.outputMu.Unlock()
-	return st.liveOutput
+	return st.liveOutput, st.outputOffset
+}
+
+// outputFrom returns the live stdout appended after startOffset, i.e. the
+// suffix since this stream was connected, plus the buffer's current end
+// offset. A startOffset past the end never grows the buffer: it yields an
+// empty suffix (coalesced wakes are safe). The full-buffer re-scan here is
+// bounded by the coalescing above — each wake costs O(unread) bytes, not the
+// whole accumulated log.
+func (st *jobState) outputFrom(startOffset int) (string, int) {
+	st.outputMu.Lock()
+	defer st.outputMu.Unlock()
+	if startOffset > len(st.liveOutput) {
+		startOffset = len(st.liveOutput)
+	}
+	return st.liveOutput[startOffset:], st.outputOffset
+}
+
+// registerOutputSubscriber subscribes ch to output wakes (one slot is enough
+// — wakes coalesce) and returns a deregister function.
+func (st *jobState) registerOutputSubscriber(ch chan struct{}) (deregister func()) {
+	st.outputMu.Lock()
+	st.outputSubs[ch] = struct{}{}
+	st.outputMu.Unlock()
+	return func() {
+		st.outputMu.Lock()
+		delete(st.outputSubs, ch)
+		st.outputMu.Unlock()
+	}
+}
+
+// doneSync implements "wait until the job is terminal, then read its result"
+// for an unlimited number of concurrent readers. It also carries the
+// terminal progress message so a stream that observes the progress channel's
+// close BEFORE the terminal value (a concurrent reader grabbed it) can still
+// write the terminal SSE line itself from the broadcast — a closed channel
+// yields its buffer first, so no drain of it can ever recover the message.
+type doneSync struct {
+	mu       sync.Mutex
+	cond     *sync.Cond
+	reported bool
+	msg      string
+	err      error
+}
+
+// newDoneSync returns an addressable doneSync: the Cond is bound to this
+// instance's own mutex, which must never be copied out.
+func newDoneSync() *doneSync {
+	ds := &doneSync{}
+	ds.cond = sync.NewCond(&ds.mu)
+	return ds
+}
+
+func (ds *doneSync) report(msg string, err error) {
+	ds.mu.Lock()
+	ds.reported = true
+	ds.msg = msg
+	ds.err = err
+	ds.cond.Broadcast()
+	ds.mu.Unlock()
+}
+
+// await blocks until reported and returns the stored terminal progress
+// message and error.
+func (ds *doneSync) await() (string, error) {
+	ds.mu.Lock()
+	for !ds.reported {
+		ds.cond.Wait()
+	}
+	msg, err := ds.msg, ds.err
+	ds.mu.Unlock()
+	return msg, err
 }
 
 // finalize sends the terminal progress event, closes the progress channel,
-// and signals the done channel — exactly once, so the SSE stream detects
-// termination (a closed progress channel ends its loop; without the close it
-// would keep heartbeating after the terminal event) and the done receiver
-// unblocks, regardless of which component (worker, timeout, or cancel
-// request) won.
+// and reports the terminal result (message plus error) on the done sync —
+// exactly once, so the SSE streams detect termination (a closed progress
+// channel ends their loops; without the close they would keep heartbeating
+// after the terminal event) and the done awaiters unblock, regardless of
+// which component (worker, timeout, or cancel request) won. The message is
+// stored on the done sync because a concurrent stream that observes the
+// channel's close cannot read the buffered value (it was already consumed),
+// so this is the only path by which EVERY stream can write the terminal
+// line.
 func (st *jobState) finalize(msg string, doneErr error) {
 	st.finalized.Do(func() {
 		st.progressMu.Lock()
@@ -364,10 +461,7 @@ func (st *jobState) finalize(msg string, doneErr error) {
 			st.closed = true
 		}
 		st.progressMu.Unlock()
-		select {
-		case st.done <- doneErr:
-		default:
-		}
+		st.doneSync.report(msg, doneErr)
 	})
 }
 
@@ -1079,30 +1173,53 @@ func (h *Handler) StreamJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A reconnecting client replaces its local log with the server's
-	// accumulated stdout, then follows new lines.
-	initial := map[string]string{"status": status}
-	if live := state.outputSnapshot(); live != "" {
+	// accumulated stdout (full snapshot + the offset new lines start at),
+	// then follows appended suffixes. Registration happens BEFORE the
+	// initial snapshot: a line appended in between races into the snapshot
+	// itself, so no output slot is ever lost.
+	wake := make(chan struct{}, 1)
+	defer state.registerOutputSubscriber(wake)()
+	live, offset := state.outputSnapshot()
+	initial := map[string]any{"status": status}
+	if live != "" {
 		initial["output"] = live
 	}
+	initial["output_offset"] = offset
 	b, _ := json.Marshal(initial)
 	fmt.Fprintf(w, "data: %s\n\n", b)
 	flusher.Flush()
 
-	// Stream progress
+	// Stream progress until the channel closes. The progress channel is
+	// shared across concurrent streams, so the reader that observes the
+	// close is NOT guaranteed to have read the terminal message — a
+	// concurrent stream may have. Every stream writes its OWN copy of the
+	// terminal line after the loop (from the done sync, below), so the
+	// outcome is identical whichever tab won the race.
 	ctx := r.Context()
-	done := false
-	for !done {
+	// lastProgress is the most recent progress line THIS stream wrote, so
+	// the post-loop clone (below) can decline to re-send the terminal event
+	// when this stream already delivered it straight off the channel.
+	var lastProgress string
+loop:
+	for {
 		select {
 		case msg, ok := <-state.progress:
 			if !ok {
-				done = true
-				break
+				break loop
 			}
 			fmt.Fprintf(w, "data: %s\n\n", msg)
 			flusher.Flush()
-		case <-state.outputNotify:
-			snapshot := state.outputSnapshot()
-			b, _ := json.Marshal(map[string]string{"output": snapshot})
+			lastProgress = msg
+		case <-wake:
+			suffix, next := state.outputFrom(offset)
+			if suffix == "" {
+				// Coalesced wake whose bytes arrived with the snapshot, or a
+				// heartbeat-shaped nudge: the reader state is already current.
+				offset = next
+				break
+			}
+			offset = next
+			b, _ := json.Marshal(map[string]any{"output": suffix, "output_offset": offset})
 			fmt.Fprintf(w, "data: %s\n\n", b)
 			flusher.Flush()
 		case <-time.After(30 * time.Second):
@@ -1114,19 +1231,34 @@ func (h *Handler) StreamJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Wait for done signal
-	select {
-	case err := <-state.done:
-		if err != nil {
-			b, _ := json.Marshal(map[string]string{"status": "error", "message": escapeJSON(err.Error())})
-			fmt.Fprintf(w, "data: %s\n\n", b)
-		} else {
-			fmt.Fprintf(w, "data: %s\n\n", `{"status":"done"}`)
-		}
+	// Drain the buffer before awaiting the terminal: a wake for the last
+	// appended line may already be pending when select picks the closed
+	// progress channel and breaks the loop — the connection must never end
+	// mid-log, so emit whatever bytes were appended after this stream's
+	// cursor before the terminal sequence starts.
+	if suffix, next := state.outputFrom(offset); suffix != "" {
+		b, _ := json.Marshal(map[string]any{"output": suffix, "output_offset": next})
+		fmt.Fprintf(w, "data: %s\n\n", b)
 		flusher.Flush()
-	case <-time.After(10 * time.Second):
-		// Force close if no done signal
 	}
+
+	// Write this stream's own copy of the terminal event, then hand back
+	// the terminal status line. Every concurrent stream does this — the
+	// progress channel's close is single-consumer, so the relative order in
+	// which streams exit the loop above and reach this point is a race; the
+	// done sync is a broadcast, so each stream waits its turn and never
+	// blocks on a peer consuming the value.
+	doneMsg, doneErr := state.doneSync.await()
+	if doneMsg != "" && doneMsg != lastProgress {
+		fmt.Fprintf(w, "data: %s\n\n", doneMsg)
+	}
+	if doneErr != nil {
+		b, _ := json.Marshal(map[string]string{"status": "error", "message": escapeJSON(doneErr.Error())})
+		fmt.Fprintf(w, "data: %s\n\n", b)
+	} else {
+		fmt.Fprintf(w, "data: %s\n\n", `{"status":"done"}`)
+	}
+	flusher.Flush()
 }
 
 // outputFormat returns the container format of a produced output file, e.g.

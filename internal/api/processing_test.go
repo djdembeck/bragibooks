@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -286,12 +287,19 @@ func TestCancelRunningJobPersistsLiveOutput(t *testing.T) {
 	// stdout exists would test nothing.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if st := svc.GetJob(id); st != nil && strings.Contains(st.outputSnapshot(), "partial live line") {
-			break
+		if st := svc.GetJob(id); st != nil {
+			if live, _ := st.outputSnapshot(); strings.Contains(live, "partial live line") {
+				break
+			}
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	if st := svc.GetJob(id); st == nil || !strings.Contains(st.outputSnapshot(), "partial live line") {
+	finalState := svc.GetJob(id)
+	if finalState == nil {
+		t.Fatal("live stdout never reached the job state before cancellation")
+	}
+	live, _ := finalState.outputSnapshot()
+	if !strings.Contains(live, "partial live line") {
 		t.Fatal("live stdout never reached the job state before cancellation")
 	}
 
@@ -1032,9 +1040,23 @@ func (w *streamRecorder) waitFor(substr string, timeout time.Duration) bool {
 	}
 }
 
+// newStreamRequest builds a GET /api/jobs/{id}/stream request with the chi
+// URL param injected by hand (the tests drive handlers directly, not the
+// router).
+func newStreamRequest(t *testing.T, id string) *http.Request {
+	t.Helper()
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Keys = append(rctx.URLParams.Keys, "id")
+	rctx.URLParams.Values = append(rctx.URLParams.Values, id)
+	req := httptest.NewRequest("GET", "/api/jobs/"+id+"/stream", nil)
+	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+}
+
 // TestStreamJobStreamsLiveOutput covers the live log: stdout appended to the
-// in-memory job state is pushed to an open SSE stream before the job ends,
-// so the page shows progress while m4b-merge is still running.
+// in-memory job state reaches an open SSE stream before the job ends, so the
+// page shows progress while m4b-merge is still running. The stream carries
+// the CONNECT offset in its initial payload and only the appended suffix in
+// each output event (no full-log re-send per line).
 func TestStreamJobStreamsLiveOutput(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
@@ -1047,26 +1069,41 @@ func TestStreamJobStreamsLiveOutput(t *testing.T) {
 		t.Fatal("no in-memory state for queued job")
 	}
 
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Keys = append(rctx.URLParams.Keys, "id")
-	rctx.URLParams.Values = append(rctx.URLParams.Values, id)
-	req := httptest.NewRequest("GET", "/api/jobs/"+id+"/stream", nil)
-	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	// Log content that existed BEFORE this stream connected: it belongs to
+	// this connection's initial snapshot, not to any suffix event.
+	st.appendOutput("pre-existing line")
 
 	w := newStreamRecorder()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.StreamJob(w, req)
+		h.StreamJob(w, newStreamRequest(t, id))
 	}()
 
-	if !w.waitFor(`"status":"queued"`, time.Second) {
-		t.Fatalf("initial SSE payload missing; body = %q", w.body())
+	// Initial payload: full snapshot + the offset new lines start at
+	// (18 bytes: "pre-existing line\n").
+	if !w.waitFor(`"output_offset":18`, time.Second) {
+		t.Fatalf("initial SSE payload missing its offset; body = %q", w.body())
 	}
+	if !strings.Contains(w.body(), `"output":"pre-existing line\n"`) {
+		t.Fatalf("initial SSE payload missing the full snapshot; body = %q", w.body())
+	}
+
 	st.appendOutput("first line")
 	st.appendOutput("second line")
-	if !w.waitFor(`"output":"first line\nsecond line\n"`, 2*time.Second) {
-		t.Fatalf("live output missing from SSE; body = %q", w.body())
+	// Suffix only — the pre-existing line must NOT be re-sent. Back-to-back
+	// appends are NOT guaranteed to coalesce into one suffix event (a
+	// receiver can run between them under -race), so assert the terminal
+	// cursor — 18 + 11 ("first line\n") + 12 ("second line\n") = 41 — and
+	// each line's bytes independently, never a single-event shape.
+	if !w.waitFor(`"output_offset":41`, 2*time.Second) {
+		t.Fatalf("live output suffix missing its terminal offset; body = %q", w.body())
+	}
+	if !strings.Contains(w.body(), "first line") || !strings.Contains(w.body(), "second line") {
+		t.Fatalf("live output lines missing from SSE; body = %q", w.body())
+	}
+	if strings.Contains(w.body(), `"output":"pre-existing line\nfirst line`) {
+		t.Errorf("SSE re-sent the pre-existing snapshot bytes as a suffix; body = %q", w.body())
 	}
 
 	st.finalize(`{"status":"done","message":"processing complete"}`, nil)
@@ -1077,6 +1114,405 @@ func TestStreamJobStreamsLiveOutput(t *testing.T) {
 	}
 	if body := w.body(); !strings.Contains(body, `{"status":"done"}`) {
 		t.Errorf("stream body = %q; want the trailing done line", body)
+	}
+}
+
+// TestStreamJobFanOutToConcurrentTimeStreams covers the two-tabs bug: the
+// single shared wake channel used to be consumed by one of N concurrent SSE
+// connections, so the other tab saw no live output at all. With per-connection
+// subscriptions every stream registered BEFORE the append must be woken.
+func TestStreamJobFanOutToConcurrentTimeStreams(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	st := svc.GetJob(id)
+	if st == nil {
+		t.Fatal("no in-memory state for queued job")
+	}
+
+	wA := newStreamRecorder()
+	wB := newStreamRecorder()
+	doneA := make(chan struct{})
+	doneB := make(chan struct{})
+	go func() {
+		defer close(doneA)
+		h.StreamJob(wA, newStreamRequest(t, id))
+	}()
+	go func() {
+		defer close(doneB)
+		h.StreamJob(wB, newStreamRequest(t, id))
+	}()
+
+	// Both streams must be registered (initial payload flushed) before the
+	// fan-out append races with registration.
+	if !wA.waitFor(`"status":"queued"`, 2*time.Second) || !wB.waitFor(`"status":"queued"`, 2*time.Second) {
+		t.Fatalf("both streams must connect; A = %q; B = %q", wA.body(), wB.body())
+	}
+
+	st.appendOutput("fan-out line")
+	if !wA.waitFor(`"output":"fan-out line\n"`, 2*time.Second) {
+		t.Fatalf("stream A missed the live output; body = %q", wA.body())
+	}
+	if !wB.waitFor(`"output":"fan-out line\n"`, 2*time.Second) {
+		t.Fatalf("stream B missed the live output (the consumed-notify bug); body = %q", wB.body())
+	}
+
+	terminal := `data: {"status":"done"}`
+	st.finalize(`{"status":"done"}`, nil)
+	select {
+	case <-doneA:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream A did not terminate after finalize")
+	}
+	select {
+	case <-doneB:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream B did not terminate after finalize")
+	}
+
+	// The terminal PROGRESS line (not just the trailing status line from the
+	// done await) must reach EVERY stream: a concurrent single reader
+	// consumes the progress channel, so the loser of that race can only get
+	// the line from the done-sync clone after the loop.
+	for name, w := range map[string]*streamRecorder{"A": wA, "B": wB} {
+		if n := strings.Count(w.body(), terminal); n < 2 {
+			t.Errorf("stream %s saw the terminal event %d times; want the progress line AND the status line (body = %q)", name, n, w.body())
+		}
+	}
+}
+
+// TestStreamJobSlowReaderCannotStallAppend covers the drain invariant: a
+// subscriber whose wake channel is already full (a reader that never drains
+// it) must be DROPPED — not blocked — so m4b-merge's stdout drain (appendOutput)
+// proceeds. One of the pair may then lack the coalesced event, but it is
+// NEVER delayed by a sick peer, and appendOutput itself must not hang.
+func TestStreamJobSlowReaderCannotStallAppend(t *testing.T) {
+	st := &jobState{outputSubs: make(map[chan struct{}]struct{})}
+
+	choked := make(chan struct{}, 1)
+	choked <- struct{}{} // Reader never drains: the next wake must not block.
+	healthy := make(chan struct{}, 1)
+	defer st.registerOutputSubscriber(choked)()
+	defer st.registerOutputSubscriber(healthy)()
+
+	done := make(chan struct{})
+	go func() {
+		st.appendOutput("kept moving")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("appendOutput stalled on a slow subscriber; the stdout drain would hang")
+	}
+
+	// The healthy subscriber still woke. (The choked one keeps its pending
+	// wake; the coalescing argument — each wake means "resend current state"
+	// — makes that safe.)
+	select {
+	case <-healthy:
+	case <-time.After(2 * time.Second):
+		t.Fatal("healthy subscriber was not woken while a sick peer choked")
+	}
+
+	// The stroke of the drain invariant: the append itself landed in the
+	// buffer regardless of the sick reader.
+	live, offset := st.outputSnapshot()
+	if live != "kept moving\n" || offset != 12 {
+		t.Errorf("buffer = %q offset = %d; want the appended line", live, offset)
+	}
+}
+
+// TestStreamJobReconnectCarriesFullSnapshot covers cancel/disconnect recovery:
+// after bytes were appended and one stream already consumed them as a suffix,
+// a newly opening stream must receive the FULL accumulated buffer (with the
+// cursor offset), not just the delta.
+func TestStreamJobReconnectCarriesFullSnapshot(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	st := svc.GetJob(id)
+	if st == nil {
+		t.Fatal("no in-memory state for queued job")
+	}
+
+	wFirst := newStreamRecorder()
+	doneFirst := make(chan struct{})
+	go func() {
+		defer close(doneFirst)
+		h.StreamJob(wFirst, newStreamRequest(t, id))
+	}()
+	if !wFirst.waitFor(`"status":"queued"`, time.Second) {
+		t.Fatalf("initial SSE payload missing; body = %q", wFirst.body())
+	}
+	st.appendOutput("line one")
+	st.appendOutput("line two")
+	// Same coalescing caveat: the first stream received these via suffix
+	// events, so assert the terminal cursor (9 + 9 = 18) and each line's
+	// bytes — never that both lines share one event.
+	if !wFirst.waitFor(`"output_offset":18`, 2*time.Second) {
+		t.Fatalf("first stream missed its terminal offset; body = %q", wFirst.body())
+	}
+	if !strings.Contains(wFirst.body(), "line one") || !strings.Contains(wFirst.body(), "line two") {
+		t.Fatalf("first stream missed the suffix lines; body = %q", wFirst.body())
+	}
+
+	// The second stream opens AFTER the bytes exist: its initial payload
+	// must carry the whole log, exactly once, plus the buffer-end offset.
+	wSecond := newStreamRecorder()
+	doneSecond := make(chan struct{})
+	go func() {
+		defer close(doneSecond)
+		h.StreamJob(wSecond, newStreamRequest(t, id))
+	}()
+	if !wSecond.waitFor(`"output":"line one\nline two\n"`, 2*time.Second) {
+		t.Fatalf("reconnect stream missing the full snapshot; body = %q", wSecond.body())
+	}
+	if !wSecond.waitFor(`"output_offset":18`, 2*time.Second) {
+		t.Fatalf("reconnect stream missing the cursor offset; body = %q", wSecond.body())
+	}
+	// The delta must NOT appear again as a suffix event on this connection.
+	if strings.Count(wSecond.body(), "line one") != 1 {
+		t.Errorf("reconnect body re-sent bytes; body = %q", wSecond.body())
+	}
+
+	st.finalize(`{"status":"done"}`, nil)
+	select {
+	case <-doneFirst:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first stream did not terminate after finalize")
+	}
+	select {
+	case <-doneSecond:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second stream did not terminate after finalize")
+	}
+}
+
+// TestStreamJobFinalDrainDeliversTrailingLine covers the post-loop drain: a
+// wake for the LAST appended line may already be pending when the loop's
+// select picks the closed progress channel and breaks — the buffer bytes
+// appended after this stream's cursor must then be emitted by the drain
+// before the terminal sequence, or the log is truncated mid-run. The
+// append+finalize are fired back-to-back (no intervening wait) to maximize
+// the window in which the wake is pending at loop exit, and the iteration
+// repeats on fresh jobs; the assertion is invariant-based (exactly one copy,
+// before the terminal line), so it holds whether or not the drain was the
+// path that delivered the bytes.
+func TestStreamJobFinalDrainDeliversTrailingLine(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+
+	for i := range 20 {
+		id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+		if err != nil {
+			t.Fatalf("iteration %d: queue job: %v", i, err)
+		}
+		st := svc.GetJob(id)
+		if st == nil {
+			t.Fatalf("iteration %d: no in-memory state for queued job", i)
+		}
+
+		w := newStreamRecorder()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			h.StreamJob(w, newStreamRequest(t, id))
+		}()
+
+		// The stream is in its select loop only once the initial payload
+		// (an empty fresh job carries the zero cursor) is out.
+		if !w.waitFor(`"output_offset":0`, time.Second) {
+			t.Fatalf("iteration %d: initial SSE payload missing; body = %q", i, w.body())
+		}
+
+		// No sleep between the two: a wake for the trailing line can be
+		// pending at the instant the closed progress channel wins the select.
+		st.appendOutput("trailing line")
+		st.finalize(`{"status":"done"}`, nil)
+
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iteration %d: stream did not terminate after finalize", i)
+		}
+
+		body := w.body()
+		if n := strings.Count(body, "trailing line"); n != 1 {
+			t.Fatalf("iteration %d: trailing line present %d times; want exactly 1 (a missing drain truncates the log); body = %q", i, n, body)
+		}
+		terminal := `data: {"status":"done"}`
+		if !strings.Contains(body, terminal) {
+			t.Fatalf("iteration %d: terminal status line missing; body = %q", i, body)
+		}
+		if last := strings.LastIndex(body, "trailing line"); last >= strings.LastIndex(body, terminal) {
+			t.Fatalf("iteration %d: trailing line landed at/after the terminal status line; body = %q", i, body)
+		}
+	}
+}
+
+// TestStreamJobLateSubscriberGetsTerminalResult covers the subscriber that
+// opens AFTER finalize: the progress channel is already closed and the done
+// sync already reported, so the stream must return immediately (not block on
+// the closed channel's empty buffer) with the buffer snapshot, the terminal
+// progress line, and the terminal status line.
+func TestStreamJobLateSubscriberGetsTerminalResult(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	st := svc.GetJob(id)
+	if st == nil {
+		t.Fatal("no in-memory state for queued job")
+	}
+	st.appendOutput("last live line")
+	st.finalize(`{"status":"error","message":"m4b-merge stopped"}`, errors.New("m4b-merge stopped"))
+
+	w := newStreamRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.StreamJob(w, newStreamRequest(t, id))
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("late stream did not return after finalize; body = %q", w.body())
+	}
+
+	body := w.body()
+	if !strings.Contains(body, `"output":"last live line\n"`) {
+		t.Errorf("late stream missing the buffer snapshot; body = %q", body)
+	}
+	if !strings.Contains(body, `data: {"status":"error","message":"m4b-merge stopped"}`) {
+		t.Errorf("late stream missing the terminal PROGRESS line; body = %q", body)
+	}
+	if !strings.Contains(body, `data: {"message":"m4b-merge stopped","status":"error"}`) {
+		t.Errorf("late stream missing the terminal STATUS line; body = %q", body)
+	}
+}
+
+// TestDoneSyncAwaitAfterReport pins the broadcast contract: await() on an
+// already-reported done sync returns the SAME (msg, err) to every reader —
+// a terminal result must never be consumed by the first stream that awaits
+// it, leaving a second concurrent stream without the terminal line.
+func TestDoneSyncAwaitAfterReport(t *testing.T) {
+	ds := newDoneSync()
+	ds.report(`{"status":"done","message":"processing complete"}`, errors.New("worker stopped"))
+
+	for i := range 3 {
+		msg, err := ds.await()
+		if msg != `{"status":"done","message":"processing complete"}` {
+			t.Errorf("await %d: msg = %q; want the reported terminal message (broadcast, not consumed-once)", i, msg)
+		}
+		if err == nil || err.Error() != "worker stopped" {
+			t.Errorf("await %d: err = %v; want the reported terminal error", i, err)
+		}
+	}
+}
+
+// TestJobStateDeregisterStopsWakes covers the deregistration: a subscriber
+// whose slot was removed must not be woken by later appends (its goroutine
+// is gone; waking it would be benign but leaks the wake pattern), while the
+// remaining subscriber still is, and the map holds exactly the live slot.
+func TestJobStateDeregisterStopsWakes(t *testing.T) {
+	st := &jobState{outputSubs: make(map[chan struct{}]struct{})}
+
+	dropped := make(chan struct{}, 1)
+	kept := make(chan struct{}, 1)
+	deregister := st.registerOutputSubscriber(dropped)
+	defer st.registerOutputSubscriber(kept)()
+	deregister()
+	if len(st.outputSubs) != 1 {
+		t.Fatalf("len(outputSubs) = %d after deregister; want 1", len(st.outputSubs))
+	}
+
+	st.appendOutput("wake line")
+
+	select {
+	case <-dropped:
+		t.Fatal("deregistered subscriber was woken; its map slot must be gone")
+	default:
+	}
+	select {
+	case <-kept:
+	case <-time.After(2 * time.Second):
+		t.Fatal("live subscriber was not woken")
+	}
+}
+
+// TestJobStateSubscriberChurnIsRaceFree hammer-tests the register/deregister
+// pair against a concurrent appendOutput: the map must never be read after
+// delete and must be empty once every churned subscriber has deregistered.
+// Run under -race.
+func TestJobStateSubscriberChurnIsRaceFree(t *testing.T) {
+	st := &jobState{outputSubs: make(map[chan struct{}]struct{})}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				ch := make(chan struct{}, 1)
+				st.registerOutputSubscriber(ch)()
+			}
+		}()
+	}
+	appendDone := make(chan struct{})
+	go func() {
+		defer close(appendDone)
+		for i := 0; i < 200; i++ {
+			st.appendOutput(fmt.Sprintf("churn line %d", i))
+		}
+	}()
+
+	wg.Wait()
+	<-appendDone
+	if len(st.outputSubs) != 0 {
+		t.Fatalf("len(outputSubs) = %d after all churn settled; want 0", len(st.outputSubs))
+	}
+}
+
+// TestJobStateOutputFrom pins outputFrom's cursor arithmetic: a start at the
+// beginning yields the whole buffer; a start AT the end and PAST the end
+// both yield the empty suffix (the coalesced-wake safe case) with the
+// buffer-end offset, and clamping must never grow the buffer.
+func TestJobStateOutputFrom(t *testing.T) {
+	st := &jobState{outputSubs: make(map[chan struct{}]struct{})}
+	st.appendOutput("a")
+	st.appendOutput("b") // "a\nb\n" — 4 bytes
+
+	tests := []struct {
+		name       string
+		start      int
+		wantSuffix string
+	}{
+		{"start at buffer beginning", 0, "a\nb\n"},
+		{"start at buffer end", 4, ""},
+		{"start past buffer end", 99, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			suffix, next := st.outputFrom(tc.start)
+			if suffix != tc.wantSuffix || next != 4 {
+				t.Errorf("outputFrom(%d) = (%q, %d); want (%q, 4)", tc.start, suffix, next, tc.wantSuffix)
+			}
+		})
+	}
+
+	// The clamped reads must have left the buffer untouched.
+	live, offset := st.outputSnapshot()
+	if live != "a\nb\n" || offset != 4 {
+		t.Errorf("buffer after clamped reads = (%q, %d); want (\"a\\nb\\n\", 4) — outputFrom must not grow the buffer", live, offset)
 	}
 }
 
