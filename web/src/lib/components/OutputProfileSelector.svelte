@@ -68,6 +68,12 @@
 		const value = (event.currentTarget as HTMLSelectElement).value;
 		selectedProfileId = value === '' ? null : Number(value);
 	}
+
+	// "these 1 book" is wrong; a one-book batch names the noun alone.
+	function countNoun(count: number): string {
+		if (count === 1) return batchNoun.replace(/s$/, '');
+		return batchNoun.endsWith('s') ? batchNoun : `${batchNoun}s`;
+	}
 </script>
 
 <div class="output-profile-selector">
@@ -90,7 +96,7 @@
 	</select>
 	{#if selectedProfile}
 		<p id={summaryId} class="output-profile-selector__summary {summaryClass}" aria-live="polite">
-			{selectedProfile.output_dir || 'Uses the global output directory'} · {selectedProfile.output_scheme || 'Uses the global path format'} — applies only to these {batchCount} {batchNoun} in this {batchScope}.
+			{selectedProfile.output_dir || 'Uses the global output directory'} · {selectedProfile.output_scheme || 'Uses the global path format'} — applies only to {batchCount === 1 ? 'this' : `these ${batchCount}`} {countNoun(batchCount)} in this {batchScope}.
 		</p>
 	{:else if profilesError}
 		<p id={summaryId} class="output-profile-selector__summary output-profile-selector__summary--warn {summaryClass}" aria-live="polite">{profilesError}</p>
