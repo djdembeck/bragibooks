@@ -162,10 +162,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("Invalid Host configuration: %v", err)
 	}
-	r.Use(hostGuard)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	// Mounted last so Host denials still get a request ID and an access-log
+	// line recording which authority was refused, while remaining ahead of
+	// every route registration (auth, health, covers, SPA all stay gated).
+	r.Use(hostGuard)
 	// The SPA is served same-origin from this server, so the API does not
 	// need CORS at all; the old wildcard-credentials combo was invalid and
 	// opened the admin API to any origin (finding: CORS). No CORS handler
