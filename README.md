@@ -51,6 +51,8 @@ Bragibooks is designed for one operator on a private network, and the API routes
 
 The web interface itself has no login screen; it relies on the boundary above and the server-set CSRF double-submit cookie. Do not expose the port directly to the public internet — keep it on a trusted network, and for wider first access put an authenticated reverse proxy in front of the app; configure the proxy's egress address in `BRAGIBOOKS_TRUSTED_PROXIES`, because a request carrying a forwarding header (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`) that arrives from a peer not configured there fails closed — it is not treated as LAN (403 while the API is off, 401 demanding a key while it is on). When you need machine access from elsewhere, enable the External API in Settings and use the printed `bk_…` key — remote (non-LAN) access always requires that key as `Authorization: Bearer <key>`.
 
+The HTTP Host authority is checked on **all routes**, including health and the UI, before API authorization. `localhost`, literal loopback/private/link-local IPv4/IPv6 addresses, and a non-wildcard `SERVER_HOST` are accepted by default. Private literal addresses intentionally include a container host's LAN address, which is not visible on the container's interfaces. DNS names are never trusted by resolving them to private IPs. For a LAN hostname, public address, or reverse-proxy domain, set `SERVER_ALLOWED_HOSTS=books.lan,books.example` (YAML: `server.allowed_hosts`, a comma-separated string), then restart. Entries are exact names or literal addresses, not URLs, suffixes, or wildcards; invalid entries stop startup. ASCII DNS names are case-insensitive and one trailing dot is ignored. IPv6 authorities must be bracketed (for example `[fd12::1]:8888`); zone identifiers are not supported. Optional numeric ports (1–65535) are validated but ignored for host matching so published ports keep working. Unspecified addresses (`0.0.0.0`, `[::]`) are not trusted merely because the listener binds all interfaces. A proxy must preserve the allowed `Host` or supply an allowed backend Host: `X-Forwarded-Host` and `Forwarded` never override it, even for trusted proxies. Host acceptance does not grant API access or bypass existing key/CSRF checks.
+
 ## Background
 
 **Bragi — god of poetry in [Norse mythology](https://en.wikipedia.org/wiki/Bragi).** The name fits an application concerned with spoken books and music.
@@ -158,6 +160,7 @@ The key environment variables are:
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `SERVER_HOST` | Address for the HTTP server | empty (all interfaces; set `127.0.0.1` for loopback only) |
+| `SERVER_ALLOWED_HOSTS` | Additional exact Host names/addresses, comma-separated; restart after changing | empty (local literal addresses and localhost remain available) |
 | `SERVER_PORT` | HTTP port | `8080` |
 | `DATABASE_PATH` | SQLite database path | `config/bragibooks.db` |
 | `M4B_MERGE_BINARY` | `m4b-merge` executable name or path | `m4b-merge` |
@@ -309,7 +312,7 @@ For the complete two-service development environment, use the development compos
 docker compose -f docker/docker-compose.dev.yml up --build
 ```
 
-Open [http://localhost:5175](http://localhost:5175) while the development stack is running. The Vite server proxies `/api` requests to the Go backend.
+Open [http://localhost:5175](http://localhost:5175) while the development stack is running. The Vite server proxies `/api` and `/covers` requests to the Go backend. The development Compose profile explicitly allows the backend service name with `SERVER_ALLOWED_HOSTS=bragibooks-dev`, because Vite's string-form proxy sends the target authority as `Host`. If you change `VITE_PROXY_TARGET` to another DNS hostname, add that exact hostname to the backend's allowed hosts; this does not bypass its API-key or CSRF checks.
 
 ## Maintainers
 

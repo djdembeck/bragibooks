@@ -157,6 +157,12 @@ func main() {
 
 	// Router
 	r := chi.NewRouter()
+	// Validate authority before auth, health, covers, or SPA handling.
+	hostGuard, err := api.ValidateHost(cfg.Server)
+	if err != nil {
+		log.Fatalf("Invalid Host configuration: %v", err)
+	}
+	r.Use(hostGuard)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)

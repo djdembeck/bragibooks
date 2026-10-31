@@ -29,6 +29,25 @@ func newTestManager(t *testing.T, seed string) (*ConfigManager, string) {
 	return m, path
 }
 
+func TestAllowedHostsConfigPrecedence(t *testing.T) {
+	t.Setenv("SERVER_ALLOWED_HOSTS", "")
+	m, path := newTestManager(t, "server:\n  allowed_hosts: books.lan,books.example\n")
+	if got := m.Config().Server.AllowedHosts; got != "books.lan,books.example" {
+		t.Fatalf("YAML hosts = %q", got)
+	}
+	if err := m.SaveKeys(map[string]any{"processing": map[string]any{"num_cpus": 2}}); err != nil {
+		t.Fatal(err)
+	}
+	assertContains(t, readFile(t, path), "allowed_hosts: books.lan,books.example", "hosts lost on settings save")
+	t.Setenv("SERVER_ALLOWED_HOSTS", "env.example")
+	if _, err := m.LoadFrom(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Config().Server.AllowedHosts; got != "env.example" {
+		t.Fatalf("env hosts = %q", got)
+	}
+}
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)

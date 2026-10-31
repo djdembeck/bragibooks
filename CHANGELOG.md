@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. See [standa
 
 ## [Unreleased]
 
+### Security
+
+- Validate Host authorities before all HTTP routes to reject DNS-rebinding names, malformed hosts, and forwarded-host spoofing. Preserve auth-free LAN literal-address access (including published container ports), external API keys, and CSRF; add exact DNS/public-address opt-ins through `SERVER_ALLOWED_HOSTS` / `server.allowed_hosts` and reuse non-wildcard listener hosts. The development Compose profile explicitly allows its `bragibooks-dev` backend service authority so Vite's API and cover proxies keep working.
+
 ### Major Updates
 
 - **Django 5.2 LTS Modernization** (#407)
