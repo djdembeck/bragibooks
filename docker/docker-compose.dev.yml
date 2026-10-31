@@ -8,8 +8,8 @@ services:
     volumes:
       - ..:/app
       - ./config:/app/config
-      - ${BRAGIBOOKS_INPUT_DIR:-../books/input}:/input
-      - ${BRAGIBOOKS_OUTPUT_DIR:-../books/output}:/output
+      - ${BRAGIBOOKS_INPUT_DIR:-./books/input}:/input
+      - ${BRAGIBOOKS_OUTPUT_DIR:-./books/output}:/output
     environment:
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8080
