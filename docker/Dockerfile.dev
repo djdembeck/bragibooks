@@ -1,4 +1,4 @@
-FROM golang:1.27-alpine
+FROM golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb
 
 RUN apk add --no-cache git ffmpeg
 RUN go install github.com/air-verse/air@latest
@@ -10,7 +10,7 @@ RUN go mod download
 
 COPY . .
 
-COPY --from=ghcr.io/djdembeck/m4b-merge:main-amd64 /usr/local/bin/m4b-merge /usr/local/bin/m4b-merge
+COPY --from=ghcr.io/djdembeck/m4b-merge:main-amd64@sha256:f36864ceba5867bd10f36ad8574ac9f4e2cf45d97a94c6c7c13b63015f80cfff /usr/local/bin/m4b-merge /usr/local/bin/m4b-merge
 
 EXPOSE 8080
 

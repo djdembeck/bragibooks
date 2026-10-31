@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. See [standa
 
 ## [Unreleased]
 
+### Features & Improvements
+
+- Narrowed development Docker media access to configurable input/output directories rather than mounting the developer home directory; pinned Docker build, runtime, and media-tool image digests for reproducible builds, with Renovate digest updates.
+
 ### Major Updates
 
 - **Django 5.2 LTS Modernization** (#407)
