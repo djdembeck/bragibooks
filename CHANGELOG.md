@@ -26,6 +26,11 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Features & Improvements
 
+- **Unified release publication on reserved versions** (#484)
+  - Release lifecycle and asset lookups are now draft-aware and paginated with an exact `tag_name` match; duplicate records fail closed, and a 403/5xx/page failure stops the run before any create or upload.
+  - `--latest` is computed from published non-draft non-prerelease numeric SemVer: a new highest stable advances GitHub Latest, a delayed lower stable publishes with `--latest=false`, and an already-published retry is a no-op. Mutable `latest`/major/minor Docker aliases are no longer written.
+  - Before any upload, the complete planned asset set (preserved immutable archives plus the pending build) is built and the checksum manifest is verified against those actual bytes. An existing labelled archive may differ from a rebuild and is preserved; a missing manifest is generated from the combined verified digests so a valid partial retry can finish; an immutable manifest that cannot describe the combined set stops the run with no writes. Existing unlabelled-mismatch and provenance rejections are preserved.
+
 - **Recorded activity shows what happened** (#440)
   - `processing_jobs` now carries a stable `action` key (`merge` | `metadata_update` | `import`); the migration backfills existing rows as `merge`.
   - Imports and metadata saves write terminal `done` audit rows, so the record's activity list no longer only shows processing runs. These rows never affect queuing or the orphan sweep, which key on `queued`/`running`.

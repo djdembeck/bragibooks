@@ -1,279 +1,137 @@
-# Generate-first release via annalist (GitHub Actions).
-#
-# Gitflow flow: releases are cut on each `develop → main` merge.
-# `develop` pushes do NOT release.
-#
-# How it works:
-#   1. On every push to the trigger branch, the next version is auto-bumped
-#      from commits since the last tag (conventional commits:
-#      BREAKING CHANGE/feat! -> major, feat -> minor, else patch). Dispatch
-#      with a `version` or `bump` input to override.
-#   2. The tag is created and pushed (skipped if it already exists).
-#   3. A version-tagged Docker image is built and pushed to GHCR and Docker Hub.
-#   4. GoRelease builds all OS/arch binaries and creates the GitHub release
-#      (goreleaser action; changelog entries are generated from commits).
-#   5. The version bump is synced back to develop.
-#
-# Re-runs are idempotent: a partial failure can be re-dispatched and the same
-# (already-existing) tag/release guards no-op or complete the work.
-#
-# Uses git, docker, and goreleaser; publishes to GitHub and Docker Hub.
-# GITHUB_TOKEN is provided automatically (permissions: contents: write, packages: write).
-# Docker Hub requires repository secrets DOCKER_USERNAME and DOCKER_PASSWORD.
-
+# One ordinary develop -> main promotion; no version commits or merge-back.
+# Annalist's existing GitHub App fills notes after complete publication.
 name: Release
 
 on:
   push:
     branches: [main]
-    paths-ignore: ['*.md', 'docs/**', '.github/**']
+    paths-ignore: ['*.md', 'docs/**', '.gitignore', 'LICENSE']
   workflow_dispatch:
     inputs:
       version:
-        description: "Explicit version (vX.Y.Z). Empty = auto-bump from commits."
+        description: 'Explicit vX.Y.Z; empty allocates from reachable reservations'
         required: false
-        default: ""
+        default: ''
       bump:
-        description: "Bump level when version is empty: auto|patch|minor|major"
+        description: 'auto, patch, minor, or major'
         required: false
         default: auto
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release
   cancel-in-progress: false
+  queue: max
 
 jobs:
-  release:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the configured release branch before publishing
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          [[ "$RELEASE_REF" == refs/heads/main ]] || { echo 'Release must run on main'; exit 1; }
+
+  reserve:
+    needs: preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.reserve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Reserve one immutable source/version identity
+        id: reserve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ github.sha }}
+          VERSION_INPUT: ${{ inputs.version }}
+          BUMP_INPUT: ${{ inputs.bump }}
+          RELEASE_EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          args=(--sha "$SOURCE" --bump "${BUMP_INPUT:-auto}")
+          if [[ -n "$VERSION_INPUT" ]]; then args+=(--version "$VERSION_INPUT"); fi
+          if [[ "$RELEASE_EVENT" == push ]]; then args+=(--automatic); fi
+          tag=$(python3 scripts/release.py reserve "${args[@]}")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  outputs:
+    needs: reserve
+    if: needs.reserve.outputs.tag != ''
     runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
+    env:
+      VERSION: ${{ needs.reserve.outputs.tag }}
+      SOURCE: ${{ github.sha }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history so version resolution can inspect all refs.
+          ref: ${{ github.sha }}
           fetch-depth: 0
-
-      - name: Configure Git
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Verify the existing native Go build
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Determine next version
-        id: version
-        env:
-          VERSION_INPUT: ${{ inputs.version }}
-          BUMP_INPUT: ${{ inputs.bump }}
-        run: |
-          set -euo pipefail
-
-          LATEST_TAG=$(git tag -l "v*.*.*" --sort=-version:refname | head -n 1 || true)
-
-          if [ -n "$VERSION_INPUT" ]; then
-            # Manual override
-            NEW_VERSION="${VERSION_INPUT#v}"
-            if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "Invalid version input: ${VERSION_INPUT} (expected vX.Y.Z)"
-              exit 1
-            fi
-            NEW_VERSION="v${NEW_VERSION}"
-          elif [ -z "$LATEST_TAG" ]; then
-            NEW_VERSION="v0.1.0"
-          else
-            MAJOR="${LATEST_TAG#v}"; MAJOR="${MAJOR%%.*}"
-            REST="${LATEST_TAG#v*.}"; MINOR="${REST%%.*}"; PATCH="${REST#*.}"
-
-            case "$BUMP_INPUT" in
-              auto|"")
-                if [ -z "$(git log --format=%H "${LATEST_TAG}..HEAD" 2>/dev/null)" ]; then
-                  PREV_TAG=$(git tag -l "v*.*.*" --sort=-version:refname | sed -n 2p || true)
-                  echo "new_version=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
-                  echo "previous_tag=${PREV_TAG:-}" >> "$GITHUB_OUTPUT"
-                  echo "No commits since ${LATEST_TAG} — reusing it"
-                  exit 0
-                fi
-                LOG=$(git log --format=%B "${LATEST_TAG}..HEAD" 2>/dev/null || true)
-                if echo "$LOG" | grep -qE 'BREAKING CHANGE:|^[a-z]+(\([^)]*\))?!: '; then LEVEL=major
-                elif echo "$LOG" | grep -qE '^feat(\([^)]*\))?: '; then LEVEL=minor
-                else LEVEL="patch"; fi
-                ;;
-              patch|minor|major) LEVEL="$BUMP_INPUT" ;;
-              *) echo "Invalid bump input: ${BUMP_INPUT} (auto|patch|minor|major)"; exit 1 ;;
-            esac
-
-            case "$LEVEL" in
-              major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
-              minor) MINOR=$((MINOR+1)); PATCH=0 ;;
-              patch) PATCH=$((PATCH+1)) ;;
-            esac
-            NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
-          fi
-
-          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "previous_tag=${LATEST_TAG:-}" >> "$GITHUB_OUTPUT"
-          echo "New version: ${NEW_VERSION} (previous: ${LATEST_TAG:-none})"
-
-      - name: Create and push tag
-        id: tag
-        run: |
-          set -euo pipefail
-          VERSION="${{ steps.version.outputs.new_version }}"
-          if git rev-parse "refs/tags/${VERSION}" >/dev/null 2>&1; then
-            echo "Tag ${VERSION} already exists, skipping"
-            echo "created=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git tag -a "${VERSION}" -m "Release ${VERSION}"
-          git push origin "${VERSION}"
-          echo "created=true" >> "$GITHUB_OUTPUT"
-
-      # Go: version comes from the pushed tag via -ldflags (Docker build here; GoReleaser below).
-
-      - name: Build and push version Docker image
-        run: |
-          set -euo pipefail
-          VERSION="${{ steps.version.outputs.new_version }}"
-          BARE="${VERSION#v}"
-          REGISTRY_IMAGE="ghcr.io/djdembeck/bragibooks"
-
-          HUB_IMAGE="djdembeck/bragibooks"
-
-          # Bare semver tags mirror CI's type=semver rules and 'latest' for
-          # major releases. The tag push is made with GITHUB_TOKEN, which
-          # cannot trigger workflow runs, so CI does not re-run for the
-          # pushed tag — the aliases must be published here too.
-          MAJOR_MINOR="${BARE%.*}"
-          SEMVER_TAGS=("${BARE}" "${MAJOR_MINOR}" "${MAJOR_MINOR%.*}")
-          [ "${BARE%%.*}" != "0" ] && SEMVER_TAGS+=("latest")
-          EXTRA_TAGS=()
-          for t in "${SEMVER_TAGS[@]}"; do
-            EXTRA_TAGS+=("${REGISTRY_IMAGE}:${t}" "${HUB_IMAGE}:${t}")
-          done
-
-          # Login to GHCR and Docker Hub (same secrets as the CI dual publish);
-          # Hub login is required for the registry reads in the idempotency
-          # guard below.
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login docker.io -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-
-          # compare two dotted versions for the alias reconciliation below:
-          # semver_ge A B returns 0 when A is the same as or newer than B.
-          semver_ge() {
-            local -a a b
-            IFS=. read -r -a a <<< "${1}"
-            IFS=. read -r -a b <<< "${2}"
-            a+=(0 0 0)
-            b+=(0 0 0)
-            if [ "${a[0]}" -ne "${b[0]}" ]; then
-              [ "${a[0]}" -gt "${b[0]}" ]
-              return
-            fi
-            if [ "${a[1]}" -ne "${b[1]}" ]; then
-              [ "${a[1]}" -gt "${b[1]}" ]
-              return
-            fi
-            [ "${a[2]}" -ge "${b[2]}" ]
-          }
-
-          # idempotency guard: skip the build when the image already exists on
-          # GHCR (e.g. rerun of a completed release) and reconcile the mutable
-          # aliases against the existing digest instead; Hub tags come from the
-          # same build, so the same digest is reused for the retags and a
-          # re-dispatched older release never moves an alias backwards.
-          if docker manifest inspect "${REGISTRY_IMAGE}:${BARE}" >/dev/null 2>&1; then
-            echo "Image ${REGISTRY_IMAGE}:${BARE} already exists - skipping build"
-            digest=$(docker buildx imagetools inspect "${REGISTRY_IMAGE}:${BARE}" --format '{{.Manifest.Digest}}')
-            [ -n "${digest}" ] || { echo "Cannot resolve existing GHCR digest - re-dispatch required" >&2; exit 1; }
-            backfilled=0
-            repointed=0
-            kept=0
-            for t in "${EXTRA_TAGS[@]}"; do
-              if ! docker manifest inspect "${t}" >/dev/null 2>&1; then
-                echo "Alias ${t} missing - retagging by digest"
-                docker buildx imagetools create --tag "${t}" "${REGISTRY_IMAGE}:${BARE}@${digest}"
-                backfilled=$((backfilled+1))
-                continue
-              fi
-              alias_digest=$(docker buildx imagetools inspect "${t}" --format '{{.Manifest.Digest}}')
-              [ -n "${alias_digest}" ] || { echo "Cannot resolve existing GHCR digest - re-dispatch required" >&2; exit 1; }
-              if [ "${alias_digest}" = "${digest}" ]; then
-                continue
-              fi
-              # the alias lags; resolve the version it currently points at
-              # from the org.opencontainers.image.version annotation so a
-              # re-dispatched older release is not written over it
-              alias_tag="${t##*:}"
-              alias_version=$(docker buildx imagetools inspect "${t}" --format '{{index .Annotations "org.opencontainers.image.version"}}' 2>/dev/null || true)
-              alias_version="${alias_version#v}"
-              if [ -z "${alias_version}" ] && [[ "${alias_tag}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-                echo "Alias ${t} version annotation unreadable - falling back to its tag version ${alias_tag}" >&2
-                alias_version="${alias_tag}"
-              fi
-              if [ -z "${alias_version}" ] || ! [[ "${alias_version}" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
-                echo "Alias ${t} digest differs and no usable version - keeping as-is" >&2
-                kept=$((kept+1))
-                continue
-              fi
-              if semver_ge "${BARE}" "${alias_version}"; then
-                echo "Re-pointing stale alias ${t} (${alias_version}) at ${BARE}"
-                docker buildx imagetools create --tag "${t}" "${REGISTRY_IMAGE}:${BARE}@${digest}"
-                repointed=$((repointed+1))
-              else
-                echo "Keeping alias ${t} (${alias_version}) - newer than re-run version ${BARE}"
-                kept=$((kept+1))
-              fi
-            done
-            if [ "${backfilled}" -eq 0 ] && [ "${repointed}" -eq 0 ] && [ "${kept}" -eq 0 ]; then
-              echo "All aliases of ${REGISTRY_IMAGE}:${BARE} aligned - nothing to do"
-            else
-              echo "Alias reconciliation complete: ${backfilled} backfilled, ${repointed} re-pointed, ${kept} kept newer"
-            fi
-            exit 0
-          fi
-
-          # Build and push the version-tagged image.
-          # Version is stamped by docker/Dockerfile from --build-arg VERSION (bare semver in the binary).
-          ALL_TAGS=("${REGISTRY_IMAGE}:${VERSION}" "${HUB_IMAGE}:${VERSION}" "${EXTRA_TAGS[@]}")
-          BUILD_TAGS=()
-          for t in "${ALL_TAGS[@]}"; do
-            BUILD_TAGS+=(-t "$t")
-          done
-          docker build \
-            -f docker/Dockerfile \
-            --build-arg VERSION="${VERSION}" \
-            "${BUILD_TAGS[@]}" \
-            .
-          for t in "${ALL_TAGS[@]}"; do
-            docker push "${t}"
-          done
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-
-      - name: Create release with goreleaser
+          go vet ./...
+          go test -ldflags="-X github.com/bragibooks/bragibooks/internal/version.Version=${VERSION#v}" ./internal/...
+      - name: Build all existing versioned native archives without publishing
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
-          version: latest
-          args: release --clean
+          version: v2.19.0
+          args: release --clean --skip=publish
         env:
           GITHUB_TOKEN: ${{ github.token }}
-
-      - name: Sync version bump back to develop
-        if: steps.tag.outputs.created == 'true'
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Install digest-preserving cross-registry copy
+        run: sudo apt-get update && sudo apt-get install -y skopeo
+      - name: Reconcile both registries without changing immutable bytes
+        run: python3 scripts/release.py image --source "$SOURCE" --version "$VERSION"
+      - name: Resume missing native assets on the unpublished draft
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          VERSION="${{ steps.version.outputs.new_version }}"
-          git fetch origin develop:develop
-          if git merge-base --is-ancestor origin/main develop; then
-            echo "main already merged into develop — skipping sync"
-            exit 0
-          fi
-          git checkout develop
-          git merge --no-ff main -m "chore(release): sync ${VERSION} back to develop [skip ci]"
-          git push origin develop
-          # if develop is protected, replace with a peter-evans/create-pull-request sync PR
+          python3 scripts/release.py release --tag "$VERSION" --source "$SOURCE"
+          python3 scripts/release.py assets --source "$SOURCE" --version "$VERSION"
 
+  publish:
+    needs: [reserve, outputs]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Publish only after all native outputs complete
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.reserve.outputs.tag }}
+          SOURCE: ${{ github.sha }}
+        run: |
+          python3 scripts/release.py release --tag "$TAG" --source "$SOURCE"
+          python3 scripts/release.py release --tag "$TAG" --source "$SOURCE" --publish
