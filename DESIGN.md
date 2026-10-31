@@ -116,7 +116,7 @@ components:
     padding: "0.125rem 0.5rem"
   activity-label:
     textColor: "{colors.text-secondary}"
-    fontSize: "0.75rem"
+    fontSize: "12px"
     fontWeight: 600
   card-panel:
     backgroundColor: "{colors.panel}"
@@ -212,7 +212,7 @@ Panels are flat at rest: white cards on the `#f5f5f4` ground, `#f8f8f6` toolbars
 
 ## Shapes
 
-Rounding runs on four steps by role: 6px (`sm`) for buttons, inputs, checkboxes, badges, alerts, and provenance chips; 10px (`md`) for cards, panels, dialogs, and cover art; 12px (`lg`) available for enclosure rounding. A 4px corner (literal value, no token) appears only on Match's route-local elements: the review-mode segment, small row chips, and compact buttons. The workspace writes containment with 1px hairlines. Dots are fully round. No hard offset shadows.
+Rounding runs on four steps by role: 6px (`sm`) for buttons, inputs, checkboxes, badges, alerts, and provenance chips; 10px (`md`) for cards, panels, dialogs, and cover art; 12px (`lg`) available for enclosure rounding. A 4px corner (literal value, no token) appears only on Match's route-local elements: the review-mode segment, small row chips, compact buttons, and its dense source/catalog/picker/dialog art. The workspace writes containment with 1px hairlines. Dots are fully round. No hard offset shadows.
 
 ## Components
 
@@ -231,7 +231,7 @@ Rounding runs on four steps by role: 6px (`sm`) for buttons, inputs, checkboxes,
 - **Mobile:** destinations move to a horizontally scrollable second row; targets stay ≥44px.
 
 ### Page Header
-Title in the display face with an optional 15px secondary description (65ch) above a 1px `#d7d7d0` rule; 1.5rem below the rule. Match's head is sticky on desktop with the mode controls and counted approval on the right; on phones it scrolls with the list. During Match's removal pass the head replaces Save with the pass count and a ghost Cancel and hides the description; below 900px it also collapses to a compact sticky strip with the title, count, and Cancel, with the review-mode switch hidden.
+Title in the display face with an optional 15px secondary description (65ch) above a 1px `#d7d7d0` rule; 1.5rem below the rule. Match's head is sticky on desktop with the mode controls and one commit row on the right: the red-wash **Remove…** action (batch review only) and the gold counted **Save N → Queue**; on phones the head scrolls with the list and the two actions share a full-width row.
 
 ### Inputs / Fields
 - **Style:** `#f8f8f6` fill, 1px `#92928a` border, 6px radius, 44px min-height.
@@ -253,14 +253,20 @@ Queue cards and book-record job history list Started, Done, Created, and the dur
 ### Mode Toggle
 Segmented pair (Batch / Focused) on Match: `#f8f8f6` track, 1px border, 6px outer / 4px inner radius; the pressed segment takes the pale gold `#fff4d3` fill with a 1px inset hairline.
 
-### Removal Pass (Match, Batch review)
-A deliberate mode entered from the batch bar's "Select to remove". The row checkbox stops meaning "include in this save" and becomes a removal selector: checked boxes paint `#b3261e` with a white tick, and picked rows sit on the `#fdecea` state-red wash with "Selected for removal" in red 12px. Source names wrap to two lines in both batch review and the pass so duplicate folders and author-prefixed titles stay distinguishable. The sticky page head takes over the mode: Save is replaced by "N of M sources selected to remove" in red 600 and a ghost Cancel, and the description is hidden. The removal bar keeps select-all, the files-stay sentence, and the red-wash "Remove N records" action (at zero selection it reads "Select sources to remove" and is disabled); on wide screens it docks under the head while the list scrolls. Below 900px the head scrolls with the list except in the pass, where it collapses to a compact sticky strip of title, count, and Cancel with the mode switch hidden; below 761px the commit actions dock to a fixed bottom bar (white panel, 1px `#e7b9b5` top edge). Confirmation is a native dialog headed "Remove N records?" with an uppercase "N sources" line above the scrollable list, each source name plus its selected record title, the files sentence in the footer, and Cancel focused on open. Per-row Remove keeps its inline two-step band for single removals.
+### Match batch row
+The batch list is the source-to-output comparison at a glance: include checkbox (save set only, 44px hit area), source art, a **Before → After** pair (Before folder name wraps to two lines; After is the proposed output, scheme preview, two-line mono clamp), then the catalog record — compact cover, title with the AbDB mark, the match-state chip, credits/runtime on one clipped line (wraps on phones) with the full list as its tooltip, and the edition line. Phones drop the 40px source-art column and give the name pair the full row: each label sits in a 78px column beside its value, After carries the preview note, and a down arrow joins the rows; desktop keeps the two columns and a horizontal arrow. Row actions are compact 36px on desktop and 44px on phones. A ready row excluded from the save dims and its chip reads "Excluded from save"; inclusion is never carried by color alone. Phones fold the edition into the credits line; the bar above the list pairs "Select all ready" with `N ready · M of X books included`; the footnote states proposed names are previews and the processor reports the actual output path.
+
+### Match state chip
+Route-local 4px chip with a 14px glyph and 12px 600 sentence-case text: auto ✓ surface / "Auto-matched"; manual ✓ green wash / "Matched manually"; low ! amber wash / "No confident match"; none ! surface / "No catalog match"; error ! red wash / "Catalog lookup failed"; loading a pulsing dot / "Loading record…" or "Loading edition…"; excluded – surface / "Excluded from save". Batch rows and the focused index share one status source; the focused inspector appends "· not saved" to the selected record's chip. Low confidence is the only amber outside processing, and it always carries the warning glyph.
+
+### Batch removal (Match)
+The row checkbox only means "include in this save" and never authorizes a delete; unchecked ready rows sit dimmed and say "Excluded from save". The red-wash **Remove…** action lives in the head's commit row and opens the native dialog "Remove sources": a checkbox list of every source (source art, folder name, and a "Matched as" record line or match state) starts empty, or with the failed survivors after a retry, above a tri-state "Select all sources" and an "N of M selected" count. Picked rows take the pale-gold selection wash. The dialog lead states that records are deleted and files on disk are not touched; the footer's red "Remove N records" action is disabled until at least one source is checked. The dialog owns the destructive selection, so the include boxes stay untouched. While the sequential deletes run, the close X, Cancel, select-all, rows, and commit are disabled (the X mutes to 50%), Escape is refused, and the page's mode switch, Save, include boxes, and per-row actions are disabled; focus returns to the Remove… trigger when it ends. A partial failure closes the dialog, keeps exactly the survivors checked, reports the count and cause in the alert above the list, and focuses Retry, which reopens with the survivors preselected. Per-row Remove keeps its inline two-step band for single removals.
 
 ### Provenance Tag
 "AbDB" chip: `#f8edf5` fill, 1px `#dcc2d5` border, `#8a286d` 12px 600 uppercase; hover draws the full-provenance border; the full "AudiobookDB" label is secondary ink, un-cased. An anchor when a record URL exists.
 
 ### Cover Art
-Square always: 3rem row thumbnails (6px corner) and the 16rem record-page hero (10px). The placeholder spine stands in for missing art — never a stretched image.
+Square always: 3rem row thumbnails (6px corner) and the 16rem record-page hero (10px). The placeholder spine stands in for missing art — never a stretched image. Match's dense rows keep a route-local compact grammar instead: 32–56px source, catalog, picker, and dialog art with the 4px route-local corner, and the diagonal split placeholder.
 
 ## Do's and Don'ts
 
@@ -272,7 +278,9 @@ Square always: 3rem row thumbnails (6px corner) and the 16rem record-page hero (
 - **Do** collapse all animation under `prefers-reduced-motion` (shimmer, transitions, chase).
 - **Do** keep the original develop branding: the stacked-books mark at `/images/logo-small-black.svg`, `favicon.ico`, and the Public Sans OFL license living beside the font file.
 - **Do** pair the status chip with a quiet sentence-case activity label, grouped so a long title never separates operation from outcome.
-- **Do** keep destructive selection in its own mode: the include-in-save box never doubles as a removal selector, and a multi-record delete always lists the exact source names before it runs.
+- **Do** keep removal explicit: the include-in-save box never deletes; the red Remove… action opens a dialog whose own checkboxes select the records, and that dialog lists every affected source before records are deleted, while files on disk stay untouched.
+- **Do** state a ready row's save exclusion in words ("Excluded from save") and keep the bar's ready/included count visible; dimming alone is never the state.
+- **Do** disable the removal dialog's close control while deletes run — no visible control may be dead.
 
 ### Don't:
 - **Don't** reintroduce tape-editor framing — no station rail, equipment, meters, tape strips, or kickers/eyebrows; the Merge Bench vocabulary is retired.

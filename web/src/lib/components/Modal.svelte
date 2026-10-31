@@ -11,13 +11,18 @@
 		// caller is responsible for explaining why). Covers the close
 		// button and Escape so a high-stakes dialog cannot be dismissed
 		// by accident.
-		beforeClose
+		beforeClose,
+		// Visual counterpart to beforeClose: when the caller refuses every
+		// dismissal for now (a deletion in flight), the X must not look
+		// live. Escape stays gated by beforeClose.
+		closeDisabled = false
 	}: {
 		open?: boolean;
 		title?: string;
 		children: Snippet;
 		footer?: Snippet;
 		beforeClose?: () => boolean;
+		closeDisabled?: boolean;
 	} = $props();
 
 	// One id per dialog instance: two dialogs can be mounted on one page,
@@ -40,6 +45,7 @@
 	}
 
 	function requestClose() {
+		if (closeDisabled) return;
 		if (beforeClose && !beforeClose()) return;
 		dialog?.close();
 	}
@@ -74,8 +80,9 @@
 				<h2 id={titleId} class="text-base font-bold text-[var(--enamel)]">{title}</h2>
 				<button
 					type="button"
-					class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-sm p-1.5 text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
+					class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-sm p-1.5 text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-[var(--text-muted)]"
 					onclick={requestClose}
+					disabled={closeDisabled}
 					aria-label="Close dialog"
 				>
 					<X class="h-4 w-4" />
