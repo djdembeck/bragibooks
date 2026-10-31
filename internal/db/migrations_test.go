@@ -36,8 +36,8 @@ var testMigrations = []migration{
 // package's `migrations` var (in-file order), so it must not be moved after
 // them.
 func TestRunMigrationsRealShape(t *testing.T) {
-	if len(migrations) < 10 {
-		t.Fatalf("migrations = %d entries, want the 10 production migrations (run before the test var mutations)", len(migrations))
+	if len(migrations) < 11 {
+		t.Fatalf("migrations = %d entries, want the 11 production migrations (run before the test var mutations)", len(migrations))
 	}
 	db := openTestDB(t)
 	if err := RunMigrations(db); err != nil {

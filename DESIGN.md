@@ -247,6 +247,9 @@ Sentence case, 12px 600, `--text-secondary`, no fill, border, or uppercase. It n
 ### Job Timing
 Queue cards and book-record job history list Started, Done, Created, and the duration in one `dl` row: 11px+ uppercase labels on the dense-row tier, 12px tabular values. Before a job starts — including one cancelled while waiting — the duration is labelled **Queued** and measures time since creation; once processing starts it is **Elapsed**. Active durations tick once per second; finished ones keep seconds under an hour (`4m 30s`) and step to hours and minutes above (`27h 14m`).
 
+### Live Job Card
+Active Queue jobs use the ready-row grammar — 3rem cover, title, author — then the status chip and action label. Running jobs lead the active list; queued jobs follow in queue order, and a book with an active job stays out of the ready list. While running, a 4px indeterminate rail in the amber state pair (`#dfc58d` track, `#80530b` segment) sits at the card top, a sentence-case stage line names m4b-merge's current phase, and the log streams below it, pinned to its newest line until the operator scrolls up; it re-pins when they return to the bottom. The log is keyboard-focusable and scrollable without a pointer. Destination shows the path the engine reports (the per-job `.tmp` segment removed) or the completed `output_file`; before that path exists, the queue-time snapshot is labelled **Output profile**, never Destination. Under reduced motion the rail is removed; stage text, badge, and log remain.
+
 ### Alert
 `role="alert"` panel, 2px state border, 14px copy, 14px padding; success/warning/error take their state washes; Retry is a dark-gold text action.
 

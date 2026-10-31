@@ -176,6 +176,18 @@ ALTER TABLE books DROP COLUMN path_format_override;
 
 `,
 	},
+	{
+		// v11: durable enqueue order. created_at has second precision, so a
+		// batch of jobs can share a timestamp; rowid supplies the insertion
+		// order for existing rows, and every new row takes max+1.
+		version: 11,
+		sql: `
+ALTER TABLE processing_jobs ADD COLUMN queue_seq INTEGER;
+UPDATE processing_jobs SET queue_seq = rowid WHERE queue_seq IS NULL;
+CREATE INDEX IF NOT EXISTS idx_processing_jobs_queue_seq ON processing_jobs(queue_seq);
+
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

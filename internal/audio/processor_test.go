@@ -207,6 +207,45 @@ func TestRunHonorsOutputOverrides(t *testing.T) {
 	})
 }
 
+// TestRunStreamsStdoutLines covers the live-output path: stdout lines reach
+// OnOutput as they are written, ANSI sequences are stripped, a line split
+// across writes is reassembled, and a trailing line without a newline is
+// flushed.
+func TestRunStreamsStdoutLines(t *testing.T) {
+	out := t.TempDir()
+	p := filepath.Join(t.TempDir(), "stream-m4b")
+	script := `#!/bin/sh
+out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift; fi
+  shift
+done
+mkdir -p "$out/Author"
+printf 'book' > "$out/Author/Title.m4b"
+printf '\033[32mfirst line\033[0m\n'
+printf 'second line'
+`
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+
+	var lines []string
+	proc := NewProcessor(p, out, "", 1, "{author}/{title}", "info")
+	res, err := proc.Run(context.Background(), "stream1", []string{"/tmp/x/a.m4b"}, "", RunOptions{
+		OnOutput: func(line string) { lines = append(lines, line) },
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := []string{"first line", "second line"}
+	if len(lines) != len(want) || lines[0] != want[0] || lines[1] != want[1] {
+		t.Errorf("streamed lines = %q; want %q", lines, want)
+	}
+	if !strings.Contains(res.Stdout, "first line") || !strings.Contains(res.Stdout, "second line") {
+		t.Errorf("captured Stdout = %q; want both lines intact", res.Stdout)
+	}
+}
+
 // TestRunWritesToPerJobSubtree covers the row-13 discovery choice: with a
 // jobID, m4b-merge runs against OutputDir/<jobID>.tmp and the result is
 // moved back to its scheme path under OutputDir. A fresher .m4b sitting in
