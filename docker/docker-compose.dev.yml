@@ -11,6 +11,7 @@ services:
       - /home/djdembeck:/home/djdembeck
     environment:
       - SERVER_HOST=0.0.0.0
+      - SERVER_ALLOWED_HOSTS=bragibooks-dev
       - SERVER_PORT=8080
       - DATABASE_PATH=config/bragibooks.db
     healthcheck:
