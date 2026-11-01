@@ -27,9 +27,10 @@ type Config struct {
 
 // ServerConfig holds server-related configuration.
 type ServerConfig struct {
-	Host        string            `mapstructure:"host" yaml:"host" json:"host"`
-	Port        int               `mapstructure:"port" yaml:"port" json:"port"`
-	APIEndpoint APIEndpointConfig `mapstructure:"api_endpoint" yaml:"api_endpoint" json:"api_endpoint"`
+	AllowedHosts string            `mapstructure:"allowed_hosts" yaml:"allowed_hosts" json:"allowed_hosts"`
+	Host         string            `mapstructure:"host" yaml:"host" json:"host"`
+	Port         int               `mapstructure:"port" yaml:"port" json:"port"`
+	APIEndpoint  APIEndpointConfig `mapstructure:"api_endpoint" yaml:"api_endpoint" json:"api_endpoint"`
 }
 
 // APIEndpointConfig holds the external-API (remote key auth) state.
@@ -462,6 +463,9 @@ func applyEnvPriority(cfg *Config) {
 		}
 		return os.Getenv(strings.ReplaceAll(strings.ToUpper(dotted), ".", "_"))
 	}
+	if v := envVal("server.allowed_hosts"); v != "" {
+		cfg.Server.AllowedHosts = v
+	}
 	if v := envVal("server.host"); v != "" {
 		cfg.Server.Host = v
 	}
@@ -526,6 +530,8 @@ func overrideKey(target, yamlOnly *Config, key string) {
 	}
 	switch key {
 	// Server
+	case "server.allowed_hosts":
+		target.Server.AllowedHosts = yamlOnly.Server.AllowedHosts
 	case "server.host":
 		target.Server.Host = yamlOnly.Server.Host
 	case "server.port":
@@ -577,6 +583,7 @@ func defaultConfigPath() string {
 
 // setDefaults sets default configuration values for Viper.
 func setDefaults(v *viper.Viper) {
+	v.SetDefault("server.allowed_hosts", "")
 	v.SetDefault("server.host", "")
 	v.SetDefault("server.port", 8080)
 	v.SetDefault("server.api_endpoint.enabled", false)
