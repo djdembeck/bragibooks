@@ -258,6 +258,29 @@ export interface ProcessingResponse {
 	output_scheme?: string;
 }
 
+/** Wire shape of GET /api/books/{id}/reprocess: the record-page dialog's pre-run preview. */
+export interface ReprocessPreview {
+	available: boolean;
+	reason?: string;
+	completed_dir?: string;
+	last_run?: { job_id: string; created_at: string; output_dir: string; output_scheme: string };
+	inputs?: {
+		total: number;
+		found: number;
+		found_in_completed: number;
+		found_in_original: number;
+		missing: string[];
+	};
+}
+
+/** Wire shape of POST /api/process/reprocess: only book_id is required; blank-inherit overrides. */
+export interface ReprocessRequest {
+	book_id: number;
+	output_profile_id?: number;
+	output_dir?: string;
+	path_format?: string;
+}
+
 /** Wire shape of models.OutputProfile. */
 export interface OutputProfile {
 	id: number;

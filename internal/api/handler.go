@@ -82,9 +82,11 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 		r.Get("/books/{id}", h.GetBook)
 		r.Put("/books/{id}", h.UpdateBook)
 		r.Delete("/books/{id}", h.DeleteBook)
+		r.Get("/books/{id}/reprocess", h.GetBookReprocess)
 
 		// Processing
 		r.Post("/process", h.StartProcessing)
+		r.Post("/process/reprocess", h.StartReprocess)
 		r.Get("/jobs", h.ListJobs)
 		r.Post("/jobs/{id}/cancel", h.CancelJob)
 		r.Get("/jobs/{id}", h.GetJobStatus)

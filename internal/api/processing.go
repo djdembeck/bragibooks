@@ -659,85 +659,12 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 	// the current global values independently into the effective pair, and
 	// the complete pair is snapshotted into every job this request creates.
 	// Any resolution failure 400s/404s the whole request with zero jobs.
-	var runOpts audio.RunOptions
-	if req.OutputProfileID != nil {
-		if *req.OutputProfileID <= 0 {
-			writeError(w, http.StatusBadRequest, "invalid output profile id")
-			return
-		}
-		profile, err := h.getOutputProfile(*req.OutputProfileID)
-		if err != nil {
-			if errors.Is(err, errProfileNotFound) {
-				writeError(w, http.StatusNotFound, "output profile not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "load output profile: "+err.Error())
-			return
-		}
-		cm := h.svc.Config
-		if cm == nil {
-			writeError(w, http.StatusInternalServerError, "settings manager unavailable")
-			return
-		}
-		cfg := cm.Config()
-		effDir := strings.TrimSpace(profile.OutputDir)
-		if effDir == "" {
-			effDir = strings.TrimSpace(cfg.Directories.OutputDir)
-		}
-		effFormat := strings.TrimSpace(profile.OutputScheme)
-		if effFormat == "" {
-			effFormat = strings.TrimSpace(cfg.Processing.PathFormat)
-		}
-		// An empty effective destination means the global value itself is
-		// empty: refuse before any job exists. Never run filepath.Abs on ""
-		// (it would silently substitute the process working directory).
-		if effDir == "" {
-			writeError(w, http.StatusBadRequest, "output directory is not set (set the profile override or the global output directory)")
-			return
-		}
-		if effFormat == "" {
-			writeError(w, http.StatusBadRequest, "output path format is not set (set the profile format or the global path format)")
-			return
-		}
-		absDir, err := filepath.Abs(effDir)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot resolve output directory %s: %v", effDir, err))
-			return
-		}
-		// The relative-format validator is deliberately applied to the
-		// effective format even when it was inherited from the global
-		// setting: a profile-started job must land inside its root.
-		if err := audio.ValidateRelativePathFormat(effFormat); err != nil {
-			writeError(w, http.StatusBadRequest, "output path format: "+err.Error())
-			return
-		}
-		runOpts = audio.RunOptions{OutputDirOverride: absDir, PathFormatOverride: effFormat}
+	runOpts, ok := h.resolveDestination(w, req.OutputProfileID, "", "")
+	if !ok {
+		return
 	}
-
-	// Probe every directory this request's jobs will write to before the
-	// first job exists: a profile or global destination whose mount changed
-	// after it was saved must 400 the whole request with zero jobs instead
-	// of queueing one that dies at run time. Save-time probing cannot cover
-	// a later remount, uid change, or env-var override, so this is the
-	// second, request-level gate.
-	if cm := h.svc.Config; cm != nil {
-		cfg := cm.Config()
-		effDir := strings.TrimSpace(cfg.Directories.OutputDir)
-		if runOpts.OutputDirOverride != "" {
-			effDir = runOpts.OutputDirOverride
-		}
-		if effDir != "" {
-			if err := audio.CheckDirWritable(effDir); err != nil {
-				writeError(w, http.StatusBadRequest, "output directory "+err.Error())
-				return
-			}
-		}
-		if completed := strings.TrimSpace(cfg.Directories.CompletedDir); completed != "" {
-			if err := audio.CheckDirWritable(completed); err != nil {
-				writeError(w, http.StatusBadRequest, "completed directory "+err.Error())
-				return
-			}
-		}
+	if !h.probeDestinations(w, runOpts) {
+		return
 	}
 
 	jobs := make([]ProcessingJobCreated, 0)
@@ -791,6 +718,389 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, StartProcessingResponse{
 		Jobs:         jobs,
+		OutputDir:    runOpts.OutputDirOverride,
+		OutputScheme: runOpts.PathFormatOverride,
+	})
+}
+
+// resolveDestination validates profileID and the explicit overrides (exactly
+// one of the two inputs may be present) and returns the resolved
+// audio.RunOptions: a profile resolves against one config snapshot with blank
+// fields inheriting the globals independently; explicit overrides are
+// validated field-by-field (a blank field omits that override, so each side
+// may inherit independently). Writes the response on failure and returns ok
+// false; runOpts is valid (zero = full globals) when ok is true.
+func (h *Handler) resolveDestination(w http.ResponseWriter, profileID *int64, overrideDir, overrideFormat string) (runOpts audio.RunOptions, ok bool) {
+	// A field the client sent with ANY characters is an override, even
+	// whitespace-only (which the empty-inherit branches below reject
+	// explicitly): counting trimmed emptiness as "set" would let a sent
+	// whitespace-only format slip past validation and inherit the global.
+	overridesSet := overrideDir != "" || overrideFormat != ""
+	if profileID != nil && overridesSet {
+		writeError(w, http.StatusBadRequest, "Choose either an output profile or explicit output overrides, not both.")
+		return audio.RunOptions{}, false
+	}
+	if profileID != nil {
+		if *profileID <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid output profile id")
+			return audio.RunOptions{}, false
+		}
+		profile, err := h.getOutputProfile(*profileID)
+		if err != nil {
+			if errors.Is(err, errProfileNotFound) {
+				writeError(w, http.StatusNotFound, "output profile not found")
+			} else {
+				writeError(w, http.StatusInternalServerError, "load output profile: "+err.Error())
+			}
+			return audio.RunOptions{}, false
+		}
+		cm := h.svc.Config
+		if cm == nil {
+			writeError(w, http.StatusInternalServerError, "settings manager unavailable")
+			return audio.RunOptions{}, false
+		}
+		cfg := cm.Config()
+		effDir := strings.TrimSpace(profile.OutputDir)
+		if effDir == "" {
+			effDir = strings.TrimSpace(cfg.Directories.OutputDir)
+		}
+		effFormat := strings.TrimSpace(profile.OutputScheme)
+		if effFormat == "" {
+			effFormat = strings.TrimSpace(cfg.Processing.PathFormat)
+		}
+		// An empty effective destination means the global value itself is
+		// empty: refuse before any job exists. Never run filepath.Abs on ""
+		// (it would silently substitute the process working directory).
+		if effDir == "" {
+			writeError(w, http.StatusBadRequest, "output directory is not set (set the profile override or the global output directory)")
+			return audio.RunOptions{}, false
+		}
+		if effFormat == "" {
+			writeError(w, http.StatusBadRequest, "output path format is not set (set the profile format or the global path format)")
+			return audio.RunOptions{}, false
+		}
+		absDir, err := filepath.Abs(effDir)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot resolve output directory %s: %v", effDir, err))
+			return audio.RunOptions{}, false
+		}
+		// The relative-format validator is deliberately applied to the
+		// effective format even when it was inherited from the global
+		// setting: a profile-started job must land inside its root.
+		if err := audio.ValidateRelativePathFormat(effFormat); err != nil {
+			writeError(w, http.StatusBadRequest, "output path format: "+err.Error())
+			return audio.RunOptions{}, false
+		}
+		return audio.RunOptions{OutputDirOverride: absDir, PathFormatOverride: effFormat}, true
+	}
+	if overridesSet {
+		if dir := strings.TrimSpace(overrideDir); dir != "" {
+			// An explicit dir is a destination root and must be absolute,
+			// mirroring validateProfile's save-time rule (the queue page and
+			// the record-page dialog copy it too). Empty dir is "inherit the
+			// global", not an override.
+			if !strings.HasPrefix(dir, "/") {
+				writeError(w, http.StatusBadRequest, "output directory must be an absolute path")
+				return audio.RunOptions{}, false
+			}
+			absDir, err := filepath.Abs(dir)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot resolve output directory %s: %v", dir, err))
+				return audio.RunOptions{}, false
+			}
+			runOpts.OutputDirOverride = absDir
+		}
+		// A field the client sent with any characters is an override — a
+		// whitespace-only format is not blank, so it must not silently
+		// inherit the global format.
+		if overrideFormat != "" {
+			format := strings.TrimSpace(overrideFormat)
+			if format == "" {
+				writeError(w, http.StatusBadRequest, "output path format is empty")
+				return audio.RunOptions{}, false
+			}
+			if err := audio.ValidateRelativePathFormat(format); err != nil {
+				writeError(w, http.StatusBadRequest, "output path format: "+err.Error())
+				return audio.RunOptions{}, false
+			}
+			runOpts.PathFormatOverride = format
+		}
+		return runOpts, true
+	}
+	return audio.RunOptions{}, true
+}
+
+// probeDestinations probes every directory this request's jobs will write to
+// before the first job exists: a profile, explicit-override, or global
+// destination whose mount changed after it was saved must 400 the request
+// with zero jobs instead of queueing one that dies at run time. Save-time
+// probing cannot cover a later remount, uid change, or env-var override, so
+// this is the second, request-level gate.
+func (h *Handler) probeDestinations(w http.ResponseWriter, runOpts audio.RunOptions) (ok bool) {
+	cm := h.svc.Config
+	if cm == nil {
+		return true
+	}
+	cfg := cm.Config()
+	effDir := strings.TrimSpace(cfg.Directories.OutputDir)
+	if runOpts.OutputDirOverride != "" {
+		effDir = runOpts.OutputDirOverride
+	}
+	if effDir != "" {
+		if err := audio.CheckDirWritable(effDir); err != nil {
+			writeError(w, http.StatusBadRequest, "output directory "+err.Error())
+			return false
+		}
+	}
+	if completed := strings.TrimSpace(cfg.Directories.CompletedDir); completed != "" {
+		if err := audio.CheckDirWritable(completed); err != nil {
+			writeError(w, http.StatusBadRequest, "completed directory "+err.Error())
+			return false
+		}
+	}
+	return true
+}
+
+// errReprocessNoRun / errReprocessNoInputs are the two reprocess refusal
+// states, mapped to their operator sentences by the handlers.
+var (
+	errReprocessNoRun    = errors.New("no recorded processing run")
+	errReprocessNoInputs = errors.New("no recorded input files")
+)
+
+// latestMergeJob returns the book's newest action='merge' job row with its
+// parsed jobArgs. Error classes: errReprocessNoRun (no merge job row),
+// errReprocessNoInputs (row exists, args empty/unparseable/no src_paths).
+// Malformed legacy args never surface as a server error.
+func (h *Handler) latestMergeJob(bookID int64) (jobArgs, models.ProcessingJob, error) {
+	var job models.ProcessingJob
+	// Legacy merge rows predate the column and carry NULL: scan through a
+	// nullable type so NULL maps to the no-inputs path, never to a 500.
+	var argsJSON sql.NullString
+	err := h.svc.DB.QueryRow(
+		"SELECT id, m4b_merge_args, status, created_at FROM processing_jobs WHERE book_id = ? AND action = 'merge' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+		bookID,
+	).Scan(&job.ID, &argsJSON, &job.Status, &job.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		job.M4bMergeArgs = ""
+		return jobArgs{}, job, errReprocessNoRun
+	}
+	if err != nil {
+		return jobArgs{}, job, err
+	}
+	job.M4bMergeArgs = argsJSON.String
+	var args jobArgs
+	if err := json.Unmarshal([]byte(job.M4bMergeArgs), &args); err != nil || len(args.SrcPaths) == 0 {
+		return jobArgs{}, job, errReprocessNoInputs
+	}
+	return args, job, nil
+}
+
+// locateInputs resolves each recorded input path: preferred
+// CompletedDir/<basename> (only when completedDir != ""), else the stored
+// original path. It preserves srcPaths order and returns the resolved paths
+// plus how many came from the completed dir vs. the original path and the
+// basenames found in neither. A basename present in BOTH locations counts as
+// completed (first candidate wins). Source files only, never the converted
+// output (dest_path/output_file).
+func locateInputs(srcPaths []string, completedDir string) (resolved []string, foundCompleted, foundOriginal int, missing []string) {
+	resolved = make([]string, 0, len(srcPaths))
+	for _, p := range srcPaths {
+		base := filepath.Base(p)
+		if completedDir != "" && isLocatedInput(filepath.Join(completedDir, base)) {
+			resolved = append(resolved, filepath.Join(completedDir, base))
+			foundCompleted++
+			continue
+		}
+		if isLocatedInput(p) {
+			resolved = append(resolved, p)
+			foundOriginal++
+			continue
+		}
+		missing = append(missing, base)
+	}
+	return resolved, foundCompleted, foundOriginal, missing
+}
+
+// isLocatedInput reports whether path exists as a REGULAR FILE: a directory
+// in the completed dir named like a recorded input must not shadow the
+// original file (m4b-merge reads inputs as files), and a recorded path that
+// now holds a directory is equally not an input.
+func isLocatedInput(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.Mode().IsRegular()
+}
+
+// GetBookReprocess handles GET /api/books/{id}/reprocess — the preview the
+// record-page dialog shows before the operator starts: latest merge run
+// snapshot + where each recorded input file currently lives.
+func (h *Handler) GetBookReprocess(w http.ResponseWriter, r *http.Request) {
+	bookID := parseInt64Param(chiURLParam(r, "id"))
+	if bookID == -1 {
+		writeError(w, http.StatusBadRequest, "invalid book ID")
+		return
+	}
+	// 404 for an unknown book (the record page only links here from an
+	// existing book, but the endpoint stays correct standalone).
+	var one int64
+	if err := h.svc.DB.QueryRow("SELECT 1 FROM books WHERE id = ?", bookID).Scan(&one); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "book not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "book lookup: "+err.Error())
+		return
+	}
+
+	resp := map[string]any{"available": true}
+	if h.svc.Config != nil {
+		resp["completed_dir"] = strings.TrimSpace(h.svc.Config.Config().Directories.CompletedDir)
+	}
+
+	args, job, err := h.latestMergeJob(bookID)
+	if err == errReprocessNoRun {
+		writeJSON(w, http.StatusOK, reprocessUnavailable("No recorded processing run for this book — re-ingest the source to process it."))
+		return
+	}
+	if err == errReprocessNoInputs {
+		writeJSON(w, http.StatusOK, reprocessUnavailable("No original input files were recorded for this book — reprocess is not available."))
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "latest merge job: "+err.Error())
+		return
+	}
+
+	completedDir, _ := resp["completed_dir"].(string)
+	resolved, foundCompleted, foundOriginal, missing := locateInputs(args.SrcPaths, completedDir)
+	found := len(resolved)
+	// The wire contract is an array (possibly empty), never null: the dialog
+	// reads missing.length directly.
+	if missing == nil {
+		missing = []string{}
+	}
+
+	resp["last_run"] = map[string]any{
+		"job_id":        job.ID,
+		"created_at":    job.CreatedAt,
+		"output_dir":    args.OutputDir,
+		"output_scheme": args.OutputScheme,
+	}
+	resp["inputs"] = map[string]any{
+		"total":              len(args.SrcPaths),
+		"found":              found,
+		"found_in_completed": foundCompleted,
+		"found_in_original":  foundOriginal,
+		"missing":            missing,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// reprocessUnavailable shapes the available:false preview: the operator
+// sentence in reason, last_run/inputs omitted entirely.
+func reprocessUnavailable(reason string) map[string]any {
+	return map[string]any{"available": false, "reason": reason}
+}
+
+// StartReprocessRequest is the JSON body for POST /api/process/reprocess.
+// Only book_id is required; OutputProfileID and the blank-inherit overrides
+// are the same edited-settings surface as the queue page (blanks inherit the
+// current global settings at run time).
+type StartReprocessRequest struct {
+	BookID          int64  `json:"book_id"`
+	OutputProfileID *int64 `json:"output_profile_id"`
+	OutputDir       string `json:"output_dir"`
+	PathFormat      string `json:"path_format"`
+}
+
+// StartReprocess handles POST /api/process/reprocess — queues one reprocess
+// job for a single book from located original input files.
+func (h *Handler) StartReprocess(w http.ResponseWriter, r *http.Request) {
+	var req StartReprocessRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.BookID <= 0 {
+		writeError(w, http.StatusBadRequest, "book_id is required")
+		return
+	}
+
+	// Book row must exist. The endpoint does NOT gate on book status (same
+	// as StartProcessing): the record page only offers the action on done
+	// books, and the below active-job guard is the operative protection.
+	var one int64
+	if err := h.svc.DB.QueryRow("SELECT 1 FROM books WHERE id = ?", req.BookID).Scan(&one); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "book not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "book lookup: "+err.Error())
+		return
+	}
+
+	if h.svc.ProcessingSvc.hasActiveJobForBook(req.BookID) {
+		writeError(w, http.StatusConflict, fmt.Sprintf("book %d already has an active processing job", req.BookID))
+		return
+	}
+
+	args, _, err := h.latestMergeJob(req.BookID)
+	switch {
+	case err == errReprocessNoRun:
+		writeError(w, http.StatusBadRequest, "No recorded processing run for this book — re-ingest the source to process it.")
+		return
+	case err == errReprocessNoInputs:
+		writeError(w, http.StatusBadRequest, "No original input files were recorded for this book — reprocess is not available.")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "latest merge job: "+err.Error())
+		return
+	}
+
+	completedDir := ""
+	if h.svc.Config != nil {
+		completedDir = strings.TrimSpace(h.svc.Config.Config().Directories.CompletedDir)
+	}
+	resolved, foundCompleted, _, missing := locateInputs(args.SrcPaths, completedDir)
+	if len(missing) > 0 {
+		locations := "in the recorded source paths"
+		if completedDir != "" {
+			locations = fmt.Sprintf("looked in %s and the recorded source paths", completedDir)
+		}
+		writeError(w, http.StatusBadRequest, "Original input files not found: "+strings.Join(missing, ", ")+
+			" ("+locations+")")
+		return
+	}
+
+	runOpts, ok := h.resolveDestination(w, req.OutputProfileID, req.OutputDir, req.PathFormat)
+	if !ok {
+		return
+	}
+	if !h.probeDestinations(w, runOpts) {
+		return
+	}
+
+	jobID, err := h.svc.ProcessingSvc.QueueJob(r.Context(), req.BookID, resolved, runOpts)
+	switch {
+	case errors.Is(err, errActiveJobForBook):
+		writeError(w, http.StatusConflict, fmt.Sprintf("book %d already has an active processing job", req.BookID))
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("queue job: %v", err))
+		return
+	}
+
+	// Keep the provenance of the run visible in the history row. The job is
+	// already queued and may already be running: a detail-write failure is a
+	// log line, not a 500 that would fake the run as failed.
+	detail := fmt.Sprintf("reprocess: %d of %d inputs from completed directory", foundCompleted, len(args.SrcPaths))
+	if foundCompleted == 0 {
+		detail = "reprocess: inputs from original source paths"
+	}
+	if _, err := h.svc.DB.Exec("UPDATE processing_jobs SET detail = ? WHERE id = ?", detail, jobID); err != nil {
+		log.Printf("record reprocess provenance for job %s: %v", jobID, err)
+	}
+
+	writeJSON(w, http.StatusOK, StartProcessingResponse{
+		Jobs:         []ProcessingJobCreated{{ID: jobID, BookID: req.BookID}},
 		OutputDir:    runOpts.OutputDirOverride,
 		OutputScheme: runOpts.PathFormatOverride,
 	})

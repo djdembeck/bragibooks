@@ -14,7 +14,7 @@
 		bookTitle?: string;
 		status: string;
 		action: string | null;
-		/** Audit detail (import source path, book title). Absent for merge jobs. */
+		/** Import audit detail, and reprocess provenance for merge jobs. */
 		detail: string | null;
 		output: string;
 		error: string | null;

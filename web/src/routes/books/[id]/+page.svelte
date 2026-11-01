@@ -2,13 +2,39 @@
 	import { goto, refreshAll } from '$app/navigation';
 	import { get, put, post } from '#lib/api.js';
 	import type { PageData } from './$types';
-	import type { BookWithPeople, ProcessingJob, JobsListResponse, AudiobookDBBook, AudiobookDBRelease } from '#lib/types.js';
+	import type {
+		BookWithPeople,
+		ProcessingJob,
+		JobsListResponse,
+		AudiobookDBBook,
+		AudiobookDBRelease,
+		OutputProfile,
+		OutputProfilesResponse,
+		ReprocessPreview,
+		ReprocessRequest,
+		Settings,
+	} from '#lib/types.js';
 	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '#lib/types.js';
 	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { formatJobTime, formatElapsed, elapsedLabel } from '#lib/datetime.js';
 	import { liveNow } from '#lib/liveNow.svelte.js';
-	import { StatusBadge, AbdTag, EmptyState, Button, Alert, ErrorDetail, Skeleton, CoverArt, JobActionLabel } from '#lib/components/index.js';
-	import { ExternalLink, ArrowLeft } from '@lucide/svelte';
+	import {
+		StatusBadge,
+		AbdTag,
+		EmptyState,
+		Button,
+		Alert,
+		ErrorDetail,
+		Skeleton,
+		CoverArt,
+		JobActionLabel,
+		Modal,
+		DirPicker,
+		OutputProfileSelector,
+		PathFormatBuilder,
+	} from '#lib/components/index.js';
+	import { parseParts, trimSegment, validateScheme } from '#lib/scheme.js';
+	import { ExternalLink, ArrowLeft, CheckCircle, ChevronDown, FolderOpen } from '@lucide/svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -29,6 +55,28 @@
 	let jobsError = $state<CleanedAdbError | null>(null);
 	// Bumped by the retry button to force the effect below to re-run.
 	let jobsReload = $state(0);
+
+	// The preview endpoint is the source of truth for "this book has recorded
+	// merge inputs" — a REMATCHED, ERRORED, OR DONE book whose merge already
+	// consumed its inputs still reprocesses through the dialog.
+	let reprocessLoadToken = 0;
+	$effect(() => {
+		const id = book?.id;
+		if (!id) return;
+		reprocessLoadToken++;
+		const token = reprocessLoadToken;
+		previewSettled = false;
+		get<ReprocessPreview>(`/books/${id}/reprocess`)
+			.then((prev) => {
+				if (reprocessLoadToken === token && book?.id === id) preview = prev;
+			})
+			.catch((e) => {
+				if (reprocessLoadToken === token && book?.id === id) previewError = toCleanedError(e);
+			})
+			.finally(() => {
+				if (reprocessLoadToken === token && book?.id === id) previewSettled = true;
+			});
+	});
 
 	$effect(() => {
 		jobsReload; // dependency — retry re-runs this effect
@@ -136,6 +184,222 @@
 			actionError = toCleanedError(e);
 		} finally {
 			cancellingJob = false;
+		}
+	}
+
+	/* ── Reprocess dialog (books with recorded merge inputs) ──────
+	 * Reruns the M4B merge from the located original input files: each
+	 * recorded path is looked up in the completed directory first, then at
+	 * its recorded original path. Settings default to BLANK = current
+	 * global settings (the same blank-inherit rule as the queue page). */
+	let reprocessOpen = $state(false);
+	let reprocessSubmitting = $state(false);
+	let reprocessError = $state<CleanedAdbError | null>(null);
+	let preview = $state<ReprocessPreview | null>(null);
+	let previewError = $state<CleanedAdbError | null>(null);
+	let previewLoading = $state(false);
+	// The page-level $effect's preview request has settled for the current
+	// book. While it is in flight, eligibility cannot be known from the
+	// preview, so the action section must not fall through to the legacy
+	// /process route (a book with recorded merge inputs would re-run from
+	// src_path instead of the dialog).
+	let previewSettled = $state(false);
+	let profiles = $state<OutputProfile[]>([]);
+	let profilesError = $state<string | null>(null);
+	let profilesLoading = $state(false);
+	/** Live global output settings, shown as the inherited placeholder/help
+	 *  so a blank field states what it will use instead of hiding it. */
+	let globals = $state<Settings | null>(null);
+	let selectedProfileId = $state<number | null>(null);
+	let overrideDir = $state('');
+	let overrideFormat = $state('');
+	let dirPickerOpen = $state(false);
+
+	// The page-level preview load (above) is the source of truth for
+	// "this book's merge recorded input files": a book that failed, was
+	// cancelled (matched), or finished still reprocesses through the dialog
+	// once the last run consumed its inputs. The preview is deliberately NOT
+	// consulted here while the button is disabled, so it stays the preview;
+	// eligibility comes from `available + inputs`, never from guessing which
+	// status qualifies. A preview fetch that failed (previewError) is not
+	// "no inputs" — the old status-based button is the safe fallback.
+	const canReprocessDialog = $derived(
+		preview !== null &&
+			preview.available === true &&
+			preview.inputs !== undefined &&
+			preview.inputs.total > 0
+	);
+
+	function openReprocess() {
+		reprocessError = null;
+		selectedProfileId = null;
+		overrideDir = '';
+		overrideFormat = '';
+		dirPickerOpen = false;
+		reprocessOpen = true;
+		void loadReprocessData();
+	}
+
+	/** The dialog must not be dismissible while the POST is in flight: closing
+	 *  would hide a failure the request still needs to report. */
+	function mayCloseReprocess(): boolean {
+		return !reprocessSubmitting;
+	}
+
+	function closeReprocess() {
+		if (!mayCloseReprocess()) return;
+		reprocessOpen = false;
+	}
+
+	// All three reads are independent: run them together so the dialog reaches
+	// its settled state once, and a failure in one never blanks the others.
+	async function loadReprocessData() {
+		const id = book?.id;
+		if (!id) return;
+		// Per-call token: a newer load (page effect re-run for a fresh book,
+		// or a retry) makes this settle stale, and a stale settle must not
+		// clobber the newer state — silent success would hide the newer
+		// load's pending skeleton.
+		const token = ++reprocessLoadToken;
+		previewLoading = true;
+		profilesLoading = true;
+		const [previewResult, profilesResult, settingsResult] = await Promise.allSettled([
+			get<ReprocessPreview>(`/books/${id}/reprocess`),
+			get<OutputProfilesResponse>('/output-profiles'),
+			get<Settings>('/settings')
+		]);
+		if (book?.id !== id || reprocessLoadToken !== token) return;
+
+		if (previewResult.status === 'fulfilled') {
+			preview = previewResult.value;
+			previewError = null;
+		} else {
+			preview = null;
+			previewError = toCleanedError(previewResult.reason);
+		}
+		if (profilesResult.status === 'fulfilled') {
+			profiles = profilesResult.value.profiles || [];
+			profilesError = null;
+		} else {
+			profiles = [];
+			profilesError = 'Saved profiles unavailable — set the destination with the fields below.';
+		}
+		globals = settingsResult.status === 'fulfilled' ? settingsResult.value : null;
+		previewLoading = false;
+		profilesLoading = false;
+	}
+
+	// A selected profile supplies BOTH destination values (the backend
+	// ignores manual overrides then); hide them so the form cannot present
+	// two competing answers.
+	const profileActive = $derived(selectedProfileId !== null);
+
+	// The builder mirrors ValidatePathFormat, but the reprocess endpoint also
+	// requires a RELATIVE format (no leading "/", no ".." segment) — the same
+	// extra pair the Settings profile form checks. Surface those here instead
+	// of letting the API answer with a 400 after submit.
+	const formatExtraError = $derived.by(() => {
+		if (profileActive || overrideFormat === '') return null;
+		const scheme = overrideFormat.trim();
+		if (scheme.startsWith('/')) {
+			return 'Must be relative to the output directory (no leading /).';
+		}
+		if (scheme.split('/').some((segment) => trimSegment(segment) === '..')) {
+			return 'Must not contain a “..” path segment.';
+		}
+		return null;
+	});
+
+	// The shared builder reports its own errors; mirror its validity into
+	// Start so an invalid custom format cannot reach the API. With a profile
+	// selected the override is not sent, so it cannot block the run.
+	// A whitespace-only value is not "blank" to the builder (it surfaces
+	// "Add at least one path element"), so it blocks too rather than sitting
+	// in a state where the builder errors but Start stays enabled.
+	const formatInvalid = $derived(
+		!profileActive &&
+			overrideFormat !== '' &&
+			(formatExtraError !== null ||
+				validateScheme(parseParts(overrideFormat)).errors.length > 0)
+	);
+
+	/** Base the builder's example on the directory this run would use. */
+	const effectiveBaseDir = $derived(overrideDir.trim() || globals?.output_dir || '');
+
+	function pickOutputDir(path: string) {
+		overrideDir = path;
+		dirPickerOpen = false;
+	}
+
+	/** Expanding the builder can open below the dialog's scroll fold. */
+	function onFormatToggle(event: Event) {
+		const el = event.currentTarget as HTMLDetailsElement;
+		if (el.open) el.scrollIntoView({ block: 'nearest' });
+	}
+
+	// Availability AND every recorded input file found: the backend refuses
+	// 400 on any missing file, so the button mirrors that rule. Non-blank
+	// overrides are validated server-side on submit (dialog stays open).
+	// Start also waits for the profile list, so "Global settings" is never
+	// the only visible option while saved profiles are still loading.
+	const canStart = $derived(
+		preview?.available === true &&
+			preview.inputs !== undefined &&
+			preview.inputs.found === preview.inputs.total &&
+			!previewLoading &&
+			!profilesLoading &&
+			!formatInvalid
+	);
+
+	function fileNoun(count: number): string {
+		return count === 1 ? 'file' : 'files';
+	}
+
+	function foundBreakdown(inputs: NonNullable<ReprocessPreview['inputs']>): string {
+		const parts: string[] = [];
+		if (inputs.found_in_completed > 0) {
+			parts.push(`${inputs.found_in_completed} in the completed directory`);
+		}
+		if (inputs.found_in_original > 0) {
+			parts.push(`${inputs.found_in_original} in the recorded source path`);
+		}
+		return parts.join(', ');
+	}
+
+	function destinationLabel(dir?: string, scheme?: string): string {
+		return [dir, scheme].filter(Boolean).join(' · ') || 'Global settings';
+	}
+
+	const searchPaths = $derived(
+		Array.from(
+			new Set(
+				[preview?.completed_dir, book?.src_path].filter((path): path is string => Boolean(path?.trim()))
+			)
+		)
+	);
+
+	async function doReprocessFromDialog() {
+		if (!book) return;
+		reprocessSubmitting = true;
+		reprocessError = null;
+		const payload: ReprocessRequest = { book_id: book.id };
+		if (selectedProfileId !== null) {
+			// A profile and the manual fields are alternatives, never a pair:
+			// the backend ignores overrides when a profile is set.
+			payload.output_profile_id = selectedProfileId;
+		} else {
+			if (overrideDir.trim()) payload.output_dir = overrideDir.trim();
+			if (overrideFormat.trim()) payload.path_format = overrideFormat.trim();
+		}
+		try {
+			await post('/process/reprocess', payload);
+			reprocessOpen = false;
+			await refreshAll();
+			await goto('/process');
+		} catch (e) {
+			reprocessError = toCleanedError(e);
+		} finally {
+			reprocessSubmitting = false;
 		}
 	}
 
@@ -411,10 +675,7 @@
 				</div>
 			{:else}
 				<div class="record-section__btns">
-					{#if isFileBacked}
-						<Button variant="primary" disabled>Re-process</Button>
-						<p class="record-section__note">Source is a single file — re-process from the Queue.</p>
-					{:else if inFlightJob}
+					{#if inFlightJob}
 						<Button variant="primary" disabled>Re-process</Button>
 						<p class="record-section__note">
 							{jobs.find((j) => j.status === 'queued' || j.status === 'running')?.status === 'queued'
@@ -430,8 +691,29 @@
 						>
 							{cancellingJob ? 'Cancelling…' : 'Cancel job'}
 						</Button>
+					{:else if canReprocessDialog}
+						<!-- Books whose last merge run recorded input files reprocess from the
+							located originals (completed directory first), not from src_path —
+							the dialog previews what it will find before the run. Eligibility
+							comes from the preview endpoint, not book status: a reprocess that
+							failed (error) or was cancelled (matched) still owns its consumed
+							inputs and stays eligible. -->
+						<Button variant="primary" onclick={openReprocess}>Re-process</Button>
+					{:else if isFileBacked}
+						<Button variant="primary" disabled>Re-process</Button>
+						<p class="record-section__note">Source is a single file — re-process from the Queue.</p>
 					{:else}
-						<Button variant="primary" onclick={() => beginAction('reprocess')}>Re-process</Button>
+						{#if previewSettled}
+							<Button variant="primary" onclick={() => beginAction('reprocess')}>Re-process</Button>
+						{:else}
+							<!-- The preview request for the current book is still in flight: a book
+								with recorded merge inputs must go through the dialog, so the legacy
+								/process route is unsafe until eligibility is known (not guessed
+								from status). A settled failure (previewError) re-enables this
+								button — the preview unavailable is not "no inputs". -->
+							<Button variant="primary" disabled>Re-process</Button>
+							<p class="record-section__note">Checking…</p>
+						{/if}
 					{/if}
 					{#if inFlightJob}
 						<Button variant="ghost" disabled>Re-match</Button>
@@ -456,6 +738,200 @@
 			</div>
 		{/if}
 	</section>
+
+	<!-- ── Re-process dialog — done books, destination settings ── -->
+	<Modal bind:open={reprocessOpen} title="Re-process" beforeClose={mayCloseReprocess}>
+		<div class="reprocess">
+			<p class="reprocess__book">{book.title}</p>
+			{#if preview?.available !== false}
+				<p class="reprocess__intro">
+					Re-runs the M4B merge from the original input files recorded by this book's last
+					processing run.
+				</p>
+			{/if}
+
+			{#if previewLoading}
+				<div class="reprocess__checking" role="status" aria-label="Checking the original input files">
+					<Skeleton variant="line" height="1rem" width="64%" />
+					<Skeleton variant="line" height="1rem" width="42%" />
+				</div>
+			{:else if preview?.available === false}
+				<!-- No-history / no-inputs: a book fact, not transient — no retry. -->
+				<Alert variant="warning">{preview.reason}</Alert>
+			{:else if preview?.available && preview.inputs}
+				{#if preview.inputs.missing.length === 0}
+					<div class="reprocess__ready" role="status">
+						<p class="reprocess__ready-line">
+							<CheckCircle class="h-3.5 w-3.5" aria-hidden="true" />
+							All {preview.inputs.total} original input {fileNoun(preview.inputs.total)} found
+						</p>
+						<p class="reprocess__ready-detail">{foundBreakdown(preview.inputs)}</p>
+					</div>
+				{:else}
+					<Alert variant="error" onretry={loadReprocessData} retryDisabled={previewLoading || profilesLoading}>
+						<p class="reprocess__alert-lead">
+							{preview.inputs.missing.length} original input
+							{fileNoun(preview.inputs.missing.length)} not found
+							{#if preview.inputs.found > 0}
+								— {preview.inputs.found} of {preview.inputs.total} located
+							{/if}
+						</p>
+						<ul class="reprocess__missing">
+							{#each preview.inputs.missing as name (name)}
+								<li><code>{name}</code></li>
+							{/each}
+						</ul>
+						<p class="reprocess__alert-help">
+							{#if searchPaths.length > 0}
+								Restore {preview.inputs.missing.length === 1 ? 'it' : 'them'} in
+								{#each searchPaths as path, index (path)}{#if index > 0}{' or '}{/if}<code>{path}</code>{/each}, then retry.
+							{:else}
+								Restore {preview.inputs.missing.length === 1 ? 'it' : 'them'} to the recorded
+								source path, then retry.
+							{/if}
+						</p>
+					</Alert>
+				{/if}
+			{/if}
+
+			{#if preview?.available && preview.last_run}
+				<dl class="reprocess__facts">
+					<div class="reprocess__fact">
+						<dt>Last run</dt>
+						<dd>{formatJobTime(preview.last_run.created_at)}</dd>
+					</div>
+					<div class="reprocess__fact">
+						<dt>Wrote to</dt>
+						<dd class="reprocess__dest">
+							{destinationLabel(preview.last_run.output_dir, preview.last_run.output_scheme)}
+						</dd>
+					</div>
+				</dl>
+			{/if}
+
+			{#if previewError}
+				<Alert variant="warning" onretry={loadReprocessData} retryDisabled={previewLoading || !previewSettled}>
+					Could not check the original input files — {previewError.message}
+				</Alert>
+			{/if}
+
+			{#if preview?.available}
+				<div class="reprocess__destination" role="group" aria-labelledby="reprocess-destination-title">
+					<h3 id="reprocess-destination-title" class="reprocess__section-title">Destination</h3>
+					<div class="reprocess__field">
+						<OutputProfileSelector
+							selectId="reprocess-output-profile-select"
+							summaryId="reprocess-profile-summary"
+							{profiles}
+							bind:selectedProfileId
+							{profilesError}
+							batchCount={1}
+							batchNoun="book"
+							batchScope="run"
+							summaryClass="w-full text-xs"
+						/>
+					</div>
+					{#if profileActive}
+						<p class="reprocess__help" role="status">
+							Choose Global settings to edit the output directory and path format.
+						</p>
+					{:else}
+						<div class="reprocess__field">
+							<label class="reprocess__label" for="reprocess-override-dir">Output directory</label>
+							<div class="reprocess__input-row">
+								<input
+									id="reprocess-override-dir"
+									class="font-mono"
+									placeholder={globals?.output_dir || 'Absolute path'}
+									bind:value={overrideDir}
+									aria-describedby="reprocess-override-dir-help"
+								/>
+								<Button
+									variant="secondary"
+									class="shrink-0"
+									onclick={() => (dirPickerOpen = true)}
+								>
+									<FolderOpen class="h-4 w-4" aria-hidden="true" />
+									Browse
+								</Button>
+							</div>
+							<p id="reprocess-override-dir-help" class="reprocess__help">
+								Absolute path. Leave blank to use the global output directory.
+							</p>
+						</div>
+						<details
+							class="reprocess__disclosure"
+							class:reprocess__disclosure--invalid={formatInvalid}
+							ontoggle={onFormatToggle}
+						>
+							<summary class="reprocess__disclosure-summary">
+								<span class="reprocess__label">Output path format</span>
+								<span
+									class="reprocess__disclosure-state"
+									class:reprocess__disclosure-state--error={formatInvalid}
+								>
+									{formatInvalid ? 'Invalid' : overrideFormat ? 'Custom' : 'Inherited'}
+								</span>
+								<code class="reprocess__disclosure-value">
+									{overrideFormat || globals?.output_scheme || 'Global path format'}
+								</code>
+								<span class="reprocess__disclosure-icon">
+									<ChevronDown class="h-4 w-4" aria-hidden="true" />
+								</span>
+							</summary>
+							<div class="reprocess__disclosure-body">
+								<PathFormatBuilder
+									bind:value={overrideFormat}
+									outputDir={effectiveBaseDir}
+									allowEmpty
+								/>
+								{#if formatExtraError}
+									<p class="reprocess__field-error" role="alert">{formatExtraError}</p>
+								{/if}
+								<p class="reprocess__help">
+									Tap a part to add it. Within a part, Arrows move, Delete removes,
+									Alt+Arrows reorders.
+								</p>
+							</div>
+						</details>
+					{/if}
+				</div>
+			{/if}
+
+			{#if reprocessError}
+				<Alert variant="error">
+					{reprocessError.message}
+					<ErrorDetail raw={reprocessError.raw} needsSettings={reprocessError.needsSettings} />
+				</Alert>
+			{/if}
+		</div>
+		{#snippet footer()}
+			<div class="record-section__confirm">
+				{#if preview?.available === false}
+					<Button variant="secondary" onclick={closeReprocess}>Close</Button>
+				{:else}
+					<Button
+						variant="primary"
+						loading={reprocessSubmitting}
+						disabled={!canStart}
+						onclick={doReprocessFromDialog}
+					>
+						Re-process
+					</Button>
+					<Button variant="ghost" disabled={reprocessSubmitting} onclick={closeReprocess}>
+						Cancel
+					</Button>
+				{/if}
+			</div>
+		{/snippet}
+	</Modal>
+
+	<DirPicker
+		bind:open={dirPickerOpen}
+		startPath={effectiveBaseDir || '/'}
+		title="Choose reprocess output directory"
+		onselect={pickOutputDir}
+	/>
 
 	<!-- ── Compare with AudiobookDB ────────────────────────────── -->
 	<section class="card record-section" aria-label="Compare with AudiobookDB">
@@ -1117,5 +1593,259 @@
 		word-break: break-word;
 		max-height: 18rem;
 		overflow-y: auto;
+	}
+
+	/* ── Re-process dialog content ──────────────────────────────── */
+	.reprocess {
+		display: flex;
+		flex-direction: column;
+		gap: 0.875rem;
+	}
+
+	.reprocess__book {
+		margin: 0;
+		font-size: 0.9375rem;
+		font-weight: 600;
+		line-height: 1.35;
+		letter-spacing: -0.01em;
+		color: var(--text);
+		text-wrap: balance;
+	}
+
+	.reprocess__intro {
+		margin: 0;
+		max-width: 60ch;
+		font-size: 0.875rem;
+		line-height: 1.55;
+		color: var(--text-secondary);
+		text-wrap: pretty;
+	}
+
+	/* File check — the first answer the operator needs */
+	.reprocess__checking {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		padding: 0.5rem 0;
+	}
+
+	.reprocess__ready {
+		display: flex;
+		flex-direction: column;
+		gap: 0.125rem;
+	}
+
+	.reprocess__ready-line {
+		margin: 0;
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+		font-size: 0.8125rem;
+		font-weight: 600;
+		color: var(--state-green);
+	}
+
+	.reprocess__ready-detail {
+		margin: 0;
+		padding-left: 1.25rem;
+		font-size: 0.75rem;
+		line-height: 1.45;
+		color: var(--text-muted);
+	}
+
+	.reprocess__alert-lead {
+		margin: 0;
+		font-weight: 600;
+	}
+
+	.reprocess__missing {
+		margin: 0.375rem 0 0;
+		padding-left: 1.1rem;
+		font-size: 0.75rem;
+		line-height: 1.5;
+	}
+
+	.reprocess__missing code,
+	.reprocess__alert-help code {
+		font-family: ui-monospace, 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace;
+		overflow-wrap: anywhere;
+	}
+
+	.reprocess__alert-help {
+		margin: 0.5rem 0 0;
+		font-size: 0.75rem;
+		line-height: 1.5;
+		color: var(--text-secondary);
+	}
+
+	/* Last-run facts — the record meta's label-over-value grammar, stacked
+	 * so a long date or path never breaks into three columns of fragments. */
+	.reprocess__facts {
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.reprocess__fact dt {
+		font-size: 0.7rem;
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		color: var(--text-muted);
+	}
+
+	.reprocess__fact dd {
+		margin: 0.125rem 0 0;
+		font-size: 0.8125rem;
+		color: var(--text-secondary);
+	}
+
+	.reprocess__dest {
+		font-family: ui-monospace, 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace;
+		font-size: 0.75rem;
+		line-height: 1.5;
+		overflow-wrap: anywhere;
+	}
+
+	.reprocess__destination {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		margin-top: 0.25rem;
+		padding-top: 0.875rem;
+		border-top: 1px solid var(--border-subtle);
+	}
+
+	.reprocess__section-title {
+		margin: 0;
+		font-size: 0.8rem;
+		font-weight: 700;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		color: var(--text-secondary);
+	}
+
+	.reprocess__field {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
+
+	.reprocess__label {
+		font-size: 0.8rem;
+		font-weight: 600;
+		color: var(--text-secondary);
+	}
+
+	.reprocess__input-row {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: flex-start;
+		gap: 0.5rem;
+	}
+
+	.reprocess__input-row input {
+		flex: 1 1 12rem;
+		width: auto;
+		min-width: 0;
+	}
+
+	/* Optional format override — a disclosure, closed until the operator
+	 * wants the builder. The summary still names the effective format. */
+	.reprocess__disclosure {
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		background: var(--bg-panel);
+	}
+
+	.reprocess__disclosure--invalid {
+		border-color: var(--state-red-border);
+	}
+
+	.reprocess__disclosure-summary {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.375rem 0.5rem;
+		min-height: 2.75rem;
+		padding: 0.5rem 0.75rem;
+		border-radius: var(--radius-sm);
+		cursor: pointer;
+		list-style: none;
+	}
+
+	.reprocess__disclosure-summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.reprocess__disclosure-summary:hover {
+		background: var(--surface-hover);
+	}
+
+	.reprocess__disclosure-state {
+		font-size: 0.6875rem;
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		color: var(--text-muted);
+		white-space: nowrap;
+	}
+
+	.reprocess__disclosure-state--error {
+		color: var(--state-red);
+	}
+
+	.reprocess__disclosure-value {
+		flex: 1 1 8rem;
+		min-width: 0;
+		margin-left: auto;
+		font-family: ui-monospace, 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace;
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+		text-align: right;
+		overflow-wrap: anywhere;
+	}
+
+	.reprocess__disclosure-icon {
+		display: inline-flex;
+		align-items: center;
+		flex-shrink: 0;
+		color: var(--text-muted);
+		transition: transform var(--duration-fast) var(--ease-out);
+	}
+
+	.reprocess__disclosure[open] .reprocess__disclosure-icon {
+		transform: rotate(180deg);
+	}
+
+	.reprocess__disclosure-body {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		padding: 0.75rem;
+		border-top: 1px solid var(--border-subtle);
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.reprocess__disclosure-icon {
+			transition: none;
+		}
+	}
+
+	.reprocess__help {
+		margin: 0;
+		font-size: 0.75rem;
+		line-height: 1.45;
+		color: var(--text-muted);
+		text-wrap: pretty;
+	}
+
+	.reprocess__field-error {
+		margin: 0;
+		font-size: 0.75rem;
+		font-weight: 500;
+		line-height: 1.45;
+		color: var(--state-red);
 	}
 </style>

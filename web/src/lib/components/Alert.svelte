@@ -5,6 +5,7 @@
 		variant = 'info',
 		children,
 		onretry,
+		retryDisabled = false,
 		// ARIA role of the root element. "alert" stays the default for
 		// errors; informational banners pass "status" so they do not
 		// interrupt.
@@ -16,6 +17,9 @@
 		variant?: 'info' | 'success' | 'warning' | 'error';
 		children: Snippet;
 		onretry?: () => void;
+		// While a retry's load is already in flight the button is a no-op: a
+		// duplicate load would race the in-flight one for the same state.
+		retryDisabled?: boolean;
 		role?: 'alert' | 'status' | 'note' | 'region';
 		actions?: Snippet;
 	} = $props();
@@ -47,6 +51,8 @@
 					<button
 						type="button"
 						class="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center px-2 text-sm font-bold text-[var(--workspace-action)] hover:underline focus-visible:outline-[var(--focus-ring)]"
+						disabled={retryDisabled}
+						aria-disabled={retryDisabled}
 						onclick={onretry}
 					>
 						Retry

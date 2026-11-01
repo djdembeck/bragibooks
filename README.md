@@ -312,6 +312,8 @@ For the complete two-service development environment, use the development compos
 docker compose -f docker/docker-compose.dev.yml up --build
 ```
 
+The development backend mounts the repository for source hot reload plus separate, writable media directories at `/input` and `/output` (default host paths `docker/books/input` and `docker/books/output`); completed inputs are stored under `/input/done`. Set `BRAGIBOOKS_INPUT_DIR` and `BRAGIBOOKS_OUTPUT_DIR` to other specific host directories when starting Compose; do not mount a home directory. Keep these paths writable: Bragibooks and `m4b-merge` rename and tag inputs as part of processing. The Dockerfile and compose images are digest-pinned; Renovate manages image digest updates through the existing Dockerfile and Docker Compose managers.
+
 Open [http://localhost:5175](http://localhost:5175) while the development stack is running. The Vite server proxies `/api` and `/covers` requests to the Go backend. The development Compose profile explicitly allows the backend service name with `SERVER_ALLOWED_HOSTS=bragibooks-dev`, because Vite's string-form proxy sends the target authority as `Host`. If you change `VITE_PROXY_TARGET` to another DNS hostname, add that exact hostname to the backend's allowed hosts; this does not bypass its API-key or CSRF checks.
 
 ## Maintainers
