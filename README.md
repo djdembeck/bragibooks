@@ -89,7 +89,7 @@ The repository's [production compose file](docker/docker-compose.yml) shows the 
 
 ### Existing binary
 
-If you already have a `bragibooks` binary, put `ffmpeg` and [`m4b-merge`](https://github.com/djdembeck/m4b-merge) on `PATH`, provide the input/output directories, and run it from the directory containing `config/config.yaml`:
+If you already have a `bragibooks` binary, put `ffmpeg`, `ffprobe`, and [`m4b-merge`](https://github.com/djdembeck/m4b-merge) on `PATH`, provide the input/output directories, and run it from the directory containing `config/config.yaml`:
 
 ```sh
 DIRECTORIES_INPUT_DIR=/path/to/input \
@@ -258,7 +258,9 @@ Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). Feat
 
 ## Building
 
-Building from source requires Go 1.26+, [Bun](https://bun.sh/), and the runtime dependencies `ffmpeg` and [`m4b-merge`](https://github.com/djdembeck/m4b-merge). The production build embeds the SvelteKit frontend in the Go binary.
+Building from source requires Go 1.26+, [Bun](https://bun.sh/), and the runtime dependencies `ffmpeg`, `ffprobe`, and [`m4b-merge`](https://github.com/djdembeck/m4b-merge). The production build embeds the SvelteKit frontend in the Go binary.
+
+Source metadata extraction (per-book snapshots of embedded tags, IDs, and durations read at intake) is best-effort: it needs `ffprobe` on `PATH`, and when `ffprobe` is missing the server logs a startup warning, keeps importing books, and persists a degraded metadata row with explicit error states instead.
 
 ### Make
 

@@ -49,6 +49,10 @@ type Services struct {
 	// FFmpeg is the ffmpeg binary used to read embedded art. Empty disables
 	// extraction (ffmpeg is not installed).
 	FFmpeg string
+
+	// FFprobe is the ffprobe binary used to read embedded tags and durations.
+	// Empty disables source metadata extraction (ffprobe is not installed).
+	FFprobe string
 }
 
 // Handler wraps services and registers routes.

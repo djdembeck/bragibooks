@@ -188,6 +188,16 @@ CREATE INDEX IF NOT EXISTS idx_processing_jobs_queue_seq ON processing_jobs(queu
 
 `,
 	},
+	{
+		version: 12,
+		sql: `
+CREATE TABLE IF NOT EXISTS book_source_metadata (
+    book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    payload TEXT NOT NULL,
+    extracted_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

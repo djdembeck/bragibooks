@@ -84,6 +84,11 @@ func TestRunMigrationsRealShape(t *testing.T) {
 	if !hasColumn(t, db, "people", "asin") {
 		t.Error("people.asin missing (v4 regression)")
 	}
+	for _, col := range []string{"book_id", "payload", "extracted_at"} {
+		if !hasColumn(t, db, "book_source_metadata", col) {
+			t.Errorf("book_source_metadata.%s missing (v11)", col)
+		}
+	}
 	// Re-applying is a no-op (columns are idempotently skipped).
 	if err := RunMigrations(db); err != nil {
 		t.Fatalf("RunMigrations re-apply: %v", err)
@@ -390,6 +395,42 @@ func TestRunMigrationsV9HealCannotResurrectColumns(t *testing.T) {
 	}
 	if n := appliedCount(t, db); n != len(migrations) {
 		t.Errorf("applied migrations = %d, want all %d", n, len(migrations))
+	}
+}
+
+// TestRunMigrationsV11CascadesSourceMetadata pins the production v11
+// DDL: deleting a book removes its book_source_metadata row via the real
+// ON DELETE CASCADE (not a hand-written test schema). It runs the full
+// production migration list, so it must not be moved after the tests that
+// swap the package's `migrations` var.
+func TestRunMigrationsV11CascadesSourceMetadata(t *testing.T) {
+	db := openTestDB(t)
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	seedTestBook(t, db)
+
+	var bookID int64
+	if err := db.QueryRow(`SELECT id FROM books WHERE title = 'Kept Book'`).Scan(&bookID); err != nil {
+		t.Fatalf("read book id: %v", err)
+	}
+	const payload = `{"schema":1}`
+	if _, err := db.Exec(`INSERT INTO book_source_metadata (book_id, payload) VALUES (?, ?)`, bookID, payload); err != nil {
+		t.Fatalf("insert metadata row: %v", err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM book_source_metadata WHERE book_id = ?`, bookID).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("metadata rows before delete = %d (err %v), want 1", n, err)
+	}
+
+	if _, err := db.Exec(`DELETE FROM books WHERE id = ?`, bookID); err != nil {
+		t.Fatalf("delete book: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM book_source_metadata WHERE book_id = ?`, bookID).Scan(&n); err != nil {
+		t.Fatalf("count metadata rows: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("book_source_metadata rows after book delete = %d, want 0 (v11 ON DELETE CASCADE)", n)
 	}
 }
 

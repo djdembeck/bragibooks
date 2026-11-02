@@ -118,6 +118,11 @@ func main() {
 		log.Printf("Warning: ffmpeg not found on PATH (%v) — source cover art will not be extracted", ffmpegErr)
 		ffmpegPath = ""
 	}
+	ffprobePath, ffprobeErr := exec.LookPath("ffprobe")
+	if ffprobeErr != nil {
+		log.Printf("Warning: ffprobe not found on PATH (%v) — source metadata extraction is unavailable; snapshots will persist degraded error rows", ffprobeErr)
+		ffprobePath = ""
+	}
 	// Services
 	processor := audio.NewProcessor(
 		cfg.M4bMerge.Binary,
@@ -153,6 +158,7 @@ func main() {
 		ProcessingSvc: processingSvc,
 		CoversDir:     coversDir,
 		FFmpeg:        ffmpegPath,
+		FFprobe:       ffprobePath,
 	})
 
 	// Router
