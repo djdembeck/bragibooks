@@ -39,4 +39,8 @@ RUN chmod 0755 /usr/local/bin/bragibooks-entrypoint
 ENV DATABASE_PATH=/config/bragibooks.db
 EXPOSE 8080
 VOLUME ["/config", "/input", "/output"]
+ARG VERSION=dev
+ARG GIT_COMMIT=unknown
+LABEL org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${GIT_COMMIT}"
 ENTRYPOINT ["/usr/local/bin/bragibooks-entrypoint"]
