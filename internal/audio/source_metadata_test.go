@@ -228,6 +228,9 @@ func TestExtractSourceMetadataSurvivesPerFileFailure(t *testing.T) {
 		t.Errorf("files[1].duration_seconds = %v, want 400", snap.Files[1].DurationSeconds)
 	}
 	wantField(t, snap, FieldTitle, StatusPresent, "Stub Title")
+	// A probe error makes the pass incomplete: a field that no
+	// successful probe supplied must be errored, not claimed missing.
+	wantField(t, snap, FieldAuthor, StatusError)
 	if snap.DurationSeconds != 400 {
 		t.Errorf("duration_seconds = %v, want 400 (errored file contributes nothing)", snap.DurationSeconds)
 	}

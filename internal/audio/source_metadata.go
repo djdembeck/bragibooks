@@ -222,13 +222,20 @@ func degradedSnapshot(snap *SourceMetadata, cause string) *SourceMetadata {
 }
 
 // finalizeEmpty writes a complete snapshot for a source with zero audio
-// files: every field is explicitly missing, nothing was probed.
+// files. A clean scan marks every field explicitly missing; a truncated
+// scan (bound hit before the directory was exhausted) cannot claim the
+// unscanned entries held nothing, so the fields are errored instead.
 func finalizeEmpty(snap *SourceMetadata) *SourceMetadata {
-	for _, f := range fieldKeys {
-		snap.Fields[f] = SourceField{Values: []string{}, Source: SourceEmbedded, Status: StatusMissing}
-	}
 	snap.Files = []SourceFile{}
 	snap.RawTags = []SourceFileTags{}
+	for _, f := range fieldKeys {
+		if snap.Truncated {
+			snap.Fields[f] = SourceField{Values: []string{}, Source: SourceEmbedded, Status: StatusError,
+				Error: "extraction incomplete: discovery truncated before audio files were found"}
+			continue
+		}
+		snap.Fields[f] = SourceField{Values: []string{}, Source: SourceEmbedded, Status: StatusMissing}
+	}
 	return snap
 }
 
@@ -377,14 +384,14 @@ func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, flo
 		if n > 0 {
 			out = append(out, tmp[:n]...)
 		}
+		if len(out) > maxProbeOutputBytes {
+			return nil, 0, "probe output exceeds 1 MiB"
+		}
 		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
 			break
 		}
 		if rerr != nil {
 			return nil, 0, fmt.Sprintf("read probe output: %v; stderr: %s", rerr, string(stderr.b))
-		}
-		if len(out) > maxProbeOutputBytes {
-			return nil, 0, "probe output exceeds 1 MiB"
 		}
 	}
 	runErr := cmd.Wait()
@@ -447,9 +454,20 @@ func mergeFields(snap *SourceMetadata, merged map[string][]string) {
 	}
 }
 
-// incomplete reports whether the pass ended without probing every file.
+// incomplete reports whether the pass ended without a clean probe of
+// every file: unprobed files, truncated discovery, or any probe error —
+// in each case a field that came up empty cannot claim the source
+// "has no such tag".
 func (s *SourceMetadata) incomplete() bool {
-	return s.Truncated || s.FilesProbed < s.FilesTotal
+	if s.Truncated || s.FilesProbed < s.FilesTotal {
+		return true
+	}
+	for _, file := range s.Files {
+		if file.Error != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // incompleteMsg is the shared message for fields that came up empty under
