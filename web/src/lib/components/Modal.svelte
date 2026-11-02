@@ -41,6 +41,9 @@
 	});
 
 	function onClose() {
+		// Native close events are queued: an earlier close can arrive after
+		// the caller has reopened this dialog (for example, a deletion retry).
+		if (dialog?.open) return;
 		open = false;
 	}
 

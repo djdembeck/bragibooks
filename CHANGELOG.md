@@ -44,9 +44,23 @@ All notable changes to this project will be documented in this file. See [standa
   - Corrected AudiobookDB book links to `/books/{id}` and account-creation links to `/users/signup`.
   - Queue job cards and book job history now show elapsed time per job. Queued jobs report time spent waiting, running jobs tick each second, and finished jobs keep second precision up to an hour.
 
+- **Match comparison hierarchy**
+  - Replaced the filename-led Before/After block with a direct Source → Proposed match comparison in batch and focused review. Output naming is a secondary preview with accessible full paths and configuration states.
+  - Made narrator, runtime, publisher, release date, language, and available edition distinctions visible in batch review. Kept focused catalog metadata and source artwork, including on phones.
+  - Replaced successful match chips with plain selection-method text and an unboxed AudiobookDB link. Grouped inclusion and editing controls outside the comparison; per-source Remove now lives under More and still requires confirmation.
+  - Prioritized narrator/runtime over secondary release metadata, consolidated focused editing into one disclosure, and separated mobile entries with clear boundaries and gaps. Kept Remove in the same toolbar position in both modes; automatic choices are explicitly title-based, not confidence scores.
+
+- **Source-evidence presentation**
+  - Added a small match-origin badge beside Proposed match and subtle supplied-evidence field indicators, with independent source/catalog values in the existing Source details disclosure.
+  - Current records remain explicitly "metadata not read" with no agreement checks. Optional candidate-scoped reports suppress stale verification when a book or edition changes; exact book identity never implies edition certainty.
+  - Aligned origin labels and evidence icons, explained exact-ID scope and runtime approximation, and added a neutral information indicator for incomparable runtime. Tooltips use concise production-facing copy; full provenance, reasons, and preview diagnostics stay in Source details. Explanations work on hover, keyboard focus, or tap.
+  - Runtime popups now align source/catalog durations, show longer/shorter direction, and distinguish gap severity in whole minutes. Explicit measurement precision prevents rounding artifacts from becoming confident differences; equality, sub-minute gaps, overlapping rounded measurements, and unavailable comparisons remain neutral. These presentation bands do not change matching confidence.
+  - Separated Source and Catalog values onto aligned rows in all differing-field popups, including narrator, and in formatted-only or unavailable-precision runtime comparisons. Long credits wrap without merging the two values.
+  - This is visual wiring only: no source tag extraction, ID lookup, or backend transport was added. Match-entry extraction is tracked separately in #488.
+
 - **Match removal**
-  - Remove a single match from its row, or enter the removal pass, select several sources, and delete their records in one confirmed action. The confirmation lists every source name; only Bragi Books records are deleted and files on disk stay untouched.
-  - Failed deletions keep the survivors selected and report the count and cause, so a partial batch can be retried. The removal selection is separate from "included in this save" and never changes inclusion. On narrow screens the pass actions dock to the bottom of the viewport.
+  - Remove a single source through More, or open Remove… in the page header and select records in the independent removal dialog. Only Bragi Books records are deleted; files on disk stay untouched.
+  - Failed deletions keep the survivors selected and report the count and cause, so a partial batch can be retried. The removal selection is separate from "included in this save" and never changes inclusion.
 
 - **Selectable output path format**
   - Replaced the free-text output path format field in Settings with a token builder: token/text/separator parts, live example resolved against a real sample record, and keyboard reorder (Alt+Arrows) with wrap-around selection.
