@@ -62,12 +62,18 @@ CREATE TABLE output_profiles (
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE book_source_metadata (
+    book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    payload TEXT NOT NULL,
+    extracted_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 ` + processingSchemaSQL
 
 // newTestDB opens an in-memory SQLite database and creates the schema.
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file::memory:?cache=shared")
+	db, err := sql.Open("sqlite", "file::memory:?cache=shared&_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
@@ -245,6 +251,51 @@ func stubFFmpegForCovers(t *testing.T, argsFile string) string {
 		t.Fatalf("write stub ffmpeg: %v", err)
 	}
 	return path
+}
+
+// stubFFprobeForMetadata returns a fake ffprobe plus the directory holding
+// its per-file responses. The script derives the input basename from its
+// last argv and cats <respDir>/<basename>.json; a missing sidecar makes it
+// fail, so per-file failures are expressible.
+func stubFFprobeForMetadata(t *testing.T) (string, string) {
+	t.Helper()
+	respDir := t.TempDir()
+	bin := filepath.Join(t.TempDir(), "ffprobe")
+	script := `#!/bin/sh
+for last; do :; done
+base=$(basename "$last")
+if [ -f "` + respDir + `/${base}.json" ]; then
+  cat "` + respDir + `/${base}.json"
+else
+  echo "probe: no such file" >&2
+  exit 1
+fi
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub ffprobe: %v", err)
+	}
+	return bin, respDir
+}
+
+func writeProbeSidecar(t *testing.T, respDir, name, doc string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(respDir, name+".json"), []byte(doc), 0o644); err != nil {
+		t.Fatalf("write probe sidecar %s: %v", name, err)
+	}
+}
+
+// metadataPayloadFor fetches and decodes the book's source-metadata row.
+func metadataPayloadFor(t *testing.T, db *sql.DB, bookID int64) map[string]any {
+	t.Helper()
+	var payload string
+	if err := db.QueryRow("SELECT payload FROM book_source_metadata WHERE book_id = ?", bookID).Scan(&payload); err != nil {
+		t.Fatalf("fetch source metadata row: %v", err)
+	}
+	var snap map[string]any
+	if err := json.Unmarshal([]byte(payload), &snap); err != nil {
+		t.Fatalf("decode source metadata payload: %v", err)
+	}
+	return snap
 }
 
 // postBook drives CreateBooks directly and decodes the created book.
@@ -533,5 +584,209 @@ func TestUpdateBookLifecycleOnlyWritesNoAuditRow(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("processing_jobs rows = %d; want 0 (lifecycle-only update recorded no audit row)", count)
+	}
+}
+
+func putBook(t *testing.T, h *Handler, bookID int64, body UpdateBookRequest) {
+	t.Helper()
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	ctx := chi.NewRouteContext()
+	ctx.URLParams.Keys = append(ctx.URLParams.Keys, "id")
+	ctx.URLParams.Values = append(ctx.URLParams.Values, fmt.Sprint(bookID))
+	req := httptest.NewRequest("PUT", fmt.Sprintf("/api/books/%d", bookID), bytes.NewReader(reqBody))
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, ctx))
+	w := httptest.NewRecorder()
+	h.UpdateBook(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("update status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+}
+
+func sourceMetadataFields(t *testing.T, snap map[string]any) map[string]map[string]any {
+	t.Helper()
+	raw, ok := snap["fields"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload fields = %T, want object", snap["fields"])
+	}
+	out := make(map[string]map[string]any, len(raw))
+	for key, value := range raw {
+		field, ok := value.(map[string]any)
+		if !ok {
+			t.Fatalf("payload fields[%s] = %T, want object", key, value)
+		}
+		out[key] = field
+	}
+	return out
+}
+
+func wantAllFieldStatuses(t *testing.T, snap map[string]any, status string) {
+	t.Helper()
+	fields := sourceMetadataFields(t, snap)
+	if len(fields) != 11 {
+		t.Errorf("payload carries %d fields, want 11", len(fields))
+	}
+	for key, field := range fields {
+		if field["status"] != status {
+			t.Errorf("field %s status = %v, want %s", key, field["status"], status)
+		}
+	}
+}
+
+func TestCreateBooksPersistsSourceMetadata(t *testing.T) {
+	srcDir := t.TempDir()
+	for _, name := range []string{"1.mp3", "2.mp3"} {
+		if err := os.WriteFile(filepath.Join(srcDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+	ffprobe, respDir := stubFFprobeForMetadata(t)
+	writeProbeSidecar(t, respDir, "1.mp3",
+		`{"format": {"duration": "300.0", "tags": {"title": "Stub Title", "album_artist": "Stub Author", "audible_asin": "B0STUBSTUB"}}, "streams": []}`)
+	writeProbeSidecar(t, respDir, "2.mp3",
+		`{"format": {"duration": "400.0", "tags": {"title": "Stub Title"}}, "streams": []}`)
+
+	h := &Handler{svc: &Services{DB: newTestDB(t), FFprobe: ffprobe}}
+	book := postBook(t, h, srcDir)
+
+	snap := metadataPayloadFor(t, h.svc.DB, book.ID)
+	if snap["source_kind"] != "folder" {
+		t.Errorf("source_kind = %v, want folder", snap["source_kind"])
+	}
+	if snap["files_total"] != float64(2) || snap["files_probed"] != float64(2) {
+		t.Errorf("files_total/files_probed = %v/%v, want 2/2", snap["files_total"], snap["files_probed"])
+	}
+	if snap["duration_seconds"] != float64(700) {
+		t.Errorf("duration_seconds = %v, want 700", snap["duration_seconds"])
+	}
+	fields := sourceMetadataFields(t, snap)
+	if title, ok := fields["title"]; !ok || title["status"] != "present" {
+		t.Fatalf("title field = %v, want present", title)
+	}
+	titleValues, _ := fields["title"]["values"].([]any)
+	if len(titleValues) != 1 || titleValues[0] != "Stub Title" {
+		t.Errorf("title values = %v, want [Stub Title]", titleValues)
+	}
+	if asin := fields["asin"]; asin["status"] != "present" || asin["source"] != "embedded" {
+		t.Errorf("asin field = %v, want present/embedded", asin)
+	}
+}
+
+func TestCreateBooksPersistsDegradedMetadataWithoutFFprobe(t *testing.T) {
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "1.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	h := newTestHandler(t)
+	book := postBook(t, h, srcDir)
+
+	snap := metadataPayloadFor(t, h.svc.DB, book.ID)
+	if snap["source_kind"] != "unknown" {
+		t.Errorf("source_kind = %v, want unknown", snap["source_kind"])
+	}
+	wantAllFieldStatuses(t, snap, "error")
+}
+
+func TestCreateBooksIntakeSurvivesProbeFailure(t *testing.T) {
+	srcDir := t.TempDir()
+	for _, name := range []string{"1.mp3", "2.mp3"} {
+		if err := os.WriteFile(filepath.Join(srcDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+	// No sidecars: the stub exits 1 on every file.
+	ffprobe, _ := stubFFprobeForMetadata(t)
+
+	h := &Handler{svc: &Services{DB: newTestDB(t), FFprobe: ffprobe}}
+	book := postBook(t, h, srcDir)
+
+	snap := metadataPayloadFor(t, h.svc.DB, book.ID)
+	wantAllFieldStatuses(t, snap, "error")
+	files, ok := snap["files"].([]any)
+	if !ok || len(files) != 2 {
+		t.Fatalf("files = %v, want 2 per-file entries", snap["files"])
+	}
+	first, _ := files[0].(map[string]any)
+	if first["error"] == nil || first["error"] == "" {
+		t.Errorf("files[0].error empty, want the probe failure")
+	}
+}
+
+func TestUpdateBookLeavesSourceMetadataUntouched(t *testing.T) {
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "1.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	ffprobe, respDir := stubFFprobeForMetadata(t)
+	writeProbeSidecar(t, respDir, "1.mp3",
+		`{"format": {"duration": "300.0", "tags": {"title": "Stub Title"}}, "streams": []}`)
+
+	h := &Handler{svc: &Services{DB: newTestDB(t), FFprobe: ffprobe}}
+	book := postBook(t, h, srcDir)
+
+	var before string
+	if err := h.svc.DB.QueryRow("SELECT payload FROM book_source_metadata WHERE book_id = ?", book.ID).Scan(&before); err != nil {
+		t.Fatalf("read payload before: %v", err)
+	}
+
+	newTitle := "Catalog Title"
+	newASIN := "B0ZZZZZZZZ"
+	newRuntime := 60
+	putBook(t, h, book.ID, UpdateBookRequest{Title: &newTitle, ASIN: &newASIN, RuntimeLengthMinutes: &newRuntime})
+
+	var title, asin string
+	var runtime int
+	if err := h.svc.DB.QueryRow("SELECT title, asin, runtime_length_minutes FROM books WHERE id = ?", book.ID).
+		Scan(&title, &asin, &runtime); err != nil {
+		t.Fatalf("query updated book: %v", err)
+	}
+	if title != newTitle || asin != newASIN || runtime != newRuntime {
+		t.Errorf("book = %q/%q/%d, want %q/%q/%d", title, asin, runtime, newTitle, newASIN, newRuntime)
+	}
+
+	var after string
+	if err := h.svc.DB.QueryRow("SELECT payload FROM book_source_metadata WHERE book_id = ?", book.ID).Scan(&after); err != nil {
+		t.Fatalf("read payload after: %v", err)
+	}
+	if after != before {
+		t.Errorf("source metadata payload changed on Save-match:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+func TestDeleteBookCascadesSourceMetadata(t *testing.T) {
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "1.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	ffprobe, respDir := stubFFprobeForMetadata(t)
+	writeProbeSidecar(t, respDir, "1.mp3",
+		`{"format": {"duration": "300.0", "tags": {"title": "Stub Title"}}, "streams": []}`)
+
+	h := &Handler{svc: &Services{DB: newTestDB(t), FFprobe: ffprobe}}
+	book := postBook(t, h, srcDir)
+	if _, err := h.svc.DB.Exec("SELECT 1 FROM book_source_metadata WHERE book_id = ?", book.ID); err != nil {
+		t.Fatalf("row missing before delete: %v", err)
+	}
+
+	ctx := chi.NewRouteContext()
+	ctx.URLParams.Keys = append(ctx.URLParams.Keys, "id")
+	ctx.URLParams.Values = append(ctx.URLParams.Values, fmt.Sprint(book.ID))
+	req := httptest.NewRequest("DELETE", fmt.Sprintf("/api/books/%d", book.ID), nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, ctx))
+	w := httptest.NewRecorder()
+	h.DeleteBook(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d; want 204 — body: %s", w.Code, w.Body.String())
+	}
+
+	var count int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM book_source_metadata WHERE book_id = ?", book.ID).Scan(&count); err != nil {
+		t.Fatalf("count metadata rows: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("book_source_metadata rows = %d; want 0 (cascade)", count)
 	}
 }

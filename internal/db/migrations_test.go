@@ -36,8 +36,8 @@ var testMigrations = []migration{
 // package's `migrations` var (in-file order), so it must not be moved after
 // them.
 func TestRunMigrationsRealShape(t *testing.T) {
-	if len(migrations) < 10 {
-		t.Fatalf("migrations = %d entries, want the 10 production migrations (run before the test var mutations)", len(migrations))
+	if len(migrations) < 11 {
+		t.Fatalf("migrations = %d entries, want the 11 production migrations (run before the test var mutations)", len(migrations))
 	}
 	db := openTestDB(t)
 	if err := RunMigrations(db); err != nil {
@@ -83,6 +83,11 @@ func TestRunMigrationsRealShape(t *testing.T) {
 	}
 	if !hasColumn(t, db, "people", "asin") {
 		t.Error("people.asin missing (v4 regression)")
+	}
+	for _, col := range []string{"book_id", "payload", "extracted_at"} {
+		if !hasColumn(t, db, "book_source_metadata", col) {
+			t.Errorf("book_source_metadata.%s missing (v11)", col)
+		}
 	}
 	// Re-applying is a no-op (columns are idempotently skipped).
 	if err := RunMigrations(db); err != nil {

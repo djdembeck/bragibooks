@@ -477,6 +477,7 @@ func (h *Handler) CreateBooks(w http.ResponseWriter, r *http.Request) {
 		// read its own art now so Match can show the original cover beside
 		// catalog candidates instead of an empty placeholder.
 		h.attachSourceCover(r.Context(), id, entry.SrcPath)
+		h.attachSourceMetadata(r.Context(), id, entry.SrcPath)
 		h.svc.ProcessingSvc.RecordBookAction(id, "import", entry.SrcPath)
 		book, err := h.getBook(id)
 		if err != nil {
@@ -527,8 +528,37 @@ func (h *Handler) attachSourceCover(ctx context.Context, bookID int64, srcPath s
 	}
 }
 
+// attachSourceMetadata reads the source's own tags, IDs, and durations and
+// persists an independent per-book snapshot. Every outcome writes a row
+// (including ffprobe-missing hosts, which persist a degraded row with
+// explicit error states); an INSERT failure never fails intake.
+func (h *Handler) attachSourceMetadata(ctx context.Context, bookID int64, srcPath string) {
+	var snap *audio.SourceMetadata
+	var err error
+	if h.svc.FFprobe == "" {
+		snap = audio.DegradedSourceMetadata("ffprobe binary unavailable; extraction not run")
+	} else {
+		snap, err = audio.ExtractSourceMetadata(ctx, h.svc.FFprobe, srcPath)
+		if err != nil || snap == nil {
+			log.Printf("extract source metadata for book %d: %v", bookID, err)
+			snap = audio.DegradedSourceMetadata(fmt.Sprintf("extraction failed: %v", err))
+		}
+	}
+	payload, marshalErr := json.Marshal(snap)
+	if marshalErr != nil {
+		log.Printf("marshal source metadata for book %d: %v", bookID, marshalErr)
+		return
+	}
+	if _, insertErr := h.svc.DB.Exec(
+		"INSERT INTO book_source_metadata (book_id, payload) VALUES (?, ?)",
+		bookID, payload,
+	); insertErr != nil {
+		log.Printf("persist source metadata for book %d: %v", bookID, insertErr)
+	}
+}
+
 // audioExtensions are the containers a single-file source may use. Only these
-// suffixes are stripped when deriving a title: a period anywhere else in the
+// suffixes are stripped when deriving a title: a period anywhere else in a
 // name (author initials like "Ursula K. Le Guin", "Vol. 2", "Dr.") is part of
 // the title, not an extension.
 var audioExtensions = map[string]bool{
