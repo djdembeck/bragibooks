@@ -120,6 +120,14 @@ All notable changes to this project will be documented in this file. See [standa
 
 ---
 
+## [1.2.3](https://github.com/djdembeck/bragibooks/compare/v1.2.2...v1.2.3) (2024-08-07)
+
+
+### Bug Fixes
+
+* 🐛 fix redirect check ([#321](https://github.com/djdembeck/bragibooks/issues/321)) ([5a9429d](https://github.com/djdembeck/bragibooks/commit/5a9429dbdd6859509761eff1054d57168ea1616a))
+* 🐛 required attr was in the wrong place  ([#319](https://github.com/djdembeck/bragibooks/issues/319)) ([1cd064a](https://github.com/djdembeck/bragibooks/commit/1cd064aad41a192a42c2697bf665198f6a8770c6))
+
 ## [1.2.2](https://github.com/djdembeck/bragibooks/compare/v1.2.1...v1.2.2) (2024-08-07)
 
 
