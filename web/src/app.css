@@ -569,6 +569,7 @@
 		gap: 1.5rem;
 		padding: 0 2.5rem;
 		min-height: 4.25rem;
+		flex-wrap: wrap;
 	}
 
 	.workspace-brand {
@@ -613,6 +614,8 @@
 		align-self: stretch;
 		align-items: center;
 		gap: 0.25rem;
+		min-width: 0;
+		overflow-x: auto;
 	}
 
 	.workspace-nav__link {
@@ -621,6 +624,7 @@
 		gap: 0.5rem;
 		height: 2.75rem;
 		padding: 0 0.875rem;
+		flex-shrink: 0;
 		border: 1px solid transparent;
 		border-radius: var(--radius-sm);
 		font-size: 0.875rem;
@@ -828,8 +832,8 @@
 			flex-wrap: wrap;
 			gap: 0;
 			padding: 0.75rem 1rem 0;
-			min-height: 0;
-			height: 6.5625rem;
+			min-height: 6.5625rem;
+			height: auto;
 		}
 
 		.workspace-brand {

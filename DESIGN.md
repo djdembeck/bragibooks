@@ -228,10 +228,10 @@ Rounding runs on four steps by role: 6px (`sm`) for buttons, inputs, checkboxes,
 - **Style:** gold bar (`#ffe08a`) with a 1px `#d7b85f` bottom edge; brand is the stacked-books mark (44px wide; 32px under 900px) plus a 20px 700 −0.025em wordmark in ink.
 - **Links:** 14px 600 `#302609` on gold; hover `#f3cf73`.
 - **Active:** white chip with a 1px `#705413` border and `#292923` ink (`aria-current="page"`); Settings sits right-aligned in the same grammar.
-- **Mobile:** destinations move to a horizontally scrollable second row; targets stay ≥44px.
+- **Mobile:** destinations move to a horizontally scrollable second row; targets stay ≥44px. The header height is content-driven and the live `--nav-height` follows it, so sticky offsets stay correct when labels wrap at large text. Nav labels keep their width and scroll inside the gold bar rather than widening the page.
 
 ### Page Header
-Title in the display face with an optional 15px secondary description (65ch) above a 1px `#d7d7d0` rule; 1.5rem below the rule. Match's head is sticky on desktop with the mode controls and one commit row on the right: the secondary **Remove…** action and the gold counted **Save N → Queue**, in the same positions in both review modes; on phones the head scrolls with the list and the two actions share a full-width row; the intro also shortens to the record-check-and-save reminder while desktop keeps the full copy.
+Title in the display face with an optional 15px secondary description (65ch) above a 1px `#d7d7d0` rule; 1.5rem below the rule. Match's head is sticky on desktop with the mode controls and one commit row on the right: the secondary **Remove…** action and the gold counted **Save N → Queue**, in the same positions in both review modes; on phones the head scrolls with the list and the two actions share a full-width row; the intro also shortens to the record-check-and-save reminder while desktop keeps the full copy. At 200% text the commit row wraps and the Save action takes a full line instead of forcing horizontal page scroll.
 
 ### Inputs / Fields
 - **Style:** `#f8f8f6` fill, 1px `#92928a` border, 6px radius, 44px min-height.
@@ -248,7 +248,7 @@ Sentence case, 12px 600, `--text-secondary`, no fill, border, or uppercase. It n
 Queue cards and book-record job history list Started, Done, Created, and the duration in one `dl` row: 11px+ uppercase labels on the dense-row tier, 12px tabular values. Before a job starts — including one cancelled while waiting — the duration is labelled **Queued** and measures time since creation; once processing starts it is **Elapsed**. Active durations tick once per second; finished ones keep seconds under an hour (`4m 30s`) and step to hours and minutes above (`27h 14m`).
 
 ### Alert
-`role="alert"` panel, 2px state border, 14px copy, 14px padding; success/warning/error take their state washes; Retry is a dark-gold text action.
+`role="alert"` panel, 2px state border, 14px copy, 14px padding; success/warning/error take their state washes; Retry is a dark-gold text action. Per-row lookup and search failures also use `role="alert"`. The Technical detail disclosure keeps a 24px minimum target.
 
 ### Mode Toggle
 Segmented pair (Batch / Focused) on Match: `#f8f8f6` track, 1px border, 6px outer / 4px inner radius; the pressed segment takes the pale gold `#fff4d3` fill with a 1px inset hairline.

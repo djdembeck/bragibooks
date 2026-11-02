@@ -50,6 +50,7 @@ All notable changes to this project will be documented in this file. See [standa
   - Replaced successful match chips with plain selection-method text and an unboxed AudiobookDB link. Grouped inclusion and editing controls outside the comparison; per-source Remove now lives under More and still requires confirmation.
   - Prioritized narrator/runtime over secondary release metadata, consolidated focused editing into one disclosure, and separated mobile entries with clear boundaries and gaps. Kept Remove in the same toolbar position in both modes; automatic choices are explicitly title-based, not confidence scores.
   - On phones, shortened the Match intro to the record-check reminder and handed focused review to the selected inspector after a source or Review is chosen; the focused Proposed match header now uses the same direction cue as batch.
+  - Announced per-row lookup and search failures, kept the Technical detail disclosure at a 24px target, and made the header and Match commit row reflow at 200% text. The nav height now follows the rendered header so sticky offsets stay correct when labels wrap.
 
 - **Source-evidence presentation**
   - Added a small match-origin badge beside Proposed match and subtle supplied-evidence field indicators, with independent source/catalog values in the existing Source details disclosure.

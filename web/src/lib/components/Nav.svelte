@@ -18,12 +18,34 @@
 	}
 
 	const pathname = $derived(page.url.pathname);
+
+	let headerEl = $state<HTMLElement>();
+
+	$effect(() => {
+		if (!headerEl) return;
+		const shell = headerEl.closest('.app-shell--workspace');
+		const target = shell instanceof HTMLElement ? shell : document.documentElement;
+		const sync = () => {
+			target.style.setProperty(
+				'--nav-height',
+				`${Math.ceil(headerEl!.getBoundingClientRect().height)}px`
+			);
+		};
+		sync();
+		if (typeof ResizeObserver === 'undefined') return;
+		const observer = new ResizeObserver(sync);
+		observer.observe(headerEl);
+		return () => {
+			observer.disconnect();
+			target.style.removeProperty('--nav-height');
+		};
+	});
 </script>
 
 <!-- Skip link — first focusable element -->
 <a href="#main-content" class="skip-link">Skip to main content</a>
 
-<header class="workspace-header">
+<header class="workspace-header" bind:this={headerEl}>
 	<div class="workspace-header__inner">
 		<a href="/" class="workspace-brand" aria-label="Bragi Books">
 			<span class="workspace-brand__mark">

@@ -1877,8 +1877,8 @@
 								{@render matchStatus(rowKind, statusText(c))}
 								{#if rowKind === 'none' || rowKind === 'low'}<p class="batch__empty-note">Choose a record in Review.</p>{/if}
 							{/if}
-							{#if c.error}<div class="batch__error"><p>{c.error.message}</p><button type="button" class="match__text-action" disabled={saving || removingMany} onclick={() => retryCandidate(c)}>Retry lookup</button><ErrorDetail raw={c.error.raw} needsSettings={c.error.needsSettings} /></div>{/if}
-							{#if c.releaseError}<div class="batch__error"><p>{c.releaseError.message}</p><button type="button" class="match__text-action" disabled={saving || removingMany || c.releaseLoading} onclick={() => chooseRelease(c, c.selectedReleaseId)}>Retry edition</button><ErrorDetail raw={c.releaseError.raw} needsSettings={c.releaseError.needsSettings} /></div>{/if}
+							{#if c.error}<div class="batch__error" role="alert"><p>{c.error.message}</p><button type="button" class="match__text-action" disabled={saving || removingMany} onclick={() => retryCandidate(c)}>Retry lookup</button><ErrorDetail raw={c.error.raw} needsSettings={c.error.needsSettings} /></div>{/if}
+							{#if c.releaseError}<div class="batch__error" role="alert"><p>{c.releaseError.message}</p><button type="button" class="match__text-action" disabled={saving || removingMany || c.releaseLoading} onclick={() => chooseRelease(c, c.selectedReleaseId)}>Retry edition</button><ErrorDetail raw={c.releaseError.raw} needsSettings={c.releaseError.needsSettings} /></div>{/if}
 							{@render outputPreview(c)}
 						</div>
 						<div class="batch__footer">
@@ -2055,7 +2055,7 @@
 						{:else if c.error}
 							<!-- Per-source failure — human copy, raw detail expandable -->
 							{@const cleaned = c.error}
-							<div class="match__failed">
+							<div class="match__failed" role="alert">
 								<p class="match__failed-title">Catalog lookup failed</p>
 								<p class="match__failed-msg">{cleaned.message}</p>
 								<div class="match__failed-actions">
@@ -2478,7 +2478,7 @@
 							{:else if searched && searchError}
 								<!-- Search failed — distinguish from zero results -->
 								{@const cleaned = searchError}
-								<div class="match__search-error">
+								<div class="match__search-error" role="alert">
 									<p class="match__failed-title">Search failed</p>
 									<p class="match__failed-msg">{cleaned.message}</p>
 									<ErrorDetail raw={cleaned.raw} needsSettings={cleaned.needsSettings} />
@@ -2737,6 +2737,7 @@
 		align-items: center;
 		gap: 12px;
 		flex-shrink: 0;
+		flex-wrap: wrap;
 	}
 
 	.match__head :global(.match__remove) {
@@ -4197,7 +4198,13 @@
 		}
 
 		.match__commit-row :global(.btn) {
-			flex: 1;
+			min-width: 0;
+		}
+
+		.match__head :global(.match__save) {
+			flex: 1 1 9rem;
+			flex-wrap: wrap;
+			white-space: normal;
 		}
 
 		.match__modes {
