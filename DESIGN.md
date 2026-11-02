@@ -218,17 +218,18 @@ Rounding runs on four steps by role: 6px (`sm`) for buttons, inputs, checkboxes,
 
 ### Buttons
 - **Shape:** 6px radius, `0.5rem 1rem` padding, 44px min-height, 14px semibold.
-- **Primary:** gold fill, `#302609` ink, 1.5px `#92701c` border + micro shadow; brightens to `#ffda70` on hover, `#f4cd62` on press; disabled at 0.45 opacity.
+- **Primary:** gold fill, `#302609` ink, 1.5px `#92701c` border + micro shadow; brightens to `#ffda70` on hover, `#f4cd62` on press.
 - **Secondary:** `#f8f8f6` fill, `#d7d7d0` border; hover darkens the fill and strengthens the border to `#92928a`.
 - **Ghost:** transparent, secondary ink; surface fill on hover.
 - **Danger:** red-wash fill, red ink, 2px red border.
+- **Disabled:** every variant drops to 0.45 opacity with a not-allowed cursor; labels stay visible.
 - **Focus:** 3px `#705413` outline, 3px offset; loading swaps in a spinner with `aria-busy`, label stays visible.
 
 ### Navigation
 - **Style:** gold bar (`#ffe08a`) with a 1px `#d7b85f` bottom edge; brand is the stacked-books mark (44px wide; 32px under 900px) plus a 20px 700 −0.025em wordmark in ink.
 - **Links:** 14px 600 `#302609` on gold; hover `#f3cf73`.
 - **Active:** white chip with a 1px `#705413` border and `#292923` ink (`aria-current="page"`); Settings sits right-aligned in the same grammar.
-- **Mobile:** destinations move to a horizontally scrollable second row; targets stay ≥44px. The header height is content-driven and the live `--nav-height` follows it, so sticky offsets stay correct when labels wrap at large text. Nav labels keep their width and scroll inside the gold bar rather than widening the page.
+- **Mobile:** destinations move to a horizontally scrollable second row; targets stay ≥44px. The header height is content-driven and the live `--nav-height` follows it, so sticky offsets stay correct when labels wrap at large text. Nav labels keep their width and scroll inside the gold bar rather than widening the page; the active destination is centered in that row.
 
 ### Page Header
 Title in the display face with an optional 15px secondary description (65ch) above a 1px `#d7d7d0` rule; 1.5rem below the rule. Match's head is sticky on desktop with the mode controls and one commit row on the right: the secondary **Remove…** action and the gold counted **Save N → Queue**, in the same positions in both review modes; on phones the head scrolls with the list and the two actions share a full-width row; the intro also shortens to the record-check-and-save reminder while desktop keeps the full copy. At 200% text the commit row wraps and the Save action takes a full line instead of forcing horizontal page scroll.

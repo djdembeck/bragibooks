@@ -20,6 +20,31 @@
 	const pathname = $derived(page.url.pathname);
 
 	let headerEl = $state<HTMLElement>();
+	let navEl = $state<HTMLElement>();
+
+	function centerActiveNav() {
+		if (!navEl || navEl.scrollWidth <= navEl.clientWidth) return;
+		const active = navEl.querySelector<HTMLElement>('[aria-current="page"]');
+		if (!active) return;
+		const navRect = navEl.getBoundingClientRect();
+		const activeRect = active.getBoundingClientRect();
+		const targetLeft =
+			navEl.scrollLeft +
+			activeRect.left -
+			navRect.left -
+			(navEl.clientWidth - activeRect.width) / 2;
+		navEl.scrollTo({ left: Math.max(0, targetLeft), behavior: 'auto' });
+	}
+
+	$effect(() => {
+		if (!navEl || !pathname) return;
+		if (typeof requestAnimationFrame === 'undefined') {
+			centerActiveNav();
+			return;
+		}
+		const frame = requestAnimationFrame(centerActiveNav);
+		return () => cancelAnimationFrame(frame);
+	});
 
 	$effect(() => {
 		if (!headerEl) return;
@@ -30,6 +55,7 @@
 				'--nav-height',
 				`${Math.ceil(headerEl!.getBoundingClientRect().height)}px`
 			);
+			centerActiveNav();
 		};
 		sync();
 		if (typeof ResizeObserver === 'undefined') return;
@@ -54,7 +80,7 @@
 			<span class="workspace-brand__name">Bragi Books</span>
 		</a>
 
-		<nav class="workspace-nav" aria-label="Main">
+		<nav class="workspace-nav" aria-label="Main" bind:this={navEl}>
 			{#each links as link (link.href)}
 				{@const active = isActive(link.href, pathname)}
 				<a

@@ -378,8 +378,8 @@
 		border-color: var(--accent-pressed);
 	}
 
-	.btn-primary:disabled,
-	.btn-primary[aria-disabled='true'] {
+	.btn:disabled,
+	.btn[aria-disabled='true'] {
 		opacity: 0.45;
 		cursor: not-allowed;
 	}
