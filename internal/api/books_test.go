@@ -10,7 +10,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -715,6 +717,119 @@ func TestCreateBooksIntakeSurvivesProbeFailure(t *testing.T) {
 	}
 }
 
+// TestCreateBooksBatchBudgetSkipsLateMetadata checks that once the
+// per-request metadata budget is exhausted the remaining books still get a
+// row, but a degraded one with the budget-exceeded cause.
+func TestCreateBooksBatchBudgetSkipsLateMetadata(t *testing.T) {
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "1.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	ffprobe, respDir := stubFFprobeForMetadata(t)
+	writeProbeSidecar(t, respDir, "1.mp3",
+		`{"format": {"duration": "300.0", "tags": {"title": "Stub Title"}}, "streams": []}`)
+
+	oldBudget := maxSourceMetadataBatchBudget
+	t.Cleanup(func() { maxSourceMetadataBatchBudget = oldBudget })
+	// An already-passed deadline: the first book's attachment is skipped
+	// too, which isolates the budget path from extraction.
+	maxSourceMetadataBatchBudget = -time.Second
+
+	h := &Handler{svc: &Services{DB: newTestDB(t), FFprobe: ffprobe}}
+	body, err := json.Marshal(CreateBooksRequest{Books: []CreateBookEntry{{SrcPath: srcDir}}})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/api/books", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.CreateBooks(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create status = %d; want 201 — body: %s", w.Code, w.Body.String())
+	}
+
+	var payload string
+	if err := h.svc.DB.QueryRow("SELECT payload FROM book_source_metadata WHERE book_id = 1").Scan(&payload); err != nil {
+		t.Fatalf("fetch source metadata row: %v", err)
+	}
+	var snap map[string]any
+	if err := json.Unmarshal([]byte(payload), &snap); err != nil {
+		t.Fatalf("decode source metadata payload: %v", err)
+	}
+	wantAllFieldStatuses(t, snap, "error")
+	if !strings.Contains(snap["fields"].(map[string]any)["title"].(map[string]any)["error"].(string), "budget exhausted") {
+		t.Errorf("title error = %v, want the budget-exceeded cause", snap["fields"])
+	}
+}
+
+// TestCreateBooksBatchDeadlineCancelsInFlightExtraction checks that an
+// extraction started just before the batch deadline is bounded by it: the
+// probe pass is canceled when the budget expires, the book still gets a
+// (degraded) row, and intake returns long before the probe would finish.
+func TestCreateBooksBatchDeadlineCancelsInFlightExtraction(t *testing.T) {
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "1.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	// A slow ffprobe stand-in: sleeps 30s (detached from the pipe so the
+	// kill does not leave a blocked writer) before emitting a successful
+	// probe. If the deadline never canceled it, the row would say present.
+	respDir := t.TempDir()
+	writeProbeSidecar(t, respDir, "1.mp3",
+		`{"format": {"duration": "300.0", "tags": {"title": "Stub Title"}}, "streams": []}`)
+	bin := filepath.Join(t.TempDir(), "ffprobe")
+	script := `#!/bin/sh
+for last; do :; done
+# The sleeper's stdio goes to /dev/null, not the inherited probe pipe:
+# when the deadline SIGKILLs the shell, the orphan must not hold the
+# write end open and block the probe reader for the full sleep.
+sleep 30 >/dev/null 2>&1 &
+wait
+base=$(basename "$last")
+cat "` + respDir + `/${base}.json"
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub ffprobe: %v", err)
+	}
+
+	oldBudget := maxSourceMetadataBatchBudget
+	t.Cleanup(func() { maxSourceMetadataBatchBudget = oldBudget })
+	maxSourceMetadataBatchBudget = 300 * time.Millisecond
+
+	h := &Handler{svc: &Services{DB: newTestDB(t), FFprobe: bin}}
+	body, err := json.Marshal(CreateBooksRequest{Books: []CreateBookEntry{{SrcPath: srcDir}}})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/api/books", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	start := time.Now()
+	h.CreateBooks(w, req)
+	elapsed := time.Since(start)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create status = %d; want 201 — body: %s", w.Code, w.Body.String())
+	}
+
+	// The probe was killed at the deadline, not run to success.
+	snap := metadataPayloadFor(t, h.svc.DB, 1)
+	wantAllFieldStatuses(t, snap, "error")
+	fields := sourceMetadataFields(t, snap)
+	if !strings.Contains(fields["title"]["error"].(string), "all 1 probed files failed") {
+		t.Errorf("title error = %v, want the all-failed message", fields["title"])
+	}
+	files, ok := snap["files"].([]any)
+	if !ok || len(files) != 1 {
+		t.Fatalf("files = %v, want one per-file entry", snap["files"])
+	}
+	first, _ := files[0].(map[string]any)
+	if first["error"] == nil || first["error"] == "" {
+		t.Errorf("files[0].error empty, want the canceled-probe failure")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("intake took %v, want the probe canceled at the ~300ms deadline", elapsed)
+	}
+}
+
 func TestUpdateBookLeavesSourceMetadataUntouched(t *testing.T) {
 	srcDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(srcDir, "1.mp3"), []byte("x"), 0o644); err != nil {
@@ -788,5 +903,32 @@ func TestDeleteBookCascadesSourceMetadata(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("book_source_metadata rows = %d; want 0 (cascade)", count)
+	}
+}
+
+// TestCreateBookSurvivesMetadataInsertFailure pins the log-only contract
+// of persistSourceMetadata: when the book_source_metadata INSERT fails
+// (here: the table is absent) intake must still return 201 and the book
+// row must exist.
+func TestCreateBookSurvivesMetadataInsertFailure(t *testing.T) {
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "1.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	db := newTestDB(t)
+	if _, err := db.Exec("DROP TABLE book_source_metadata"); err != nil {
+		t.Fatalf("drop metadata table: %v", err)
+	}
+
+	h := &Handler{svc: &Services{DB: db}}
+	book := postBook(t, h, srcDir)
+
+	var status string
+	if err := h.svc.DB.QueryRow("SELECT status FROM books WHERE id = ?", book.ID).Scan(&status); err != nil {
+		t.Fatalf("query created book: %v", err)
+	}
+	if status != "pending" {
+		t.Errorf("book status = %q; want pending", status)
 	}
 }

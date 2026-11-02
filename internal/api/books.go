@@ -453,6 +453,10 @@ func (h *Handler) CreateBooks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	created := make([]models.Book, 0, len(req.Books))
+	// The metadata pass is best-effort: cap its wall clock per request so
+	// a large batch on slow storage cannot hold intake open for hours.
+	// Books after the deadline get a degraded row (the row contract holds).
+	metadataDeadline := time.Now().Add(maxSourceMetadataBatchBudget)
 	for _, entry := range req.Books {
 		title := entry.Title
 		if title == "" {
@@ -477,7 +481,18 @@ func (h *Handler) CreateBooks(w http.ResponseWriter, r *http.Request) {
 		// read its own art now so Match can show the original cover beside
 		// catalog candidates instead of an empty placeholder.
 		h.attachSourceCover(r.Context(), id, entry.SrcPath)
-		h.attachSourceMetadata(r.Context(), id, entry.SrcPath)
+		// The deadline is the wall-clock cap, not just a start gate: an
+		// extraction begun just before it must not run its full per-book
+		// budget past it, so the context is bound to it and the probe pass
+		// is canceled when it expires.
+		extractCtx, cancel := context.WithDeadline(r.Context(), metadataDeadline)
+		if time.Now().Before(metadataDeadline) {
+			h.attachSourceMetadata(extractCtx, id, entry.SrcPath)
+		} else {
+			log.Printf("source metadata for book %d: batch budget exhausted, extraction skipped", id)
+			h.persistSourceMetadata(id, audio.DegradedSourceMetadata("batch wall-clock budget exhausted; extraction not run"))
+		}
+		cancel()
 		h.svc.ProcessingSvc.RecordBookAction(id, "import", entry.SrcPath)
 		book, err := h.getBook(id)
 		if err != nil {
@@ -499,6 +514,12 @@ func (h *Handler) CreateBooks(w http.ResponseWriter, r *http.Request) {
 // sourceCoverTimeout bounds the ffmpeg run per ingested book: cover art is
 // cosmetic and must not hold the intake request open on a slow mount.
 const sourceCoverTimeout = 30 * time.Second
+
+// maxSourceMetadataBatchBudget bounds the total wall clock of source
+// metadata extraction per intake request: the per-book probe pass is up to
+// 60s each, so a large batch on slow storage must not hold intake open.
+// Tests may shrink it.
+var maxSourceMetadataBatchBudget = 10 * time.Minute
 
 // attachSourceCover extracts the art the source already carries into the
 // covers directory and records its served URL on the book. Best-effort:
@@ -544,6 +565,12 @@ func (h *Handler) attachSourceMetadata(ctx context.Context, bookID int64, srcPat
 			snap = audio.DegradedSourceMetadata(fmt.Sprintf("extraction failed: %v", err))
 		}
 	}
+	h.persistSourceMetadata(bookID, snap)
+}
+
+// persistSourceMetadata writes one book's snapshot row; failures are
+// log-only so the row never fails intake.
+func (h *Handler) persistSourceMetadata(bookID int64, snap *audio.SourceMetadata) {
 	payload, marshalErr := json.Marshal(snap)
 	if marshalErr != nil {
 		log.Printf("marshal source metadata for book %d: %v", bookID, marshalErr)

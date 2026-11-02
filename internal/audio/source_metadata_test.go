@@ -2,11 +2,15 @@ package audio
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // stubFFprobe writes an executable shell script standing in for ffprobe.
@@ -265,6 +269,40 @@ func TestExtractSourceMetadataAllFilesFailIsDegraded(t *testing.T) {
 	}
 }
 
+// TestExtractSourceMetadataAllFilesFailKeepsFilenameASIN checks that the
+// all-probes-failed degradation keeps the filename ASIN: the degraded
+// override must not write over a value no successful probe could supply.
+func TestExtractSourceMetadataAllFilesFailKeepsFilenameASIN(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	// No sidecars: both probes fail.
+	srcDir := t.TempDir()
+	for _, name := range []string{"b012345678 - book.mp3", "2.mp3"} {
+		if err := os.WriteFile(filepath.Join(srcDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+
+	snap := runExtraction(t, ffprobe, srcDir)
+	wantField(t, snap, FieldASIN, StatusPresent, "B012345678")
+	if got := snap.Fields[FieldASIN].Source; got != SourceFilename {
+		t.Errorf("asin source = %q, want %q", got, SourceFilename)
+	}
+	for _, f := range fieldKeys {
+		if f == FieldASIN {
+			continue
+		}
+		if sf := snap.Fields[f]; sf.Status != StatusError || !strings.Contains(sf.Error, "all 2 probed files failed") {
+			t.Errorf("field %s = %+v, want the all-failed error", f, sf)
+		}
+	}
+	if snap.Files[0].Error == "" || snap.Files[1].Error == "" {
+		t.Errorf("files = %+v, want per-file probe errors retained", snap.Files)
+	}
+}
+
 func TestExtractSourceMetadataEmptyFolderIsAllMissing(t *testing.T) {
 	respDir := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "ran")
@@ -296,6 +334,431 @@ func TestExtractSourceMetadataMissingSourceIsDegraded(t *testing.T) {
 		if f.Error == "" {
 			t.Errorf("field %s error empty, want the stat failure", key)
 		}
+	}
+}
+
+// TestExtractSourceMetadataProbeOutputCapExercises exercises the 1 MiB
+// probe-output cap: the probe is errored, which makes the pass incomplete,
+// so every empty field is errored (extraction incomplete), never claimed
+// missing.
+func TestExtractSourceMetadataProbeOutputCapExercises(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	// A 1.05 MiB tag value pushes the probe output over the 1 MiB cap
+	// (the value itself is under the 2 KiB per-value cap).
+	longValue := strings.Repeat("x", 1050*1024)
+	writeProbeResponse(t, respDir, "1", `{"format": {"duration": "10", "tags": {"title": "`+longValue+`"}}, "streams": []}`)
+
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "1.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	snap := runExtraction(t, ffprobe, srcDir)
+	if len(snap.Files) != 1 || !strings.Contains(snap.Files[0].Error, "probe output exceeds 1 MiB") {
+		t.Fatalf("files = %+v, want the capped probe errored", snap.Files)
+	}
+	// The probe error makes the pass incomplete: no field may claim the
+	// source lacks a tag.
+	wantAllFieldsStatus(t, snap, StatusError, SourceDegraded)
+}
+
+// TestExtractSourceMetadataFileCapIsTruncated exercises the 100-file probe
+// cap: file 101 is never probed, so the pass is incomplete and an empty
+// field is errored, not missing.
+func TestExtractSourceMetadataFileCapIsTruncated(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	srcDir := t.TempDir()
+	for i := 1; i <= 101; i++ {
+		name := fmt.Sprintf("%03d.mp3", i)
+		if i == 1 {
+			// Only file 1 supplies a title: the file that never gets
+			// probed would have supplied the author.
+			writeProbeResponse(t, respDir, name[:len(name)-4],
+				`{"format": {"duration": "1", "tags": {"title": "Capped"}}, "streams": []}`)
+		} else {
+			writeProbeResponse(t, respDir, name[:len(name)-4],
+				`{"format": {"duration": "1", "tags": {}}, "streams": []}`)
+		}
+		if err := os.WriteFile(filepath.Join(srcDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+
+	snap := runExtraction(t, ffprobe, srcDir)
+	// The cap is enforced at discovery: only 100 of the 101 matched
+	// files are kept, truncated is flagged, and all kept files are
+	// probed.
+	if !snap.Truncated {
+		t.Fatal("truncated = false, want true (file cap hit)")
+	}
+	if snap.FilesTotal != 100 || snap.FilesProbed != 100 {
+		t.Fatalf("files_total/probed = %d/%d, want 100/100", snap.FilesTotal, snap.FilesProbed)
+	}
+	wantField(t, snap, FieldTitle, StatusPresent, "Capped")
+	// Truncation alone makes the pass incomplete: the unscanned file
+	// could have supplied the author.
+	wantField(t, snap, FieldAuthor, StatusError)
+}
+
+// TestExtractSourceMetadataRawTagCapIsTruncated exercises the 64 KiB
+// raw-tag retention cap: the first file's tags are kept, the second file's
+// are dropped, and the pass is marked truncated.
+func TestExtractSourceMetadataRawTagCapIsTruncated(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	// Each tag value is capped at 2 KiB, so the 64 KiB raw cap is only
+	// reachable across many wide tags: file 1's 32 (~64 KiB) just fit,
+	// file 2's push it over.
+	wideDoc := func(ch byte, n int) string {
+		tags := make([]string, n)
+		for i := range n {
+			tags[i] = fmt.Sprintf(`"t%02d": "%s"`, i, strings.Repeat(string(ch), 2000))
+		}
+		return `{"format": {"duration": "10", "tags": {` + strings.Join(tags, ", ") + `}}, "streams": []}`
+	}
+	writeProbeResponse(t, respDir, "1", wideDoc('a', 32))
+	writeProbeResponse(t, respDir, "2", `{"format": {"duration": "10", "tags": {"publisher": "`+strings.Repeat("b", 2044)+`"}}, "streams": []}`)
+
+	srcDir := t.TempDir()
+	for _, name := range []string{"1.mp3", "2.mp3"} {
+		if err := os.WriteFile(filepath.Join(srcDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+
+	snap := runExtraction(t, ffprobe, srcDir)
+	if !snap.Truncated {
+		t.Fatal("truncated = false, want true (raw-tag cap hit)")
+	}
+	if len(snap.RawTags) != 1 || snap.RawTags[0].File != "1.mp3" {
+		t.Fatalf("raw_tags = %d entries, want one entry for 1.mp3", len(snap.RawTags))
+	}
+	// File 2 was fully probed (no per-file error), so its publisher value
+	// survives even though its raw tags were dropped.
+	wantField(t, snap, FieldPublisher, StatusPresent)
+	// Truncation makes the pass incomplete: a field no probe supplied
+	// must be errored, never claimed missing.
+	wantField(t, snap, FieldTitle, StatusError)
+	wantField(t, snap, FieldAuthor, StatusError)
+}
+
+// TestExtractSourceMetadataMissingSourceKeepsFilenameASIN checks that a
+// vanished source degrades to all-error rows, except the ASIN field, which
+// the filename still supplies.
+func TestExtractSourceMetadataMissingSourceKeepsFilenameASIN(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	snap := runExtraction(t, ffprobe, filepath.Join(t.TempDir(), "b012345678 - book.m4b"))
+	wantField(t, snap, FieldASIN, StatusPresent, "B012345678")
+	if got := snap.Fields[FieldASIN].Source; got != SourceFilename {
+		t.Errorf("asin source = %q, want %q", got, SourceFilename)
+	}
+	wantField(t, snap, FieldTitle, StatusError)
+	wantField(t, snap, FieldAuthor, StatusError)
+	if snap.SourceKind != "unknown" {
+		t.Errorf("source_kind = %q, want unknown", snap.SourceKind)
+	}
+}
+
+// TestExtractSourceMetadataStreamWinsOverDifferentlyCasedFormatTag pins
+// the case-insensitive format/stream collision: the format tag is spelled
+// TITLE and the first audio stream's title is spelled title. The narrower
+// (stream) scope must win deterministically, not by map iteration order.
+func TestExtractSourceMetadataStreamWinsOverDifferentlyCasedFormatTag(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	writeProbeResponse(t, respDir, "1", `{
+  "format": {"duration": "10", "tags": {"TITLE": "Format Value"}},
+  "streams": [{"codec_type": "audio", "tags": {"title": "Stream Value"}}]
+}`)
+
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "1.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	for range 10 {
+		snap := runExtraction(t, ffprobe, srcDir)
+		wantField(t, snap, FieldTitle, StatusPresent, "Stream Value")
+	}
+}
+
+// TestExtractSourceMetadataProbeRestrictsProtocols asserts the probe is
+// launched with the local-only protocol whitelist: a crafted container
+// must not be able to make ffprobe reach the network.
+func TestExtractSourceMetadataProbeRestrictsProtocols(t *testing.T) {
+	respDir := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "argv")
+	bin := filepath.Join(t.TempDir(), "ffprobe")
+	script := `#!/bin/sh
+printf '%s
+' "$@" > ` + argsFile + `
+for last; do :; done
+base=$(basename "$last")
+cat "` + respDir + `/${base}.json"
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub ffprobe: %v", err)
+	}
+	writeProbeResponse(t, respDir, "1.mp3", `{"format": {"duration": "10", "tags": {"title": "Named"}}, "streams": []}`)
+
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "1.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	snap := runExtraction(t, bin, srcDir)
+	wantField(t, snap, FieldTitle, StatusPresent, "Named")
+
+	raw, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read argv sidecar: %v", err)
+	}
+	args := strings.Fields(string(raw))
+	for i, a := range args {
+		if a == "-protocol_whitelist" {
+			if i+1 >= len(args) || args[i+1] != "file,pipe,data" {
+				t.Fatalf("probe argv = %q, want -protocol_whitelist file,pipe,data", args)
+			}
+			return
+		}
+	}
+	t.Fatalf("probe argv = %q, want the -protocol_whitelist flag", args)
+}
+
+// TestExtractSourceMetadataOverLimitProbeIsKilledAndReaped pins the reap
+// fix: when the probe output exceeds the 1 MiB cap the child is killed
+// AND reaped, so after the extraction returns nothing is left alive (or
+// as a zombie) from the probe.
+func TestExtractSourceMetadataOverLimitProbeIsKilledAndReaped(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "probe.pid")
+	bin := filepath.Join(t.TempDir(), "ffprobe")
+	script := `#!/bin/sh
+echo $$ > ` + pidFile + `
+head -c 1100000 /dev/zero | tr '\0' 'x'
+sleep 300
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub ffprobe: %v", err)
+	}
+
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "1.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	snap := runExtraction(t, bin, srcDir)
+	if len(snap.Files) != 1 || !strings.Contains(snap.Files[0].Error, "probe output exceeds 1 MiB") {
+		t.Fatalf("files = %+v, want the capped probe errored", snap.Files)
+	}
+
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read probe pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("parse probe pid: %v", err)
+	}
+	// Bounded settle loop, not a sleep: kill -0 also reports zombies, so
+	// a live process here means the reap (kill + wait) did not happen.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := syscall.Kill(pid, 0); err != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("probe pid %d still alive after extraction returned", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestExtractSourceMetadataTagValueCapIsIndependent pins the per-tag 2 KiB
+// value cap: a probe response comfortably under the 1 MiB output cap still
+// has its oversized value truncated in both the merged field and the
+// retained raw tags, and the probe itself succeeds.
+func TestExtractSourceMetadataTagValueCapIsIndependent(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	long := strings.Repeat("v", 3000)
+	writeProbeResponse(t, respDir, "1", `{"format": {"duration": "10", "tags": {"title": "`+long+`"}}, "streams": []}`)
+
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "1.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	snap := runExtraction(t, ffprobe, srcDir)
+	if len(snap.Files) != 1 || snap.Files[0].Error != "" {
+		t.Fatalf("files = %+v, want one clean probe", snap.Files)
+	}
+	wantValue := strings.Repeat("v", 2048) + "…"
+	wantField(t, snap, FieldTitle, StatusPresent, wantValue)
+	if len(snap.RawTags) != 1 || snap.RawTags[0].Tags["title"] != wantValue {
+		t.Errorf("raw title = %q, want the same 2 KiB-capped value", snap.RawTags[0].Tags["title"])
+	}
+}
+
+// TestExtractSourceMetadataProbeStderrIsBounded pins the 512-byte stderr
+// cap: a probe failing with a large stderr has only its first 512 bytes
+// retained in the per-file error, and the extraction returns promptly
+// (the bounded writer never makes the child block).
+func TestExtractSourceMetadataProbeStderrIsBounded(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "ffprobe")
+	script := `#!/bin/sh
+head -c 2000 /dev/zero | tr '\0' 'e' >&2
+exit 1
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub ffprobe: %v", err)
+	}
+
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "1.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	snap := runExtraction(t, bin, srcDir)
+	if len(snap.Files) != 1 {
+		t.Fatalf("files = %+v, want one per-file entry", snap.Files)
+	}
+	const marker = "; stderr: "
+	idx := strings.Index(snap.Files[0].Error, marker)
+	if idx < 0 {
+		t.Fatalf("file error = %q, want the stderr quote", snap.Files[0].Error)
+	}
+	if retained := snap.Files[0].Error[idx+len(marker):]; len(retained) != 512 {
+		t.Fatalf("retained stderr = %d bytes, want the 512-byte cap", len(retained))
+	}
+}
+
+// TestExtractSourceMetadataDistinctValueCapPinsTheFirstTwenty pins the
+// per-field 20-distinct-value bound: 21 files with distinct titles keep
+// exactly the first 20 in first-seen (sorted path) order.
+func TestExtractSourceMetadataDistinctValueCapPinsTheFirstTwenty(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	srcDir := t.TempDir()
+	for i := range 21 {
+		stem := fmt.Sprintf("%03d", i)
+		writeProbeResponse(t, respDir, stem,
+			fmt.Sprintf(`{"format": {"duration": "1", "tags": {"title": "T%02d"}}, "streams": []}`, i))
+		if err := os.WriteFile(filepath.Join(srcDir, stem+".mp3"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+
+	snap := runExtraction(t, ffprobe, srcDir)
+	want := make([]string, 20)
+	for i := range want {
+		want[i] = fmt.Sprintf("T%02d", i)
+	}
+	wantField(t, snap, FieldTitle, StatusPresent, want...)
+}
+
+// TestExtractSourceMetadataDiscoveryBoundTruncatesBeforeAudio pins the
+// 1000-entry discovery bound: the scan walks in 64-entry batches and
+// truncates once a batch pushes the scanned count past 1000, so a folder
+// with more entries than the bound (but no audio in the scanned window)
+// is marked truncated. A truncated scan cannot claim the unscanned entries
+// held nothing, so empty fields report error, never missing.
+//
+// The folder carries 1029 non-audio files — just past 16 full batches —
+// so the 17th read never happens: the bound trips on batch 16 (scanned
+// 1028 >= 1000), independent of the filesystem's read order.
+func TestExtractSourceMetadataDiscoveryBoundTruncatesBeforeAudio(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	srcDir := t.TempDir()
+	for i := range 1029 {
+		name := fmt.Sprintf("%04d.txt", i)
+		if err := os.WriteFile(filepath.Join(srcDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write fixture %s: %v", name, err)
+		}
+	}
+
+	snap := runExtraction(t, ffprobe, srcDir)
+	if !snap.Truncated {
+		t.Fatal("truncated = false, want true (discovery bound hit)")
+	}
+	if snap.FilesTotal != 0 || snap.FilesProbed != 0 {
+		t.Errorf("files_total/probed = %d/%d, want 0/0 (no audio in the scanned window)",
+			snap.FilesTotal, snap.FilesProbed)
+	}
+	wantAllFieldsStatus(t, snap, StatusError, SourceEmbedded)
+}
+
+// TestExtractSourceMetadataSingleFileSource pins the direct file branch:
+// a non-directory source probes the one file and reports source_kind
+// "file", one probed file, its mapped fields, and its duration.
+func TestExtractSourceMetadataSingleFileSource(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	writeProbeResponse(t, respDir, "book",
+		`{"format": {"duration": "90.5", "tags": {"title": "Solo", "album_artist": "Sole Author"}}, "streams": []}`)
+
+	src := filepath.Join(t.TempDir(), "book.m4b")
+	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	snap := runExtraction(t, ffprobe, src)
+	if snap.SourceKind != "file" {
+		t.Errorf("source_kind = %q, want file", snap.SourceKind)
+	}
+	if snap.FilesTotal != 1 || snap.FilesProbed != 1 {
+		t.Errorf("files_total/probed = %d/%d, want 1/1", snap.FilesTotal, snap.FilesProbed)
+	}
+	if snap.DurationSeconds != 90.5 {
+		t.Errorf("duration_seconds = %v, want 90.5", snap.DurationSeconds)
+	}
+	wantField(t, snap, FieldTitle, StatusPresent, "Solo")
+	wantField(t, snap, FieldAuthor, StatusPresent, "Sole Author")
+}
+
+// TestExtractSourceMetadataEmbeddedASINOutranksFilename pins the ASIN
+// precedence: a source whose filename carries an ASIN keeps the embedded
+// tag's value (and its embedded provenance) when a probe supplies one;
+// the filename ASIN is never recorded as the field value.
+func TestExtractSourceMetadataEmbeddedASINOutranksFilename(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	name := "B0ZZZZZZZZ - book.m4b"
+	writeProbeResponse(t, respDir, "B0ZZZZZZZZ - book",
+		`{"format": {"duration": "10", "tags": {"audible_asin": "B0EMBEDDED"}}, "streams": []}`)
+
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, name), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	snap := runExtraction(t, ffprobe, srcDir)
+	wantField(t, snap, FieldASIN, StatusPresent, "B0EMBEDDED")
+	if got := snap.Fields[FieldASIN].Source; got != SourceEmbedded {
+		t.Errorf("asin source = %q, want %q", got, SourceEmbedded)
 	}
 }
 

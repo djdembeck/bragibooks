@@ -151,13 +151,22 @@ func ExtractSourceMetadata(ctx context.Context, ffprobe, srcPath string) (*Sourc
 	defer cancel()
 
 	snap := &SourceMetadata{
-		Schema: SourceMetadataSchema,
-		Fields: make(map[string]SourceField, len(tagPrecedence)),
+		Schema:     SourceMetadataSchema,
+		SourceKind: "unknown",
+		Fields:     make(map[string]SourceField, len(tagPrecedence)),
 	}
 
 	stat, err := os.Stat(srcPath)
 	if err != nil {
-		return degradedSnapshot(snap, err.Error()), nil
+		snap = degradedSnapshot(snap, err.Error())
+		// Filename extraction needs no successful probe: a stat failure
+		// (renamed source, vanished file) still leaves a scannable name.
+		// Set the field only when a value is found so a clean degradation
+		// stays all-error.
+		if values := findASINs([]string{filepath.Base(srcPath)}); len(values) > 0 {
+			snap.Fields[FieldASIN] = SourceField{Values: values, Source: SourceFilename, Status: StatusPresent}
+		}
+		return snap, nil
 	}
 
 	var paths []string
@@ -183,7 +192,12 @@ func ExtractSourceMetadata(ctx context.Context, ffprobe, srcPath string) (*Sourc
 		if len(snap.Files) > 0 {
 			firstErr = snap.Files[0].Error
 		}
-		return degradedSnapshot(snap, fmt.Sprintf("all %d probed files failed: %s", len(paths), firstErr)), nil
+		// Filename extraction needs no successful probe; run it after the
+		// degraded override so a found value is not written over by the
+		// all-error marking.
+		snap = degradedSnapshot(snap, fmt.Sprintf("all %d probed files failed: %s", len(paths), firstErr))
+		applyASINFallback(snap, srcPath)
+		return snap, nil
 	}
 
 	mergeFields(snap, merged)
@@ -295,7 +309,7 @@ func probeFiles(ctx context.Context, ffprobe string, paths []string, snap *Sourc
 		snap.FilesProbed++
 		snap.Files = append(snap.Files, SourceFile{File: filepath.Base(path)})
 
-		effective, duration, probeErr := probeOne(ctx, ffprobe, path)
+		effective, lowered, duration, probeErr := probeOne(ctx, ffprobe, path)
 		if probeErr != "" {
 			snap.Files[len(snap.Files)-1].Error = probeErr
 			probedErrs++
@@ -318,12 +332,10 @@ func probeFiles(ctx context.Context, ffprobe string, paths []string, snap *Sourc
 
 		// Tag keys are matched case-insensitively (ID3 and M4B spell
 		// the same tag differently); RawTags above keeps the original
-		// spellings.
-		normalized := make(map[string]string, len(effective))
-		for k, v := range effective {
-			normalized[strings.ToLower(k)] = v
-		}
-		mergeDoc(merged, seen, normalized)
+		// spellings. `lowered` folds the effective overlay
+		// case-insensitively with stream scope winning, so same-key,
+		// different-case format/stream collisions are deterministic.
+		mergeDoc(merged, seen, lowered)
 	}
 	return merged, probedErrs
 }
@@ -363,18 +375,34 @@ func addValue(merged map[string][]string, seen map[string]map[string]bool, field
 	merged[field] = append(merged[field], value)
 }
 
-// probeOne runs a single bounded ffprobe and returns the effective tag
-// map, the parsed duration, and an error message ("" on success).
-func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, float64, string) {
-	cmd := exec.CommandContext(ctx, ffprobe, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path)
+// probeOne runs a single bounded ffprobe and returns the original-case
+// effective tag map, the same tags lowercased, the parsed duration, and
+// an error message ("" on success).
+func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, map[string]string, float64, string) {
+	cmd := exec.CommandContext(ctx, ffprobe,
+		// ffprobe infers the format from file content, so a crafted
+		// playlist or container can reference remote resources; restrict
+		// it to local protocols.
+		"-protocol_whitelist", "file,pipe,data",
+		"-v", "error", "-print_format", "json", "-show_format", "-show_streams", path)
 	stderr := &limitedWriter{}
 	cmd.Stderr = stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, 0, fmt.Sprintf("probe pipe: %v", err)
+		return nil, nil, 0, fmt.Sprintf("probe pipe: %v", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, 0, fmt.Sprintf("start probe: %v", err)
+		return nil, nil, 0, fmt.Sprintf("start probe: %v", err)
+	}
+
+	// reap kills the child and reaps it after closing stdout, so an early
+	// return leaves no process blocked on the pipe.
+	reap := func() {
+		_ = stdout.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
 	}
 
 	var out []byte
@@ -385,18 +413,20 @@ func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, flo
 			out = append(out, tmp[:n]...)
 		}
 		if len(out) > maxProbeOutputBytes {
-			return nil, 0, "probe output exceeds 1 MiB"
+			reap()
+			return nil, nil, 0, "probe output exceeds 1 MiB"
 		}
 		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
 			break
 		}
 		if rerr != nil {
-			return nil, 0, fmt.Sprintf("read probe output: %v; stderr: %s", rerr, string(stderr.b))
+			reap()
+			return nil, nil, 0, fmt.Sprintf("read probe output: %v; stderr: %s", rerr, string(stderr.b))
 		}
 	}
 	runErr := cmd.Wait()
 	if runErr != nil {
-		return nil, 0, fmt.Sprintf("ffprobe: %v; stderr: %s", runErr, string(stderr.b))
+		return nil, nil, 0, fmt.Sprintf("ffprobe: %v; stderr: %s", runErr, string(stderr.b))
 	}
 
 	var doc struct {
@@ -410,7 +440,7 @@ func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, flo
 		} `json:"streams"`
 	}
 	if err := json.NewDecoder(bytes.NewReader(out)).Decode(&doc); err != nil {
-		return nil, 0, fmt.Sprintf("parse probe output: %v", err)
+		return nil, nil, 0, fmt.Sprintf("parse probe output: %v", err)
 	}
 
 	// Effective tags: format-level tags overlaid by the first audio
@@ -434,8 +464,30 @@ func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, flo
 		}
 	}
 
+	// Case-insensitive fold of the same overlay: format tags first, then
+	// stream tags, so a same-key/different-case collision (TITLE vs
+	// title) is decided deterministically by scope, not map iteration
+	// order.
+	lowered := make(map[string]string, len(effective))
+	for k, v := range doc.Format.Tags {
+		lowered[strings.ToLower(k)] = v
+	}
+	for _, s := range doc.Streams {
+		if s.CodecType == "audio" {
+			for k, v := range s.Tags {
+				lowered[strings.ToLower(k)] = v
+			}
+			break
+		}
+	}
+	for k, v := range lowered {
+		if len(v) > maxTagValueBytes {
+			lowered[k] = v[:maxTagValueBytes] + "…"
+		}
+	}
+
 	duration, _ := strconv.ParseFloat(doc.Format.Duration, 64)
-	return effective, duration, ""
+	return effective, lowered, duration, ""
 }
 
 // mergeFields turns the accumulated value lists into per-field states.
@@ -483,17 +535,9 @@ func (s *SourceMetadata) incompleteMsg() string {
 		errored, s.FilesTotal-s.FilesProbed, s.FilesTotal)
 }
 
-// applyASINFallback scans basenames for an ASIN when no embedded value
-// exists.
-func applyASINFallback(snap *SourceMetadata, srcPath string) {
-	if f, ok := snap.Fields[FieldASIN]; ok && len(f.Values) > 0 {
-		return
-	}
-
-	names := []string{filepath.Base(srcPath)}
-	for _, file := range snap.Files {
-		names = append(names, file.File)
-	}
+// findASINs scans basenames (extension stripped) for ASINs, returning the
+// distinct matches normalized to uppercase in first-seen order.
+func findASINs(names []string) []string {
 	seen := map[string]bool{}
 	var values []string
 	for _, name := range names {
@@ -509,8 +553,29 @@ func applyASINFallback(snap *SourceMetadata, srcPath string) {
 			}
 		}
 	}
+	return values
+}
+
+// applyASINFallback scans basenames for an ASIN when no embedded value
+// exists.
+func applyASINFallback(snap *SourceMetadata, srcPath string) {
+	if f, ok := snap.Fields[FieldASIN]; ok && len(f.Values) > 0 {
+		return
+	}
+
+	names := []string{filepath.Base(srcPath)}
+	for _, file := range snap.Files {
+		names = append(names, file.File)
+	}
+	values := findASINs(names)
 	if len(values) > 0 {
 		snap.Fields[FieldASIN] = SourceField{Values: values, Source: SourceFilename, Status: StatusPresent}
+		return
+	}
+	// A degraded all-error pass already wrote the ASIN field with its own
+	// cause; without a filename value there is nothing to improve, so keep
+	// the degraded field rather than re-deriving a narrower error message.
+	if f, ok := snap.Fields[FieldASIN]; ok && f.Source == SourceDegraded {
 		return
 	}
 	if !snap.incomplete() {
