@@ -1,3 +1,5 @@
+import type { MatchEvidenceReport } from './matchEvidence.js';
+
 /**
  * Wire shape of Go's `sql.NullString` fields: a plain string for valid
  * values, or the serialized struct `{String, Valid}` (with `Valid: false`
@@ -57,6 +59,8 @@ export interface Person {
 }
 
 export interface BookWithPeople {
+	/** Optional Match presentation report; not populated by current intake. */
+	match_evidence?: MatchEvidenceReport;
 	id: number;
 	title: string;
 	asin: NullString;
@@ -131,6 +135,11 @@ export interface ProcessingJob {
 	started_at: string | null;
 	completed_at: string | null;
 	created_at: string;
+	/** Durable enqueue order; SQLite created_at is second-precision. */
+	queue_order?: number;
+	/** Queue-time destination snapshot (profiled batches only). */
+	output_dir?: string;
+	output_scheme?: string;
 }
 
 export interface JobsListResponse {

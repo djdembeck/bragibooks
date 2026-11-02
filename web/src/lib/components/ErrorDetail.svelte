@@ -28,7 +28,7 @@
 {#if raw}
 	<details class={className}>
 		<summary
-			class="cursor-pointer select-none text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+			class="min-h-6 cursor-pointer select-none py-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
 		>
 			{label}
 		</summary>

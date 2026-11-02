@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/bragibooks/bragibooks/internal/audio"
 	"github.com/bragibooks/bragibooks/internal/models"
@@ -616,7 +617,25 @@ func deriveTitle(path string) string {
 	if name == "" {
 		name = "Untitled"
 	}
-	return strings.Title(name)
+	return titleCase(name)
+}
+
+// titleCase uppercases the first letter of each whitespace-separated word and
+// leaves the rest of the word untouched. strings.Title is deprecated and also
+// capitalizes after apostrophes ("Kane's" -> "Kane'S"), which mangles
+// contractions in source filenames.
+func titleCase(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	startOfWord := true
+	for _, r := range name {
+		if startOfWord {
+			r = unicode.ToUpper(r)
+		}
+		b.WriteRune(r)
+		startOfWord = unicode.IsSpace(r)
+	}
+	return b.String()
 }
 
 func replacePeople(db *sql.DB, bookID int64, authors, narrators []PersonUpdate) error {

@@ -57,6 +57,9 @@ type ProcessingJob struct {
 	StartedAt    *string       `db:"started_at" json:"started_at"`
 	CompletedAt  *string       `db:"completed_at" json:"completed_at"`
 	CreatedAt    string        `db:"created_at" json:"created_at"`
+	// QueueSeq is the durable enqueue order. SQLite's created_at is only
+	// second-precision, so a batch would otherwise have no stable FIFO tie.
+	QueueSeq int64 `db:"queue_seq" json:"queue_seq"`
 }
 
 // OutputProfile is a named, reusable output destination for queue batches:

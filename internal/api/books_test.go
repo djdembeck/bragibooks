@@ -431,6 +431,16 @@ func TestDeriveTitleStripsOnlyAudioExtensions(t *testing.T) {
 			path: "/some/path/Author_Book_Title.m4b",
 			want: "Author Book Title",
 		},
+		{
+			name: "apostrophe contraction",
+			path: "/library/01 Kane's Fate.mp3",
+			want: "01 Kane's Fate",
+		},
+		{
+			name: "typographic apostrophe contraction",
+			path: "/library/Charlotte’s Web.m4b",
+			want: "Charlotte’s Web",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
