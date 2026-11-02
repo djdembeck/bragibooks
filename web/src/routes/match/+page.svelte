@@ -115,6 +115,7 @@
 	// The removal toolbar docks directly under the sticky page head, whose
 	// height changes with wrapping and breakpoints.
 	let headEl = $state<HTMLElement>();
+	let inspectorEl = $state<HTMLElement>();
 	let headHeight = $state(0);
 
 	$effect(() => {
@@ -200,12 +201,27 @@
 	function openFocused(id: number) {
 		setActive(id);
 		setMode('focused');
+		void revealInspector();
 	}
 
-	function setActive(id: number) {
-		if (activeId === id) return;
-		activeId = id;
-		closePicker();
+	function setActive(id: number, reveal = false) {
+		if (activeId !== id) {
+			activeId = id;
+			closePicker();
+		}
+		if (reveal) void revealInspector();
+	}
+
+	function isPhoneLayout(): boolean {
+		return typeof window !== 'undefined' && window.matchMedia('(max-width: 900px)').matches;
+	}
+
+	async function revealInspector() {
+		if (!isPhoneLayout()) return;
+		await tick();
+		if (!inspectorEl) return;
+		inspectorEl.scrollIntoView({ block: 'start' });
+		inspectorEl.focus({ preventScroll: true });
 	}
 
 	/** Clamp the active source to a real candidate — after the initial load
@@ -1012,6 +1028,49 @@
 		return pathLast(candidate.srcPath) || candidate.title;
 	}
 
+	function sourceParent(candidate: MatchCandidate): string {
+		const trimmed = candidate.srcPath.replace(/\/+$/, '');
+		const i = trimmed.lastIndexOf('/');
+		return i > 0 ? trimmed.slice(0, i) : '';
+	}
+
+	function sourceParentLabel(candidate: MatchCandidate): string {
+		const parent = sourceParent(candidate);
+		const segments = parent.split('/').filter(Boolean);
+		if (segments.length === 0) return '';
+		const peers = candidates
+			.filter(
+				(other) =>
+					other.bookId !== candidate.bookId &&
+					sourceBase(other).toLocaleLowerCase() === sourceBase(candidate).toLocaleLowerCase()
+			)
+			.map((other) => sourceParent(other).split('/').filter(Boolean));
+		for (let depth = 1; depth <= segments.length; depth += 1) {
+			const suffix = segments.slice(-depth).join('/');
+			if (!peers.some((peer) => peer.slice(-depth).join('/') === suffix)) return suffix;
+		}
+		return segments.join('/');
+	}
+
+	const duplicateSourceBases = $derived.by(() => {
+		const counts = new Map<string, number>();
+		for (const candidate of candidates) {
+			const key = sourceBase(candidate).toLocaleLowerCase();
+			counts.set(key, (counts.get(key) ?? 0) + 1);
+		}
+		return counts;
+	});
+
+	function sourceNameIsAmbiguous(candidate: MatchCandidate): boolean {
+		return (duplicateSourceBases.get(sourceBase(candidate).toLocaleLowerCase()) ?? 0) > 1;
+	}
+
+	function sourceIdentity(candidate: MatchCandidate): string {
+		if (!sourceNameIsAmbiguous(candidate)) return sourceBase(candidate);
+		const parent = sourceParentLabel(candidate);
+		return parent ? `${sourceBase(candidate)} in ${parent}` : sourceBase(candidate);
+	}
+
 	// ── Proposed output naming ─────────────────────────────────
 	// Preview only: the processor writes ASIN + scheme and reports the actual
 	// final path. Resolved through the shared scheme resolver, so this
@@ -1582,7 +1641,10 @@
 		<div class="match__head-in">
 			<div class="match__intro">
 				<h1 class="match__title" id="match-title" tabindex="-1">Match metadata</h1>
-				<p class="match__intro-note">Compare each source with its proposed catalog record. Automatic choices compare titles; check narrator and edition. Choices are not saved until you save the batch.</p>
+				<p class="match__intro-note">
+					<span class="match__intro-note--full">Compare each source with its proposed catalog record. Automatic choices compare titles; check narrator and edition. Choices are not saved until you save the batch.</span>
+					<span class="match__intro-note--compact">Compare each source with its proposed record; check narrator and edition. Choices are saved with the batch.</span>
+				</p>
 			</div>
 			{#if candidates.length > 0}
 				<div class="match__head-actions">
@@ -1884,7 +1946,7 @@
 							class="match__src"
 							class:match__src--active={candidate.bookId === activeId}
 							aria-current={candidate.bookId === activeId ? 'true' : undefined}
-							onclick={() => setActive(candidate.bookId)}
+							onclick={() => setActive(candidate.bookId, true)}
 						>
 							{#if candidate.coverUrl}
 								<img
@@ -1921,7 +1983,12 @@
 
 			{#if active}
 				{@const c = active}
-				<section class="match__inspector" aria-label="Selected source and catalog record">
+				<section
+					class="match__inspector"
+					aria-label="Selected source and catalog record"
+					tabindex="-1"
+					bind:this={inspectorEl}
+				>
 					<nav class="match__position match__source-nav" aria-label="Source navigation">
 							<button
 								type="button"
@@ -1975,7 +2042,7 @@
 
 
 					<div class="match__chosen">
-						<div class="match__sechead"><h2>Proposed match</h2>{@render proposalStatus(c)}</div>
+						<div class="match__sechead"><h2><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" /></svg> Proposed match</h2>{@render proposalStatus(c)}</div>
 						{#if c.loading && !c.details.book && !c.error}
 							<div class="match__record match__record--loading">
 								<Skeleton variant="rect" width="110px" height="110px" />
@@ -2469,6 +2536,7 @@
 		</div>
 		<ul class="batch-dialog__list">
 			{#each candidates as target (target.bookId)}
+				{@const ambiguousSource = sourceNameIsAmbiguous(target)}
 				<li
 					class="batch-dialog__item"
 					class:batch-dialog__item--picked={removePick.has(target.bookId)}
@@ -2480,7 +2548,7 @@
 							checked={removePick.has(target.bookId)}
 							disabled={removingMany}
 							onchange={() => toggleRemovePick(target)}
-							aria-label={`Remove ${sourceBase(target)}`}
+							aria-label={`Remove ${sourceIdentity(target)}`}
 						/>
 						{#if target.coverUrl}
 							<img
@@ -2497,6 +2565,11 @@
 							></span>
 						{/if}
 						<span class="batch-dialog__pick-body">
+							{#if ambiguousSource && sourceParentLabel(target)}
+								<span class="batch-dialog__parent" title={sourceParent(target)}
+									>… / {sourceParentLabel(target)}</span
+								>
+							{/if}
 							<span class="batch-dialog__name" title={target.srcPath}
 								>{sourceBase(target)}</span
 							>
@@ -3268,16 +3341,34 @@
 	}
 
 	.match__sechead h2 {
+		display: flex;
+		align-items: center;
+		gap: 7px;
 		font-size: 15px;
 		font-weight: 700;
 		color: var(--m-ink);
 		margin: 0;
 	}
 
+	.match__sechead h2 svg {
+		width: 16px;
+		height: 16px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.6;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
 	.match__proposal-head { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem 0.75rem; margin-bottom: 0.65rem; }
 	.match__proposal-head .batch__section-title { margin-bottom: 0; }
 	.match__origin { display: inline-flex; align-items: center; gap: 0.3rem; color: var(--m-muted); font-size: 12px; font-weight: 500; line-height: 1.5; }
-	.match__origin, .match__field-trigger { border: 0; padding: 0; background: transparent; font-family: inherit; cursor: help; text-align: inherit; }
+	.match__origin, .match__field-trigger { position: relative; border: 0; padding: 0; background: transparent; font-family: inherit; cursor: help; text-align: inherit; }
+	.match__origin > span { text-decoration: underline dotted var(--m-border-strong); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+	.match__origin:hover > span { text-decoration-color: var(--m-ink-2); }
+	.match__origin::after, .match__field-trigger::after { content: ''; position: absolute; inset: -5px -4px; }
+	.match__field-trigger .match__field-value { text-decoration: underline dotted var(--m-border-strong); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+	.match__field-trigger:hover .match__field-value { text-decoration-color: var(--m-ink-2); }
 	.match__origin[data-evidence-origin='verified'], .match__field-mark[data-evidence-state='match'] { color: var(--state-green); }
 	.match__origin[data-evidence-origin='conflict'], .match__field-mark[data-evidence-state='different'] { color: var(--state-amber); }
 	.match__origin svg, .match__field-mark svg { display: block; width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
@@ -3977,6 +4068,16 @@
 		min-width: 0;
 	}
 
+	.batch-dialog__parent {
+		display: block;
+		font-size: 11px;
+		line-height: 1.4;
+		color: var(--m-muted);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
 	.batch-dialog__name {
 		font-size: 14px;
 		font-weight: 600;
@@ -4025,6 +4126,7 @@
 	}
 
 	.match__intro-note { max-width: 54ch; margin: 7px 0 0; font-size: 13px; line-height: 1.5; color: var(--m-muted); }
+	.match__intro-note--compact { display: none; }
 	.match__provenance { display: inline-flex; align-items: center; gap: 3px; color: var(--provenance); font-family: inherit; font-size: 12px; font-weight: 700; line-height: 1.5; text-decoration: none; white-space: nowrap; }
 	.match__provenance:hover { text-decoration: underline; text-underline-offset: 3px; }
 	.match__provenance svg, .match__more svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
@@ -4071,6 +4173,9 @@
 			padding: 12px 1rem 12px;
 		}
 
+		.match__intro-note--full { display: none; }
+		.match__intro-note--compact { display: inline; }
+
 		.match__head-in {
 			flex-wrap: wrap;
 			gap: 12px;
@@ -4112,6 +4217,10 @@
 
 		.match__grid {
 			display: block;
+		}
+
+		.match__inspector {
+			scroll-margin-top: 132px;
 		}
 
 		.match__index {
@@ -4211,7 +4320,8 @@
 		.batch__source { padding: 12px 16px; background: var(--m-surface); border-radius: var(--m-r-md) var(--m-r-md) 0 0; }
 		.batch__thumb, .batch__skel-thumb { display: none; }
 		.batch__proposed { border-left: 0; border-top: 1px solid var(--m-border); padding: 15px 16px 18px; }
-		.batch__section-title svg { transform: rotate(90deg); }
+		.batch__section-title svg,
+		.match__sechead h2 svg { transform: rotate(90deg); }
 		.batch__record { gap: 12px; }
 		.batch__record-art { width: 60px; height: 60px; }
 		.batch__record-title { font-size: 18px; }
