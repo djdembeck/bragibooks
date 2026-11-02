@@ -1,3 +1,5 @@
+import type { MatchEvidenceReport } from './matchEvidence.js';
+
 /**
  * Wire shape of Go's `sql.NullString` fields: a plain string for valid
  * values, or the serialized struct `{String, Valid}` (with `Valid: false`
@@ -57,6 +59,8 @@ export interface Person {
 }
 
 export interface BookWithPeople {
+	/** Optional Match presentation report; not populated by current intake. */
+	match_evidence?: MatchEvidenceReport;
 	id: number;
 	title: string;
 	asin: NullString;
