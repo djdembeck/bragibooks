@@ -215,5 +215,5 @@ jobs:
 
             **To test:**
             ```bash
-            docker run --rm -v /host/media:/media:rw -p 8080:8080 ghcr.io/djdembeck/bragibooks:pr-${{ github.event.pull_request.number || steps.pr-number.outputs.number }}
+            docker run --rm -v /host/media:/media:rw -p 8000:8000 ghcr.io/djdembeck/bragibooks:pr-${{ github.event.pull_request.number || steps.pr-number.outputs.number }}
             ```

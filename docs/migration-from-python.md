@@ -25,19 +25,19 @@ This guide covers the practical Docker upgrade, what does and does not get copie
 
    ```sh
    docker run --rm -d --name bragibooks \
-     --publish 8888:8080 \
+     --publish 8888:8000 \
      --volume "$PWD/config:/config" \
      --volume /path/to/input:/input \
      --volume /path/to/output:/output \
      --volume /path/to/completed:/input/done \
-     --env SERVER_PORT=8080 \
+     --env SERVER_PORT=8000 \
      --env DIRECTORIES_INPUT_DIR=/input \
      --env DIRECTORIES_OUTPUT_DIR=/output \
      --env DIRECTORIES_COMPLETED_DIR=/input/done \
      ghcr.io/djdembeck/bragibooks:develop
    ```
 
-   The Python image exposed container port `8000`; the Go image listens on `8080` (`SERVER_PORT`). Pick whatever host port you like — `8888` is the example used in the [README](../README.md#docker).
+   Both the Python image and the Go image listen on container port `8000` (`SERVER_PORT`), so an existing `--publish 8000:8000` mapping keeps working unchanged. Pick whatever host port you like — `8888` is the example used in the [README](../README.md#docker); only the container-side port is fixed.
 
 3. Read the start log. An eligible migration logs, in order:
 
@@ -102,13 +102,13 @@ The Python app's environment variables no longer apply. Mapping of what changed:
 | `DEBUG`, `CSRF_TRUSTED_ORIGINS` | none — replaced by the Go app's admin auth and its CSRF double-submit cookie (see [Security](../README.md#security) in the README) |
 | `LOG_LEVEL` | `PROCESSING_LOG_LEVEL` |
 | `REGION` | `PROCESSING_REGION` (`REGION` is still accepted as an alias) |
-| *(none — port 8000)* | `SERVER_PORT` (default `8080`) and `SERVER_HOST` |
+| *(none — fixed port `8000`)* | `SERVER_PORT` (default `8000`) and `SERVER_HOST` |
 | *(none — the Python app had no AudiobookDB credential setting)* | `API_KEY_API_KEY` (optional) and `API_KEY_BASE_URL` (default `https://audiobookdb.org/api`) |
 | *(directories came from the DB setting row)* | `DATABASE_PATH`, `M4B_MERGE_BINARY`, `DIRECTORIES_*`, `PROCESSING_NUM_CPUS`, `PROCESSING_PATH_FORMAT`, plus `LEGACY_DB_PATH` for migration only. Remote API access is no longer an env var: it is the Settings → External API key (optional `SERVER_API_ENDPOINT_ENABLED` pins the on/off flag at deployment level) |
 
 Go settings precedence is **environment variable > YAML file > default**, with the database settings row (where the migration writes the legacy settings) loaded below YAML and env.
 
-One binding detail to be aware of: `SERVER_HOST` defaults to *empty*, and an empty host makes the Go server listen on **all interfaces** (`:8080`), not loopback. In Docker the published port is what controls exposure — use `--publish 127.0.0.1:8888:8080` to keep it reachable from the host only. If you run the binary directly on a host and want loopback-only, set `SERVER_HOST=127.0.0.1` explicitly.
+One binding detail to be aware of: `SERVER_HOST` defaults to *empty*, and an empty host makes the Go server listen on **all interfaces** (`:8000`), not loopback. In Docker the published port is what controls exposure — use `--publish 127.0.0.1:8888:8000` to keep it reachable from the host only. If you run the binary directly on a host and want loopback-only, set `SERVER_HOST=127.0.0.1` explicitly.
 
 ## Verifying the migration
 
@@ -190,7 +190,7 @@ The rollback is simple because the legacy database was never modified:
 
 1. Stop and remove the Go container.
 2. If you will be running the Python app again, remove (or keep aside) `bragibooks.db`, `bragibooks.db-wal`, `bragibooks.db-shm`, and `db.sqlite3.bragi-migrated` from the config volume so the legacy file is exactly as before — or restore the config volume from the backup you made before the upgrade.
-3. Start the archived image on the old port layout (container port `8000`): `ghcr.io/djdembeck/bragibooks:python-final` (or the Docker Hub equivalent; both are pinned at the digest stated above). The legacy app opens `/config/db.sqlite3` exactly as it always did.
+3. Start the archived image (it also listens on container port `8000`): `ghcr.io/djdembeck/bragibooks:python-final` (or the Docker Hub equivalent; both are pinned at the digest stated above). The legacy app opens `/config/db.sqlite3` exactly as it always did.
 
 Caveat: **audio work the Go app already performed is not undone.** Processed output and completed files produced since the upgrade remain on disk, and the legacy app will simply not know about them (its book list and statuses come from `db.sqlite3`).
 

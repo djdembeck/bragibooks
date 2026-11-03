@@ -37,7 +37,7 @@ RUN chmod 0755 /usr/local/bin/bragibooks-entrypoint
 # pin it to the /config volume. Compose files and operator env vars
 # keep overriding these.
 ENV DATABASE_PATH=/config/bragibooks.db
-EXPOSE 8080
+EXPOSE 8000
 VOLUME ["/config", "/input", "/output"]
 ARG VERSION=dev
 ARG GIT_COMMIT=unknown

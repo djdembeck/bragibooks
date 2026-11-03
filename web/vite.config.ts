@@ -7,7 +7,7 @@ export default defineConfig(({ mode }) => {
 	const env = loadEnv(mode, process.cwd(), '');
 	const isDev = mode === 'development';
 	const port = Number(env.VITE_PORT) || 5175;
-	const proxyTarget = env.VITE_PROXY_TARGET || 'http://localhost:8080';
+	const proxyTarget = env.VITE_PROXY_TARGET || 'http://localhost:8000';
 
 	return {
 		plugins: [

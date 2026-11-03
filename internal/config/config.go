@@ -585,7 +585,7 @@ func defaultConfigPath() string {
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.allowed_hosts", "")
 	v.SetDefault("server.host", "")
-	v.SetDefault("server.port", 8080)
+	v.SetDefault("server.port", 8000)
 	v.SetDefault("server.api_endpoint.enabled", false)
 	v.SetDefault("database.path", "config/bragibooks.db")
 	v.SetDefault("m4b_merge.binary", "m4b-merge")
@@ -604,7 +604,7 @@ func setDefaults(v *viper.Viper) {
 // Used when Viper-based loading fails entirely.
 func setDefaultsOnConfig(cfg *Config) {
 	cfg.Server.Host = ""
-	cfg.Server.Port = 8080
+	cfg.Server.Port = 8000
 	cfg.Database.Path = "config/bragibooks.db"
 	cfg.M4bMerge.Binary = "m4b-merge"
 	cfg.APIKey.APIKey = ""

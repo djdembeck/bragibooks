@@ -12,6 +12,6 @@ COPY . .
 
 COPY --from=ghcr.io/djdembeck/m4b-merge:main-amd64@sha256:f36864ceba5867bd10f36ad8574ac9f4e2cf45d97a94c6c7c13b63015f80cfff /usr/local/bin/m4b-merge /usr/local/bin/m4b-merge
 
-EXPOSE 8080
+EXPOSE 8000
 
 CMD ["air", "-c", ".air.toml"]

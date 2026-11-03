@@ -73,19 +73,19 @@ Create or choose host directories for the database/configuration, input books, o
 
 ```sh
 docker run --rm -d --name bragibooks \
-  --publish 8888:8080 \
+  --publish 8888:8000 \
   --volume "$PWD/config:/config" \
   --volume /path/to/input:/input \
   --volume /path/to/output:/output \
   --volume /path/to/completed:/input/done \
-  --env SERVER_PORT=8080 \
+  --env SERVER_PORT=8000 \
   --env DIRECTORIES_INPUT_DIR=/input \
   --env DIRECTORIES_OUTPUT_DIR=/output \
   --env DIRECTORIES_COMPLETED_DIR=/input/done \
   ghcr.io/djdembeck/bragibooks:develop
 ```
 
-The equivalent Docker Hub image is `djdembeck/bragibooks:develop`. The container listens on port `8080`; the command above publishes it as `http://localhost:8888`. The mounted `/config` directory holds the SQLite database (by default `bragibooks.db`) and any runtime configuration; it is declared a volume in the image so the database persists across container recreation. `API_KEY_API_KEY` is optional, but setting it enables AudiobookDB requests that require an API key.
+The equivalent Docker Hub image is `djdembeck/bragibooks:develop`. The container listens on port `8000` — the same port the Python image used, so an existing `-p 8000:8000` mapping keeps working — and the command above publishes it as `http://localhost:8888`. The mounted `/config` directory holds the SQLite database (by default `bragibooks.db`) and any runtime configuration; it is declared a volume in the image so the database persists across container recreation. `API_KEY_API_KEY` is optional, but setting it enables AudiobookDB requests that require an API key.
 
 The repository's [production compose file](docker/docker-compose.yml) shows the same container ports and config/input/output mount points; it hardcodes a host input path and has no separate completed-directory mount, so edit its host paths and add the completed mount before replacing the image name with the one above.
 
@@ -100,7 +100,7 @@ DIRECTORIES_COMPLETED_DIR=/path/to/completed \
 ./bragibooks
 ```
 
-The binary serves the web UI on `SERVER_HOST:SERVER_PORT` (port `8080` by default). `SERVER_HOST` is unset by default, which makes Go bind all interfaces (`:8080`); set `SERVER_HOST=127.0.0.1` to restrict it to loopback. See [Building](#building) for the source-build commands.
+The binary serves the web UI on `SERVER_HOST:SERVER_PORT` (port `8000` by default). `SERVER_HOST` is unset by default, which makes Go bind all interfaces (`:8000`); set `SERVER_HOST=127.0.0.1` to restrict it to loopback. See [Building](#building) for the source-build commands.
 
 ## Usage
 
@@ -163,7 +163,7 @@ The key environment variables are:
 | --- | --- | --- |
 | `SERVER_HOST` | Address for the HTTP server | empty (all interfaces; set `127.0.0.1` for loopback only) |
 | `SERVER_ALLOWED_HOSTS` | Additional exact Host names/addresses, comma-separated; restart after changing | empty (local literal addresses and localhost remain available) |
-| `SERVER_PORT` | HTTP port | `8080` |
+| `SERVER_PORT` | HTTP port | `8000` |
 | `DATABASE_PATH` | SQLite database path | `config/bragibooks.db` |
 | `M4B_MERGE_BINARY` | `m4b-merge` executable name or path | `m4b-merge` |
 | `API_KEY_API_KEY` | Optional AudiobookDB API key | empty |
@@ -180,7 +180,7 @@ For a YAML-based setup, create `config/config.yaml` in the mounted config direct
 
 ```yaml
 server:
-  port: 8080
+  port: 8000
 
 directories:
   input_dir: /input
@@ -307,7 +307,7 @@ The [Dockerfile](docker/Dockerfile) builds the SvelteKit frontend, embeds it in 
 
 ```sh
 docker build -f docker/Dockerfile -t bragibooks:local .
-docker run --rm -p 8888:8080 \
+docker run --rm -p 8888:8000 \
   -v "$PWD/config:/config" \
   -v /path/to/input:/input \
   -v /path/to/output:/output \
@@ -322,7 +322,7 @@ For backend hot reload with `air`, run:
 make watch
 ```
 
-For the complete two-service development environment, use the development compose file. It runs the Go backend on port `8080` and the Vite frontend on port `5175`:
+For the complete two-service development environment, use the development compose file. It runs the Go backend on port `8000` and the Vite frontend on port `5175`:
 
 ```sh
 docker compose -f docker/docker-compose.dev.yml up --build
