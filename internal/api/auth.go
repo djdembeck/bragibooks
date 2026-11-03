@@ -22,6 +22,10 @@ import (
 //   - 172.16.0.0/12 (class-B private range, 172.16.-172.31.*)
 //   - 192.168.0.0/16 (class-C private)
 //
+// Native IPv6 ULA and link-local addresses are intentionally not in this
+// set even though the Host guard accepts them as literals; those clients
+// need key authentication.
+//
 // This is deliberately NOT “only loopback”: the compose deployment runs in
 // a private LAN and the host must be able to reach it (finding: local
 // mode must stop LAN exposure without breaking single-host use). The

@@ -33,11 +33,35 @@ func TestHostAuthority(t *testing.T) {
 			r.Header.Set("Forwarded", "host=localhost")
 			w := httptest.NewRecorder()
 			guard(okHandler()).ServeHTTP(w, r)
-			if w.Code != 403 || !strings.Contains(w.Body.String(), "untrusted request Host") {
+			if w.Code != 403 || !strings.Contains(w.Body.String(), "request Host") {
 				t.Fatalf("%q: %d %s", host, w.Code, w.Body)
 			}
 		})
 	}
+
+	t.Run("untrusted host names the allowlist", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/api/books", nil)
+		r.Host = "evil.example"
+		w := httptest.NewRecorder()
+		guard(okHandler()).ServeHTTP(w, r)
+		if !strings.Contains(w.Body.String(), "untrusted request Host") ||
+			!strings.Contains(w.Body.String(), "SERVER_ALLOWED_HOSTS") {
+			t.Fatalf("untrusted denial lacks allowlist hint: %s", w.Body)
+		}
+	})
+
+	t.Run("malformed host does not name the allowlist", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/api/books", nil)
+		r.Host = "http://localhost"
+		w := httptest.NewRecorder()
+		guard(okHandler()).ServeHTTP(w, r)
+		if !strings.Contains(w.Body.String(), "invalid request Host") {
+			t.Fatalf("malformed denial is not named: %s", w.Body)
+		}
+		if strings.Contains(w.Body.String(), "SERVER_ALLOWED_HOSTS") {
+			t.Fatalf("malformed denial incorrectly points at the allowlist: %s", w.Body)
+		}
+	})
 }
 
 func TestHostWithAuthAndCSRF(t *testing.T) {

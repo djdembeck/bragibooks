@@ -106,6 +106,8 @@ The Python app's environment variables no longer apply. Mapping of what changed:
 | *(none — the Python app had no AudiobookDB credential setting)* | `API_KEY_API_KEY` (optional) and `API_KEY_BASE_URL` (default `https://audiobookdb.org/api`) |
 | *(directories came from the DB setting row)* | `DATABASE_PATH`, `M4B_MERGE_BINARY`, `DIRECTORIES_*`, `PROCESSING_NUM_CPUS`, `PROCESSING_PATH_FORMAT`, plus `LEGACY_DB_PATH` for migration only. Remote API access is no longer an env var: it is the Settings → External API key (optional `SERVER_API_ENDPOINT_ENABLED` pins the on/off flag at deployment level) |
 
+Python environment variables are not reused, except for the legacy `REGION` alias. In particular, `ALLOWED_HOSTS` is ignored: set `SERVER_ALLOWED_HOSTS` to exact hostnames and replace any wildcard. Access through `localhost`, loopback, or a literal private IP needs no change. If the old deployment used a reverse proxy, see [Reverse proxy](reverse-proxy.md) for the exact external `Host` and for `BRAGIBOOKS_TRUSTED_PROXIES` when the proxy forwards `X-Forwarded-For`.
+
 Go settings precedence is **environment variable > YAML file > default**, with the database settings row (where the migration writes the legacy settings) loaded below YAML and env.
 
 One binding detail to be aware of: `SERVER_HOST` defaults to *empty*, and an empty host makes the Go server listen on **all interfaces** (`:8000`), not loopback. In Docker the published port is what controls exposure — use `--publish 127.0.0.1:8888:8000` to keep it reachable from the host only. If you run the binary directly on a host and want loopback-only, set `SERVER_HOST=127.0.0.1` explicitly.
