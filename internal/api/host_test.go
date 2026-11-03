@@ -36,6 +36,9 @@ func TestHostAuthority(t *testing.T) {
 			if w.Code != 403 || !strings.Contains(w.Body.String(), "untrusted request Host") {
 				t.Fatalf("%q: %d %s", host, w.Code, w.Body)
 			}
+			if !strings.Contains(w.Body.String(), "SERVER_ALLOWED_HOSTS") {
+				t.Fatalf("%q: denial lacks allowlist hint: %s", host, w.Body)
+			}
 		})
 	}
 }
