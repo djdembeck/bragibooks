@@ -4,7 +4,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.dev
     expose:
-      - '8080'
+      - '8000'
     volumes:
       - ..:/app
       - ./config:/app/config
@@ -13,13 +13,13 @@ services:
     environment:
       - SERVER_HOST=0.0.0.0
       - SERVER_ALLOWED_HOSTS=bragibooks-dev
-      - SERVER_PORT=8080
+      - SERVER_PORT=8000
       - DATABASE_PATH=config/bragibooks.db
       - DIRECTORIES_INPUT_DIR=/input
       - DIRECTORIES_OUTPUT_DIR=/output
       - DIRECTORIES_COMPLETED_DIR=/input/done
     healthcheck:
-      test: ['CMD-SHELL', 'wget -qO /dev/null http://localhost:8080/api/health || exit 1']
+      test: ['CMD-SHELL', 'wget -qO /dev/null http://localhost:8000/api/health || exit 1']
       interval: 10s
       start_period: 90s
 
@@ -33,7 +33,7 @@ services:
     environment:
       - NODE_ENV=development
       - VITE_PORT=5175
-      - VITE_PROXY_TARGET=http://bragibooks-dev:8080
+      - VITE_PROXY_TARGET=http://bragibooks-dev:8000
     command: ['bun', 'run', 'dev']
     depends_on:
       bragibooks-dev:
