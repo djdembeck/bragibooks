@@ -624,13 +624,18 @@
 						</div>
 					</section>
 				{:else if activeJobs.length === 0 && !dl.error}
-					<div class="queue-empty"><EmptyState title="No books ready to process" description={pendingBooks.length > 0 ? 'Match the remaining sources before adding them to a processing batch.' : 'Import sources and match their metadata to build your next batch.'} actionLabel={pendingBooks.length > 0 ? 'Match metadata' : 'Import sources'} actionHref={pendingBooks.length > 0 ? '/match' : '/import'} /></div>
+					<div class="queue-empty"><EmptyState title="No books ready to process" description={pendingBooks.length > 0 ? 'Match the remaining sources before processing them.' : 'Import sources and match their metadata to build your next batch.'} actionLabel={pendingBooks.length > 0 ? 'Match metadata' : 'Import sources'} actionHref={pendingBooks.length > 0 ? '/match' : '/import'} /></div>
 				{/if}
 
 				{#if pendingBooks.length > 0}
 					<details class="pending-list">
 						<summary><span>Needs a metadata match <span class="count">{pendingBooks.length}</span></span></summary>
-						<div class="pending-intro"><p>These sources cannot be processed until their metadata is matched.</p><a href="/match">Match metadata <ArrowRight size={14} aria-hidden="true" /></a></div>
+						<div class="pending-intro">
+							<p>These sources cannot be processed until their metadata is matched.</p>
+							{#if matchedBooks.length > 0 || activeJobs.length > 0 || dl.error}
+								<a href="/match">Match metadata <ArrowRight size={14} aria-hidden="true" /></a>
+							{/if}
+						</div>
 						{#each pendingBooks as book (book.id)}
 							<div class="pending-row"><CoverArt url={book.cover_image_url} title={book.title} size="sm" /><div class="book-identity"><a href="/books/{book.id}">{book.title}</a><p>{book.authors.map((author) => author.name).join(', ') || 'Unknown author'}</p></div><span class="pending-state">Needs match</span></div>
 						{/each}

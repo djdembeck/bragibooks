@@ -13,6 +13,9 @@
 	// is also not actionable from Settings, so it gets no nudge.
 	let apiNotice = $state<'unknown' | 'off' | 'on' | 'managed'>('unknown');
 	let noticeDismissed = $state(false);
+	// Import's pipeline value reports source configuration, not work in the
+	// stage. A failed settings fetch is "unknown", never "not configured".
+	let sourceState = $state<'checking' | 'ready' | 'missing' | 'unavailable'>('checking');
 	const showApiNotice = $derived(apiNotice === 'off' && !noticeDismissed);
 	$effect(() => {
 		// Storage can be unavailable (private mode, blocked storage): a
@@ -29,11 +32,13 @@
 					: s.api_endpoint_enabled === true
 						? 'on'
 						: 'off';
+				sourceState = s.input_dir?.trim() ? 'ready' : 'missing';
 			})
 			.catch(() => {
 				// Decorative notice: an unknown state hides the banner
 				// instead of claiming the API is off.
 				apiNotice = 'unknown';
+				sourceState = 'unavailable';
 			});
 	});
 
@@ -76,53 +81,85 @@
 	const safeDone = $derived(typeof totals.done === 'number' ? totals.done : 0);
 	const safeErrors = $derived(typeof totals.error === 'number' ? totals.error : 0);
 
-	// idle = no work in step, active = ready or in-flight work, error = failures,
-	// done = settled output
+	// idle = no work in step, active = ready or in-flight work, done = settled
+	// output. Job failures stay on Queue's Recent activity; this report is
+	// stage state, so the gold CTA is the page's single failure statement.
 	const queueRunning = $derived(jobs.some((j) => j.status === 'running' || j.status === 'queued'));
-	const queueError = $derived(jobs.some((j) => j.status === 'error'));
 
-	const workflow = $derived([
-		{
-			id: 'import',
-			label: 'Import',
-			count: null,
-			href: '/import',
-			description: 'Add source folders',
-			state: 'idle' as const,
-		},
+	const totalBooks = $derived(
+		safePending + safeMatched + safeProcessing + safeDone + safeErrors
+	);
+	// An empty library gets one call to action: the Recent books empty state.
+	// Before the fetch settles, and after a failed one, it is not empty — it is
+	// unknown.
+	const libraryEmpty = $derived(dl.hasLoaded && !dl.error && totalBooks === 0);
+
+	const SOURCE_STATE_LABEL = {
+		checking: 'Checking…',
+		ready: 'Configured',
+		missing: 'Not configured',
+		unavailable: 'Unknown',
+	} as const;
+
+	// The pipeline is a state report, not a second menu: destinations live in
+	// the header, and repeating them here made three sets of controls for the
+	// same five routes.
+	const pipeline = $derived([
+		{ id: 'import', label: 'Import', value: SOURCE_STATE_LABEL[sourceState] },
 		{
 			id: 'match',
 			label: 'Match',
-			count: safePending,
-			href: '/match',
-			description: 'Metadata review',
-			// A step with nothing in it is idle — red `error` is reserved
-			// for actual match failures; book-level errors stay on the
-			// "N errors" summary link.
-			state: safePending > 0 ? ('active' as const) : ('idle' as const),
+			value: safePending > 0 ? `${safePending} waiting` : 'Nothing waiting',
 		},
 		{
 			id: 'queue',
 			label: 'Queue',
-			count: safeMatched + safeProcessing,
-			href: '/process',
-			description: `${safeMatched} ready · ${safeProcessing} processing`,
-			state:
-				queueRunning || safeMatched > 0 || safeProcessing > 0
-					? ('active' as const)
-					: queueError
-						? ('error' as const)
-						: ('idle' as const),
+			value:
+				safeProcessing > 0 && safeMatched > 0
+					? `${safeProcessing} processing · ${safeMatched} ready`
+					: safeProcessing > 0
+						? `${safeProcessing} processing`
+						: safeMatched > 0
+							? `${safeMatched} ready`
+							: queueRunning
+								? 'Active'
+								: 'Empty',
 		},
 		{
 			id: 'done',
 			label: 'Done',
-			count: safeDone,
-			href: '/books?status=done',
-			description: 'Completed library',
-			state: safeDone > 0 ? ('done' as const) : ('idle' as const),
+			value: safeDone > 0 ? `${safeDone} finished` : 'Nothing finished yet',
 		},
 	]);
+
+	// Exactly one move is offered, chosen by urgency: failures first, then
+	// matching, then queued work, then intake.
+	const nextAction = $derived.by(() => {
+		if (safeErrors > 0) {
+			return {
+				href: '/books?status=error',
+				label: `Review ${safeErrors} error${safeErrors === 1 ? '' : 's'}`,
+			};
+		}
+		if (safePending > 0) {
+			return {
+				href: '/match',
+				label: `Match ${safePending} book${safePending === 1 ? '' : 's'}`,
+			};
+		}
+		// "View queue" is passive navigation; when the move is to work a
+		// ready batch, name that work instead.
+		if (safeMatched > 0 && safeProcessing === 0 && !queueRunning) {
+			return {
+				href: '/process',
+				label: `Review ${safeMatched} ready book${safeMatched === 1 ? '' : 's'}`,
+			};
+		}
+		if (safeMatched > 0 || safeProcessing > 0 || queueRunning) {
+			return { href: '/process', label: 'View queue' };
+		}
+		return { href: '/import', label: 'Import books' };
+	});
 </script>
 
 <PageHeader title="Overview" description="What needs attention in your library, and where each book is right now." />
@@ -151,80 +188,54 @@
 	</div>
 {/if}
 
-<!-- ── Workflow summary ──────────────────────────────────────── -->
+<!-- ── Pipeline summary ──────────────────────────────────────── -->
 {#if !dl.hasLoaded && !dl.showSkeleton}
-	<!-- 200 ms delay window: announce pending, no skeleton, no zeroed rows. -->
-	<div class="mb-6" aria-label="Workflow loading" role="status" aria-live="polite">
-		<div class="flex h-[13.25rem] items-center justify-center overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]">
-			<span class="sr-only">Loading the library workflow…</span>
+	<!-- 200 ms delay window: announce pending, no skeleton, no zeroed values. -->
+	<div class="mb-3" aria-label="Library pipeline loading" role="status" aria-live="polite">
+		<div class="flex h-[8.5rem] items-center justify-center overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)] sm:h-[4.25rem]">
+			<span class="sr-only">Loading the library pipeline…</span>
 		</div>
 	</div>
 {:else if dl.showSkeleton}
-	<div class="mb-6" aria-label="Workflow loading">
+	<div class="mb-3" aria-label="Library pipeline loading">
 		<div class="overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]">
-			{#each Array(4) as _}
-				<div class="flex items-center gap-4 border-b border-[var(--border-subtle)] px-4 py-3 last:border-b-0">
-					<Skeleton height="1rem" width="4rem" />
-					<Skeleton class="hidden flex-1 max-w-[11rem] sm:block" height="0.75rem" width="9rem" />
-					<Skeleton class="ml-auto" height="0.75rem" width="2rem" />
-				</div>
-			{/each}
+			<div class="grid grid-cols-2 gap-px bg-[var(--border-subtle)] sm:grid-cols-4">
+				{#each Array(4) as _}
+					<div class="min-h-[4.25rem] bg-[var(--bg-panel)] px-4 py-3">
+						<Skeleton height="0.75rem" width="3rem" />
+						<Skeleton class="mt-2" height="0.875rem" width="5rem" />
+					</div>
+				{/each}
+			</div>
 		</div>
 	</div>
-{:else}
-	<nav aria-label="Library workflow" class="mb-6">
-		<ol class="divide-y divide-[var(--border-subtle)] overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]">
-			{#each workflow as step (step.id)}
-				<li>
-					<a
-						href={step.href}
-						class="flex min-h-[48px] items-center gap-3 px-4 py-2 no-underline transition-colors hover:bg-[var(--surface-hover)]"
-						aria-label={step.count === null ? `${step.label}: ${step.description}` : `${step.label}: ${step.count} books, ${step.state}. ${step.description}`}
-					>
-						<span class="w-16 flex-shrink-0 text-sm font-semibold text-[var(--text)]">{step.label}</span>
-						<span class="hidden min-w-0 flex-1 truncate text-xs text-[var(--text-muted)] sm:block">{step.description}</span>
-						{#if step.count === null}
-							<span class="ml-auto text-sm text-[var(--text-secondary)]">Browse</span>
-						{:else}
-							<span class="ml-auto flex flex-shrink-0 items-center gap-2">
-								{#if step.state === 'active'}
-									<span class="rounded-sm border border-[var(--state-amber-border)] bg-[var(--state-amber-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--state-amber)]">active</span>
-								{:else if step.state === 'error'}
-									<span class="rounded-sm border border-[var(--state-red-border)] bg-[var(--state-red-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--state-red)]">error</span>
-								{:else if step.state === 'done'}
-									<span class="rounded-sm border border-[var(--state-green-border)] bg-[var(--state-green-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--state-green)]">done</span>
-								{/if}
-								<span class="font-mono text-sm tabular-nums text-[var(--text-secondary)]">{step.count}</span>
-							</span>
-						{/if}
-					</a>
-				</li>
+{:else if !dl.error && !libraryEmpty}
+	<section aria-label="Library pipeline" class="mb-3">
+		<dl class="grid grid-cols-2 gap-px overflow-hidden rounded-md border border-[var(--border)] bg-[var(--border-subtle)] sm:grid-cols-4">
+			{#each pipeline as step (step.id)}
+				<div class="bg-[var(--bg-panel)] px-4 py-3">
+					<dt class="text-xs font-semibold text-[var(--text-muted)]">{step.label}</dt>
+					<dd class="mt-1 text-sm font-semibold tabular-nums text-[var(--text)]">{step.value}</dd>
+				</div>
 			{/each}
-		</ol>
-	</nav>
+		</dl>
+	</section>
 {/if}
 
 <!-- ── Primary next action ───────────────────────────────────── -->
-<!-- Hidden until the first fetch settles: before that, the zeroed counts
-     would offer a stale "Import books" action and then shift. -->
-<div class="mb-6 flex flex-wrap items-center gap-2" class:invisible={!dl.hasLoaded}>
-	{#if safeErrors > 0}
-		<Button variant="primary" href="/books?status=error">Review {safeErrors} error{#if safeErrors !== 1}s{/if}</Button>
-	{/if}
-	{#if safePending > 0}
-		<Button variant={safeErrors > 0 ? 'secondary' : 'primary'} href="/match">Match metadata</Button>
-	{/if}
-	{#if safeMatched > 0 || safeProcessing > 0 || queueRunning}
-		<Button variant={safeErrors > 0 || safePending > 0 ? 'secondary' : 'primary'} href="/process">View queue</Button>
-	{/if}
-	<Button variant={safePending > 0 || safeMatched > 0 || safeProcessing > 0 || queueRunning || safeErrors > 0 ? 'ghost' : 'primary'} href="/import">Import books</Button>
-	<Button variant="ghost" href="/books">View all books</Button>
-</div>
+<!-- One move, chosen from library state. Navigation belongs to the header. -->
+{#if !libraryEmpty && dl.error === null}
+	<div class="mb-6" class:invisible={!dl.hasLoaded}>
+		<Button variant="primary" href={nextAction.href}>{nextAction.label}</Button>
+	</div>
+{/if}
 
 <!-- ── Recent books ──────────────────────────────────────────── -->
-<div class="mb-3">
-	<h2 class="text-lg font-semibold text-[var(--enamel)]">Recent books</h2>
-</div>
+{#if !dl.hasLoaded || recent.length > 0}
+	<div class="mb-3">
+		<h2 class="text-lg font-semibold text-[var(--enamel)]">Recent books</h2>
+	</div>
+{/if}
 {#if !dl.hasLoaded && !dl.showSkeleton}
 	<!-- 200 ms delay window: announce pending; sized like the settled rows. -->
 	<div class="space-y-2" aria-label="Recent books loading" role="status" aria-live="polite">

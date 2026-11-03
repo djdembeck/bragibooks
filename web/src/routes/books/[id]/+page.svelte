@@ -716,9 +716,9 @@
 						{/if}
 					{/if}
 					{#if inFlightJob}
-						<Button variant="ghost" disabled>Re-match</Button>
+						<Button variant="secondary" disabled>Re-match</Button>
 					{:else}
-						<Button variant="ghost" onclick={() => beginAction('rematch')}>Re-match</Button>
+						<Button variant="secondary" onclick={() => beginAction('rematch')}>Re-match</Button>
 					{/if}
 				</div>
 			{/if}
@@ -946,7 +946,7 @@
 		</div>
 
 		{#if !abdBookId}
-			<p class="record-section__note">Not matched to AudiobookDB. Use <a class="record-section__inline-link" href="/match">Re-match</a> below to link it.</p>
+			<p class="record-section__note">Not matched to AudiobookDB. {#if inFlightJob}<span class="whitespace-nowrap">Re-match</span> is unavailable while a job is queued or running.{:else}Choose <span class="whitespace-nowrap">Re-match</span> in Actions to send this book for metadata review.{/if}</p>
 		{:else}
 			{#if !abdExpanded}
 				<Button variant="secondary" onclick={() => (abdExpanded = true)}>Show comparison</Button>
