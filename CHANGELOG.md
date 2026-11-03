@@ -2,6 +2,125 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [Unreleased]
+
+### Features & Improvements
+
+- Kept the container's default HTTP port at `8000`, the same port the Python image used, so existing Docker port mappings keep working after upgrading; `SERVER_PORT` still overrides it.
+- Narrowed development Docker media access to configurable input/output directories rather than mounting the developer home directory; pinned Docker build, runtime, and media-tool image digests for reproducible builds, with Renovate digest updates.
+
+### Security
+
+- Validate Host authorities before all HTTP routes to reject DNS-rebinding names, malformed hosts, and forwarded-host spoofing. Preserve auth-free LAN literal-address access (including published container ports), external API keys, and CSRF; add exact DNS/public-address opt-ins through `SERVER_ALLOWED_HOSTS` / `server.allowed_hosts` and reuse non-wildcard listener hosts. The development Compose profile explicitly allows its `bragibooks-dev` backend service authority so Vite's API and cover proxies keep working.
+
+### Major Updates
+
+- **Django 5.2 LTS Modernization** (#407)
+  - Upgraded from Django 4.2 to Django 5.2 LTS
+  - Fixed wildcard ALLOWED_HOSTS security issue
+  - Improved CSRF_TRUSTED_ORIGINS parsing
+  - Added production security headers
+  - Migrated packaging to modern `pyproject.toml` format
+  - Switched from python-Levenshtein to rapidfuzz for better performance
+
+- **m4b-merge migrated to Rust** (#406)
+  - Replaced Python m4b-merge library with high-performance Rust binary
+  - Added multi-stage Docker build for Rust compilation
+  - Improved processing speed and reliability
+  - Added retry logic for subprocess operations
+
+### Features & Improvements
+
+- **Unified release publication on reserved versions** (#484)
+  - Release lifecycle and asset lookups are now draft-aware and paginated with an exact `tag_name` match; duplicate records fail closed, and a 403/5xx/page failure stops the run before any create or upload.
+  - `--latest` is computed from published non-draft non-prerelease numeric SemVer: a new highest stable advances GitHub Latest, a delayed lower stable publishes with `--latest=false`, and an already-published retry is a no-op. Mutable `latest`/major/minor Docker aliases are no longer written.
+  - Before any upload, the complete planned asset set (preserved immutable archives plus the pending build) is built and the checksum manifest is verified against those actual bytes. An existing labelled archive may differ from a rebuild and is preserved; a missing manifest is generated from the combined verified digests so a valid partial retry can finish; an immutable manifest that cannot describe the combined set stops the run with no writes. Existing unlabelled-mismatch and provenance rejections are preserved.
+
+- **Recorded activity shows what happened** (#440)
+  - `processing_jobs` now carries a stable `action` key (`merge` | `metadata_update` | `import`); the migration backfills existing rows as `merge`.
+  - Imports and metadata saves write terminal `done` audit rows, so the record's activity list no longer only shows processing runs. These rows never affect queuing or the orphan sweep, which key on `queued`/`running`.
+  - `GET /api/jobs` and `GET /api/jobs/:id` expose `action`; the Queue cards and the book record's activity list show a quiet sentence-case operation label (M4B merge / Metadata update / Import) beside the status chip. Unknown stored operations read "Unknown action" instead of being guessed as merges.
+  - `processing_jobs` gains a `detail` column (migration v8) exposed by `GET /api/jobs` and `GET /api/jobs/:id`; pre-v8 rows are NULL, and import rows show their source path.
+  - Job completion reads "Completed" across merges, imports, and metadata saves; an empty record reads "No recorded activity yet."
+
+- **Live Queue output and real destinations**
+  - Active Queue cards now stream `m4b-merge` stdout over SSE as it runs, with a reconnect snapshot from the in-memory job state instead of waiting for the terminal row.
+  - Queue cards show the book cover and author, an indeterminate processing rail and the current engine stage, and the destination `m4b-merge` reports (the completed `output_file`, or the live path with its per-job `.tmp` segment removed). Until the engine resolves the path, the queue-time profile is labeled "Output profile", never "Destination".
+  - `GET /api/jobs` and `GET /api/jobs/:id` expose a profiled job's stored output directory and path format, so a restored active job keeps its destination context.
+  - The live log stays where the operator scrolls it (re-pinning only at the bottom) and is keyboard-scrollable; running jobs lead the active section, queued jobs keep their enqueue order across reloads, and a book with a queued job no longer remains selectable in Ready to process.
+  - A transient stream drop reconnects with the server's accumulated output instead of freezing the log, and cancelling a running job keeps the output it produced before the process was killed.
+
+- **Saved output profiles with queue-time snapshots**
+  - Added named output profiles (output directory and/or relative path format) managed on the Settings page via `/api/output-profiles` (list, create, update, delete). Blank fields inherit the global values.
+  - The Queue page and the Books bulk requeue action select one profile per batch. The selection is resolved once at queue time, snapshotted into each created job's arguments, so already-queued jobs are unaffected by later profile or Settings changes; no profile is stored on a book.
+  - Removed the obsolete per-book and per-import output override fields, UI, and migrations (migration v8 adds the `output_profiles` table and drops the unreleased per-book columns).
+
+- **Record workspace rollout**
+  - Restored the original gold palette, stacked-books logo, and favicon; applied the shared top navigation, neutral work surfaces, and self-hosted Public Sans headings across Overview, Import, Match, Queue, Books, book detail, and Settings.
+  - Added counted batch match approval with explicit inclusion and optional focused review. Source and proposed output names stay visible; the processor's actual output path remains distinct from the preview.
+  - Expanded selected metadata, responsive description disclosure, and catalog choices with author, narrator, runtime, and available release details. Preserved distinct credits that share a display name and the selected release when reselecting a record.
+  - Retained Queue's ready-work, active-processing, and history hierarchy; corrected partial Select all, reactive job updates, and book titles after reload.
+  - Preserved keyboard selection, source-removal confirmation, error recovery, and folder-picker cancellation. Added truthful loading/removal states, executed-search labels, and same-folder retry after a directory error.
+  - Kept catalog publication dates stable across time zones, made mobile Overview and Books titles readable on two lines, and rebalanced helper-text wrapping.
+  - Corrected AudiobookDB book links to `/books/{id}` and account-creation links to `/users/signup`.
+  - Queue job cards and book job history now show elapsed time per job. Queued jobs report time spent waiting, running jobs tick each second, and finished jobs keep second precision up to an hour.
+
+- **Match comparison hierarchy**
+  - Replaced the filename-led Before/After block with a direct Source → Proposed match comparison in batch and focused review. Output naming is a secondary preview with accessible full paths and configuration states.
+  - Made narrator, runtime, publisher, release date, language, and available edition distinctions visible in batch review. Kept focused catalog metadata and source artwork, including on phones.
+  - Replaced successful match chips with plain selection-method text and an unboxed AudiobookDB link. Grouped inclusion and editing controls outside the comparison; per-source Remove now lives under More and still requires confirmation.
+  - Prioritized narrator/runtime over secondary release metadata, consolidated focused editing into one disclosure, and separated mobile entries with clear boundaries and gaps. Kept Remove in the same toolbar position in both modes; automatic choices are explicitly title-based, not confidence scores.
+  - On phones, shortened the Match intro to the record-check reminder and handed focused review to the selected inspector after a source or Review is chosen; the focused Proposed match header now uses the same direction cue as batch.
+  - Announced per-row lookup and search failures, kept the Technical detail disclosure at a 24px target, and made the header and Match commit row reflow at 200% text. The nav height now follows the rendered header so sticky offsets stay correct when labels wrap.
+  - Unified disabled buttons at 0.45 opacity across variants and centered the active destination in the scrollable nav at narrow or large-text widths.
+
+- **Source-evidence presentation**
+  - Added a small match-origin badge beside Proposed match and subtle supplied-evidence field indicators, with independent source/catalog values in the existing Source details disclosure.
+  - Current records remain explicitly "metadata not read" with no agreement checks. Optional candidate-scoped reports suppress stale verification when a book or edition changes; exact book identity never implies edition certainty.
+  - Aligned origin labels and evidence icons, explained exact-ID scope and runtime approximation, and added a neutral information indicator for incomparable runtime. Tooltips use concise production-facing copy; full provenance, reasons, and preview diagnostics stay in Source details. Explanations work on hover, keyboard focus, or tap.
+  - Runtime popups now align source/catalog durations, show longer/shorter direction, and distinguish gap severity in whole minutes. Explicit measurement precision prevents rounding artifacts from becoming confident differences; equality, sub-minute gaps, overlapping rounded measurements, and unavailable comparisons remain neutral. These presentation bands do not change matching confidence.
+  - Separated Source and Catalog values onto aligned rows in all differing-field popups, including narrator, and in formatted-only or unavailable-precision runtime comparisons. Long credits wrap without merging the two values.
+  - Added a dotted underline and a 24px transparent hit area to inline evidence triggers, so the comparison reads as actionable on touch without boxing the field. Per-field agreement checks are unchanged.
+  - This is visual wiring only: no source tag extraction, ID lookup, or backend transport was added. Match-entry extraction is tracked separately in #488.
+
+- **Match removal**
+  - Remove a single source through More, or open Remove… in the page header and select records in the independent removal dialog. Only Bragi Books records are deleted; files on disk stay untouched.
+  - When two sources share a folder name, the removal list adds a distinguishing parent-folder breadcrumb and includes that context in the checkbox's accessible name; unique names keep the compact row.
+  - Failed deletions keep the survivors selected and report the count and cause, so a partial batch can be retried. The removal selection is separate from "included in this save" and never changes inclusion.
+
+- **Selectable output path format**
+  - Replaced the free-text output path format field in Settings with a token builder: token/text/separator parts, live example resolved against a real sample record, and keyboard reorder (Alt+Arrows) with wrap-around selection.
+  - Warns when literal text joins an adjacent token in the same path segment, annotates the example when the format is invalid, and documents the keyboard model in a help line.
+  - Rejects settings updates with an invalid format server-side with an HTTP 400.
+  - Mutes the non-substituted `{asin}` chip; on touch, parts show a persistent removal control and 40px minimum targets.
+
+- **Loading States** (#409)
+  - Added loading indicators to the import page for better UX
+  - Users can now see when operations are in progress
+
+- **Performance Optimizations**
+  - Skip chown operations when file ownership is already correct
+  - Reduced container startup time
+
+- **Dependency Updates**
+  - Upgraded kombu to v5.6.2
+  - Upgraded whitenoise to v6.11.0
+  - Migrated Levenshtein to rapidfuzz for faster fuzzy matching
+
+- **Docker Improvements**
+  - Fixed gosu installation for Alpine v3.15 compatibility
+  - Fixed Docker container startup failures
+  - Improved file permission handling
+
+### Bug Fixes
+
+- Fixed output path parsing regex for Rust m4b-merge binary
+- Fixed installation to use pyproject.toml for all Django dependencies
+- Fixed ALLOWED_HOSTS to use environment variable with sensible defaults
+- Fixed CSRF_TRUSTED_ORIGINS to return empty list instead of string when not set
+
+---
+
 ## [1.2.3](https://github.com/djdembeck/bragibooks/compare/v1.2.2...v1.2.3) (2024-08-07)
 
 

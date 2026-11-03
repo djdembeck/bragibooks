@@ -1,0 +1,104 @@
+<script lang="ts">
+	import { page } from '$app/state';
+	import { Logo } from '#lib/components/index.js';
+
+	// One familiar topnav for every route. No polling, no count badges:
+	// batch counts live in the workspace that owns the data.
+	const links = [
+		{ href: '/', label: 'Overview' },
+		{ href: '/import', label: 'Import' },
+		{ href: '/match', label: 'Match' },
+		{ href: '/process', label: 'Queue' },
+		{ href: '/books', label: 'Books' },
+	];
+
+	function isActive(href: string, pathname: string) {
+		if (href === '/') return pathname === '/';
+		return pathname === href || pathname.startsWith(`${href}/`);
+	}
+
+	const pathname = $derived(page.url.pathname);
+
+	let headerEl = $state<HTMLElement>();
+	let navEl = $state<HTMLElement>();
+
+	function centerActiveNav() {
+		if (!navEl || navEl.scrollWidth <= navEl.clientWidth) return;
+		const active = navEl.querySelector<HTMLElement>('[aria-current="page"]');
+		if (!active) return;
+		const navRect = navEl.getBoundingClientRect();
+		const activeRect = active.getBoundingClientRect();
+		const targetLeft =
+			navEl.scrollLeft +
+			activeRect.left -
+			navRect.left -
+			(navEl.clientWidth - activeRect.width) / 2;
+		navEl.scrollTo({ left: Math.max(0, targetLeft), behavior: 'auto' });
+	}
+
+	$effect(() => {
+		if (!navEl || !pathname) return;
+		if (typeof requestAnimationFrame === 'undefined') {
+			centerActiveNav();
+			return;
+		}
+		const frame = requestAnimationFrame(centerActiveNav);
+		return () => cancelAnimationFrame(frame);
+	});
+
+	$effect(() => {
+		if (!headerEl) return;
+		const shell = headerEl.closest('.app-shell--workspace');
+		const target = shell instanceof HTMLElement ? shell : document.documentElement;
+		const sync = () => {
+			target.style.setProperty(
+				'--nav-height',
+				`${Math.ceil(headerEl!.getBoundingClientRect().height)}px`
+			);
+			centerActiveNav();
+		};
+		sync();
+		if (typeof ResizeObserver === 'undefined') return;
+		const observer = new ResizeObserver(sync);
+		observer.observe(headerEl);
+		return () => {
+			observer.disconnect();
+			target.style.removeProperty('--nav-height');
+		};
+	});
+</script>
+
+<!-- Skip link — first focusable element -->
+<a href="#main-content" class="skip-link">Skip to main content</a>
+
+<header class="workspace-header" bind:this={headerEl}>
+	<div class="workspace-header__inner">
+		<a href="/" class="workspace-brand" aria-label="Bragi Books">
+			<span class="workspace-brand__mark">
+				<Logo />
+			</span>
+			<span class="workspace-brand__name">Bragi Books</span>
+		</a>
+
+		<nav class="workspace-nav" aria-label="Main" bind:this={navEl}>
+			{#each links as link (link.href)}
+				{@const active = isActive(link.href, pathname)}
+				<a
+					href={link.href}
+					class="workspace-nav__link"
+					aria-current={active ? 'page' : undefined}
+				>
+					{link.label}
+				</a>
+			{/each}
+		</nav>
+
+		<a
+			href="/settings"
+			class="workspace-settings"
+			aria-current={isActive('/settings', pathname) ? 'page' : undefined}
+		>
+			Settings
+		</a>
+	</div>
+</header>

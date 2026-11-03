@@ -1,0 +1,854 @@
+<script lang="ts">
+	import { get, post, streamEvents } from '#lib/api.js';
+	import type { BookWithPeople, BooksListResponse, ProcessingResponse, ProcessingJob, JobsListResponse, OutputProfile, OutputProfilesResponse } from '#lib/types.js';
+	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, StatusBadge, CoverArt, OutputProfileSelector, JobActionLabel } from '#lib/components/index.js';
+	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
+	import { cleanAdbError, toCleanedError } from '#lib/adbError.js';
+	import { formatJobTime, formatElapsed, elapsedLabel } from '#lib/datetime.js';
+	import { createJobLogTracker, type JobLogTracker } from '#lib/jobDestination.js';
+	import { mergeOutputEvent } from '#lib/jobOutput.js';
+	import { liveNow } from '#lib/liveNow.svelte.js';
+	import { CheckCircle, Clock, ArrowRight, FileText } from '@lucide/svelte';
+
+	interface JobItem {
+		id: string;
+		bookId: number | null;
+		bookTitle?: string;
+		status: string;
+		action: string | null;
+		/** Import audit detail, and reprocess provenance for merge jobs. */
+		detail: string | null;
+		output: string;
+		error: string | null;
+		startedAt: string | null;
+		completedAt: string | null;
+		createdAt: string | null;
+		/** Explicit FIFO position; SQLite's second-precision timestamps can tie. */
+		queueOrder: number;
+		/** Local cancellation in flight: badge is optimistic until the backend terminal state lands. */
+		cancelRequested: boolean;
+		/** Final .m4b reported by the API once the job finishes. */
+		outputFile: string | null;
+		/** Buffer-end offset of the log this item holds; null until the first
+		 *  offset-carrying SSE event. Suffix events APPEND; a full snapshot
+		 *  (initial/reconnect/poll) replaces and resets it. */
+		outputOffset: number | null;
+		/** Book art and author line for the active card; hydrated from the book record. */
+		coverUrl?: string;
+		authorNames?: string;
+		/** Queue-time output destination snapshot (profiled batches only). */
+		outputDir?: string;
+		outputScheme?: string;
+	}
+
+	let books: BookWithPeople[] = $state([]);
+	let selectedIds = $state<Set<number>>(new Set());
+	let profiles = $state<OutputProfile[]>([]);
+	let profilesError = $state<string | null>(null);
+	// null = "Global settings"; set only when the user picks a saved profile.
+	let selectedProfileId = $state<number | null>(null);
+	let selectAllControl = $state<HTMLInputElement>();
+	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
+	let loading = $state(true);
+	let starting = $state(false);
+	let jobs = $state<JobItem[]>([]);
+	let queueSequence = 0;
+	let cancelling = $state<Set<string>>(new Set());
+	const cleanupMap = $state(new Map<string, () => void>());
+	const pollTimers = $state(new Map<string, number>());
+	const retryTimers = $state(new Map<string, number>());
+	// Per-job cache over the streaming log: stage/destination re-scan only the
+	// lines a new suffix event added, so a long conversion doesn't re-split the
+	// whole accumulated log on every line. Rebuilt on reload.
+	const logTrackers = new Map<string, JobLogTracker>();
+
+	/** The job's log tracker, seeded from the current item on first use. */
+	function trackerFor(item: JobItem): JobLogTracker {
+		let tracker = logTrackers.get(item.id);
+		if (!tracker) {
+			tracker = createJobLogTracker(item.id, item.output);
+			logTrackers.set(item.id, tracker);
+		}
+		return tracker;
+	}
+
+	$effect(() => {
+		load();
+		return () => {
+			cleanupMap.forEach((fn) => fn());
+			pollTimers.forEach((timer) => clearInterval(timer));
+			retryTimers.forEach((timer) => clearTimeout(timer));
+		};
+	});
+
+	async function load() {
+		loading = true;
+		await dl.run(async () => {
+			const [matched, pending, jobsResp] = await Promise.all([
+				get<BooksListResponse>('/books?status=matched&limit=100'),
+				get<BooksListResponse>('/books?status=pending&limit=100'),
+				get<JobsListResponse>('/jobs?limit=20'),
+			]);
+			books = [...(matched.books || []), ...(pending.books || [])];
+			restoreJobs(jobsResp.jobs);
+		});
+		loading = false;
+		// Independent of the queue load: a profile-list failure must not
+		// fail the page; the selector simply offers Global settings only.
+		void loadProfiles();
+	}
+
+	async function loadProfiles() {
+		try {
+			const res = await get<OutputProfilesResponse>('/output-profiles');
+			profiles = res.profiles || [];
+			profilesError = null;
+		} catch {
+			profilesError = 'Saved profiles unavailable — queuing uses global settings.';
+		}
+	}
+
+	async function loadBooks() {
+		try {
+			const [matched, pending] = await Promise.all([
+				get<BooksListResponse>('/books?status=matched&limit=100'),
+				get<BooksListResponse>('/books?status=pending&limit=100'),
+			]);
+			books = [...(matched.books || []), ...(pending.books || [])];
+		} catch {
+			// Keep the current job view when the book-list refresh is unavailable.
+		}
+	}
+
+	function authorLabel(book: BookWithPeople): string {
+		return book.authors.map((author) => author.name).join(', ');
+	}
+
+	function applyJobBook(item: JobItem, book: BookWithPeople) {
+		item.bookTitle = book.title;
+		item.coverUrl = book.cover_image_url;
+		item.authorNames = authorLabel(book);
+	}
+
+	function restoreJobs(jobList: ProcessingJob[]) {
+		cleanupMap.forEach((fn) => fn());
+		pollTimers.forEach((timer) => clearInterval(timer));
+		retryTimers.forEach((timer) => clearTimeout(timer));
+		cleanupMap.clear();
+		pollTimers.clear();
+		retryTimers.clear();
+		// The REST log has no SSE offset; trackers are rebuilt lazily per job.
+		logTrackers.clear();
+
+		const items: JobItem[] = [];
+		const bookRequests = new Map<number, Promise<BookWithPeople>>();
+		// Use the API's durable enqueue order; fall back to API position for
+		// legacy rows so tied second-level timestamps cannot reverse a batch.
+		queueSequence = Math.max(0, ...jobList.map((j) => j.queue_order ?? 0), jobList.length);
+		for (const [index, j] of jobList.entries()) {
+			const known = j.book_id !== null ? books.find((book) => book.id === j.book_id) : undefined;
+			const item = $state<JobItem>({
+				id: j.id,
+				bookId: j.book_id,
+				bookTitle: known?.title,
+				coverUrl: known?.cover_image_url,
+				authorNames: known ? authorLabel(known) : undefined,
+				status: j.status,
+				action: j.action ?? null,
+				detail: j.detail ?? null,
+				output: j.output || '',
+				outputOffset: null,
+				outputFile: j.output_file ?? null,
+				error: j.error || null,
+				startedAt: j.started_at,
+				completedAt: j.completed_at,
+				createdAt: j.created_at ?? null,
+				queueOrder: j.queue_order ?? (jobList.length - index),
+				cancelRequested: false,
+				outputDir: j.output_dir,
+				outputScheme: j.output_scheme,
+			});
+			items.push(item);
+			// Active jobs need the book's cover and author even though the book
+			// has already left the matched/pending lists. History only fetches
+			// when the job row arrived without a title.
+			if (item.bookId !== null && !known && (isActiveJob(item) || !item.bookTitle)) {
+				let request = bookRequests.get(item.bookId);
+				if (!request) {
+					request = get<BookWithPeople>(`/books/${item.bookId}`);
+					bookRequests.set(item.bookId, request);
+				}
+				void request
+					.then((book) => applyJobBook(item, book))
+					.catch(() => {
+						// Deleted or temporarily unavailable books retain the ID fallback.
+					});
+			}
+			if (isActiveJob(item)) connectSSE(item);
+		}
+		jobs = items;
+	}
+
+	// Heartbeats ("alive") and unknown payloads must not clobber the job
+	// status; only real lifecycle values are whitelisted.
+	const JOB_STATUSES = new Set(['queued', 'running', 'done', 'error', 'cancelled']);
+	const TERMINAL_STATUSES = new Set(['done', 'error', 'cancelled']);
+
+	function clearRetry(id: string) {
+		const timer = retryTimers.get(id);
+		if (timer) clearTimeout(timer);
+		retryTimers.delete(id);
+	}
+
+	/** Re-open the live stream after a transient failure. Polling keeps the
+	 *  canonical job state current in the meantime, but only the SSE snapshot
+	 *  restores the in-memory log; retrying is what keeps the log live. */
+	function scheduleReconnect(item: JobItem, attempt: number) {
+		clearRetry(item.id);
+		const delay = Math.min(1000 * 2 ** Math.min(attempt, 3), 10000);
+		retryTimers.set(
+			item.id,
+			window.setTimeout(() => {
+				retryTimers.delete(item.id);
+				if (!isActiveJob(item) || TERMINAL_STATUSES.has(item.status)) return;
+				connectSSE(item, attempt + 1);
+			}, delay)
+		);
+	}
+
+	function connectSSE(item: JobItem, attempt = 0) {
+		clearRetry(item.id);
+		// Each connection's first offset event is the server's FULL log
+		// snapshot: dropping the previous connection's cursor hands the
+		// replace branch the re-sync, so a reconnect never appends the
+		// snapshot onto the old log nor misses the suffixes after it.
+		item.outputOffset = null;
+		const stop = streamEvents(
+			`/api/jobs/${item.id}/stream`,
+			(raw) => {
+				try {
+					const parsed = JSON.parse(raw);
+					if (parsed.status && JOB_STATUSES.has(String(parsed.status).toLowerCase())) {
+						const next = String(parsed.status).toLowerCase();
+						if (next !== item.status) {
+							item.status = next;
+							// SSE events carry no clock fields; pull the canonical timestamps.
+							void pollJob(item);
+						}
+					}
+					// Output events are offset-carried (snapshot vs. suffix
+					// vs. replay); the tracker mirrors whichever merge won.
+					const merged = mergeOutputEvent(
+						{ output: item.output, offset: item.outputOffset },
+						parsed
+					);
+					if (merged.action === 'replace') {
+						item.output = merged.output;
+						item.outputOffset = merged.offset;
+						trackerFor(item).replace(item.output);
+					} else if (merged.action === 'append') {
+						item.output = merged.output;
+						item.outputOffset = merged.offset;
+						trackerFor(item).append(parsed.output);
+					}
+					if (parsed.message && !parsed.output && !item.output) {
+						item.output += parsed.message + '\n';
+						trackerFor(item).append(parsed.message + '\n');
+					}
+					if (parsed.error) item.error = parsed.error;
+					if (TERMINAL_STATUSES.has(item.status)) {
+						clearRetry(item.id);
+						stop();
+						cleanupMap.delete(item.id);
+						// The SSE payload carries no clock fields and a running cancel
+						// persists its terminal row from the worker; keep polling until
+						// the canonical job row (with completed_at) arrives.
+						startPolling(item);
+						void pollJob(item);
+					}
+				} catch {
+					item.output += raw + '\n';
+					trackerFor(item).append(raw + '\n');
+				}
+			},
+			() => {
+				stop();
+				cleanupMap.delete(item.id);
+				void pollJob(item);
+				if (TERMINAL_STATUSES.has(item.status) || !isActiveJob(item)) {
+					clearRetry(item.id);
+					startPolling(item);
+					return;
+				}
+				startPolling(item);
+				scheduleReconnect(item, attempt);
+			}
+		);
+		cleanupMap.set(item.id, stop);
+	}
+
+	function startPolling(item: JobItem) {
+		stopPolling(item.id);
+		pollTimers.set(item.id, window.setInterval(() => pollJob(item), 3000));
+	}
+
+	async function pollJob(item: JobItem) {
+		try {
+			const job = await get<ProcessingJob>(`/jobs/${item.id}`);
+			const backendTerminal = TERMINAL_STATUSES.has(job.status.toLowerCase());
+			// A cancel request made here keeps the optimistic 'cancelled' badge
+			// until the backend row itself is terminal; otherwise the badge would
+			// flip back to 'running' while the worker reaps the killed process.
+			if (!(item.cancelRequested && !backendTerminal)) {
+				if (job.status !== item.status || job.error !== item.error || (job.output && job.output !== item.output)) {
+					item.status = job.status;
+					item.error = job.error;
+					if (job.output) {
+						// The REST log is a full snapshot: replace, and the
+						// next offset event (initial SSE payload) re-syncs the
+						// cursor against the server buffer.
+						item.output = job.output;
+						item.outputOffset = null;
+						trackerFor(item).replace(item.output);
+					}
+				}
+			}
+			item.startedAt = job.started_at;
+			item.completedAt = job.completed_at;
+			item.createdAt = job.created_at ?? null;
+			if (job.queue_order !== undefined) item.queueOrder = job.queue_order;
+			item.outputFile = job.output_file ?? null;
+			item.outputDir = job.output_dir ?? item.outputDir;
+			item.outputScheme = job.output_scheme ?? item.outputScheme;
+			if (!backendTerminal) {
+				// Still running (e.g. a cancelled process the worker has not reaped
+				// yet): keep the poll loop so the terminal row lands eventually.
+				return;
+			}
+			item.cancelRequested = false;
+			clearRetry(item.id);
+			stopPolling(item.id);
+			refreshAfterTerminal(item.id);
+		} catch {
+			/* The next scheduled poll can restore the live job state. */
+		}
+	}
+
+	function stopPolling(id: string) {
+		const timer = pollTimers.get(id);
+		if (timer) clearInterval(timer);
+		pollTimers.delete(id);
+	}
+
+	async function refreshAfterTerminal(jobId: string) {
+		const item = jobs.find((j) => j.id === jobId);
+		if (item) {
+			clearRetry(jobId);
+			const existing = cleanupMap.get(jobId);
+			if (existing) {
+				existing();
+				cleanupMap.delete(jobId);
+			}
+		}
+		await loadBooks();
+	}
+
+	function toggleBook(id: number) {
+		const next = new Set(selectedIds);
+		if (next.has(id)) next.delete(id);
+		else next.add(id);
+		selectedIds = next;
+	}
+
+	async function start() {
+		if (selectedReadyCount === 0) return;
+		starting = true;
+		dl.setError(null);
+		try {
+			const selected = matchedBooks.filter((b) => selectedIds.has(b.id));
+			const payload: { book_ids: number[]; src_dirs: string[]; output_profile_id?: number } = {
+				book_ids: selected.map((b) => b.id),
+				src_dirs: selected.map((b) => b.src_path),
+			};
+			if (selectedProfileId !== null) payload.output_profile_id = selectedProfileId;
+			const response = await post<ProcessingResponse>('/process', payload);
+			for (const job of response.jobs) {
+				const selectedBook = selected.find((book) => book.id === job.book_id);
+				const item = $state<JobItem>({
+					id: job.id,
+					bookId: job.book_id,
+					bookTitle: selectedBook?.title,
+					coverUrl: selectedBook?.cover_image_url,
+					authorNames: selectedBook ? authorLabel(selectedBook) : undefined,
+					status: 'queued',
+					action: 'merge',
+					detail: null,
+					output: '',
+					outputOffset: null,
+					outputFile: null,
+					error: null,
+					startedAt: null,
+					completedAt: null,
+					createdAt: null,
+					queueOrder: ++queueSequence,
+					cancelRequested: false,
+					outputDir: response.output_dir,
+					outputScheme: response.output_scheme,
+				});
+				jobs = [item, ...jobs];
+				connectSSE(item);
+				void pollJob(item);
+			}
+			selectedIds = new Set();
+			selectedProfileId = null; // Batch queued with this choice; back to Global settings.
+			await loadBooks();
+		} catch (e) {
+			dl.setError(toCleanedError(e));
+		} finally {
+			starting = false;
+		}
+	}
+
+	function isActiveJob(job: JobItem): boolean {
+		const status = job.status.toLowerCase();
+		return status === 'running' || status === 'queued';
+	}
+
+	/** Running jobs lead the active section; queued jobs follow in queue order.
+	 *  The live card is the reason to look here, so it must not sit below a
+	 *  waiting card just because the waiting job was created later. */
+	const activeJobs = $derived.by(() => {
+		const active = jobs.filter(isActiveJob);
+		return active.sort((a, b) => {
+			const runningFirst = Number(isRunning(b)) - Number(isRunning(a));
+			if (runningFirst !== 0) return runningFirst;
+			return a.queueOrder - b.queueOrder;
+		});
+	});
+	/** A queued book has not started yet, so its status is still "matched". It
+	 *  already has a card in the active section; offering it for another batch
+	 *  would only produce the backend's active-job 409. */
+	const activeBookIds = $derived(
+		new Set(activeJobs.map((job) => job.bookId).filter((id): id is number => id !== null))
+	);
+	const matchedBooks = $derived(
+		books.filter((book) => book.status === 'matched' && !activeBookIds.has(book.id))
+	);
+	const selectedReadyCount = $derived(
+		matchedBooks.reduce((count, book) => count + Number(selectedIds.has(book.id)), 0)
+	);
+	$effect(() => {
+		if (selectAllControl) {
+			selectAllControl.indeterminate = selectedReadyCount > 0 && selectedReadyCount < matchedBooks.length;
+		}
+	});
+	const pendingBooks = $derived(books.filter((b) => b.status === 'pending'));
+	const pastJobs = $derived(jobs.filter((job) => !isActiveJob(job)));
+	const clock = liveNow(() => activeJobs.length > 0);
+	const failedJobs = $derived(pastJobs.filter((job) => job.status === 'error' || job.status === 'failed').length);
+	const runningJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'running').length);
+	const queuedJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'queued').length);
+
+	function jobStatusLabel(status: string): string {
+		switch (status.toLowerCase()) {
+			case 'queued': return 'Waiting for a processing slot';
+			case 'running': return 'm4b-merge is processing this book';
+			case 'done':
+			case 'completed': return 'Completed';
+			case 'cancelled': return 'Stopped by the operator';
+			case 'error':
+			case 'failed': return 'Processing failed';
+			default: return status;
+		}
+	}
+
+	function isRunning(job: JobItem): boolean {
+		return job.status.toLowerCase() === 'running';
+	}
+
+	/** The final path once known: the API's completed output file, or the
+	 *  destination m4b-merge itself reported while the run is in flight.
+	 *  Empty otherwise, so a failed or finished job never borrows a working
+	 *  path from its log. */
+	function destinationFor(job: JobItem): string {
+		if (job.outputFile) return job.outputFile;
+		if (isRunning(job)) {
+			// Read job.output so the {@const} derived depends on the log: the
+			// tracker's cache makes the return value stale until this read
+			// dirties the derivation on every appended suffix.
+			void job.output;
+			return trackerFor(job).destination();
+		}
+		return '';
+	}
+
+	/** Queue-time profile snapshot, shown as context until the engine reports
+	 *  the real path. Never presented as the destination itself. */
+	function outputProfileLabel(job: JobItem): string {
+		const dir = job.outputDir?.trim() ?? '';
+		const scheme = job.outputScheme?.trim() ?? '';
+		if (dir && scheme) return `${dir} · ${scheme}`;
+		return dir || scheme;
+	}
+
+	function activeStageLabel(job: JobItem): string {
+		if (job.status.toLowerCase() === 'queued') return 'Waiting for a processing slot';
+		// Read job.output so the {@const} derived depends on the log: the
+		// tracker's cache makes the return value stale until this read
+		// dirties the derivation on every appended suffix.
+		void job.output;
+		return trackerFor(job).stage() || 'Starting m4b-merge';
+	}
+
+	type AutoscrollParams = { text: string; active: boolean };
+
+	/** Keep the live log pinned to its newest line while the job runs, but
+	 *  never yank an operator who has scrolled up to read earlier output.
+	 *  Pinned is re-armed when they return to the bottom. */
+	function autoscroll(node: HTMLElement, params: AutoscrollParams) {
+		let lastText = '';
+		let pinned = true;
+		const onScroll = () => {
+			pinned = node.scrollHeight - node.scrollTop - node.clientHeight <= 4;
+		};
+		const update = (next: AutoscrollParams) => {
+			if (!next.active || next.text === lastText) return;
+			lastText = next.text;
+			if (!pinned) return;
+			queueMicrotask(() => {
+				node.scrollTop = node.scrollHeight;
+			});
+		};
+		node.addEventListener('scroll', onScroll, { passive: true });
+		update(params);
+		return {
+			update,
+			destroy() {
+				node.removeEventListener('scroll', onScroll);
+			}
+		};
+	}
+
+	async function cancelJob(job: JobItem) {
+		if (cancelling.has(job.id)) return;
+		const next = new Set(cancelling);
+		next.add(job.id);
+		cancelling = next;
+		try {
+			await post(`/jobs/${job.id}/cancel`, {});
+			// Optimistic badge only: the terminal row (and its completed_at) is
+			// written by the API for queued jobs and by the worker for running
+			// ones, so keep refreshing until that canonical row arrives.
+			job.status = 'cancelled';
+			job.error = null;
+			job.cancelRequested = true;
+			clearRetry(job.id);
+			const existing = cleanupMap.get(job.id);
+			if (existing) {
+				existing();
+				cleanupMap.delete(job.id);
+			}
+			jobs = [...jobs];
+			await pollJob(job);
+			// pollJob clears cancelRequested once the canonical row (with
+			// completed_at) is in hand and refreshes the book list itself;
+			// until then keep polling for the worker's terminal write.
+			if (job.cancelRequested) {
+				startPolling(job);
+				await loadBooks();
+			}
+		} catch (e) {
+			job.error = e instanceof Error ? e.message : 'Failed to cancel job';
+		} finally {
+			const done = new Set(cancelling);
+			done.delete(job.id);
+			cancelling = done;
+		}
+	}
+</script>
+
+<svelte:head><title>Queue — Bragi Books</title></svelte:head>
+
+<div class="queue-page">
+	<header class="queue-heading">
+		<div><h1>Processing queue</h1><p>Select ready books to process. Review job output and outcomes here.</p></div>
+		<p class="queue-live" role="status" aria-live="polite">
+			<span><span class:live-dot--running={runningJobs > 0} class="live-dot" aria-hidden="true"></span>{runningJobs} running</span>
+			<span>{queuedJobs} queued</span>
+			{#if activeJobs.length > 0}<a href="#active-jobs">View jobs <ArrowRight size={14} aria-hidden="true" /></a>{/if}
+		</p>
+	</header>
+
+	{#if dl.error}
+		<Alert variant="error" onretry={load}>{dl.error.message}<ErrorDetail raw={dl.error.raw} needsSettings={dl.error.needsSettings} /></Alert>
+	{/if}
+
+	{#if dl.showSkeleton}
+		<div class="queue-loading" aria-label="Loading queue">{#each Array(5) as _}<Skeleton height="4.5rem" />{/each}</div>
+	{:else if !loading && (!dl.error || books.length > 0 || jobs.length > 0)}
+		<div class="queue-columns" class:queue-columns--single={matchedBooks.length === 0 && activeJobs.length > 0}>
+			<div class="queue-work">
+				{#if matchedBooks.length > 0}
+					<section class="ready-list" aria-labelledby="ready-title">
+						<div class="section-heading"><div><h2 id="ready-title">Ready to process <span>{matchedBooks.length}</span></h2><p>Metadata matched. Select the books to include in this batch.</p></div></div>
+						<div class="selection-toolbar">
+							<div class="toolbar-lead">
+								<label class="select-all"><input bind:this={selectAllControl} type="checkbox" checked={matchedBooks.length > 0 && selectedReadyCount === matchedBooks.length} onchange={(event) => {
+									const checked = event.currentTarget.checked;
+									const next = new Set(selectedIds);
+									matchedBooks.forEach((book) => { if (checked) next.add(book.id); else next.delete(book.id); });
+									selectedIds = next;
+								}} aria-label="Select all matched books" /><span>{selectedReadyCount} selected of {matchedBooks.length}</span></label>
+								{#if selectedReadyCount > 0}
+									<div class="profile-pick">
+										<OutputProfileSelector
+											{profiles}
+											bind:selectedProfileId
+											{profilesError}
+											batchCount={selectedReadyCount}
+										/>
+									</div>
+								{/if}
+							</div>
+							<Button loading={starting} disabled={selectedReadyCount === 0} onclick={start}>Start processing <ArrowRight size={16} aria-hidden="true" /></Button>
+						</div>
+						<div class="ready-rows">
+							{#each matchedBooks as book (book.id)}
+								<div class="queue-row" class:queue-row--selected={selectedIds.has(book.id)}>
+									<label class="queue-check"><input type="checkbox" checked={selectedIds.has(book.id)} onchange={() => toggleBook(book.id)} aria-label="Select {book.title} for processing" /></label>
+									<CoverArt url={book.cover_image_url} title={book.title} size="sm" />
+									<div class="book-identity"><a href="/books/{book.id}">{book.title}</a><p>{book.authors.map((author) => author.name).join(', ') || 'Unknown author'}</p></div>
+									<span class="ready-state"><CheckCircle size={14} aria-hidden="true" />Ready</span>
+								</div>
+							{/each}
+						</div>
+					</section>
+				{:else if activeJobs.length === 0 && !dl.error}
+					<div class="queue-empty"><EmptyState title="No books ready to process" description={pendingBooks.length > 0 ? 'Match the remaining sources before adding them to a processing batch.' : 'Import sources and match their metadata to build your next batch.'} actionLabel={pendingBooks.length > 0 ? 'Match metadata' : 'Import sources'} actionHref={pendingBooks.length > 0 ? '/match' : '/import'} /></div>
+				{/if}
+
+				{#if pendingBooks.length > 0}
+					<details class="pending-list">
+						<summary><span>Needs a metadata match <span class="count">{pendingBooks.length}</span></span></summary>
+						<div class="pending-intro"><p>These sources cannot be processed until their metadata is matched.</p><a href="/match">Match metadata <ArrowRight size={14} aria-hidden="true" /></a></div>
+						{#each pendingBooks as book (book.id)}
+							<div class="pending-row"><CoverArt url={book.cover_image_url} title={book.title} size="sm" /><div class="book-identity"><a href="/books/{book.id}">{book.title}</a><p>{book.authors.map((author) => author.name).join(', ') || 'Unknown author'}</p></div><span class="pending-state">Needs match</span></div>
+						{/each}
+					</details>
+				{/if}
+			</div>
+
+			<aside class="queue-activity" id="active-jobs" aria-labelledby="activity-title">
+				{#if activeJobs.length > 0}
+					<section class="active-jobs"><div class="section-heading"><h2 id="activity-title">Active jobs <span>{activeJobs.length}</span></h2><p>Running and waiting jobs. Live output streams as each starts.</p></div>{#each activeJobs as job (job.id)}{@render JobRecord(job, true)}{/each}</section>
+				{:else}
+					<section class="queue-idle"><Clock size={21} aria-hidden="true" /><h2 id="activity-title">Nothing processing</h2><p>Ready books stay in the list until you start a batch.</p></section>
+				{/if}
+				{#if pastJobs.length > 0}
+					<details class="job-history"><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each pastJobs as job (job.id)}{@render JobRecord(job, false)}{/each}</details>
+				{/if}
+			</aside>
+		</div>
+	{/if}
+</div>
+
+{#snippet JobRecord(job: JobItem, active: boolean)}
+	{@const destination = destinationFor(job)}
+	{@const profile = outputProfileLabel(job)}
+	{@const running = isRunning(job)}
+	{@const stage = activeStageLabel(job)}
+	<article class="job-record" class:job-record--active={active} aria-busy={active && running}>
+		{#if active && running}
+			<div class="job-progress" role="progressbar" aria-label="Processing {job.bookTitle || 'book'}" aria-valuetext={stage}><span></span></div>
+		{/if}
+		<div class="job-record__heading">
+			<div class="job-heading__lead">
+				{#if active}<CoverArt url={job.coverUrl} title={job.bookTitle} size="sm" />{/if}
+				<div class="job-identity">
+					{#if job.bookId}<a href="/books/{job.bookId}">{job.bookTitle || `Book #${job.bookId}`}</a>{:else}<strong>Unlinked job</strong>{/if}
+					{#if active && job.authorNames}<p class="job-author">{job.authorNames}</p>{/if}
+					<code title={job.id}>{job.id.slice(0, 8)}</code>
+				</div>
+			</div>
+			<div class="job-record__state"><StatusBadge status={job.status} /><JobActionLabel action={job.action} /></div>
+		</div>
+		<div class="job-record__body">
+			<div class="job-facts">
+				{#if destination}
+					<p class="job-destination"><span class="job-label">Destination</span><code>{destination}</code></p>
+				{:else if profile}
+					<p class="job-destination job-destination--target"><span class="job-label">Output profile</span><code>{profile}</code></p>
+				{/if}
+				{#if active}
+					<p class="job-stage" class:job-stage--queued={!running} role="status" aria-live="polite"><span class="job-stage__dot" aria-hidden="true"></span>{stage}</p>
+				{:else}
+					<p class="job-description">{jobStatusLabel(job.status)}</p>
+				{/if}
+				<dl class="job-timestamps">
+					{#if job.startedAt}
+						<div class="job-timestamp"><dt>Started</dt><dd>{formatJobTime(job.startedAt)}</dd></div>
+					{/if}
+					{#if job.completedAt}
+						<div class="job-timestamp"><dt>Done</dt><dd>{formatJobTime(job.completedAt)}</dd></div>
+					{/if}
+					{#if job.startedAt || job.createdAt}
+						<div class="job-timestamp"><dt>{elapsedLabel(job.startedAt)}</dt><dd>{formatElapsed(job.startedAt ?? job.createdAt, job.completedAt, clock.now)}</dd></div>
+					{/if}
+					{#if !job.startedAt && !job.completedAt && job.createdAt}
+						<div class="job-timestamp"><dt>Created</dt><dd>{formatJobTime(job.createdAt)}</dd></div>
+					{/if}
+				</dl>
+				{#if job.detail}
+					<p class="job-detail">{job.detail}</p>
+				{/if}
+				{#if job.error}
+					{@const error = cleanAdbError(job.error)}
+					<div class="job-message" class:job-message--error={job.status !== 'cancelled'} role={job.status === 'cancelled' ? 'note' : 'alert'}>{error.message}</div>
+					<ErrorDetail raw={job.error} needsSettings={error.needsSettings} />
+				{/if}
+			</div>
+			{#if job.action === 'merge' || job.output}
+				<details class="job-output" open={active && running}>
+					<summary><FileText size={14} aria-hidden="true" />{active ? 'Live output' : 'Job output'}</summary>
+					{#if job.output}
+						<!-- The log is a scrollable reading surface; keyboard focus is required to scroll it. -->
+						<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+						<pre use:autoscroll={{ text: job.output, active: active && running }} role="log" aria-label="Job {job.id.slice(0, 8)} output" aria-live="off" tabindex="0">{job.output}</pre>
+					{:else}
+						<p>{active ? 'Waiting for the first line…' : 'No output recorded yet.'}</p>
+					{/if}
+				</details>
+			{/if}
+		</div>
+		{#if active}
+			<div class="job-actions">
+				<Button variant="ghost" class="cancel-job" loading={cancelling.has(job.id)} disabled={cancelling.has(job.id)} aria-label={job.bookTitle ? `Cancel job for ${job.bookTitle} (${job.id.slice(0, 8)})` : `Cancel job ${job.id.slice(0, 8)}`} onclick={() => cancelJob(job)}>{cancelling.has(job.id) ? 'Cancelling…' : 'Cancel job'}</Button>
+			</div>
+		{/if}
+	</article>
+{/snippet}
+
+<style>
+	.queue-page { padding-bottom: 2rem; }
+	.queue-heading { display: flex; justify-content: space-between; align-items: center; gap: 1.5rem; margin-bottom: 1.75rem; }
+	.queue-heading h1 { margin: 0 0 0.5rem; font-size: 1.75rem; letter-spacing: -0.025em; }
+	.queue-heading p { font-size: 0.9375rem; color: var(--text-muted); }
+	.queue-live { display: flex; align-items: center; flex-wrap: wrap; gap: 1rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+	.queue-live > span, .queue-live a { display: inline-flex; align-items: center; gap: 0.5rem; }
+	.queue-live a { color: var(--workspace-action); min-height: 2.75rem; }
+	.live-dot { width: 0.45rem; height: 0.45rem; border-radius: 50%; background: var(--text-muted); }
+	.live-dot--running { background: var(--state-amber); }
+	.queue-loading { display: grid; gap: 0.75rem; }
+	.queue-columns { display: grid; grid-template-columns: minmax(0, 1fr) 21rem; align-items: start; gap: 1.5rem; margin-top: 1.5rem; }
+	.queue-columns--single { grid-template-columns: minmax(0, 1fr); }
+	.queue-columns--single .queue-work:empty { display: none; }
+	.queue-work, .queue-activity { min-width: 0; }
+	.ready-list, .active-jobs { overflow: hidden; background: var(--bg-panel); border-radius: var(--radius-md); }
+	.section-heading { padding: 1.25rem 1.5rem; }
+	.section-heading h2 { display: flex; align-items: center; gap: 0.6rem; margin: 0; font-size: 1.0625rem; font-weight: 650; }
+	.section-heading h2 span, .count { color: var(--text-muted); font-size: 0.8125rem; font-weight: 500; font-variant-numeric: tabular-nums; }
+	.section-heading p { color: var(--text-muted); font-size: 0.8125rem; margin-top: 0.35rem; text-wrap: pretty; }
+	.selection-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem 1rem; padding: 0.75rem 1.5rem; background: var(--surface); border-top: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); }
+	.toolbar-lead { display: flex; align-items: center; flex-wrap: nowrap; gap: 0.75rem 1rem; flex: 1 1 24rem; min-width: 0; }
+	.select-all { display: flex; align-items: center; gap: 0.75rem; flex: 0 0 auto; min-height: 2.75rem; font-size: 0.8125rem; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+	.profile-pick { flex: 0 1 22rem; min-width: 0; max-width: 22rem; }
+	.selection-toolbar :global(.btn) { margin-left: auto; }
+	.queue-row { display: grid; grid-template-columns: 2.75rem 3rem minmax(0, 1fr) auto; align-items: center; gap: 0.75rem; padding: 0.875rem 1.5rem 0.875rem 0.75rem; border-bottom: 1px solid var(--border-subtle); }
+	.queue-row:last-child { border-bottom: 0; }
+	.queue-row:hover { background: var(--surface); }
+	.queue-row--selected, .queue-row--selected:hover { background: var(--workspace-selected); }
+	.queue-check { display: flex; align-items: center; justify-content: center; min-height: 2.75rem; min-width: 2.75rem; cursor: pointer; }
+	.book-identity { min-width: 0; }
+	.book-identity a { display: inline-block; color: var(--text); font-size: 0.9375rem; line-height: 1.4; font-weight: 600; overflow-wrap: anywhere; }
+	.book-identity p { margin-top: 0.25rem; color: var(--text-muted); font-size: 0.8125rem; overflow-wrap: anywhere; }
+	.ready-state { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--state-green); font-size: 0.75rem; white-space: nowrap; }
+	.pending-list { margin-top: 1.25rem; border-top: 1px solid var(--border); }
+	.pending-list > summary, .job-history > summary { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; cursor: pointer; padding: 1rem 0; font-size: 0.875rem; font-weight: 600; min-height: 2.75rem; list-style: none; }
+	.pending-list > summary::after, .job-history > summary::after { content: ''; width: 0.45rem; height: 0.45rem; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); margin-right: 0.25rem; flex-shrink: 0; }
+	.pending-list[open] > summary::after, .job-history[open] > summary::after { transform: rotate(225deg); }
+	.pending-list > summary > span { display: inline-flex; align-items: baseline; gap: 0.6rem; }
+	.pending-intro { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding-bottom: 1rem; }
+	.pending-intro p, .history-hint { color: var(--text-muted); font-size: 0.8125rem; line-height: 1.6; }
+	.pending-intro a { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--workspace-action); font-size: 0.8125rem; white-space: nowrap; min-height: 2.75rem; }
+	.pending-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 0; border-top: 1px solid var(--border-subtle); }
+	.pending-row .book-identity { flex: 1; }
+	.pending-state { color: var(--text-muted); font-size: 0.75rem; white-space: nowrap; }
+	.queue-activity { scroll-margin-top: 7rem; }
+	.queue-idle { padding: 1.5rem; background: var(--surface); border-radius: var(--radius-md); }
+	.queue-idle > :global(svg) { color: var(--text-muted); margin-bottom: 0.75rem; }
+	.queue-idle h2 { font-size: 1rem; margin-bottom: 0.5rem; }
+	.queue-idle p { color: var(--text-muted); font-size: 0.875rem; line-height: 1.6; }
+	.job-history { margin-top: 1.25rem; border-top: 1px solid var(--border); }
+	.job-history > summary { flex-wrap: wrap; }
+	.job-history > summary > span:first-child { display: inline-flex; align-items: baseline; gap: 0.5rem; }
+	.failure-count { font-size: 0.75rem; color: var(--state-red); font-weight: 500; margin-left: auto; }
+	.history-hint { margin: 0 0 1rem; }
+	.job-record { min-width: 0; padding: 1.25rem 1.5rem; border-top: 1px solid var(--border-subtle); }
+	.job-record--active { container-type: inline-size; padding-top: 1rem; }
+	.job-history .job-record { padding: 1rem 0; }
+	.job-progress { height: 4px; margin: -0.15rem 0 1rem; overflow: hidden; border-radius: 9999px; background: var(--state-amber-border); }
+	.job-progress > span { display: block; width: 35%; height: 100%; border-radius: inherit; background: var(--state-amber); animation: job-progress 1.5s linear infinite; }
+	@keyframes job-progress { 0% { transform: translateX(-105%); } 100% { transform: translateX(300%); } }
+	.job-record__heading { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 0.5rem; }
+	.job-heading__lead { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
+	.job-record__state { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
+	.job-record__body { display: grid; gap: 0.75rem; min-width: 0; margin-top: 0.65rem; }
+	.job-facts { display: grid; gap: 0.55rem; min-width: 0; }
+	.job-identity { display: grid; gap: 0.35rem; min-width: 0; }
+	.job-identity a, .job-identity strong { font-size: 0.875rem; font-weight: 600; overflow-wrap: anywhere; }
+	.job-record--active .job-identity a, .job-record--active .job-identity strong { font-size: 0.9375rem; line-height: 1.35; }
+	.job-identity code { font-size: 0.75rem; color: var(--text-muted); }
+	.job-author { color: var(--text-muted); font-size: 0.8125rem; line-height: 1.4; overflow-wrap: anywhere; }
+	.job-destination { display: grid; gap: 0.25rem; min-width: 0; margin: 0; }
+	.job-label { color: var(--text-muted); font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+	.job-destination code { color: var(--text-secondary); font-size: 0.75rem; line-height: 1.5; overflow-wrap: anywhere; }
+	.job-destination--target code { color: var(--text-muted); }
+	.job-stage { display: flex; align-items: center; gap: 0.5rem; margin: 0; color: var(--state-amber); font-size: 0.75rem; font-weight: 600; }
+	.job-stage--queued { color: var(--text-muted); }
+	.job-stage__dot { width: 0.45rem; height: 0.45rem; flex-shrink: 0; border-radius: 50%; background: currentColor; }
+	.job-description { color: var(--text-muted); font-size: 0.75rem; margin: 0; }
+	.job-timestamps { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin: 0; font-size: 0.75rem; color: var(--text-secondary); }
+	.job-timestamp { display: flex; align-items: baseline; gap: 0.35rem; }
+	.job-timestamp dt { font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
+	.job-timestamp dd { margin: 0; font-variant-numeric: tabular-nums; }
+	.job-detail { font-size: 0.75rem; color: var(--text-muted); margin: 0; overflow-wrap: anywhere; }
+	.job-message { overflow-wrap: anywhere; font-size: 0.8125rem; line-height: 1.55; margin: 0; color: var(--text-secondary); }
+	.job-message--error { color: var(--state-red); }
+	.job-output { margin-top: 0; }
+	.job-output > summary { display: flex; align-items: center; gap: 0.4rem; cursor: pointer; min-height: 2.75rem; font-size: 0.75rem; color: var(--text-secondary); }
+	.job-output pre { max-height: 16rem; overflow: auto; border-radius: var(--radius-sm); padding: 0.875rem; background: var(--surface); font-size: 0.75rem; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-secondary); }
+	.job-output > p { font-size: 0.8125rem; color: var(--text-muted); padding: 0 0 0.75rem; }
+	/* Svelte's snippet CSS pruning drops this plain selector; keep the
+	 * page-scoped footer layout explicit. */
+	:global(.job-actions) { display: flex; justify-content: flex-end; margin-top: 0.5rem; }
+	@container (min-width: 44rem) {
+		.job-record--active .job-record__body { grid-template-columns: minmax(15rem, 0.82fr) minmax(0, 1.18fr); gap: 1.5rem; align-items: start; margin-top: 0.9rem; }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.job-progress { display: none; }
+	}
+	:global(.app-shell--workspace .cancel-job) { color: var(--state-red); margin-top: 0.25rem; }
+	@media (max-width: 1050px) { .queue-columns { grid-template-columns: minmax(0, 1fr); } .queue-heading { align-items: flex-start; } .queue-live { justify-content: flex-end; } }
+	@media (max-width: 640px) {
+		.queue-heading { flex-direction: column; gap: 0.75rem; margin-bottom: 1.25rem; }
+		.queue-heading h1 { font-size: 1.5rem; }
+		.queue-heading p { font-size: 0.875rem; }
+		.queue-live { justify-content: flex-start; font-size: 0.8125rem; }
+		.queue-columns { gap: 1.25rem; margin-top: 1.25rem; }
+		.section-heading { padding: 1.125rem; }
+		.section-heading h2 { font-size: 1rem; }
+		.selection-toolbar { padding: 0.75rem 1.125rem; gap: 0.5rem; flex-wrap: wrap; }
+		.selection-toolbar :global(.btn) { flex: 1; min-width: 10rem; }
+		.toolbar-lead { flex: 1 1 100%; gap: 0.5rem; flex-wrap: wrap; }
+		.select-all { flex: 1; white-space: nowrap; }
+		.profile-pick { flex: 1 1 100%; max-width: none; }
+		.queue-row { grid-template-columns: 2.75rem 3rem minmax(0, 1fr); padding: 0.875rem 1.125rem 0.875rem 0.25rem; gap: 0.5rem; }
+		.ready-state { grid-column: 3; margin-top: -0.25rem; }
+		.pending-intro { align-items: flex-start; flex-direction: column; gap: 0; }
+		.job-record--active { padding: 1.125rem; }
+		.job-record--active .job-record__heading { align-items: flex-start; }
+		.job-output pre { max-height: 12rem; }
+
+		.queue-idle { padding: 1.125rem; }
+	}
+</style>

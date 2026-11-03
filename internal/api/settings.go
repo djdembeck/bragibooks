@@ -1,0 +1,509 @@
+package api
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/bragibooks/bragibooks/internal/audio"
+	"github.com/bragibooks/bragibooks/internal/audiobookdb"
+	"github.com/bragibooks/bragibooks/internal/config"
+	"github.com/bragibooks/bragibooks/internal/version"
+)
+
+// cryptoRand is the key-entropy source; a variable (not the package) so a
+// test can fault it for the generateAPIKey error path.
+var cryptoRand = rand.Reader
+
+// GetSettings handles GET /api/settings.
+// Returns the current settings without the API key.
+func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
+	cfg := h.svc.Config.Config()
+
+	// The API key digest is never exposed by any read path.
+	settings := map[string]any{
+		"m4b_merge_binary":         cfg.M4bMerge.Binary,
+		"input_dir":                cfg.Directories.InputDir,
+		"output_dir":               cfg.Directories.OutputDir,
+		"completed_dir":            cfg.Directories.CompletedDir,
+		"num_cpus":                 cfg.Processing.NumCPUs,
+		"output_scheme":            cfg.Processing.PathFormat,
+		"region":                   cfg.Processing.Region,
+		"audiobookdb_base_url":     cfg.APIKey.BaseURL,
+		"api_endpoint_enabled":     cfg.Server.APIEndpoint.Enabled,
+		"api_endpoint_env_managed": h.svc.Config.APIEndpointEnvManaged(),
+		"bragibooks_version":       version.Version,
+		"m4b_merge_version":        h.svc.Processor.ReadVersion(),
+	}
+
+	writeJSON(w, http.StatusOK, settings)
+}
+
+// generateAPIKey mints a new external-API key: 32 random bytes, exposed to
+// the client as "bk_<64 hex>", stored only as its SHA-256 digest.
+func generateAPIKey() (raw string, digest string, err error) {
+	var b [32]byte
+	if _, err = cryptoRand.Read(b[:]); err != nil {
+		return "", "", err
+	}
+	raw = "bk_" + hex.EncodeToString(b[:])
+	sum := sha256.Sum256([]byte(raw))
+	return raw, hex.EncodeToString(sum[:]), nil
+}
+
+// matchAPIKeyDigest reports whether presented is the key whose digest is
+// stored (constant-time compare over the SHA-256 hex digest).
+func matchAPIKeyDigest(presented, storedDigest string) bool {
+	sum := sha256.Sum256([]byte(presented))
+	presentedHex := hex.EncodeToString(sum[:])
+	return subtle.ConstantTimeCompare([]byte(presentedHex), []byte(storedDigest)) == 1
+}
+
+// envManagedGuard rejects enable/disable when the env var
+// SERVER_API_ENDPOINT_ENABLED is set (deployment-managed state).
+// Returns true (and has written the 403 response) when managed.
+func (h *Handler) envManagedGuard(w http.ResponseWriter) bool {
+	if h.svc.Config.APIEndpointEnvManaged() {
+		writeError(w, http.StatusForbidden, "external API state is managed by the SERVER_API_ENDPOINT_ENABLED environment variable")
+		return true
+	}
+	return false
+}
+
+// persistAPIEndpointState persists the external-API state (DB first, then
+// the YAML flag, rolling the DB back on a file failure) and — only after
+// both stores agree — swaps the live state. Returns the previous snapshot
+// for rollback and (for enable/reissue) the minted raw key.
+//
+// It runs the whole read-modify-write under h.svc.settingsMu, the same
+// lock UpdateSettings uses for the form save: both persist the entire
+// settings row, so unserialized they can interleave snapshot-read and
+// row-write and clobber each other (a form save landing after an enable
+// would clear the freshly stored key digest, and the returned key would
+// stop working after a restart).
+//
+// requireEnabled (regenerate only) is evaluated against the SAME locked
+// snapshot prev that the write is built from: a concurrent disable that
+// commits before this flow takes the lock leaves the snapshot disabled,
+// so the regenerate fails with 400 instead of persisting enabled=true
+// with a fresh key and reopening remote access after a successful
+// disable (finding: regenerate precondition race).
+func (h *Handler) persistAPIEndpointState(w http.ResponseWriter, enabled bool, keyDigest string, requireEnabled bool) bool {
+	h.svc.settingsMu.Lock()
+	defer h.svc.settingsMu.Unlock()
+
+	// The pre-commit window (the SettingsPersistDelay test hook; nil in
+	// production) is widened BEFORE the authoritative snapshot is taken:
+	// the write must be built from the state as it exists when it
+	// commits, so a concurrent disable that lands in this window leaves
+	// the snapshot disabled (finding: regenerate precondition race). The
+	// lock is held across the whole window, so no other flow can commit
+	// in it.
+	if h.svc.SettingsPersistDelay != nil {
+		h.svc.SettingsPersistDelay()
+	}
+
+	prev := h.svc.Config.Config()
+	if requireEnabled && !prev.Server.APIEndpoint.Enabled {
+		writeError(w, http.StatusBadRequest, "enable the external API first")
+		return false
+	}
+	snap := *prev
+	snap.Server.APIEndpoint = config.APIEndpointConfig{
+		Enabled:   enabled,
+		KeyDigest: keyDigest,
+	}
+
+	// 1. DB first — the settings row is the authoritative store (it is the
+	//    only source a restart reads when no deployment pin exists).
+	if err := h.saveSettingsToDB(&snap); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("persist external API state to DB: %v", err))
+		return false
+	}
+
+	// 2. File second: the enabled flag only (the digest has no YAML path by
+	//    tag). The write ALWAYS runs, including from the regenerate path,
+	//    which is allowed while SERVER_API_ENDPOINT_ENABLED pins the flag:
+	//    while the pin is present it shadows this file value (env wins at
+	//    load, and the value written equals the pin — enable/disable are
+	//    the only flows the env guard blocks), and once the pin is removed
+	//    the file flag matches the pin that governed the write.
+	if err := h.svc.Config.SaveKeys(map[string]any{"server": map[string]any{"api_endpoint": map[string]any{"enabled": enabled}}}); err != nil {
+		if rbErr := h.saveSettingsToDB(prev); rbErr != nil {
+			// Both stores now disagree and the rollback lost: report both,
+			// keep the live process on the previous state (it and the DB
+			// revert together on the next successful action), do NOT swap.
+			log.Printf("Warning: external API state file save failed and DB rollback also failed: %v (file error: %v)", rbErr, err)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("save external API state: %v", err))
+			return false
+		}
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("save external API state: %v", err))
+		return false
+	}
+
+	// 3. Both stores persisted: swap the live state so the next request sees
+	//    it without a restart.
+	h.svc.Config.SetAPIEndpointState(enabled, keyDigest)
+	h.svc.Config.AddYAMLKeys("server.api_endpoint.enabled")
+	return true
+}
+
+// EnableAPIEndpoint enables the external API and mints a new key. The raw
+// key is returned ONLY here — reveal-once by design.
+func (h *Handler) EnableAPIEndpoint(w http.ResponseWriter, r *http.Request) {
+	if h.envManagedGuard(w) {
+		return
+	}
+	raw, digest, err := generateAPIKey()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not generate API key")
+		return
+	}
+	if !h.persistAPIEndpointState(w, true, digest, false) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "api_key": raw})
+}
+
+// DisableAPIEndpoint disables the external API and wipes the stored key.
+func (h *Handler) DisableAPIEndpoint(w http.ResponseWriter, r *http.Request) {
+	if h.envManagedGuard(w) {
+		return
+	}
+	if !h.persistAPIEndpointState(w, false, "", false) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+}
+
+// RegenerateAPIEndpoint mints a fresh key while the external API is
+// enabled, invalidating the previous one. Allowed in env-managed mode
+// (only the enabled flag is deployment-managed, not the key).
+//
+// The "enabled" precondition is enforced INSIDE settingsMu, against the
+// same locked snapshot the row write is built from (a fast pre-check
+// here skips the key mint when it is already known to be disabled; the
+// locked check is the authoritative one — a disable that commits first
+// makes the regenerate fail with 400, never re-enable, finding:
+// regenerate precondition race).
+func (h *Handler) RegenerateAPIEndpoint(w http.ResponseWriter, r *http.Request) {
+	if !h.svc.Config.Config().Server.APIEndpoint.Enabled {
+		writeError(w, http.StatusBadRequest, "enable the external API first")
+		return
+	}
+	raw, digest, err := generateAPIKey()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not generate API key")
+		return
+	}
+	if !h.persistAPIEndpointState(w, true, digest, true) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "api_key": raw})
+}
+
+// UpdateSettingsRequest is the JSON body accepted by PUT /api/settings.
+type UpdateSettingsRequest struct {
+	AudiobookdbAPIKey  *string `json:"audiobookdb_api_key"`
+	AudiobookdbBaseURL *string `json:"audiobookdb_base_url"`
+	M4bMergeBinary     *string `json:"m4b_merge_binary"`
+	InputDir           *string `json:"input_dir"`
+	OutputDir          *string `json:"output_dir"`
+	CompletedDir       *string `json:"completed_dir"`
+	NumCPUs            *int    `json:"num_cpus"`
+	OutputScheme       *string `json:"output_scheme"`
+	Region             *string `json:"region"`
+}
+
+// UpdateSettings handles PUT /api/settings.
+//
+// Persistence order (finding: split-brain): the settings DB row is written
+// FIRST (it is the durable settings store), then the YAML file. If the DB
+// write fails, nothing was written. If the file write fails afterwards, the
+// DB row is re-set from the previous config so the two stores can never
+// diverge, and the error is returned. Only after both persist is the live
+// config pointer swapped and the processor/clients refreshed.
+//
+// The YAML file is written PARTIALLY — only the keys explicitly updated by
+// this request — so saving one setting does not freeze the others' env-var
+// values (finding: partial YAML save).
+func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
+	var req UpdateSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Validate before applying anything.
+	if req.InputDir != nil && strings.TrimSpace(*req.InputDir) == "" {
+		writeError(w, http.StatusBadRequest, "input directory must not be empty")
+		return
+	}
+	if req.OutputDir != nil && strings.TrimSpace(*req.OutputDir) == "" {
+		writeError(w, http.StatusBadRequest, "output directory must not be empty")
+		return
+	}
+	if req.NumCPUs != nil && *req.NumCPUs < 0 {
+		writeError(w, http.StatusBadRequest, "CPU count must be zero or greater")
+		return
+	}
+	if req.OutputScheme != nil {
+		if verr := audio.ValidatePathFormat(*req.OutputScheme); verr != nil {
+			writeError(w, http.StatusBadRequest, "output scheme: "+verr.Error())
+			return
+		}
+	}
+	// SSRF guard (finding: base URL policy) — the proxy target must be a
+	// trusted origin; anything else can exfiltrate the API key.
+	if req.AudiobookdbBaseURL != nil && *req.AudiobookdbBaseURL != "" {
+		if err := validateAudiobookdbBaseURL(*req.AudiobookdbBaseURL); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
+	// Directories the server creates subdirectories in are probed before
+	// persisting, but only when this request CHANGES the value: the stored
+	// value is not re-probed, so a mount that went away cannot block
+	// unrelated saves (including the save that clears or fixes it), while a
+	// newly submitted path the server cannot write is rejected here instead
+	// of failing 0s into a job. Blank completed_dir clears the setting.
+	// probedOutputDir/probedCompletedDir are the trimmed, tilde-expanded
+	// values the server actually validated; persisting them (rather than
+	// the raw request values) keeps the stored path equal to the probed one.
+	var probedOutputDir, probedCompletedDir string
+	if req.OutputDir != nil {
+		v, err := probeChangedDir("output directory", *req.OutputDir, h.svc.Config.Config().Directories.OutputDir)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		probedOutputDir = v
+	}
+	if req.CompletedDir != nil {
+		v, err := probeChangedDir("completed directory", *req.CompletedDir, h.svc.Config.Config().Directories.CompletedDir)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		probedCompletedDir = v
+	}
+
+	// Serialize with the external-API state flows (same full-row
+	// read-modify-write; see persistAPIEndpointState). The lock covers
+	// snapshot-read through row-write, so a concurrent save cannot
+	// interleave its row write with this one.
+	h.svc.settingsMu.Lock()
+	defer h.svc.settingsMu.Unlock()
+
+	prev := h.svc.Config.Config()
+	snap := *prev
+	changed := make(map[string]any)
+	if h.svc.SettingsPersistDelay != nil {
+		h.svc.SettingsPersistDelay()
+	}
+
+	if req.AudiobookdbAPIKey != nil {
+		snap.APIKey.APIKey = *req.AudiobookdbAPIKey
+		changed["api_key"] = mergeChangedMap(changed, "api_key", "api_key", *req.AudiobookdbAPIKey)
+	}
+	if req.AudiobookdbBaseURL != nil {
+		snap.APIKey.BaseURL = *req.AudiobookdbBaseURL
+		changed["api_key"] = mergeChangedMap(changed, "api_key", "base_url", *req.AudiobookdbBaseURL)
+	}
+	if req.M4bMergeBinary != nil {
+		snap.M4bMerge.Binary = *req.M4bMergeBinary
+		changed["m4b_merge"] = mergeChangedMap(changed, "m4b_merge", "binary", *req.M4bMergeBinary)
+	}
+	if req.InputDir != nil {
+		snap.Directories.InputDir = *req.InputDir
+		changed["directories"] = mergeChangedMap(changed, "directories", "input_dir", *req.InputDir)
+	}
+	if req.OutputDir != nil {
+		// Persist the probed (trimmed) value, not the raw request value.
+		snap.Directories.OutputDir = probedOutputDir
+		changed["directories"] = mergeChangedMap(changed, "directories", "output_dir", probedOutputDir)
+	}
+	if req.CompletedDir != nil {
+		// Persist the probed (trimmed) value, not the raw request value.
+		snap.Directories.CompletedDir = probedCompletedDir
+		changed["directories"] = mergeChangedMap(changed, "directories", "completed_dir", probedCompletedDir)
+	}
+	if req.NumCPUs != nil {
+		snap.Processing.NumCPUs = *req.NumCPUs
+		changed["processing"] = mergeChangedMap(changed, "processing", "num_cpus", *req.NumCPUs)
+	}
+	if req.OutputScheme != nil {
+		snap.Processing.PathFormat = *req.OutputScheme
+		changed["processing"] = mergeChangedMap(changed, "processing", "path_format", *req.OutputScheme)
+	}
+	if req.Region != nil {
+		snap.Processing.Region = *req.Region
+		changed["processing"] = mergeChangedMap(changed, "processing", "region", *req.Region)
+	}
+
+	// 1. DB first.
+	if err := h.saveSettingsToDB(&snap); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("persist settings to DB: %v", err))
+		return
+	}
+
+	// 2. File second; on failure roll the DB row back to the previous state
+	//    so DB and file agree again.
+	if len(changed) > 0 {
+		if err := h.svc.Config.SaveKeys(changed); err != nil {
+			if rbErr := h.saveSettingsToDB(prev); rbErr != nil {
+				log.Printf("Warning: settings file save failed and DB rollback also failed: %v", rbErr)
+			}
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("save config: %v", err))
+			return
+		}
+	}
+
+	// 3. Both stores persisted: swap in the new immutable live config
+	//    (directory ~ expanded so the live value is absolute) and refresh
+	//    the live services (finding: live settings apply).
+	live := snap
+	live.Directories.InputDir = expandTilde(live.Directories.InputDir)
+	live.Directories.OutputDir = expandTilde(live.Directories.OutputDir)
+	live.Directories.CompletedDir = expandTilde(live.Directories.CompletedDir)
+	h.svc.Config.Store(&live)
+	for _, k := range changedDottedKeys(changed) {
+		h.svc.Config.AddYAMLKeys(k)
+	}
+	h.svc.Processor.ApplyConfig(h.svc.Config.Config())
+	h.svc.AudiobookDB.Store(audiobookdb.NewClient(live.APIKey.APIKey, live.APIKey.BaseURL))
+
+	// Re-snapshot the m4b-merge version and pair its result with the live
+	// binary in the response: a second read here could observe the value
+	// stored by an overlapping update.
+	m4bMergeVersion := h.svc.Processor.UpdateVersion()
+
+	settings := map[string]any{
+		"m4b_merge_binary":     live.M4bMerge.Binary,
+		"input_dir":            live.Directories.InputDir,
+		"output_dir":           live.Directories.OutputDir,
+		"completed_dir":        live.Directories.CompletedDir,
+		"num_cpus":             live.Processing.NumCPUs,
+		"output_scheme":        live.Processing.PathFormat,
+		"region":               live.Processing.Region,
+		"audiobookdb_base_url": live.APIKey.BaseURL,
+		"bragibooks_version":   version.Version,
+		"m4b_merge_version":    m4bMergeVersion,
+	}
+
+	writeJSON(w, http.StatusOK, settings)
+}
+
+// mergeChangedMap sets sub inside the top-level section of a partial-save
+// map, creating the section when absent, and returns it.
+func mergeChangedMap(changed map[string]any, top string, sub string, value any) map[string]any {
+	section, _ := changed[top].(map[string]any)
+	if section == nil {
+		section = make(map[string]any)
+		changed[top] = section
+	}
+	section[sub] = value
+	return section
+}
+
+// changedDottedKeys lists the dotted keys present in a partial-save map.
+func changedDottedKeys(changed map[string]any) []string {
+	var keys []string
+	for top, section := range changed {
+		if s, ok := section.(map[string]any); ok {
+			for k := range s {
+				keys = append(keys, top+"."+k)
+			}
+		} else {
+			keys = append(keys, top)
+		}
+	}
+	return keys
+}
+
+// validateAudiobookdbBaseURL enforces the trusted-origin policy for the
+// audiobookdb proxy target (finding: SSRF). The policy — https only on
+// audiobookdb.org and its subdomains, localhost/http dev targets only
+// behind BRAGIBOOKS_ALLOW_LOCAL_ADB — lives in
+// audiobookdb.TrustedBaseURL, shared with the client's request-time gate.
+func validateAudiobookdbBaseURL(raw string) error {
+	_, err := audiobookdb.TrustedBaseURL(raw)
+	return err
+}
+
+// saveSettingsToDB persists the config to the settings table in the database.
+// Uses INSERT OR REPLACE to handle both initial setup and updates.
+// Directory paths are stored in expanded (absolute) form.
+func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
+	apiEnabled := 0
+	if cfg.Server.APIEndpoint.Enabled {
+		apiEnabled = 1
+	}
+	// The whole row is replaced, so the legacy-token one-shot marker
+	// (schema v6) must be carried through: this INSERT is the only
+	// settings-row writer the UI's form save and the external-API state
+	// flows use, and dropping the marker to 0 would let the startup
+	// migration re-seed the digest after a user later disabled the API
+	// (finding: legacy token cutover).
+	var legacyMigrated int
+	if err := h.svc.DB.QueryRow(
+		`SELECT COALESCE(legacy_token_migrated, 0) FROM settings WHERE id = 1`,
+	).Scan(&legacyMigrated); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	_, err := h.svc.DB.Exec(`
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+	`,
+		cfg.APIKey.APIKey,
+		cfg.APIKey.BaseURL,
+		cfg.M4bMerge.Binary,
+		expandTilde(cfg.Directories.InputDir),
+		expandTilde(cfg.Directories.OutputDir),
+		expandTilde(cfg.Directories.CompletedDir),
+		cfg.Processing.NumCPUs,
+		cfg.Processing.PathFormat,
+		cfg.Processing.Region,
+		apiEnabled,
+		cfg.Server.APIEndpoint.KeyDigest,
+		legacyMigrated,
+	)
+	return err
+}
+
+// expandTilde expands a leading ~ in a path to the user's home directory.
+func expandTilde(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home + path[1:]
+		}
+	}
+	return path
+}
+
+// probeChangedDir checks a submitted directory setting the server must write
+// to, but only when it differs from the live (tilde-expanded) value. label
+// names the settings field in the returned 400 message. An empty submitted
+// value always passes: clearing an optional directory never needs access.
+// It returns the probed (trimmed, tilde-expanded) value so the caller
+// persists exactly what was validated — the raw request value may carry
+// surrounding whitespace the probe stripped.
+func probeChangedDir(label, submitted, live string) (string, error) {
+	v := expandTilde(strings.TrimSpace(submitted))
+	if v == "" || v == live {
+		return v, nil
+	}
+	if err := audio.CheckDirWritable(v); err != nil {
+		return "", fmt.Errorf("%s %w", label, err)
+	}
+	return v, nil
+}

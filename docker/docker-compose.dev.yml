@@ -1,0 +1,40 @@
+services:
+  bragibooks-dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+    expose:
+      - '8000'
+    volumes:
+      - ..:/app
+      - ./config:/app/config
+      - ${BRAGIBOOKS_INPUT_DIR:-./books/input}:/input
+      - ${BRAGIBOOKS_OUTPUT_DIR:-./books/output}:/output
+    environment:
+      - SERVER_HOST=0.0.0.0
+      - SERVER_ALLOWED_HOSTS=bragibooks-dev
+      - SERVER_PORT=8000
+      - DATABASE_PATH=config/bragibooks.db
+      - DIRECTORIES_INPUT_DIR=/input
+      - DIRECTORIES_OUTPUT_DIR=/output
+      - DIRECTORIES_COMPLETED_DIR=/input/done
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO /dev/null http://localhost:8000/api/health || exit 1']
+      interval: 10s
+      start_period: 90s
+
+  bragibooks-vite:
+    image: oven/bun:1-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a
+    working_dir: /app/web
+    ports:
+      - '5175:5175'
+    volumes:
+      - ..:/app
+    environment:
+      - NODE_ENV=development
+      - VITE_PORT=5175
+      - VITE_PROXY_TARGET=http://bragibooks-dev:8000
+    command: ['bun', 'run', 'dev']
+    depends_on:
+      bragibooks-dev:
+        condition: service_healthy

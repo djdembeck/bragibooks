@@ -1,0 +1,23 @@
+services:
+  bragibooks:
+    image: bragibooks:local
+    ports:
+      - '8888:8000'
+    volumes:
+      - ./config:/config
+      - ${BRAGIBOOKS_INPUT_DIR:-./books/input}:/input
+      - ${BRAGIBOOKS_OUTPUT_DIR:-./books/output}:/output
+      # Optional: store completed source files outside the input volume.
+      # Uncomment this mount and set DIRECTORIES_COMPLETED_DIR=/completed below.
+      # - ${BRAGIBOOKS_COMPLETED_DIR:-./books/completed}:/completed
+    environment:
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
+      # Reverse proxy: exact external Host(s) and the proxy address/CIDR.
+      # - SERVER_ALLOWED_HOSTS=books.example
+      # - BRAGIBOOKS_TRUSTED_PROXIES=172.20.0.2
+      - DATABASE_PATH=/config/bragibooks.db
+      - DIRECTORIES_INPUT_DIR=/input
+      - DIRECTORIES_OUTPUT_DIR=/output
+      - DIRECTORIES_COMPLETED_DIR=/input/done
+    restart: unless-stopped

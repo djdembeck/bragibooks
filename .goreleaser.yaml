@@ -1,0 +1,56 @@
+version: 2
+
+project_name: bragibooks
+
+# before: build the SPA so the Go binary can embed it (webfs).
+# bun is provided by oven-sh/setup-bun in .github/workflows/release.yml.
+before:
+  hooks:
+    # Run through sh: GoReleaser parses hooks with shellwords and execs them
+    # directly, so shell syntax like `cd dir && ...` would fail.
+    - sh -c "cd web && bun install --frozen-lockfile"
+    - sh -c "cd web && bun run build"
+    - sh -c "rm -rf webfs/build"
+    - sh -c "cp -r web/build webfs/build"
+
+builds:
+  - id: bragibooks
+    main: ./cmd/bragibooks
+    binary: bragibooks
+    ldflags:
+      - -s -w
+      - -X github.com/bragibooks/bragibooks/internal/version.Version={{ .Version }}
+    tags:
+      - webui
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "arm64" }}arm64
+      {{ end }}
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+
+release:
+  github:
+    owner: djdembeck
+    name: bragibooks

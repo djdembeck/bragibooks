@@ -1,50 +1,22 @@
 #!/bin/sh
+# Container entrypoint.
+#
+# Runs as root by default (matching the legacy image) and drops to the
+# requested identity via setpriv, so host-mounted volumes stay writable.
+# Identity comes from UID/GID (legacy variable names, same defaults as the
+# pre-rewrite image: 99/100); PUID/PGID are accepted as aliases.
+set -eu
 
-# set environment variables for UID and GID
-PUID=${UID:-99}
-PGID=${GID:-100}
+PUID="${UID:-${PUID:-99}}"
+PGID="${GID:-${PGID:-100}}"
 
-# create a user and group with specified UID and GID
-addgroup -g $PGID appgroup
-adduser -D -u $PUID -G appgroup appuser
+if [ "$(id -u)" = "0" ]; then
+    if find /config /input /output ! -user "${PUID}" -o ! -group "${PGID}" | head -n 1 | grep -q .; then
+        chown -R "${PUID}:${PGID}" /config /input /output || \
+            echo "warning: could not chown runtime directories; continuing" >&2
+    fi
+    echo "Starting with UID: ${PUID}, GID: ${PGID}"
+    exec setpriv --reuid "${PUID}" --regid "${PGID}" --clear-groups /usr/local/bin/bragibooks "$@"
+fi
 
-mkdir -p $APP_HOME
-chown -R appuser:appuser $APP_HOME
-
-echo "Starting with UID: $PUID, GID: $PGID"
-
-# Fix permissions
-chown -R "$PUID":"$PGID" /config /input /output
-
-until cd /home/app/web
-do
-    echo "Waiting for server volume..."
-    sleep 1
-done
-
-until python manage.py migrate
-do
-    echo "Waiting for db to be ready..."
-    sleep 2
-done
-
-python manage.py collectstatic --noinput
-
-# Start Celery Worker
-gosu "$PUID":"$PGID" celery -A bragibooks_proj worker --loglevel=info --concurrency ${CELERY_WORKERS:-1} -E &
-
-# If you want to use the admin panel for debugging
-# python manage.py createsuperuser --noinput
-
-# Start gunicorn server
-gosu "$PUID":"$PGID" gunicorn bragibooks_proj.wsgi \
-    --bind 0.0.0.0:8000 \
-    --timeout 1200 \
-    --worker-tmp-dir /dev/shm \
-    --workers 2 \
-    --threads 4 \
-    --worker-class gthread \
-    --enable-stdio-inheritance
-
-# for debug
-#python manage.py runserver 0.0.0.0:8000
+exec /usr/local/bin/bragibooks "$@"

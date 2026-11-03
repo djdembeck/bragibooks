@@ -1,37 +1,46 @@
-# Base image
-FROM ghcr.io/djdembeck/m4b-merge:develop
+# Stage 0: Build SvelteKit frontend
+FROM oven/bun:1@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS frontend
+WORKDIR /app/web
+COPY web/package.json web/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY web/ ./
+RUN bun run build
 
-# Keeps Python from generating .pyc files in the container
-ENV PYTHONDONTWRITEBYTECODE=1
+# Stage 1: Build Go backend with embedded frontend
+FROM golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS builder
+RUN apk add --no-cache git
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+COPY --from=frontend /app/web/build webfs/build/
+ARG VERSION=dev
+RUN VERSION="${VERSION#v}" && CGO_ENABLED=0 go build -tags webui -ldflags="-s -w -X github.com/bragibooks/bragibooks/internal/version.Version=${VERSION}" -o bragibooks ./cmd/bragibooks
 
-# Turns off buffering for easier container logging
-ENV PYTHONUNBUFFERED=1
 
-# Setup environment variable
-ENV APP_HOME=/home/app/web
-
-# Where your code lives  
-WORKDIR $APP_HOME
-
-# Copy the necessary files to the container
-COPY requirements.txt .
-
-# Run this command to install all dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Copy whole project to your docker home directory.
-COPY bragibooks_proj $APP_HOME/bragibooks_proj/
-COPY importer $APP_HOME/importer/
-COPY utils $APP_HOME/utils/
-COPY manage.py $APP_HOME
-
-# Copy entrypoint file
-COPY docker/entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
-# Port where the Django app runs
+# Stage 2: Runtime
+FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /config /input /output
+WORKDIR /app
+COPY --from=builder /build/bragibooks /usr/local/bin/
+COPY --from=ghcr.io/djdembeck/m4b-merge:v2.0.1@sha256:4ab05f233ddd10f7f6d5a9f009998884921958ffd2997e1098268349a1a0bd0e /usr/local/bin/m4b-merge /usr/local/bin/
+COPY docker/entrypoint.sh /usr/local/bin/bragibooks-entrypoint
+RUN chmod 0755 /usr/local/bin/bragibooks-entrypoint
+# The image runs as root by default (matching the legacy image); the
+# entrypoint chowns the runtime directories and drops to UID/GID (legacy
+# variable names, defaults 99/100; PUID/PGID accepted as aliases) so
+# host-mounted volumes keep working on upgrade. The built-in default
+# database path is relative to WORKDIR and would fatal at startup, so
+# pin it to the /config volume. Compose files and operator env vars
+# keep overriding these.
+ENV DATABASE_PATH=/config/bragibooks.db
 EXPOSE 8000
-
-# Entrypoint for the container
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+VOLUME ["/config", "/input", "/output"]
+ARG VERSION=dev
+ARG GIT_COMMIT=unknown
+LABEL org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${GIT_COMMIT}"
+ENTRYPOINT ["/usr/local/bin/bragibooks-entrypoint"]

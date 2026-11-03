@@ -1,0 +1,137 @@
+# One ordinary develop -> main promotion; no version commits or merge-back.
+# Annalist's existing GitHub App fills notes after complete publication.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['*.md', 'docs/**', '.gitignore', 'LICENSE']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Explicit vX.Y.Z; empty allocates from reachable reservations'
+        required: false
+        default: ''
+      bump:
+        description: 'auto, patch, minor, or major'
+        required: false
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the configured release branch before publishing
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          [[ "$RELEASE_REF" == refs/heads/main ]] || { echo 'Release must run on main'; exit 1; }
+
+  reserve:
+    needs: preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.reserve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Reserve one immutable source/version identity
+        id: reserve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ github.sha }}
+          VERSION_INPUT: ${{ inputs.version }}
+          BUMP_INPUT: ${{ inputs.bump }}
+          RELEASE_EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          args=(--sha "$SOURCE" --bump "${BUMP_INPUT:-auto}")
+          if [[ -n "$VERSION_INPUT" ]]; then args+=(--version "$VERSION_INPUT"); fi
+          if [[ "$RELEASE_EVENT" == push ]]; then args+=(--automatic); fi
+          tag=$(python3 scripts/release.py reserve "${args[@]}")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  outputs:
+    needs: reserve
+    if: needs.reserve.outputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.reserve.outputs.tag }}
+      SOURCE: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Verify the existing native Go build
+        run: |
+          go vet ./...
+          go test -ldflags="-X github.com/bragibooks/bragibooks/internal/version.Version=${VERSION#v}" ./internal/...
+      - name: Build all existing versioned native archives without publishing
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: v2.19.0
+          args: release --clean --skip=publish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Install digest-preserving cross-registry copy
+        run: sudo apt-get update && sudo apt-get install -y skopeo
+      - name: Reconcile both registries without changing immutable bytes
+        run: python3 scripts/release.py image --source "$SOURCE" --version "$VERSION"
+      - name: Resume missing native assets on the unpublished draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release.py release --tag "$VERSION" --source "$SOURCE"
+          python3 scripts/release.py assets --source "$SOURCE" --version "$VERSION"
+
+  publish:
+    needs: [reserve, outputs]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Publish only after all native outputs complete
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.reserve.outputs.tag }}
+          SOURCE: ${{ github.sha }}
+        run: |
+          python3 scripts/release.py release --tag "$TAG" --source "$SOURCE"
+          python3 scripts/release.py release --tag "$TAG" --source "$SOURCE" --publish
