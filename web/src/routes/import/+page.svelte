@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { get, post } from '#lib/api.js';
 	import { goto } from '$app/navigation';
+	import { AUDIO_FILE_EXTS } from '#lib/types.js';
 	import type { DirectoryEntry, DirectoriesResponse, Settings, CreateBooksResponse } from '#lib/types.js';
 	import { PageHeader, Alert, ErrorDetail, Button, Skeleton, EmptyState } from '#lib/components/index.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
@@ -21,15 +22,12 @@
 	let loading = $state(true);
 	let settingsError = $state<CleanedAdbError | null>(null);
 
-	const SUPPORTED_EXTENSIONS = new Set(['.mp3', '.m4a', '.m4b', '.mp4', '.aac', '.ogg', '.flac', '.wma']);
-
+	// Shared AUDIO_FILE_EXTS is the single source of truth for supported
+	// audio containers (covers the same set as the backend audioExtensions,
+	// including .wav/.opus/.oga/.mka).
 	function isSupportedType(entry: DirectoryEntry): boolean {
 		if (entry.type === 'dir') return true;
-		const ext = entry.name.toLowerCase();
-		for (const supported of SUPPORTED_EXTENSIONS) {
-			if (ext.endsWith(supported)) return true;
-		}
-		return false;
+		return AUDIO_FILE_EXTS.test(entry.name);
 	}
 
 	function formatSize(bytes: number): string {
@@ -138,9 +136,14 @@
 	}
 
 	function toggleSelectAll() {
-		const allSelected = filtered.length > 0 && filtered.every((e) => selectedPaths.has(e.path));
+		// Unsupported files have disabled checkboxes, so bulk selection only
+		// applies to entries the supported-type predicate accepts; with none
+		// selectable the click is a no-op, matching the derived allSelected.
+		const selectable = filtered.filter((e) => isSupportedType(e));
+		if (selectable.length === 0) return;
+		const allSelected = selectable.every((e) => selectedPaths.has(e.path));
 		const next = new Set(selectedPaths);
-		filtered.forEach((e) => {
+		selectable.forEach((e) => {
 			if (allSelected) next.delete(e.path);
 			else next.add(e.path);
 		});
@@ -196,9 +199,18 @@
 		filterAndSort();
 	});
 
-	const allSelected = $derived(filtered.length > 0 && filtered.every((e) => selectedPaths.has(e.path)));
+	// Checkbox state tracks the same selectable set toggleSelectAll uses.
+	// An empty selectable set (a filter that matches only unsupported files)
+	// must not read as "everything is selected": Array.prototype.every on an
+	// empty list is true, which would render the checkbox checked and make
+	// clicking it a no-op.
+	const selectableCount = $derived(filtered.filter((e) => isSupportedType(e)).length);
+	const allSelected = $derived(
+		selectableCount > 0 &&
+			filtered.filter((e) => isSupportedType(e)).every((e) => selectedPaths.has(e.path))
+	);
 	const selectedCount = $derived(selectedSourcePaths().length);
-	const canSelect = $derived(filtered.length > 0);
+	const canSelect = $derived(selectableCount > 0);
 </script>
 
 <svelte:head>

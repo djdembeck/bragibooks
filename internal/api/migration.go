@@ -308,15 +308,9 @@ func (h *Handler) RecoverPeople(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authorCount, err := migratePeopleType(legacyDB, h.svc.DB, "author", mapping)
+	authorCount, narratorCount, err := recoverPeople(legacyDB, h.svc.DB, mapping)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("migrate authors: %v", err))
-		return
-	}
-
-	narratorCount, err := migratePeopleType(legacyDB, h.svc.DB, "narrator", mapping)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("migrate narrators: %v", err))
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("migrate people: %v", err))
 		return
 	}
 
@@ -473,12 +467,13 @@ func buildBookMapping(newDB sqlExecer) (*bookMapping, error) {
 
 	for rows.Next() {
 		var id int64
-		var asin, title string
+		var asin sql.NullString
+		var title string
 		if err := rows.Scan(&id, &asin, &title); err != nil {
 			return nil, err
 		}
-		if asin != "" {
-			m.byASIN[asin] = id
+		if asin.Valid && asin.String != "" {
+			m.byASIN[asin.String] = id
 		}
 		m.byTitle[title] = id
 	}
@@ -487,6 +482,13 @@ func buildBookMapping(newDB sqlExecer) (*bookMapping, error) {
 	}
 	return m, nil
 }
+
+const (
+	allowDuplicateAssociations duplicatePeoplePolicy = false
+	skipExistingDuplicates     duplicatePeoplePolicy = true
+)
+
+type duplicatePeoplePolicy bool
 
 // migratePeople reads legacy author/narrator tables and inserts them into the new people table.
 func migratePeople(legacyDB *sql.DB, newDB sqlExecer) (int, error) {
@@ -498,14 +500,14 @@ func migratePeople(legacyDB *sql.DB, newDB sqlExecer) (int, error) {
 
 	count := 0
 
-	authorCount, err := migratePeopleType(legacyDB, newDB, "author", mapping)
+	authorCount, err := migratePeopleType(legacyDB, newDB, "author", mapping, allowDuplicateAssociations)
 	if err != nil {
 		return 0, err
 	}
 	log.Printf("Migrated %d authors", authorCount)
 	count += authorCount
 
-	narratorCount, err := migratePeopleType(legacyDB, newDB, "narrator", mapping)
+	narratorCount, err := migratePeopleType(legacyDB, newDB, "narrator", mapping, allowDuplicateAssociations)
 	if err != nil {
 		return 0, err
 	}
@@ -517,7 +519,7 @@ func migratePeople(legacyDB *sql.DB, newDB sqlExecer) (int, error) {
 
 // migratePeopleType migrates a specific type of person (author or narrator)
 // from the legacy DB using pre-built book mappings.
-func migratePeopleType(legacyDB *sql.DB, newDB sqlExecer, role string, mapping *bookMapping) (int, error) {
+func migratePeopleType(legacyDB *sql.DB, newDB sqlExecer, role string, mapping *bookMapping, duplicatePolicy duplicatePeoplePolicy) (int, error) {
 	personTable := "importer_author"
 	m2mTable := "importer_author_books"
 	m2mFK := "author"
@@ -557,13 +559,6 @@ func migratePeopleType(legacyDB *sql.DB, newDB sqlExecer, role string, mapping *
 	defer rows.Close()
 
 	// Collect all rows in memory first
-	type personRow struct {
-		id        int
-		firstName string
-		lastName  string
-		asin      sql.NullString
-		bookID    int
-	}
 	var allRows []personRow
 
 	for rows.Next() {
@@ -577,7 +572,51 @@ func migratePeopleType(legacyDB *sql.DB, newDB sqlExecer, role string, mapping *
 		return 0, err
 	}
 
-	// 3. Match and insert
+	// 3. Match and insert. Recovery skips existing associations so the pass
+	// is idempotent; initial migration inserts each association unconditionally.
+	return insertPeopleRows(newDB, allRows, legacyBooks, mapping, role, duplicatePolicy)
+}
+
+// personRow holds one legacy person-to-book association row.
+type personRow struct {
+	id        int
+	firstName string
+	lastName  string
+	asin      sql.NullString
+	bookID    int
+}
+
+// recoverPeople runs the author and narrator recovery passes inside a
+// single transaction and skips associations that already exist, so
+// re-running the people-recovery endpoint is idempotent instead of
+// appending duplicate people rows.
+func recoverPeople(legacyDB *sql.DB, newDB *sql.DB, mapping *bookMapping) (authors, narrators int, err error) {
+	tx, err := newDB.Begin()
+	if err != nil {
+		return 0, 0, fmt.Errorf("begin people recovery transaction: %w", err)
+	}
+	defer tx.Rollback() // safe to call after Commit
+
+	authors, err = migratePeopleType(legacyDB, tx, "author", mapping, skipExistingDuplicates)
+	if err != nil {
+		return 0, 0, fmt.Errorf("migrate authors: %w", err)
+	}
+
+	narrators, err = migratePeopleType(legacyDB, tx, "narrator", mapping, skipExistingDuplicates)
+	if err != nil {
+		return 0, 0, fmt.Errorf("migrate narrators: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("commit people recovery transaction: %w", err)
+	}
+	return authors, narrators, nil
+}
+
+// insertPeopleRows matches pre-collected legacy person rows to new book IDs
+// and inserts them. skipExistingDuplicates omits associations already present
+// for the same (book, name, role).
+func insertPeopleRows(newDB sqlExecer, allRows []personRow, legacyBooks map[int]legacyBookInfo, mapping *bookMapping, role string, duplicatePolicy duplicatePeoplePolicy) (int, error) {
 	count := 0
 	for _, r := range allRows {
 		name := strings.TrimSpace(r.firstName + " " + r.lastName)
@@ -607,6 +646,19 @@ func migratePeopleType(legacyDB *sql.DB, newDB sqlExecer, role string, mapping *
 			continue
 		}
 
+		if duplicatePolicy == skipExistingDuplicates {
+			var exists int
+			if err := newDB.QueryRow(
+				"SELECT COUNT(*) FROM people WHERE book_id = ? AND name = ? AND role = ?",
+				newBookID, name, role,
+			).Scan(&exists); err != nil {
+				return count, err
+			}
+			if exists > 0 {
+				continue
+			}
+		}
+
 		// Insert into new people table
 		var asinVal any
 		if r.asin.Valid {
@@ -614,11 +666,10 @@ func migratePeopleType(legacyDB *sql.DB, newDB sqlExecer, role string, mapping *
 		} else {
 			asinVal = ""
 		}
-		_, err = newDB.Exec(
+		if _, err := newDB.Exec(
 			"INSERT INTO people (book_id, name, role, asin) VALUES (?, ?, ?, ?)",
 			newBookID, name, role, asinVal,
-		)
-		if err != nil {
+		); err != nil {
 			return count, err
 		}
 		count++

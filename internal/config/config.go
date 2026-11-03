@@ -281,7 +281,7 @@ func (cm *ConfigManager) Save() error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
-	return atomicWriteFile(path, data, 0o644)
+	return atomicWriteFile(path, data, 0o600)
 }
 
 // SaveKeys persists ONLY the explicitly changed keys to the YAML file,
@@ -353,7 +353,7 @@ func (cm *ConfigManager) SaveKeys(changed map[string]any) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
-	return atomicWriteFile(path, data, 0o644)
+	return atomicWriteFile(path, data, 0o600)
 }
 
 // SetConfigPath overrides the persisted path used by Save/SaveKeys.
@@ -660,12 +660,22 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		// Docker bind-mounted files live on overlayfs where rename may fail.
 		// Fall back to a direct truncate+write.
-		if writeErr := os.WriteFile(path, data, perm); writeErr != nil {
+		if writeErr := writeConfigFallback(path, data, perm); writeErr != nil {
 			return fmt.Errorf("failed to rename config (%w) and fallback write also failed: %v", err, writeErr)
 		}
 		os.Remove(tmpPath)
 	}
 
 	committed = true
+	return nil
+}
+
+func writeConfigFallback(path string, data []byte, perm os.FileMode) error {
+	if err := os.WriteFile(path, data, perm); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, perm); err != nil {
+		return fmt.Errorf("chmod fallback config: %w", err)
+	}
 	return nil
 }

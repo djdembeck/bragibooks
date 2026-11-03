@@ -30,6 +30,15 @@ type ProcessingService struct {
 	mu       sync.RWMutex
 	workerCh chan *models.ProcessingJob
 	wg       sync.WaitGroup
+	// dispatching is the set of job IDs already handed to a worker (on
+	// workerCh or being processed), so the dispatcher never sends the same
+	// job twice. Guarded by mu.
+	dispatching map[string]struct{}
+	// dispatchSig wakes the dispatcher (one slot coalesces bursts).
+	dispatchSig chan struct{}
+	// dispatchOnce ensures a single dispatcher goroutine even if
+	// RunWorkers is called more than once.
+	dispatchOnce sync.Once
 	// workerStartHook (test-only, production nil) runs after the worker
 	// dequeues its first job and before processing, pinning the
 	// enqueue-then-reconfigure window for snapshot tests.
@@ -37,12 +46,20 @@ type ProcessingService struct {
 }
 
 type jobState struct {
-	job      models.ProcessingJob
-	progress chan string
-	// progressMu guards every progress send (including the one in
-	// finalize) so a send can never race the channel close in finalize.
+	job models.ProcessingJob
+	// progressSubs is the per-connection lifecycle-event fan-out: every
+	// open SSE stream registers a one-slot channel before its select loop.
+	// sendProgress (and finalize) fan the event out to ALL of them, so two
+	// tabs streaming the same job both see "running"/"started processing"
+	// — a single shared channel was single-consumer, so a second tab saw
+	// nothing. Each wake is non-blocking: a slow reader is dropped, never
+	// stalling the worker. Buffered one slot coalesces, and a dropped
+	// terminal event is recovered by the stream's done-sync clone.
+	progressSubs map[chan string]struct{}
+	// progressMu guards progressSubs and closed and serializes sends against
+	// finalize's channel closes.
 	progressMu sync.Mutex
-	// closed marks that finalize has closed the progress channel.
+	// closed marks that finalize has closed every progress subscriber.
 	closed bool
 	// doneSync is the terminal-result broadcast that every open SSE stream
 	// reads after its progress loop ends. It is a condition variable, not a
@@ -81,18 +98,37 @@ type jobState struct {
 // error and their books reset to 'pending' so they can be re-queued.
 func NewProcessingService(db *sql.DB, proc *audio.Processor, numWorkers int) *ProcessingService {
 	s := &ProcessingService{
-		db:       db,
-		proc:     proc,
-		workers:  numWorkers,
-		jobs:     make(map[string]*jobState),
-		workerCh: make(chan *models.ProcessingJob, 100),
+		db:          db,
+		proc:        proc,
+		workers:     numWorkers,
+		jobs:        make(map[string]*jobState),
+		workerCh:    make(chan *models.ProcessingJob, 100),
+		dispatching: make(map[string]struct{}),
+		dispatchSig: make(chan struct{}, 1),
 	}
 	s.sweepOrphans()
 	return s
 }
 
+// signalDispatcher wakes the dispatcher if one is running. The one-slot
+// buffer coalesces bursts: a pending signal already means the dispatcher
+// will rescan the DB queue, so additional enqueues need not each wake it.
+// A signal sent before RunWorkers is a harmless no-op (nobody reads the
+// slot yet); the dispatcher's initial scan on startup catches those jobs.
+func (s *ProcessingService) signalDispatcher() {
+	select {
+	case s.dispatchSig <- struct{}{}:
+	default:
+	}
+}
+
 // sweepOrphans marks jobs that were queued/running when the service last
-// exited as error, and resets their stuck 'processing' books to 'pending'.
+// exited as error, and resets their stuck 'processing' books back to the
+// status the book had when the (latest) job was queued — the same
+// pre-queue-status contract as the cancel path (finding: F28: one
+// consistent answer across cancel and orphan-sweep). A book whose job
+// predates the book_pre_status column, or that was 'pending' when queued,
+// lands on 'pending' as before.
 func (s *ProcessingService) sweepOrphans() {
 	res, err := s.db.Exec(
 		"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE status IN (?, ?)",
@@ -103,37 +139,76 @@ func (s *ProcessingService) sweepOrphans() {
 		return
 	}
 	n, _ := res.RowsAffected()
-	// Book ids of the swept jobs, so only their stuck books are reset.
-	var bookIDs []int64
-	rows, err := s.db.Query(
-		"SELECT book_id FROM processing_jobs WHERE status = ? AND book_id IS NOT NULL AND error = ?",
+	// (book, pre-queue status) pairs of the swept jobs, so only their stuck
+	// books are reset — to the status the newest swept job recorded.
+	type bookReset struct {
+		bookID int64
+		pre    string
+	}
+	var resets []bookReset
+	// rowid (monotonic insert order) picks the NEWEST swept job per book;
+	// queue_seq is NULL for pre-dispatcher rows, so it cannot order them.
+	rows, err := s.db.Query(`
+		SELECT j.book_id, j.book_pre_status
+		FROM processing_jobs j
+		JOIN (
+			SELECT book_id, MAX(rowid) AS newest
+			FROM processing_jobs
+			WHERE status = ? AND book_id IS NOT NULL AND error = ?
+			GROUP BY book_id
+		) l ON l.book_id = j.book_id AND l.newest = j.rowid
+		WHERE j.status = ? AND j.book_id IS NOT NULL AND j.error = ?`,
+		jobStatusError, "orphaned: service restarted while job was active",
 		jobStatusError, "orphaned: service restarted while job was active",
 	)
 	if err == nil {
 		for rows.Next() {
-			var bid int64
-			if rows.Scan(&bid) == nil {
-				bookIDs = append(bookIDs, bid)
+			var r bookReset
+			var pre sql.NullString
+			if rows.Scan(&r.bookID, &pre); err != nil {
+				log.Printf("orphan job sweep: read reset: %v", err)
+				break
 			}
+			if pre.Valid && pre.String != "" {
+				r.pre = pre.String
+			} else {
+				// Pre-column row (or empty pre-status): keep the historic
+				// behavior for books stuck in 'processing' after a restart.
+				r.pre = "pending"
+			}
+			resets = append(resets, r)
 		}
 		rows.Close()
 	}
-	for _, bid := range bookIDs {
-		s.db.Exec("UPDATE books SET status = 'pending', status_message = '' WHERE id = ? AND status = 'processing'", bid)
+	for _, r := range resets {
+		s.db.Exec("UPDATE books SET status = ?, status_message = '' WHERE id = ? AND status = 'processing'", r.pre, r.bookID)
 	}
 	if n > 0 {
-		log.Printf("orphan job sweep: marked %d job(s) as error, reset %d stuck book(s) to pending", n, len(bookIDs))
+		log.Printf("orphan job sweep: marked %d job(s) as error, reset %d stuck book(s) to their pre-queue status", n, len(resets))
 	}
 }
 
-// RunWorkers starts the worker goroutines that consume jobs from the channel.
-// numWorkers < 1 (the "use all cores" convention for m4b-merge) would
-// otherwise spawn no workers and leave every job queued forever, so it is
-// clamped to at least one.
+// RunWorkers starts the dispatcher and the worker goroutines. The dispatcher
+// is the SOLE producer of workerCh (finding: F7): it pulls 'queued' jobs from
+// the durable DB queue in queue_seq order and hands each to a free worker, so
+// QueueJob never blocks on a full channel and a large bulk action enqueues
+// instantly. numWorkers < 1 (the "use all cores" convention for m4b-merge)
+// would otherwise spawn no workers and leave every job queued forever, so it
+// is clamped to at least one.
 func (s *ProcessingService) RunWorkers(ctx context.Context, numWorkers int) {
 	if numWorkers < 1 {
 		numWorkers = 1
 	}
+
+	// One dispatcher per service, even if RunWorkers is called twice.
+	s.dispatchOnce.Do(func() {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.dispatch(ctx)
+		}()
+	})
+
 	for range numWorkers {
 		s.wg.Add(1)
 		go func() {
@@ -152,18 +227,128 @@ func (s *ProcessingService) RunWorkers(ctx context.Context, numWorkers int) {
 					if st := s.GetJob(job.ID); st != nil && st.jobCtx != nil && st.jobCtx.Err() != nil {
 						st.finalize(cancelledProgressMsg, nil)
 						s.forgetJob(job.ID)
+						s.signalDispatcher()
 						continue
 					}
 					if s.workerStartHook != nil {
 						s.workerStartHook(job.ID)
 					}
 					s.processJob(ctx, job)
+					// The job is terminal: forgetJob cleared the in-flight
+					// set; wake the dispatcher to pull the next job (if any).
+					s.signalDispatcher()
 				case <-ctx.Done():
 					return
 				}
 			}
 		}()
 	}
+}
+
+// dispatch is the worker-refill loop (finding: F7). It is the only code that
+// sends on workerCh. It runs continuously (no drain-and-stop, which would
+// re-introduce the blocking-send problem when the queue is deep), pulling
+// the oldest queued DB job that has not already been handed to a worker and
+// sending it — blocking only while a worker is busy, which is exactly the
+// case where a slot is about to free.
+func (s *ProcessingService) dispatch(ctx context.Context) {
+	// The initial scan covers jobs queued before RunWorkers started.
+	s.pump(ctx)
+	for {
+		select {
+		case <-s.dispatchSig:
+			s.pump(ctx)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// pump moves as many queued DB jobs onto workerCh as there are free slots,
+// oldest (queue_seq) first. It blocks on the channel send only when every
+// worker is busy — the normal, expected case — and re-scans on each delivery
+// so a burst of free slots drains the backlog in order.
+func (s *ProcessingService) pump(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		job := s.nextQueuedJob()
+		if job == nil {
+			return
+		}
+		s.markDispatched(job.ID)
+		select {
+		case s.workerCh <- job:
+		case <-ctx.Done():
+			s.markUndispatched(job.ID)
+			return
+		}
+	}
+}
+
+// nextQueuedJob returns the oldest 'queued' job not already dispatched, or
+// nil when the backlog is empty. The NOT IN dispatching set is enforced in
+// Go (the set is small: at most workers + in-flight channel depth) so the
+// query stays a plain indexed ORDER BY.
+func (s *ProcessingService) nextQueuedJob() *models.ProcessingJob {
+	s.mu.RLock()
+	seen := make(map[string]struct{}, len(s.dispatching))
+	for id := range s.dispatching {
+		seen[id] = struct{}{}
+	}
+	s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		"SELECT id, book_id, m4b_merge_args, status, action, detail, output, error, output_file, started_at, completed_at, created_at, COALESCE(book_pre_status, '') FROM processing_jobs WHERE status = ? ORDER BY queue_seq ASC",
+		jobStatusQueued,
+	)
+	if err != nil {
+		log.Printf("dispatcher: query queued jobs: %v", err)
+		return nil
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var job models.ProcessingJob
+		var mergeArgs, preStatus sql.NullString
+		if err := rows.Scan(&job.ID, &job.BookID, &mergeArgs, &job.Status, &job.Action,
+			&job.Detail, &job.Output, &job.Error, &job.OutputFile, &job.StartedAt,
+			&job.CompletedAt, &job.CreatedAt, &preStatus); err != nil {
+			log.Printf("dispatcher: scan queued job: %v", err)
+			return nil
+		}
+		if _, ok := seen[job.ID]; ok {
+			continue
+		}
+		job.M4bMergeArgs = mergeArgs.String
+		if preStatus.Valid {
+			job.BookPreStatus = preStatus
+		}
+		return &job
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("dispatcher: queued rows: %v", err)
+		return nil
+	}
+	return nil
+}
+
+// markDispatched records that jobID has been handed to a worker.
+func (s *ProcessingService) markDispatched(id string) {
+	s.mu.Lock()
+	s.dispatching[id] = struct{}{}
+	s.mu.Unlock()
+}
+
+// markUndispatched removes jobID from the in-flight set so the dispatcher
+// may hand it to a worker again.
+func (s *ProcessingService) markUndispatched(id string) {
+	s.mu.Lock()
+	delete(s.dispatching, id)
+	s.mu.Unlock()
 }
 
 // errActiveJobForBook is returned when the book already has a queued or
@@ -188,8 +373,28 @@ type jobArgs struct {
 // opts carries the resolved destination snapshot for profile-backed
 // requests; the zero value preserves the global-settings behavior.
 func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths []string, opts audio.RunOptions) (string, error) {
+	// Queue-time validation: m4b-merge only accepts .mp3/.m4a/.m4b. The
+	// broader IsAudioFile set (covers, discovery, browsing) must not feed a
+	// job the engine would reject mid-run, so unsupported containers are
+	// refused here with a clear message (finding: F22).
+	if unsupported := firstUnsupportedMergePath(srcPaths); unsupported != "" {
+		return "", fmt.Errorf("unsupported input format %q: m4b-merge accepts .mp3, .m4a, .m4b only", unsupported)
+	}
+
+	// The active-job guard is the advisory fast path (a clean 409 with no
+	// wasted UUID); the atomic INSERT below is the authoritative one, so two
+	// concurrent enqueues for the same book cannot BOTH pass and both insert.
 	if bookID > 0 && s.hasActiveJobForBook(bookID) {
 		return "", errActiveJobForBook
+	}
+
+	// The book's pre-queue status, stored on the job so a RUNNING-job cancel
+	// can restore it instead of hard-coding 'matched' (finding: F28).
+	var bookPreStatus sql.NullString
+	if bookID > 0 {
+		if err := s.db.QueryRow("SELECT status FROM books WHERE id = ?", bookID).Scan(&bookPreStatus); err != nil {
+			bookPreStatus = sql.NullString{}
+		}
 	}
 
 	id := uuid.New().String()
@@ -209,25 +414,36 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	}
 
 	job := &models.ProcessingJob{
-		ID:           id,
-		BookID:       sql.NullInt64{Int64: bookID, Valid: true},
-		M4bMergeArgs: string(argsJSON),
-		Action:       "merge",
-		Status:       "queued",
-		Error:        nil,
-		OutputFile:   nil,
-		StartedAt:    nil,
-		CompletedAt:  nil,
+		ID:            id,
+		BookID:        sql.NullInt64{Int64: bookID, Valid: true},
+		M4bMergeArgs:  string(argsJSON),
+		Action:        "merge",
+		Status:        "queued",
+		Error:         nil,
+		OutputFile:    nil,
+		StartedAt:     nil,
+		CompletedAt:   nil,
+		BookPreStatus: bookPreStatus,
 	}
 
-	// Insert into DB
-	_, err = s.db.Exec(
-		`INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action, queue_seq)
-		 VALUES (?, ?, ?, ?, ?, (SELECT COALESCE(MAX(queue_seq), 0) + 1 FROM processing_jobs))`,
-		job.ID, job.BookID.Int64, job.M4bMergeArgs, job.Status, job.Action,
+	// Atomic enqueue: the INSERT only lands when the book has no queued/
+	// running job (finding: F5). RowsAffected()==0 means a concurrent
+	// enqueue won the race — translate the losing write to the same 409 the
+	// fast path returns, so the HTTP contract is identical.
+	res, err := s.db.Exec(
+		`INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action, book_pre_status, queue_seq)
+		 SELECT ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(queue_seq), 0) + 1 FROM processing_jobs)
+		 WHERE ? = 0 OR NOT EXISTS (
+		     SELECT 1 FROM processing_jobs
+		     WHERE book_id = ? AND status IN (?, ?))`,
+		job.ID, job.BookID.Int64, job.M4bMergeArgs, job.Status, job.Action, job.BookPreStatus,
+		bookID, job.BookID.Int64, jobStatusQueued, jobStatusRunning,
 	)
 	if err != nil {
 		return "", fmt.Errorf("insert processing job: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return "", errActiveJobForBook
 	}
 
 	// The per-job context is cancelable from the API (POST /jobs/:id/cancel)
@@ -237,12 +453,12 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	jobCtx, jobCancel := context.WithCancel(context.Background())
 	s.mu.Lock()
 	s.jobs[id] = &jobState{
-		job:        *job,
-		progress:   make(chan string, 10),
-		doneSync:   newDoneSync(),
-		jobCtx:     jobCtx,
-		cancel:     jobCancel,
-		outputSubs: make(map[chan struct{}]struct{}),
+		job:          *job,
+		progressSubs: make(map[chan string]struct{}),
+		doneSync:     newDoneSync(),
+		jobCtx:       jobCtx,
+		cancel:       jobCancel,
+		outputSubs:   make(map[chan struct{}]struct{}),
 	}
 	s.mu.Unlock()
 
@@ -251,8 +467,15 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	// job is a promise, not work — cancelling it then requires no book
 	// status rollback, and the UI never shows a book as 'processing' while
 	// the job is still queued. (Pre-queued status 'matched'/'pending' is
-	// preserved as-is.)
-	s.workerCh <- job
+	// captured above on the job for the cancel-restore path.)
+	//
+	// Enqueue is NON-blocking (finding: F7): the DB queue is the backlog.
+	// The dispatcher (started by RunWorkers) is the sole producer of
+	// workerCh — it pulls 'queued' rows in queue_seq order as slots free,
+	// so a 1000-book bulk action returns job IDs immediately instead of
+	// blocking the HTTP request until workers drain. Signalling is
+	// non-blocking (one slot coalesces a burst of enqueues).
+	s.signalDispatcher()
 	return id, nil
 }
 
@@ -295,10 +518,13 @@ func (s *ProcessingService) hasActiveJobForBook(bookID int64) bool {
 
 // forgetJob removes a job's in-memory state under the service mutex. Terminal
 // job state remains readable from the DB (ListJobs/GetJobStatus read SQL), so
-// dropping the map entry frees memory without losing information.
+// dropping the map entry frees memory without losing information. The job is
+// terminal, so it also leaves the dispatcher's in-flight set (otherwise that
+// set grows one entry per job for the process's lifetime).
 func (s *ProcessingService) forgetJob(id string) {
 	s.mu.Lock()
 	delete(s.jobs, id)
+	delete(s.dispatching, id)
 	s.mu.Unlock()
 }
 
@@ -319,24 +545,74 @@ const (
 	jobStatusCancelled = "cancelled"
 )
 
+// mergeSupportedExts are the ONLY containers m4b-merge accepts as input.
+// The broader audio.IsAudioFile set (cover detection, folder discovery,
+// library browsing) deliberately stays wide, but processing must refuse to
+// queue a job the engine would reject (finding: F22).
+var mergeSupportedExts = map[string]bool{
+	".mp3": true, ".m4a": true, ".m4b": true,
+}
+
+// firstUnsupportedMergePath returns the first source path whose extension
+// m4b-merge cannot handle, or "" when every path is queueable.
+func firstUnsupportedMergePath(srcPaths []string) string {
+	for _, p := range srcPaths {
+		if !mergeSupportedExts[strings.ToLower(filepath.Ext(p))] {
+			return filepath.Base(p)
+		}
+	}
+	return ""
+}
+
 var errJobNotFound = errors.New("job not found")
 
 var errJobTerminal = errors.New("job already finished")
 
 const cancelledProgressMsg = `{"status":"cancelled","message":"job cancelled"}`
 
-// sendProgress delivers a progress event without ever panicking on a closed
-// channel: after finalize runs, late sends (e.g. a worker reaching the
-// "running" step milliseconds after a queued cancel) must be dropped.
+// sendProgress fans a lifecycle event out to EVERY open stream (finding:
+// F8). A single shared channel was single-consumer: with two tabs streaming
+// one job, only one saw "running"/"started processing". Each delivery is
+// non-blocking — a slow reader drops the event and recovers it from the
+// terminal clone after the loop (or keeps polling the DB, which the page
+// does for status), so a sick subscriber can never stall the worker. After
+// finalize runs, late sends (e.g. a worker reaching the "running" step
+// milliseconds after a queued cancel) must be dropped.
 func (st *jobState) sendProgress(msg string) {
 	st.progressMu.Lock()
 	defer st.progressMu.Unlock()
 	if st.closed {
 		return
 	}
-	select {
-	case st.progress <- msg:
-	default:
+	for ch := range st.progressSubs {
+		select {
+		case ch <- msg:
+		default: // Wake already pending; the terminal clone covers the loss.
+		}
+	}
+}
+
+// registerProgressSubscriber subscribes ch to lifecycle-event wakes and
+// returns a deregister function. A one-slot buffer coalesces bursts; the
+// reader re-reads the DB status on every wake, so a dropped non-terminal
+// event loses nothing the page does not already recover.
+func (st *jobState) registerProgressSubscriber(ch chan string) (deregister func()) {
+	st.progressMu.Lock()
+	if st.closed {
+		// Finalized while the stream was connecting: close immediately so
+		// the stream's loop exits and it reaches the done sync (which
+		// already carries the terminal result) instead of waiting for a
+		// terminal event that will never come.
+		st.progressMu.Unlock()
+		close(ch)
+		return func() {}
+	}
+	st.progressSubs[ch] = struct{}{}
+	st.progressMu.Unlock()
+	return func() {
+		st.progressMu.Lock()
+		delete(st.progressSubs, ch)
+		st.progressMu.Unlock()
 	}
 }
 
@@ -439,26 +715,38 @@ func (ds *doneSync) await() (string, error) {
 	return msg, err
 }
 
-// finalize sends the terminal progress event, closes the progress channel,
-// and reports the terminal result (message plus error) on the done sync —
-// exactly once, so the SSE streams detect termination (a closed progress
-// channel ends their loops; without the close they would keep heartbeating
-// after the terminal event) and the done awaiters unblock, regardless of
-// which component (worker, timeout, or cancel request) won. The message is
-// stored on the done sync because a concurrent stream that observes the
-// channel's close cannot read the buffered value (it was already consumed),
-// so this is the only path by which EVERY stream can write the terminal
-// line.
+// finalize ends every open stream's lifecycle loop and reports the terminal
+// result (message plus error) on the done sync — exactly once, so the SSE
+// streams detect termination (a closed progress subscription ends their
+// loops; without it they would keep heartbeating after the terminal event)
+// and the done awaiters unblock, regardless of which component (worker,
+// timeout, or cancel request) won.
+//
+// The terminal PROGRESS line is broadcast to every subscriber (non-blocking,
+// same fan-out as lifecycle events) BEFORE the channels close: the progress
+// channel is the single source of the terminal progress message, so a
+// single-consumer design would let one stream's read starve every other
+// connected tab (finding: F8 part a). After the loop, every stream writes
+// the terminal STATUS line from the done sync, which carries the TRUE
+// terminal status (finding: F8 part b — a cancelled job ends with
+// {"status":"cancelled"}, never a spurious {"status":"done"}). Subscribers
+// registered AFTER finalize observes closed get their channel closed
+// immediately, so a late stream exits its loop and reaches the done sync
+// (which already has the result) rather than waiting for a terminal event
+// that will never come.
 func (st *jobState) finalize(msg string, doneErr error) {
 	st.finalized.Do(func() {
 		st.progressMu.Lock()
 		if !st.closed {
-			select {
-			case st.progress <- msg:
-			default:
-			}
-			close(st.progress)
 			st.closed = true
+			for ch := range st.progressSubs {
+				select {
+				case ch <- msg:
+				default:
+				}
+				close(ch)
+			}
+			st.progressSubs = make(map[chan string]struct{})
 		}
 		st.progressMu.Unlock()
 		st.doneSync.report(msg, doneErr)
@@ -468,23 +756,23 @@ func (st *jobState) finalize(msg string, doneErr error) {
 // CancelJob cancels a processing job and returns the job's book_id.
 //
 // Behavior by current DB status:
-//   - queued:  the job is marked 'cancelled' in the DB immediately; the
-//     book is left untouched because queueing no longer flips it to
-//     'processing' (that transition happens at worker start, so a queued
-//     job's book is still in its pre-queue state — 'matched'/'pending').
-//     The worker will dequeue the job and skip it.
+//   - queued:  the job is marked 'cancelled' in the DB immediately. The book
+//     normally remains in its pre-queue state; a conditional restore covers a
+//     worker-start interleaving that already moved it to 'processing'. The
+//     worker will dequeue the job and skip it.
 //   - running: the per-job context is cancelled so m4b-merge is killed via its
 //     context; the worker's finalizeCancelled then writes the terminal
-//     'cancelled' status and resets the book. CancelJob does not touch the
+//     'cancelled' status and restores the book. CancelJob does not touch the
 //     book itself here, so a job that finishes successfully in the race window
 //     ends up consistently 'done'.
 //   - done/error/cancelled: errJobTerminal is returned.
 func (s *ProcessingService) CancelJob(jobID string) (sql.NullInt64, error) {
 	var status string
 	var bookID sql.NullInt64
+	var bookPreStatus sql.NullString
 	err := s.db.QueryRow(
-		"SELECT status, book_id FROM processing_jobs WHERE id = ?", jobID,
-	).Scan(&status, &bookID)
+		"SELECT status, book_id, book_pre_status FROM processing_jobs WHERE id = ?", jobID,
+	).Scan(&status, &bookID, &bookPreStatus)
 	if err == sql.ErrNoRows {
 		return sql.NullInt64{}, errJobNotFound
 	}
@@ -501,10 +789,28 @@ func (s *ProcessingService) CancelJob(jobID string) (sql.NullInt64, error) {
 	}
 
 	if status == jobStatusQueued {
-		s.db.Exec(
-			"UPDATE processing_jobs SET status = ?, completed_at = datetime('now') WHERE id = ?",
-			jobStatusCancelled, jobID,
+		// Conditional on the read status (finding: F9): an unconditional
+		// UPDATE would overwrite a worker that won the queued->running
+		// race milliseconds after our read, leaving the book 'done' and
+		// the job 'cancelled'. When 0 rows were affected the job already
+		// transitioned — the cancel is a no-op and we report the terminal
+		// state the worker will own.
+		res, err := s.db.Exec(
+			"UPDATE processing_jobs SET status = ?, completed_at = datetime('now') WHERE id = ? AND status = ?",
+			jobStatusCancelled, jobID, jobStatusQueued,
 		)
+		if err != nil {
+			return sql.NullInt64{}, fmt.Errorf("cancel queued job: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return bookID, nil // the worker claimed the job and owns book restoration
+		} else if bookID.Valid {
+			pre := bookPreStatus.String
+			if pre == "" {
+				pre = s.bookPreStatus(jobID)
+			}
+			s.restoreBookOnCancel(bookID.Int64, pre)
+		}
 		// Close any open progress stream; the worker's skip path finalizes
 		// idempotently via sync.Once.
 		if state != nil {
@@ -513,19 +819,43 @@ func (s *ProcessingService) CancelJob(jobID string) (sql.NullInt64, error) {
 	} else if status == jobStatusRunning && state == nil {
 		// Running job with no in-memory state (the process restarted while
 		// the job was running): no worker owns it, so nobody would observe
-		// the cancelled context. Persist the terminal state directly.
-		s.db.Exec(
-			"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE id = ?",
-			jobStatusCancelled, "cancelled by user", jobID,
+		// the cancelled context. Persist the terminal state directly and
+		// restore the book to its PRE-QUEUE status (finding: F28) — not a
+		// hard-coded 'matched', which would demote a reprocessed 'done'
+		// book or promote a 'pending' one.
+		res, err := s.db.Exec(
+			"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE id = ? AND status = ?",
+			jobStatusCancelled, "cancelled by user", jobID, jobStatusRunning,
 		)
-		if bookID.Valid {
-			s.db.Exec(
-				"UPDATE books SET status = 'matched', status_message = '' WHERE id = ? AND status = 'processing'",
-				bookID.Int64,
-			)
+		if err != nil {
+			return sql.NullInt64{}, fmt.Errorf("cancel running job: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 && bookID.Valid {
+			s.restoreBookOnCancel(bookID.Int64, s.bookPreStatus(jobID))
 		}
 	}
 	return bookID, nil
+}
+
+// bookPreStatus reads the job's stored pre-queue book status (v13), falling
+// back to 'matched' for jobs queued before the column existed.
+func (s *ProcessingService) bookPreStatus(jobID string) string {
+	var pre sql.NullString
+	if err := s.db.QueryRow(
+		"SELECT book_pre_status FROM processing_jobs WHERE id = ?", jobID,
+	).Scan(&pre); err == nil && pre.Valid && pre.String != "" {
+		return pre.String
+	}
+	return "matched"
+}
+
+// restoreBookOnCancel resets a cancelled job's book from 'processing' back
+// to preStatus, the status it had when the job was queued (finding: F28).
+func (s *ProcessingService) restoreBookOnCancel(bookID int64, preStatus string) {
+	s.db.Exec(
+		"UPDATE books SET status = ?, status_message = '' WHERE id = ? AND status = 'processing'",
+		preStatus, bookID,
+	)
 }
 
 func (s *ProcessingService) processJob(ctx context.Context, job *models.ProcessingJob) {
@@ -551,23 +881,53 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		return
 	}
 
-	// The queued -> processing book transition (and job -> running) happens
-	// HERE, at worker start, not in QueueJob: keeping the book in its
-	// pre-queue state ('matched'/'pending') while the job waits in the queue
-	// is what lets a queued cancel need no status rollback.
+	// Claim the job before moving its book to processing. This conditional
+	// transition arbitrates against queued cancellation: only the winner of
+	// queued -> running may proceed to processing.
+	res, err := s.db.Exec(
+		"UPDATE processing_jobs SET status = ?, started_at = datetime('now') WHERE id = ? AND status = ?",
+		jobStatusRunning, job.ID, jobStatusQueued,
+	)
+	if err != nil {
+		log.Printf("start processing job %s: %v", job.ID, err)
+		s.forgetJob(job.ID)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// A queued cancellation won before this worker claimed the job. Restore
+		// defensively in case the book was already marked processing by an older
+		// worker path; the conditional restore cannot overwrite a newer status.
+		if job.BookID.Valid {
+			pre := ""
+			if job.BookPreStatus.Valid {
+				pre = job.BookPreStatus.String
+			}
+			if pre == "" {
+				pre = s.bookPreStatus(job.ID)
+			}
+			s.restoreBookOnCancel(job.BookID.Int64, pre)
+		}
+		if state != nil {
+			state.finalize(cancelledProgressMsg, nil)
+		}
+		s.forgetJob(job.ID)
+		return
+	}
+
+	// Claiming the job first closes the queued-cancel race: cancellation can
+	// only win before this transition, in which case the book was never moved
+	// to processing; or after it, in which case the running cancel path owns
+	// restoring the pre-queue status.
 	if job.BookID.Valid {
 		s.db.Exec(
 			"UPDATE books SET status = 'processing', status_message = '' WHERE id = ?",
 			job.BookID.Int64,
 		)
 	}
-
-	// Only a queued job may transition to running: a queued job cancelled
-	// by CancelJob is already 'cancelled' and must not be overwritten.
-	s.db.Exec(
-		"UPDATE processing_jobs SET status = ?, started_at = datetime('now') WHERE id = ? AND status = ?",
-		jobStatusRunning, job.ID, jobStatusQueued,
-	)
+	if state != nil && state.jobCtx != nil && state.jobCtx.Err() != nil {
+		s.finalizeCancelled(job, "")
+		return
+	}
 
 	if state != nil {
 		state.sendProgress(`{"status":"running","message":"started processing"}`)
@@ -709,20 +1069,31 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 
 // finalizeCancelled marks a running job cancelled in the DB after its
 // m4b-merge process was killed via the job context, persists the stdout the
-// killed run had already produced, resets the book to 'matched' (only if it
-// is still 'processing'), and emits the terminal progress signal. The
-// queued-cancel path resets the book in CancelJob instead; this is the
-// running path.
+// killed run had already produced, restores the book to its PRE-QUEUE status
+// (only if it is still 'processing'), and emits the terminal progress
+// signal. The queued-cancel path leaves the book untouched (it never left
+// its pre-queue state); this is the running path. Restoring the stored
+// pre-queue status — not a hard-coded 'matched' — keeps a reprocessed
+// 'done' book at 'done' and a 'pending' book at 'pending' (finding: F28).
 func (s *ProcessingService) finalizeCancelled(job *models.ProcessingJob, stdout string) {
-	s.db.Exec(
-		"UPDATE processing_jobs SET status = ?, error = ?, output = ?, completed_at = datetime('now') WHERE id = ?",
-		jobStatusCancelled, "cancelled by user", stdout, job.ID,
+	// Conditional on the job still being 'running': a run that finished
+	// successfully in the kill window owns the terminal 'done' state.
+	res, err := s.db.Exec(
+		"UPDATE processing_jobs SET status = ?, error = ?, output = ?, completed_at = datetime('now') WHERE id = ? AND status = ?",
+		jobStatusCancelled, "cancelled by user", stdout, job.ID, jobStatusRunning,
 	)
-	if job.BookID.Valid {
-		s.db.Exec(
-			"UPDATE books SET status = 'matched', status_message = '' WHERE id = ? AND status = 'processing'",
-			job.BookID.Int64,
-		)
+	if err != nil {
+		log.Printf("finalize cancelled job %s: %v", job.ID, err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 && job.BookID.Valid {
+		pre := ""
+		if job.BookPreStatus.Valid {
+			pre = job.BookPreStatus.String
+		}
+		if pre == "" {
+			pre = s.bookPreStatus(job.ID)
+		}
+		s.restoreBookOnCancel(job.BookID.Int64, pre)
 	}
 	if state := s.GetJob(job.ID); state != nil {
 		state.finalize(cancelledProgressMsg, nil)
@@ -1499,27 +1870,28 @@ func (h *Handler) StreamJob(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "data: %s\n\n", b)
 	flusher.Flush()
 
-	// Stream progress until the channel closes. The progress channel is
-	// shared across concurrent streams, so the reader that observes the
-	// close is NOT guaranteed to have read the terminal message — a
-	// concurrent stream may have. Every stream writes its OWN copy of the
-	// terminal line after the loop (from the done sync, below), so the
-	// outcome is identical whichever tab won the race.
+	// Stream progress until finalize closes this stream's subscription
+	// (finding: F8a). Every stream registers its OWN progress channel, so
+	// lifecycle events ("running", "started processing") fan out to all
+	// connected tabs — a shared single-consumer channel starved every
+	// stream after the first. The terminal line is written after the loop
+	// by EVERY stream from the done sync: that is the single source of the
+	// true terminal status (e.g. "cancelled" for a cancelled job), so a
+	// cancelled job can never end with a spurious {"status":"done"} frame.
 	ctx := r.Context()
-	// lastProgress is the most recent progress line THIS stream wrote, so
-	// the post-loop clone (below) can decline to re-send the terminal event
-	// when this stream already delivered it straight off the channel.
+	progressChan := make(chan string, 4)
+	defer state.registerProgressSubscriber(progressChan)()
 	var lastProgress string
 loop:
 	for {
 		select {
-		case msg, ok := <-state.progress:
+		case msg, ok := <-progressChan:
 			if !ok {
 				break loop
 			}
+			lastProgress = msg
 			fmt.Fprintf(w, "data: %s\n\n", msg)
 			flusher.Flush()
-			lastProgress = msg
 		case <-wake:
 			suffix, next := state.outputFrom(offset)
 			if suffix == "" {
@@ -1552,22 +1924,36 @@ loop:
 		flusher.Flush()
 	}
 
-	// Write this stream's own copy of the terminal event, then hand back
-	// the terminal status line. Every concurrent stream does this — the
-	// progress channel's close is single-consumer, so the relative order in
-	// which streams exit the loop above and reach this point is a race; the
-	// done sync is a broadcast, so each stream waits its turn and never
-	// blocks on a peer consuming the value.
+	// Write this stream's own terminal status line. Every concurrent
+	// stream does this — the done sync is a broadcast, so each stream
+	// waits its turn and never blocks on a peer consuming the value.
+	// The line carries the TRUE terminal status parsed from the terminal
+	// progress message (finding: F8b): a cancelled job ends with
+	// {"status":"cancelled"}, never a spurious {"status":"done"}.
 	doneMsg, doneErr := state.doneSync.await()
+	// A stream that registered AFTER finalize (or whose buffered slot
+	// dropped the fan-out) never saw the terminal PROGRESS line in the
+	// loop: emit it from the done sync so every stream ends with the same
+	// terminal progress + status pair. Streams that already consumed the
+	// line in the loop are deduped by lastProgress.
 	if doneMsg != "" && doneMsg != lastProgress {
 		fmt.Fprintf(w, "data: %s\n\n", doneMsg)
+		flusher.Flush()
+	}
+	final := map[string]any{}
+	var terminal struct {
+		Status string `json:"status"`
+	}
+	if json.Unmarshal([]byte(doneMsg), &terminal) == nil && terminal.Status != "" {
+		final["status"] = terminal.Status
+	} else {
+		final["status"] = jobStatusDone
 	}
 	if doneErr != nil {
-		b, _ := json.Marshal(map[string]string{"status": "error", "message": escapeJSON(doneErr.Error())})
-		fmt.Fprintf(w, "data: %s\n\n", b)
-	} else {
-		fmt.Fprintf(w, "data: %s\n\n", `{"status":"done"}`)
+		final["message"] = doneErr.Error()
 	}
+	b, _ = json.Marshal(final)
+	fmt.Fprintf(w, "data: %s\n\n", b)
 	flusher.Flush()
 }
 

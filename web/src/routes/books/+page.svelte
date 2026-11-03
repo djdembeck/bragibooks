@@ -33,6 +33,9 @@
 	// Select-all-matching selection state
 	let allMatchedIds = $state<Set<number> | null>(null);
 	let allMatchedTotal = $state(0);
+	// The all_ids payload is capped server-side; when true the selection
+	// holds only the first page of matches, so the UI must say so.
+	let allMatchedTruncated = $state(false);
 	let selectingAll = $state(false);
 	let bulkRequeueing = $state(false);
 	let bulkError = $state<CleanedAdbError | null>(null);
@@ -136,16 +139,27 @@
 	async function selectAllMatching() {
 		selectingAll = true;
 		bulkError = null;
+		// Snapshot the request criteria: a filter/search change while the
+		// request is in flight clears the selection, and restoring this
+		// response afterwards would resurrect IDs that no longer match.
+		const requestedFilter = filter;
+		const requestedQ = q;
 		try {
 			const params = new URLSearchParams();
-			if (filter !== 'all') params.set('status', filter);
-			if (q) params.set('q', q);
+			if (requestedFilter !== 'all') params.set('status', requestedFilter);
+			if (requestedQ) params.set('q', requestedQ);
 			params.set('all_ids', '1');
-			const res = await get<{ ids: number[] }>(`/books?${params.toString()}`);
+			const res = await get<{ ids: number[]; total: number; truncated: boolean }>(`/books?${params.toString()}`);
+			if (filter !== requestedFilter || q !== requestedQ) return;
 			if (!res || !Array.isArray(res.ids)) throw new Error('Could not load matching book IDs.');
 			allMatchedIds = new Set(res.ids);
-			allMatchedTotal = res.ids.length;
+			// The server caps the all_ids payload: total/truncated make the
+			// cut explicit so the UI never treats a capped list as the whole
+			// matching set (finding: F21).
+			allMatchedTotal = res.total ?? res.ids.length;
+			allMatchedTruncated = Boolean(res.truncated);
 		} catch (e) {
+			if (filter !== requestedFilter || q !== requestedQ) return;
 			bulkError = toCleanedError(e);
 			allMatchedIds = null;
 		} finally {
@@ -156,6 +170,7 @@
 	function clearSelection() {
 		allMatchedIds = null;
 		allMatchedTotal = 0;
+		allMatchedTruncated = false;
 		bulkError = null;
 		selectedProfileId = null; // The batch it applied to no longer exists.
 	}
@@ -245,6 +260,11 @@
 	const totalPages = $derived(response ? Math.max(1, Math.ceil(response.total / limit)) : 1);
 	const startIndex = $derived(response && response.total > 0 ? currentPage * limit + 1 : 0);
 	const endIndex = $derived(response ? Math.min((currentPage + 1) * limit, response.total) : 0);
+	// The number of books the bulk requeue will actually send — the size of
+	// the ID set, which the server caps at 1,000. Kept distinct from
+	// allMatchedTotal (the FULL match count) so the UI never presents the
+	// capped selection as if the whole set were selected.
+	const allMatchedSelected = $derived(allMatchedIds ? allMatchedIds.size : 0);
 </script>
 
 <svelte:head>
@@ -313,8 +333,14 @@
 	{#if allMatchedIds}
 		<div class="panel mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 p-3" role="region" aria-label="Bulk requeue" aria-live="polite">
 			<p class="text-sm text-[var(--text)]">
-				<span class="font-mono font-semibold">{allMatchedTotal}</span> books selected for bulk requeue
-				<span class="text-xs text-[var(--text-muted)]">· {activeFilterLabel.toLowerCase()}{q ? ` · “${q}”` : ''}</span>
+				<span class="font-mono font-semibold">{allMatchedSelected}</span> books selected for bulk requeue
+				{#if allMatchedTruncated}
+					<span class="text-xs text-[var(--warning, var(--text-muted))]"
+						>({allMatchedSelected} of {allMatchedTotal} matching books — server cap 1,000)</span
+					>
+				{:else}
+					<span class="text-xs text-[var(--text-muted)]">· {activeFilterLabel.toLowerCase()}{q ? ` · “${q}”` : ''}</span>
+				{/if}
 			</p>
 			<div class="flex flex-wrap items-center gap-x-4 gap-y-1">
 				<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -322,7 +348,7 @@
 						{profiles}
 						bind:selectedProfileId
 						{profilesError}
-						batchCount={allMatchedTotal}
+						batchCount={allMatchedSelected}
 						batchScope="queue"
 						selectId="bulk-output-profile-select"
 						summaryId="bulk-profile-summary"

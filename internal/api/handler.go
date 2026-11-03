@@ -126,11 +126,16 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 
 	// Extracted source covers are library content — the same art the book
 	// endpoints return — so they sit behind the same gate rather than being
-	// enumerable by book ID. They are mounted outside /api only because the
-	// `<img>` tags that render them cannot attach a bearer header: the SPA
-	// mirrors its token into the same-origin `bragibooks_token` cookie
-	// (web/src/lib/api.ts), which the browser sends with those requests, and
-	// local mode admits loopback/LAN clients exactly as it does for the API.
+	// enumerable by book ID. They are mounted outside /api because the
+	// `<img>` tags that render them cannot attach a bearer header, so they
+	// are admitted via the same no-key loopback/LAN fallback the /api
+	// routes use (GET is CSRF-exempt). Consequence: a remote API-key client
+	// cannot fetch covers — `<img>` requests carry no Authorization header,
+	// and the SPA does NOT mirror its token into a cookie (it only clears
+	// a leftover `bragibooks_token`, see web/src/lib/api.ts); remote API-key
+	// clients cannot load cover art via <img>: the book endpoints return only
+	// a protected cover URL, and images cannot attach the Authorization
+	// header.
 	r.Group(func(r chi.Router) {
 		r.Use(auth)
 		r.Handle("/covers/*", CoverHandler(h.svc.CoversDir))

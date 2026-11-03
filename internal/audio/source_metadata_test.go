@@ -803,3 +803,60 @@ func TestExtractSourceMetadataRealMedia(t *testing.T) {
 		t.Error("raw_tags empty, want one entry per probed file")
 	}
 }
+
+// TestFoldProbeTagsResolvesCollisionsDeterministically pins the case-fold
+// collision rules: a within-scope case collision (TITLE vs title) is decided
+// by lexicographic key order, and a cross-scope collision (same folded key in
+// format AND stream) is decided by scope (stream wins). Neither may depend on
+// map iteration order, which is random per process.
+func TestFoldProbeTagsResolvesCollisionsDeterministically(t *testing.T) {
+	tests := []struct {
+		name       string
+		formatTags map[string]string
+		streamTags map[string]string
+		want       map[string]string
+	}{
+		{
+			// Within-scope: pairs sort ascending by raw key ("TITLE" before
+			// "title") and later insertions win, so the lexicographically
+			// larger key ("title") decides the fold — a fixed rule, never
+			// map iteration order.
+			name:       "within-scope case collision is lexicographic",
+			formatTags: map[string]string{"TITLE": "upper loses", "title": "Lower Wins", "artist": "A"},
+			streamTags: nil,
+			want:       map[string]string{"title": "Lower Wins", "artist": "A"},
+		},
+		{
+			// Cross-scope: the stream (narrower) scope wins for "title".
+			name:       "cross-scope collision stream wins",
+			formatTags: map[string]string{"TITLE": "Format Title"},
+			streamTags: map[string]string{"title": "Stream Title"},
+			want:       map[string]string{"title": "Stream Title"},
+		},
+		{
+			// Both scope AND within-scope ordering at once: format has TITLE
+			// and title; stream has Title. Result must be the stream's.
+			name:       "scope wins over within-scope ordering",
+			formatTags: map[string]string{"TITLE": "fmt upper", "title": "fmt lower"},
+			streamTags: map[string]string{"Title": "stream"},
+			want:       map[string]string{"title": "stream"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Run the fold repeatedly: map iteration order is randomized, so
+			// any non-deterministic winner would surface within a few passes.
+			for range 50 {
+				got := foldProbeTags(tc.formatTags, tc.streamTags)
+				if len(got) != len(tc.want) {
+					t.Fatalf("fold = %d keys, want %d (got %v)", len(got), len(tc.want), got)
+				}
+				for k, v := range tc.want {
+					if got[k] != v {
+						t.Fatalf("fold[%q] = %q, want %q (got %v)", k, got[k], v, got)
+					}
+				}
+			}
+		})
+	}
+}

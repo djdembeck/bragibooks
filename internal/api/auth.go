@@ -31,12 +31,11 @@ import (
 // X-Forwarded-For is honored ONLY when the direct TCP peer (RemoteAddr)
 // is in an explicitly configured trusted-proxy set (env
 // BRAGIBOOKS_TRUSTED_PROXIES: comma-separated IPs and/or CIDRs, default
-// empty). The chain is
-// then walked from the rightmost hop to the client, skipping trusted-proxy
-// entries, and the first untrusted entry is the end client. With no
-// trusted proxies configured the header is ignored entirely and the direct
-// peer decides, so a remote client behind any unconfigured proxy cannot
-// forge a trusted first hop. (Finding: XFF trust.)
+// empty). The chain is walked from the rightmost hop toward the client,
+// skipping trusted-proxy entries; the first untrusted parseable entry is the
+// end client. If no verifiable client is present, the trusted proxy's own
+// address is not used as a fallback. With no trusted proxies configured the
+// header is ignored entirely and the direct peer decides (finding: XFF trust).
 //
 // State-changing (POST/PUT/PATCH/DELETE) requests additionally pass a
 // double-submit-cookie CSRF check: the client echoes the server-set
@@ -66,11 +65,14 @@ import (
 //     (X-Forwarded-For, X-Real-IP, Forwarded), the end client cannot be
 //     attributed — the proxy's outward-facing hop decides nothing we can
 //     verify — so the request is NOT treated as loopback/LAN and falls
-//     through to rule 4 (enabled: 401 Bearer; disabled: 403). A peer
-//     that IS a configured trusted proxy skips the clause (its XFF chain
-//     is legitimate and consumed per the XFF-trust rule above).
-//     Genuine direct LAN browsers are unaffected: browsers do not send
-//     those headers themselves.
+//     through to rule 4 (enabled: 401 Bearer; disabled: 403). A configured
+//     trusted proxy that FORWARDS a request (forwarding header present)
+//     must provide a verifiable forwarded client; with a chain that
+//     yields no verifiable client, its own address does not establish
+//     the end client's location and the request fails closed. A trusted
+//     proxy address connecting DIRECTLY (no forwarding header) is a plain
+//     LAN client and is treated by its own address. Direct LAN peers
+//     that are not trusted proxies remain unaffected.
 //  3. A present but invalid key: 403 "invalid API key" — always, so a
 //     stale credential can never degrade to the LAN fallback.
 //  4. Otherwise (non-LAN, no valid key):
@@ -173,21 +175,32 @@ func bearerToken(r *http.Request) (string, bool) {
 // isLoopbackLAN reports whether the request's end client is in the
 // loopback-LAN networks defined at the top of this file. The direct TCP
 // peer (RemoteAddr) must be in those networks, or the peer must be an
-// explicitly trusted proxy (env BRAGIBOOKS_TRUSTED_PROXIES). When the peer
-// is a trusted proxy, the X-Forwarded-For chain is walked from the
-// rightmost entry to the client: entries of trusted proxies are skipped
-// and the first untrusted entry is the end client. With no trusted
-// proxies configured the header is ignored entirely and the direct peer
-// decides (finding: XFF trust).
+// explicitly trusted proxy (env BRAGIBOOKS_TRUSTED_PROXIES) whose
+// forwarded chain identifies a loopback-LAN client. When the peer is a
+// trusted proxy, the X-Forwarded-For chain is walked from the rightmost
+// entry to the client: entries of trusted proxies are skipped and the
+// first untrusted entry is the end client. With no trusted proxies
+// configured the header is ignored entirely and the direct peer decides
+// (finding: XFF trust). A trusted proxy address connecting directly
+// (no forwarding header) is a plain LAN client: its own address decides,
+// the same as any other direct loopback-LAN peer.
 func isLoopbackLAN(r *http.Request) bool {
 	peer := clientAddress(r)
 	proxies := parseTrustedProxies()
 	if len(proxies) > 0 && isTrustedProxyIP(peer, proxies) {
-		// The peer is an explicitly trusted proxy, so the forwarded chain
-		// is authoritative: the proxy has told us the true end client, and
-		// a LAN end client is accepted while a foreign one is rejected
-		// (we do NOT fall back to accepting on the peer's own LAN status).
-		return isLoopbackLANIP(endClientFromChain(peer, r.Header.Get("X-Forwarded-For"), proxies))
+		// No forwarding header: the peer is talking to us directly (a
+		// LAN host that is also a configured proxy). Its own address
+		// decides — the same contract as the direct-loopback UI path.
+		// The fail-closed case is a proxy that FORWARDS (XFF present)
+		// but supplies no verifiable client.
+		if !hasForwardingHeader(r) {
+			return isLoopbackLANIP(peer)
+		}
+		// Header.Get reads only the FIRST XFF field value; when a client
+		// or intermediary appends a second value, the first one is
+		// client-supplied and its rightmost hop is the true client, so all
+		// values are joined into one chain before walking (finding: F4).
+		return isLoopbackLANIP(endClientFromChain(peer, strings.Join(r.Header.Values("X-Forwarded-For"), ","), proxies))
 	}
 	// Not arriving from a trusted proxy: the XFF header is not trusted and
 	// the direct peer decides (finding: XFF trust).
@@ -205,10 +218,11 @@ func isLoopbackLAN(r *http.Request) bool {
 // RemoteAddr = the proxy's hop (loopback/LAN), and the keyless LAN
 // fallback would then pass ANY internet client (finding: reverse-proxy
 // LAN bypass). The request therefore falls through to the enabled→401
-// Bearer / disabled→403 branch instead. A configured trusted proxy
-// skips the clause — its XFF chain is legitimate and already consumed
-// by endClientFromChain. Genuine direct LAN browsers are unaffected:
-// browsers do not send those headers themselves.
+// Bearer / disabled→403 branch instead. A trusted proxy is eligible for the
+// fallback only when its forwarded chain identifies a loopback/LAN client;
+// a forwarded request with an unverifiable client fails closed, while a
+// direct connection from the proxy's own address (no forwarding headers)
+// is a plain LAN client. Direct LAN peers are unaffected.
 func lanPathAllowed(r *http.Request) bool {
 	if !isLoopbackLAN(r) {
 		return false
@@ -235,10 +249,11 @@ func hasForwardingHeader(r *http.Request) bool {
 // skipped, and the first untrusted, parseable entry is the end client.
 // Walking this direction matters — a leftward scan would let a remote
 // attacker plant a LAN entry to the left of the hop the trusted proxy
-// appended for them. When every entry is a trusted proxy, the peer itself
-// is the best available answer; when a rightward-reached entry is not an
-// IP literal (proxies sometimes log the client hostname), no address can
-// be verified and nil is returned (rejection).
+// appended for them. When no entry resolves to a verifiable client — the
+// chain is empty, contains only trusted hops, or a rightward-reached entry
+// is not an IP literal (proxies sometimes log the client hostname) — nil is
+// returned (rejection). Falling back to the peer itself would accept the
+// trusted proxy's own hop, letting keyless access through the proxy.
 func endClientFromChain(peer net.IP, xff string, proxies []trustedProxy) net.IP {
 	entries := strings.Split(xff, ",")
 	for i := len(entries) - 1; i >= 0; i-- {
@@ -254,7 +269,7 @@ func endClientFromChain(peer net.IP, xff string, proxies []trustedProxy) net.IP 
 			return ip
 		}
 	}
-	return peer
+	return nil
 }
 
 // trustedProxy is one element of the configured trusted-proxy set: a

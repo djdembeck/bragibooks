@@ -52,7 +52,10 @@ func TestHostWithAuthAndCSRF(t *testing.T) {
 		message                          string
 	}{
 		{"LAN csrf", "192.168.20.4", "192.168.20.10:10", "", "tok", "", 200, ""},
-		{"LAN missing csrf", "localhost", "127.0.0.1:10", "", "", "", 403, "CSRF token mismatch"},
+		// 127.0.0.1 is a configured trusted proxy, so an unattributable
+		// (empty-XFF) request from it fails closed (finding: F3). To reach
+		// the LAN CSRF guard the end client must be a verifiable LAN hop.
+		{"LAN missing csrf", "localhost", "127.0.0.1:10", "", "", "192.168.20.4", 403, "CSRF token mismatch"},
 		{"external key", "localhost", "8.8.8.8:10", "secret", "", "", 200, ""},
 		{"wrong key", "localhost", "127.0.0.1:10", "wrong", "tok", "", 403, "invalid API key"},
 		{"external no key", "localhost", "8.8.8.8:10", "", "tok", "", 401, "API key required"},

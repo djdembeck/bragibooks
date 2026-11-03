@@ -276,17 +276,25 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// unrelated saves (including the save that clears or fixes it), while a
 	// newly submitted path the server cannot write is rejected here instead
 	// of failing 0s into a job. Blank completed_dir clears the setting.
+	// probedOutputDir/probedCompletedDir are the trimmed, tilde-expanded
+	// values the server actually validated; persisting them (rather than
+	// the raw request values) keeps the stored path equal to the probed one.
+	var probedOutputDir, probedCompletedDir string
 	if req.OutputDir != nil {
-		if err := probeChangedDir("output directory", *req.OutputDir, h.svc.Config.Config().Directories.OutputDir); err != nil {
+		v, err := probeChangedDir("output directory", *req.OutputDir, h.svc.Config.Config().Directories.OutputDir)
+		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		probedOutputDir = v
 	}
 	if req.CompletedDir != nil {
-		if err := probeChangedDir("completed directory", *req.CompletedDir, h.svc.Config.Config().Directories.CompletedDir); err != nil {
+		v, err := probeChangedDir("completed directory", *req.CompletedDir, h.svc.Config.Config().Directories.CompletedDir)
+		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		probedCompletedDir = v
 	}
 
 	// Serialize with the external-API state flows (same full-row
@@ -320,12 +328,14 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		changed["directories"] = mergeChangedMap(changed, "directories", "input_dir", *req.InputDir)
 	}
 	if req.OutputDir != nil {
-		snap.Directories.OutputDir = *req.OutputDir
-		changed["directories"] = mergeChangedMap(changed, "directories", "output_dir", *req.OutputDir)
+		// Persist the probed (trimmed) value, not the raw request value.
+		snap.Directories.OutputDir = probedOutputDir
+		changed["directories"] = mergeChangedMap(changed, "directories", "output_dir", probedOutputDir)
 	}
 	if req.CompletedDir != nil {
-		snap.Directories.CompletedDir = *req.CompletedDir
-		changed["directories"] = mergeChangedMap(changed, "directories", "completed_dir", *req.CompletedDir)
+		// Persist the probed (trimmed) value, not the raw request value.
+		snap.Directories.CompletedDir = probedCompletedDir
+		changed["directories"] = mergeChangedMap(changed, "directories", "completed_dir", probedCompletedDir)
 	}
 	if req.NumCPUs != nil {
 		snap.Processing.NumCPUs = *req.NumCPUs
@@ -484,13 +494,16 @@ func expandTilde(path string) string {
 // to, but only when it differs from the live (tilde-expanded) value. label
 // names the settings field in the returned 400 message. An empty submitted
 // value always passes: clearing an optional directory never needs access.
-func probeChangedDir(label, submitted, live string) error {
+// It returns the probed (trimmed, tilde-expanded) value so the caller
+// persists exactly what was validated — the raw request value may carry
+// surrounding whitespace the probe stripped.
+func probeChangedDir(label, submitted, live string) (string, error) {
 	v := expandTilde(strings.TrimSpace(submitted))
 	if v == "" || v == live {
-		return nil
+		return v, nil
 	}
 	if err := audio.CheckDirWritable(v); err != nil {
-		return fmt.Errorf("%s %w", label, err)
+		return "", fmt.Errorf("%s %w", label, err)
 	}
-	return nil
+	return v, nil
 }

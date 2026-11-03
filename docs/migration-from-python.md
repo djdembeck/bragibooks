@@ -98,7 +98,8 @@ The Python app's environment variables no longer apply. Mapping of what changed:
 
 | Python env var | Go equivalent |
 | --- | --- |
-| `ALLOWED_HOSTS`, `DEBUG`, `CSRF_TRUSTED_ORIGINS` | none — replaced by the Go app's admin auth (see [Security](../README.md#security) in the README) |
+| `ALLOWED_HOSTS` | `SERVER_ALLOWED_HOSTS` (YAML `server.allowed_hosts`) — exact Host names/addresses accepted beyond the local defaults (see [Security](../README.md#security) in the README) |
+| `DEBUG`, `CSRF_TRUSTED_ORIGINS` | none — replaced by the Go app's admin auth and its CSRF double-submit cookie (see [Security](../README.md#security) in the README) |
 | `LOG_LEVEL` | `PROCESSING_LOG_LEVEL` |
 | `REGION` | `PROCESSING_REGION` (`REGION` is still accepted as an alias) |
 | *(none — port 8000)* | `SERVER_PORT` (default `8080`) and `SERVER_HOST` |
@@ -138,8 +139,28 @@ The other normal boots are no-ops: once the new database has any books, migratio
 
 If the automatic migration did not find your legacy database (set `LEGACY_DB_PATH` and restart, or use the endpoint directly):
 
+`POST /api/migrate` is a state-changing API route, so it is subject to the [Security](../README.md#security) rules — the bare request below is refused (`403` for a CSRF mismatch from the LAN path, `403`/`401` from anywhere else). Use one of the two flows below.
+
+**LAN flow (double-submit CSRF, what the web UI does):** the server sets a `bragibooks_csrf` cookie on its responses, and the POST must echo it back in an `X-CSRF-Token` header:
+
+```sh
+# 1) Any response sets the cookie (stored in a cookie jar).
+curl -s -c /tmp/bragi-cookies http://localhost:8888/api/health > /dev/null
+CSRF=$(awk '$6 == "bragibooks_csrf" {print $7}' /tmp/bragi-cookies)
+
+# 2) POST with the cookie and the echoed token.
+curl -s -X POST http://localhost:8888/api/migrate \
+  -b /tmp/bragi-cookies \
+  -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: $CSRF" \
+  -d '{"path": "/config/db.sqlite3"}'
+```
+
+**External API key flow (key present from anywhere, CSRF-exempt):** enable the External API in Settings and present the printed `bk_…` key — no CSRF token is needed, since a `Bearer` header cannot be forged cross-origin:
+
 ```sh
 curl -s -X POST http://localhost:8888/api/migrate \
+  -H "Authorization: Bearer <bk_…key>" \
   -H "Content-Type: application/json" \
   -d '{"path": "/config/db.sqlite3"}'
 ```

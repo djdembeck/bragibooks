@@ -104,6 +104,50 @@ func TestSaveKeysParseErrorIsPropagated(t *testing.T) {
 	}
 }
 
+// TestSaveWritesConfigFilePrivate covers the secret-bearing-file rule: the
+// config file may contain the API key, so both Save and SaveKeys must write
+// it 0600 — and must never widen the mode of an existing file.
+func TestSaveWritesConfigFilePrivate(t *testing.T) {
+	m, path := newTestManager(t, "server:\n  port: 8080\n")
+
+	if err := m.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	assertMode(t, path, 0o600)
+	if err := m.SaveKeys(map[string]any{"server": map[string]any{"port": 9999}}); err != nil {
+		t.Fatalf("SaveKeys: %v", err)
+	}
+	assertMode(t, path, 0o600)
+
+	// A pre-existing world-readable file must be chmodded down on rewrite.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Save(); err != nil {
+		t.Fatalf("Save over 0644 file: %v", err)
+	}
+	assertMode(t, path, 0o600)
+
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfigFallback(path, []byte("server:\n  port: 7777\n"), 0o600); err != nil {
+		t.Fatalf("writeConfigFallback over 0644 file: %v", err)
+	}
+	assertMode(t, path, 0o600)
+}
+
+func assertMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if got := st.Mode().Perm(); got != want {
+		t.Errorf("mode of %s = %o, want %o", path, got, want)
+	}
+}
+
 // TestStoreAtomicSwapVisible covers row 24: Config/Store use
 // atomic.Pointer, so live readers never see a torn struct. The race
 // detector is the real check; this pins the visible semantic: the new
@@ -202,27 +246,23 @@ func TestSaveAndSaveKeysUseDefaultConfigPath(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
-			var removeVolumeDir bool
-			if tc.container {
-				st, statErr := os.Stat("/config")
-				switch {
-				case statErr != nil:
-					// No volume in this environment; only a root test
-					// harness can create it, so skip the case elsewhere.
-					if err := os.MkdirAll("/config", 0o755); err != nil {
-						t.Skipf("cannot create /config volume for this case: %v", err)
-					}
-					removeVolumeDir = true
-				case !st.IsDir():
-					t.Fatalf("/config exists but is not a directory")
+			// The test writes real config data to the resolved default path,
+			// so it may only target a /config volume it created itself. A
+			// pre-existing /config (a dev-machine bind mount) can carry
+			// operator config and must never be overwritten; in that
+			// environment the case is skipped instead.
+			if st, statErr := os.Stat("/config"); statErr == nil && st.IsDir() {
+				if !tc.container {
+					t.Skipf("/config volume exists; the volume-absent default cannot be exercised")
 				}
-				t.Cleanup(func() {
-					if removeVolumeDir {
-						_ = os.RemoveAll("/config")
-					}
-				})
-			} else if st, statErr := os.Stat("/config"); statErr == nil && st.IsDir() {
-				t.Fatalf("case expects /config absent, but a directory exists at /config")
+				t.Skipf("/config volume exists; not writing test data to a real volume")
+			} else if tc.container {
+				// No volume in this environment; only a root test harness
+				// can create it, so skip the case elsewhere.
+				if err := os.MkdirAll("/config", 0o755); err != nil {
+					t.Skipf("cannot create /config volume for this case: %v", err)
+				}
+				t.Cleanup(func() { _ = os.RemoveAll("/config") })
 			}
 
 			// No explicit path: built the same way NewConfigManager()

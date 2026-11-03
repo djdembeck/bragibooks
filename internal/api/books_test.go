@@ -942,3 +942,162 @@ func TestCreateBookSurvivesMetadataInsertFailure(t *testing.T) {
 		t.Errorf("book status = %q; want pending", status)
 	}
 }
+
+// TestUpdateBookAuthorsOnlyKeepsNarrators pins the F11 contract: a request
+// that supplies ONLY authors replaces the author rows and leaves the
+// narrator rows untouched — the old delete-everything-then-insert shape
+// wiped narrators on any authors-only metadata update.
+func TestUpdateBookAuthorsOnlyKeepsNarrators(t *testing.T) {
+	h := newTestHandlerWithJobs(t)
+	h.svc.DB.Exec(`INSERT INTO books (id, title, status) VALUES (1, 'My Book', 'matched')`)
+	h.svc.DB.Exec(`INSERT INTO people (book_id, name, role) VALUES
+		(1, 'Jane Author', 'author'),
+		(1, 'Old Narrator', 'narrator')`)
+
+	putBook(t, h, 1, UpdateBookRequest{
+		Authors: []PersonUpdate{{Name: "New Author"}},
+	})
+
+	var authorCount, narratorCount int
+	if err := h.svc.DB.QueryRow(`SELECT COUNT(*) FROM people WHERE book_id = 1 AND role = 'author'`).Scan(&authorCount); err != nil {
+		t.Fatalf("count authors: %v", err)
+	}
+	if err := h.svc.DB.QueryRow(`SELECT COUNT(*) FROM people WHERE book_id = 1 AND role = 'narrator'`).Scan(&narratorCount); err != nil {
+		t.Fatalf("count narrators: %v", err)
+	}
+	if authorCount != 1 {
+		t.Errorf("author rows = %d; want 1 (the replacement)", authorCount)
+	}
+	if narratorCount != 1 {
+		t.Errorf("narrator rows = %d; want 1 (must survive an authors-only update)", narratorCount)
+	}
+
+	var authorName string
+	if err := h.svc.DB.QueryRow(`SELECT name FROM people WHERE book_id = 1 AND role = 'author'`).Scan(&authorName); err != nil {
+		t.Fatalf("read author name: %v", err)
+	}
+	if authorName != "New Author" {
+		t.Errorf("author name = %q; want New Author", authorName)
+	}
+}
+
+// TestUpdateBookEmptyAuthorsListClearsAuthors pins the F11 distinction
+// between "role absent" (nil — leave untouched) and "role present but
+// empty" (empty slice — replace with nothing).
+func TestUpdateBookEmptyAuthorsListClearsAuthors(t *testing.T) {
+	h := newTestHandlerWithJobs(t)
+	h.svc.DB.Exec(`INSERT INTO books (id, title, status) VALUES (1, 'My Book', 'matched')`)
+	h.svc.DB.Exec(`INSERT INTO people (book_id, name, role) VALUES
+		(1, 'Jane Author', 'author'),
+		(1, 'Sam Narrator', 'narrator')`)
+
+	putBook(t, h, 1, UpdateBookRequest{
+		Authors: []PersonUpdate{},
+	})
+
+	var authorCount, narratorCount int
+	if err := h.svc.DB.QueryRow(`SELECT COUNT(*) FROM people WHERE book_id = 1 AND role = 'author'`).Scan(&authorCount); err != nil {
+		t.Fatalf("count authors: %v", err)
+	}
+	if err := h.svc.DB.QueryRow(`SELECT COUNT(*) FROM people WHERE book_id = 1 AND role = 'narrator'`).Scan(&narratorCount); err != nil {
+		t.Fatalf("count narrators: %v", err)
+	}
+	if authorCount != 0 {
+		t.Errorf("author rows = %d; want 0 (empty list clears)", authorCount)
+	}
+	if narratorCount != 1 {
+		t.Errorf("narrator rows = %d; want 1 (must survive)", narratorCount)
+	}
+}
+
+// TestUpdateBookPeopleOnlySucceeds pins the F20 contract: a request that
+// carries ONLY people fields is a valid update (no 400 "no fields to
+// update") and writes no books-column change.
+func TestUpdateBookPeopleOnlySucceeds(t *testing.T) {
+	h := newTestHandlerWithJobs(t)
+	h.svc.DB.Exec(`INSERT INTO books (id, title, status) VALUES (1, 'My Book', 'matched')`)
+	h.svc.DB.Exec(`INSERT INTO people (book_id, name, role) VALUES (1, 'Old Author', 'author')`)
+
+	putBook(t, h, 1, UpdateBookRequest{
+		Authors: []PersonUpdate{{Name: "Solo Author"}},
+	})
+
+	var authorCount int
+	if err := h.svc.DB.QueryRow(`SELECT COUNT(*) FROM people WHERE book_id = 1 AND role = 'author'`).Scan(&authorCount); err != nil {
+		t.Fatalf("count authors: %v", err)
+	}
+	if authorCount != 1 {
+		t.Errorf("author rows = %d; want 1", authorCount)
+	}
+}
+
+// TestListBooksAllIDsReportsTotalAndTruncation pins the F21 contract: the
+// all_ids response carries the FULL match count (total) and a truncated
+// flag, so a client never mistakes a capped ID list for the whole matching
+// set. The over-cap case is TestListBooksAllIDSCapTruncates.
+func TestListBooksAllIDsReportsTotalAndTruncation(t *testing.T) {
+	h := newTestHandler(t)
+	for i := range 5 {
+		h.svc.DB.Exec(`INSERT INTO books (id, title, status) VALUES (?, 'Book ' || ?, 'pending')`, i+1, i+1)
+	}
+	for i := range 2 {
+		h.svc.DB.Exec(`INSERT INTO books (id, title, status) VALUES (?, 'Other ' || ?, 'done')`, 100+i, i+1)
+	}
+
+	// Under the cap: total = matches, truncated false.
+	w := httptest.NewRecorder()
+	h.ListBooks(w, httptest.NewRequest("GET", "/api/books?all_ids=1&status=pending", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status = %d — body: %s", w.Code, w.Body.String())
+	}
+	var under struct {
+		Total     int     `json:"total"`
+		Truncated bool    `json:"truncated"`
+		IDs       []int64 `json:"ids"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &under); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if under.Total != 5 || len(under.IDs) != 5 || under.Truncated {
+		t.Errorf("uncapped: total=%d ids=%d truncated=%v; want 5/5/false", under.Total, len(under.IDs), under.Truncated)
+	}
+}
+
+// TestListBooksAllIDSCapTruncates seeds more books than maxBookIDs and pins
+// that the response cuts at the cap while total/truncated report the rest.
+func TestListBooksAllIDSCapTruncates(t *testing.T) {
+	h := newTestHandler(t)
+	const extra = 10
+	// Seed one row per id, 1..maxBookIDs+extra, via a recursive CTE
+	// (modernc sqlite has no generate_series table function).
+	stmt := `INSERT INTO books (id, title, status)
+		WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < ` + fmt.Sprint(maxBookIDs+extra) + `)
+		SELECT n, 'Book ' || n, 'pending' FROM seq`
+	if _, err := h.svc.DB.Exec(stmt); err != nil {
+		t.Fatalf("seed books: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	h.ListBooks(w, httptest.NewRequest("GET", "/api/books?all_ids=1&status=pending", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status = %d — body: %s", w.Code, w.Body.String())
+	}
+	var res struct {
+		Total     int     `json:"total"`
+		Truncated bool    `json:"truncated"`
+		IDs       []int64 `json:"ids"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	wantTotal := maxBookIDs + extra
+	if res.Total != wantTotal {
+		t.Errorf("total = %d; want %d (the full match count)", res.Total, wantTotal)
+	}
+	if !res.Truncated {
+		t.Error("truncated = false; want true (payload cut at the cap)")
+	}
+	if len(res.IDs) != maxBookIDs {
+		t.Errorf("ids = %d; want the cap %d", len(res.IDs), maxBookIDs)
+	}
+}

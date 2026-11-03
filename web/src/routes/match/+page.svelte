@@ -248,8 +248,20 @@
 				} catch {
 					// Settings unavailable — previews stay visibly unresolved
 				}
-				const response = await get<BooksListResponse>('/books?status=pending&limit=100');
-				candidates = (response.books || []).map((book) => ({
+				// Load every pending book: a single first-100 request left
+				// the rest of the queue unmatchable (early books block the
+				// rest), so page through the API until the total is reached.
+				const pageLimit = 100;
+				const books: BookWithPeople[] = [];
+				for (let page = 0; ; page++) {
+					const response = await get<BooksListResponse>(
+						`/books?status=pending&page=${page}&limit=${pageLimit}`
+					);
+					books.push(...(response.books || []));
+					const total = Number.isFinite(response.total) ? response.total : books.length;
+					if (books.length >= total || (response.books || []).length === 0) break;
+				}
+				candidates = books.map((book) => ({
 					bookId: book.id,
 					srcPath: book.src_path,
 					title: book.title,
@@ -1467,10 +1479,16 @@
 		const release = candidate.details.release;
 		const releaseDate = release?.releaseDate || book?.originallyPublishedAt || '';
 		const runtimeMs = releaseRuntimeMs(release);
+		// The book's series field renders directly in the book list/detail,
+		// so store the upstream series NAME, never the opaque seriesId —
+		// and skip entries that carry no name rather than falling back to
+		// the ID.
 		const series = (book?.series ?? [])
 			.map((entry) => {
+				const name = seriesRecordName(entry);
+				if (!name) return '';
 				const position = seriesPositionValue(entry);
-				return [entry.seriesId, position ? `#${position}` : ''].filter(Boolean).join(' ');
+				return [name, position ? `#${position}` : ''].filter(Boolean).join(' ');
 			})
 			.filter(Boolean)
 			.join(', ');

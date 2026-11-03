@@ -464,30 +464,65 @@ func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, map
 		}
 	}
 
-	// Case-insensitive fold of the same overlay: format tags first, then
-	// stream tags, so a same-key/different-case collision (TITLE vs
-	// title) is decided deterministically by scope, not map iteration
-	// order.
-	lowered := make(map[string]string, len(effective))
-	for k, v := range doc.Format.Tags {
-		lowered[strings.ToLower(k)] = v
-	}
-	for _, s := range doc.Streams {
+	lowered := foldProbeTags(doc.Format.Tags, firstAudioStreamTags(doc.Streams))
+
+	duration, _ := strconv.ParseFloat(doc.Format.Duration, 64)
+	return effective, lowered, duration, ""
+}
+
+// firstAudioStreamTags returns the tags of the first audio stream, or nil.
+func firstAudioStreamTags(streams []struct {
+	CodecType string            `json:"codec_type"`
+	Tags      map[string]string `json:"tags"`
+}) map[string]string {
+	for _, s := range streams {
 		if s.CodecType == "audio" {
-			for k, v := range s.Tags {
-				lowered[strings.ToLower(k)] = v
-			}
-			break
+			return s.Tags
 		}
+	}
+	return nil
+}
+
+// foldProbeTags case-folds the format/stream tag overlay into a lowercase
+// key map. A same-key/different-case collision (TITLE vs title) is decided
+// by scope (the narrower stream scope wins), and a collision WITHIN one
+// scope is decided by lexicographic key order — never map iteration order
+// (finding: nondeterministic extracted values). Collecting the source pairs
+// first and inserting them in sorted (scope, key) order makes the winner of
+// any collision deterministic. Values are capped at maxTagValueBytes,
+// matching the effective-tag pass.
+func foldProbeTags(formatTags, streamTags map[string]string) map[string]string {
+	type tagPair struct {
+		scope int // 0 = format, 1 = stream
+		key   string
+		val   string
+	}
+	var pairs []tagPair
+	for k, v := range formatTags {
+		pairs = append(pairs, tagPair{scope: 0, key: k, val: v})
+	}
+	for k, v := range streamTags {
+		pairs = append(pairs, tagPair{scope: 1, key: k, val: v})
+	}
+	sort.SliceStable(pairs, func(i, j int) bool {
+		if pairs[i].scope != pairs[j].scope {
+			return pairs[i].scope < pairs[j].scope
+		}
+		if pairs[i].key != pairs[j].key {
+			return pairs[i].key < pairs[j].key
+		}
+		return false
+	})
+	lowered := make(map[string]string, len(pairs))
+	for _, p := range pairs {
+		lowered[strings.ToLower(p.key)] = p.val
 	}
 	for k, v := range lowered {
 		if len(v) > maxTagValueBytes {
 			lowered[k] = v[:maxTagValueBytes] + "…"
 		}
 	}
-
-	duration, _ := strconv.ParseFloat(doc.Format.Duration, 64)
-	return effective, lowered, duration, ""
+	return lowered
 }
 
 // mergeFields turns the accumulated value lists into per-field states.

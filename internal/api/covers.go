@@ -11,11 +11,14 @@ import (
 // The art is schematic library content, so the caller mounts this handler
 // behind the same auth middleware as /api (see RegisterRoutes) — an
 // anonymous client must not be able to enumerate /covers/1.jpg, /covers/2.jpg.
-// It sits outside the /api prefix only because the `<img>` tags that render
-// it cannot attach the bearer header; the SPA mirrors its token into the
-// same-origin `bragibooks_token` cookie, which the browser sends with those
-// image requests. Only the `<id>.jpg` files written by CreateBooks are
-// served: no directory listings, no traversal, no other content types.
+// It sits outside the /api prefix because the `<img>` tags that render it
+// cannot attach the bearer header, so it rides the same no-key loopback/LAN
+// fallback as the /api routes. The SPA does not mirror its token into a
+// cookie (it only clears a leftover `bragibooks_token`), so remote
+// API-key clients cannot load cover art via `<img>`: the book endpoints
+// return only a protected cover URL, and an `<img>` cannot attach the
+// Authorization header. Only the `<id>.jpg` files written by CreateBooks
+// are served: no directory listings, no traversal, no other content types.
 func CoverHandler(dir string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, "/covers/")
