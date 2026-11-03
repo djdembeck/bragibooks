@@ -23,6 +23,7 @@ import (
 
 	"github.com/bragibooks/bragibooks/internal/audio"
 	"github.com/bragibooks/bragibooks/internal/config"
+	"github.com/bragibooks/bragibooks/internal/models"
 )
 
 // processingSchemaSQL adds the processing_jobs table to the books test schema.
@@ -373,6 +374,94 @@ func TestCancelRunningJobPersistsLiveOutput(t *testing.T) {
 	}
 	if !strings.Contains(output, "partial live line") {
 		t.Errorf("cancelled output = %q; want the stdout produced before cancellation", output)
+	}
+}
+
+// TestFinalizeCancelledExecErrorSkipsBookRestoreAndCleansUp pins the
+// Exec-error branch of finalizeCancelled (regression): when the
+// cancellation UPDATE fails, the returned sql.Result is nil, and the
+// res.RowsAffected() guard MUST be skipped — calling it on a nil result
+// panics. The UPDATE is made to fail deterministically by dropping the
+// processing_jobs table (it then returns "no such table" while the books
+// table stays readable and the DB stays open), and the job passed in has a
+// valid BookID with a recorded pre-queue status, so a SUCCESSFUL
+// finalizeCancelled WOULD have restored the book. The expected behavior is:
+// log, skip book restoration (book stays 'processing'), continue cleanup
+// (drop the in-memory job state), never panic.
+func TestFinalizeCancelledExecErrorSkipsBookRestoreAndCleansUp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := sql.Open("sqlite", fmt.Sprintf(
+		"file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", path,
+	))
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	if _, err := db.Exec(processingSchemaSQL); err != nil {
+		t.Fatalf("create jobs schema: %v", err)
+	}
+	svc := NewProcessingService(db, &audio.Processor{}, 1)
+
+	// Book in its pre-queue status: QueueJob records it as
+	// book_pre_status, so a SUCCESSFUL finalizeCancelled WOULD have
+	// restored the book from 'processing' back to 'matched' (book_id
+	// valid, book_pre_status recorded).
+	if _, err := db.Exec(
+		"INSERT INTO books (id, title, status, status_message) VALUES (1, 'Running Book', 'matched', '')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+
+	// Simulate a worker that has started the job: the job is flipped to
+	// 'running' so the cancellation UPDATE matches, and the book to
+	// 'processing' so the success path's restore branch would flip it back
+	// to 'matched' — making the skip on the Exec error observable.
+	setJobStatus(t, db, id, "running")
+	if _, err := db.Exec("UPDATE books SET status = 'processing' WHERE id = 1"); err != nil {
+		t.Fatalf("set book to processing: %v", err)
+	}
+
+	// Dropping the table makes ONLY the cancellation UPDATE fail
+	// deterministically ("no such table: processing_jobs") while the books
+	// table stays readable for the post-call assertion. GetJob/forgetJob
+	// are pure in-memory, so no worker goroutine is needed.
+	if _, err := db.Exec("DROP TABLE processing_jobs"); err != nil {
+		t.Fatalf("drop processing_jobs: %v", err)
+	}
+
+	var panicked bool
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+			}
+		}()
+		svc.finalizeCancelled(&models.ProcessingJob{
+			ID:            id,
+			BookID:        sql.NullInt64{Int64: 1, Valid: true},
+			BookPreStatus: sql.NullString{String: "matched", Valid: true},
+		}, "")
+	}()
+	if panicked {
+		t.Fatal("finalizeCancelled panicked on cancellation-UPDATE Exec failure; the res.RowsAffected() guard must be skipped when the Exec errored")
+	}
+
+	// The book row must be UNCHANGED: on the success path finalizeCancelled
+	// would have restored it from 'processing' to 'matched', but the UPDATE
+	// failed, so book restoration was skipped and it stays 'processing'.
+	if got := bookStatusFromDB(t, db, 1); got != "processing" {
+		t.Errorf("book status after Exec-failing cancel = %q; want processing (book must NOT be restored when the cancellation UPDATE fails)", got)
+	}
+	if st := svc.GetJob(id); st != nil {
+		t.Error("job still present in service.jobs after finalizeCancelled; the in-memory state must be cleaned up even on Exec failure")
 	}
 }
 

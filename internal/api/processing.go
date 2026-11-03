@@ -1084,8 +1084,7 @@ func (s *ProcessingService) finalizeCancelled(job *models.ProcessingJob, stdout 
 	)
 	if err != nil {
 		log.Printf("finalize cancelled job %s: %v", job.ID, err)
-	}
-	if n, _ := res.RowsAffected(); n > 0 && job.BookID.Valid {
+	} else if n, _ := res.RowsAffected(); n > 0 && job.BookID.Valid {
 		pre := ""
 		if job.BookPreStatus.Valid {
 			pre = job.BookPreStatus.String
