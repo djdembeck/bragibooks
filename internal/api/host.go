@@ -46,7 +46,11 @@ func ValidateHost(cfg config.ServerConfig) (func(http.Handler) http.Handler, err
 			// access: the host's LAN IP is not a container interface address.
 			// DNS names are never resolved to decide trust.
 			local := ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast())
-			if err != nil || (!allowed[host] && !local) {
+			if err != nil {
+				writeError(w, http.StatusForbidden, fmt.Sprintf("invalid request Host %q", r.Host))
+				return
+			}
+			if !allowed[host] && !local {
 				writeError(w, http.StatusForbidden, fmt.Sprintf("untrusted request Host %q; add it to SERVER_ALLOWED_HOSTS or use a local/private literal address", r.Host))
 				return
 			}
