@@ -23,7 +23,10 @@ type Book struct {
 	CoverImageURL        string         `db:"cover_image_url" json:"cover_image_url"`
 	CreatedAt            string         `db:"created_at" json:"created_at"`
 	UpdatedAt            string         `db:"updated_at" json:"updated_at"`
-	Converted            bool           `db:"converted" json:"converted"`
+	// The books.converted column (legacy migration provenance) is
+	// intentionally NOT part of the API contract: no book-read query
+	// selects it and nothing updates it, so it could only ever report
+	// false. It stays in the schema for migration fidelity.
 }
 
 // Person represents an author or narrator linked to a book.
@@ -60,6 +63,11 @@ type ProcessingJob struct {
 	// QueueSeq is the durable enqueue order. SQLite's created_at is only
 	// second-precision, so a batch would otherwise have no stable FIFO tie.
 	QueueSeq int64 `db:"queue_seq" json:"queue_seq"`
+	// BookPreStatus is the book's status at queue time; cancelling a running
+	// job restores the book to this (not a hard-coded 'matched'), so a
+	// reprocessed 'done' book is not demoted and a 'pending' one is not
+	// promoted. NULL for jobs queued before v13.
+	BookPreStatus sql.NullString `db:"book_pre_status" json:"-"`
 }
 
 // OutputProfile is a named, reusable output destination for queue batches:

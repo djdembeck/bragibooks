@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
 	started_at TEXT,
 	completed_at TEXT,
 	created_at TEXT DEFAULT (datetime('now')),
-	queue_seq INTEGER
+	queue_seq INTEGER,
+	book_pre_status TEXT
 );
 `
 
@@ -218,6 +219,63 @@ func TestCancelQueuedJob(t *testing.T) {
 	w2 := doCancel(t, h, id)
 	if w2.Code != http.StatusConflict {
 		t.Errorf("second cancel status = %d; want 409 — body: %s", w2.Code, w2.Body.String())
+	}
+}
+
+func TestCancelQueuedJobRestoresPreQueueBookStatus(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status, status_message) VALUES (1, 'Reprocessed Book', 'done', '')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	if _, err := h.svc.DB.Exec("UPDATE books SET status = 'processing' WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CancelJob(id); err != nil {
+		t.Fatalf("cancel queued job: %v", err)
+	}
+	if got := bookStatusFromDB(t, h.svc.DB, 1); got != "done" {
+		t.Errorf("book status after queued cancellation = %q; want pre-queue done", got)
+	}
+}
+
+func TestWorkerLosingQueuedClaimRestoresPreQueueBookStatus(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status, status_message) VALUES (1, 'Reprocessed Book', 'done', '')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	state := svc.GetJob(id)
+	if state == nil {
+		t.Fatal("queued job has no state")
+	}
+
+	// Pin the cancel-vs-start loser state: cancellation has made the job
+	// terminal after the book was temporarily marked processing.
+	if _, err := h.svc.DB.Exec("UPDATE books SET status = 'processing' WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.DB.Exec("UPDATE processing_jobs SET status = 'cancelled' WHERE id = ?", id); err != nil {
+		t.Fatal(err)
+	}
+	job := state.job
+	svc.processJob(t.Context(), &job)
+
+	if got := bookStatusFromDB(t, h.svc.DB, 1); got != "done" {
+		t.Errorf("book status after worker loses queued claim = %q; want pre-queue done", got)
+	}
+	if got, err := jobStatusFromDB(t, h.svc.DB, id); err != nil || got != "cancelled" {
+		t.Errorf("job status after worker loses queued claim = %q, err = %v; want cancelled", got, err)
 	}
 }
 
@@ -564,19 +622,27 @@ func TestListBooksAllIDs(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("all_ids status = %d; want 200 — body: %s", w.Code, w.Body.String())
 	}
-	var resp map[string][]int64
+	var resp struct {
+		IDs       []int64 `json:"ids"`
+		Total     int     `json:"total"`
+		Truncated bool    `json:"truncated"`
+	}
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	ids, ok := resp["ids"]
-	if !ok {
-		t.Fatalf("response missing 'ids' key: %s", w.Body.String())
+	// The F21 contract: the payload is capped at maxBookIDs, while total
+	// reports the FULL match count and truncated makes the cut explicit.
+	if len(resp.IDs) != maxBookIDs {
+		t.Errorf("all_ids returned %d ids; want cap %d", len(resp.IDs), maxBookIDs)
 	}
-	if len(ids) != maxBookIDs {
-		t.Errorf("all_ids returned %d ids; want cap %d", len(ids), maxBookIDs)
+	if resp.Total != 1005 {
+		t.Errorf("total = %d; want 1005 (the full match count)", resp.Total)
+	}
+	if !resp.Truncated {
+		t.Error("truncated = false; want true (1005 > cap)")
 	}
 	// ids must be a valid non-empty subset of seeded IDs.
-	for _, id := range ids {
+	for _, id := range resp.IDs {
 		if id < 1 || id > 1005 {
 			t.Errorf("all_ids returned out-of-range id %d", id)
 			break
@@ -678,6 +744,53 @@ func TestSweepOrphansOnStartup(t *testing.T) {
 	}
 	for id, want := range map[int64]string{1: "pending", 2: "pending", 3: "done"} {
 		if got := bookStatusFromDB(t, db, int64(id)); got != want {
+			t.Errorf("book %d status = %q; want %q", id, got, want)
+		}
+	}
+}
+
+// TestSweepOrphansRestoresPreQueueStatus pins the F28 cross-path contract:
+// the orphan sweep restores a stuck book to the status it had when its
+// (newest) job was queued — the same answer the cancel path gives — not a
+// hard-coded 'pending'. A reprocessed 'done' book stays 'done'; a book that
+// was 'matched' when queued goes back to 'matched'.
+func TestSweepOrphansRestoresPreQueueStatus(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sweep-pre.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	if _, err := db.Exec(processingSchemaSQL); err != nil {
+		t.Fatalf("create jobs schema: %v", err)
+	}
+
+	seed := `
+		INSERT INTO books (id, title, status) VALUES
+			(1, 'Reprocessed Book', 'processing'),
+			(2, 'Matched Book', 'processing'),
+			(3, 'Stale Book', 'processing');
+		INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, book_pre_status, queue_seq) VALUES
+			('d1', 1, '{}', 'done', 'matched', 1),
+			('r1', 1, '{}', 'running', 'done', 2),
+			('q1', 2, '{}', 'queued', 'matched', 3),
+			('r2', 3, '{}', 'running', NULL, 4);
+	`
+	if _, err := db.Exec(seed); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	NewProcessingService(db, &audio.Processor{}, 1)
+
+	for id, want := range map[int64]string{
+		1: "done",    // newest swept job (r1) recorded pre-queue 'done'
+		2: "matched", // newest swept job (q1) recorded pre-queue 'matched'
+		3: "pending", // NULL pre-status falls back to the historic 'pending'
+	} {
+		if got := bookStatusFromDB(t, db, id); got != want {
 			t.Errorf("book %d status = %q; want %q", id, got, want)
 		}
 	}
@@ -1416,6 +1529,35 @@ func TestDoneSyncAwaitAfterReport(t *testing.T) {
 		if err == nil || err.Error() != "worker stopped" {
 			t.Errorf("await %d: err = %v; want the reported terminal error", i, err)
 		}
+	}
+}
+
+func TestJobStateSendProgressConcurrentWithFinalize(t *testing.T) {
+	for range 100 {
+		st := &jobState{
+			progressSubs: make(map[chan string]struct{}),
+			doneSync:     newDoneSync(),
+		}
+		ch := make(chan string, 1)
+		st.registerProgressSubscriber(ch)
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range 10 {
+				st.sendProgress(`{"status":"running"}`)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			st.finalize(cancelledProgressMsg, nil)
+		}()
+		close(start)
+		wg.Wait()
 	}
 }
 

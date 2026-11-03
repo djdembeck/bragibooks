@@ -53,24 +53,27 @@ type CreateBooksResponse struct {
 
 // UpdateBookRequest is the JSON body accepted by PUT /api/books/:id.
 type UpdateBookRequest struct {
-	Title                *string        `json:"title"`
-	ASIN                 *string        `json:"asin"`
-	AudiobookdbBookID    *string        `json:"audiobookdb_book_id"`
-	AudiobookdbReleaseID *string        `json:"audiobookdb_release_id"`
-	Description          *string        `json:"description"`
-	ReleaseDate          *string        `json:"release_date"`
-	Series               *string        `json:"series"`
-	Publisher            *string        `json:"publisher"`
-	Language             *string        `json:"language"`
-	RuntimeLengthMinutes *int           `json:"runtime_length_minutes"`
-	FormatType           *string        `json:"format_type"`
-	SrcPath              *string        `json:"src_path"`
-	DestPath             *string        `json:"dest_path"`
-	Status               *string        `json:"status"`
-	StatusMessage        *string        `json:"status_message"`
-	CoverImageURL        *string        `json:"cover_image_url"`
-	Authors              []PersonUpdate `json:"authors,omitempty"`
-	Narrators            []PersonUpdate `json:"narrators,omitempty"`
+	Title                *string `json:"title"`
+	ASIN                 *string `json:"asin"`
+	AudiobookdbBookID    *string `json:"audiobookdb_book_id"`
+	AudiobookdbReleaseID *string `json:"audiobookdb_release_id"`
+	Description          *string `json:"description"`
+	ReleaseDate          *string `json:"release_date"`
+	Series               *string `json:"series"`
+	Publisher            *string `json:"publisher"`
+	Language             *string `json:"language"`
+	RuntimeLengthMinutes *int    `json:"runtime_length_minutes"`
+	FormatType           *string `json:"format_type"`
+	SrcPath              *string `json:"src_path"`
+	DestPath             *string `json:"dest_path"`
+	Status               *string `json:"status"`
+	StatusMessage        *string `json:"status_message"`
+	CoverImageURL        *string `json:"cover_image_url"`
+	// No omitempty: an empty list ([] = "clear this role") must survive
+	// JSON round-trips as distinct from an absent field (nil = "leave this
+	// role untouched"), which is the F11 replace-vs-keep contract.
+	Authors   []PersonUpdate `json:"authors"`
+	Narrators []PersonUpdate `json:"narrators"`
 }
 
 // booksColumns is the SELECT column list for the books table, shared by the
@@ -118,7 +121,7 @@ func buildBooksFilter(status, q string) (string, []any) {
 }
 
 // ListBooks handles GET /api/books with optional status, text (q) and
-// pagination filters. all_ids=1 switches the response to a bare ID list for
+// pagination filters. all_ids=1 switches the response to a capped ID list
 // bulk selection.
 func (h *Handler) ListBooks(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
@@ -143,7 +146,8 @@ func (h *Handler) ListBooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// all_ids mode: return just the matching IDs (capped) for bulk select.
+	// all_ids mode: return the matching IDs (capped, with total/truncated)
+	// for bulk select.
 	if parseBoolQueryParam(r, "all_ids") {
 		h.listBookIDs(w, status, q)
 		return
@@ -191,9 +195,18 @@ func (h *Handler) ListBooks(w http.ResponseWriter, r *http.Request) {
 // maxBookIDs caps the all_ids response so a bulk-select payload stays small.
 const maxBookIDs = 1000
 
-// listBookIDs writes {"ids":[...]} for the given filters, capped at maxBookIDs.
+// listBookIDs writes {"ids":[...],"total":N,"truncated":bool} for the given
+// filters, capped at maxBookIDs. total is the FULL match count (uncapped)
+// and truncated is true when the cap cut the list — the client must not
+// treat a capped response as the whole set (finding: F21).
 func (h *Handler) listBookIDs(w http.ResponseWriter, status, q string) {
 	where, filterArgs := buildBooksFilter(status, q)
+	var total int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM books"+where, filterArgs...).Scan(&total); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("count books: %v", err))
+		return
+	}
+
 	queryArgs := append(append([]any{}, filterArgs...), maxBookIDs)
 	rows, err := h.svc.DB.Query(
 		"SELECT id FROM books"+where+" ORDER BY created_at DESC LIMIT ?",
@@ -218,7 +231,11 @@ func (h *Handler) listBookIDs(w http.ResponseWriter, status, q string) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string][]int64{"ids": ids})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ids":       ids,
+		"total":     total,
+		"truncated": len(ids) < total,
+	})
 }
 
 // BooksCountsResponse is the JSON shape returned by GET /api/books/counts.
@@ -379,19 +396,25 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 		args = append(args, *req.CoverImageURL)
 	}
 
-	if len(setters) == 0 {
+	// People fields are valid update fields even when they are the ONLY
+	// thing in the request: they have no SQL setter, so counting only the
+	// scalar setters would 400 a request that updates just authors or
+	// narrators (finding: F20).
+	if len(setters) == 0 && req.Authors == nil && req.Narrators == nil {
 		writeError(w, http.StatusBadRequest, "no fields to update")
 		return
 	}
 
-	args = append(args, bookID)
-	settersStr := strings.Join(setters, ", ")
-	query := fmt.Sprintf("UPDATE books SET %s WHERE id = ?", settersStr)
+	if len(setters) > 0 {
+		args = append(args, bookID)
+		settersStr := strings.Join(setters, ", ")
+		query := fmt.Sprintf("UPDATE books SET %s WHERE id = ?", settersStr)
 
-	_, err := h.svc.DB.Exec(query, args...)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("update book: %v", err))
-		return
+		_, err := h.svc.DB.Exec(query, args...)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("update book: %v", err))
+			return
+		}
 	}
 
 	if req.Authors != nil || req.Narrators != nil {
@@ -638,12 +661,46 @@ func titleCase(name string) string {
 	return b.String()
 }
 
+// replacePeople replaces the people for the roles PRESENT in the request.
+// A nil list means "not provided" and leaves that role's existing rows
+// untouched: the old delete-both-roles-then-insert shape wiped narrators
+// whenever a metadata update supplied only authors (finding: F11).
+// Delete + insert run in one transaction so a partial write cannot leave
+// the book with a half-replaced role.
 func replacePeople(db *sql.DB, bookID int64, authors, narrators []PersonUpdate) error {
-	if _, err := db.Exec("DELETE FROM people WHERE book_id = ?", bookID); err != nil {
+	replaceRoles := make([]string, 0, 2)
+	if authors != nil {
+		replaceRoles = append(replaceRoles, "author")
+	}
+	if narrators != nil {
+		replaceRoles = append(replaceRoles, "narrator")
+	}
+	if len(replaceRoles) == 0 {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin people transaction: %w", err)
+	}
+	defer tx.Rollback() // safe to call after Commit
+
+	// Delete only the roles being replaced; the other role's rows survive.
+	placeholders := strings.Repeat("?,", len(replaceRoles))
+	placeholders = strings.TrimSuffix(placeholders, ",")
+	delArgs := make([]any, 0, len(replaceRoles)+1)
+	delArgs = append(delArgs, bookID)
+	for _, role := range replaceRoles {
+		delArgs = append(delArgs, role)
+	}
+	if _, err := tx.Exec(
+		"DELETE FROM people WHERE book_id = ? AND role IN ("+placeholders+")",
+		delArgs...,
+	); err != nil {
 		return fmt.Errorf("delete people: %w", err)
 	}
 
-	insert, err := db.Prepare(
+	insert, err := tx.Prepare(
 		"INSERT INTO people (book_id, name, role, audiobookdb_person_id, created_at) VALUES (?, ?, ?, ?, datetime('now'))",
 	)
 	if err != nil {
@@ -666,11 +723,19 @@ func replacePeople(db *sql.DB, bookID int64, authors, narrators []PersonUpdate) 
 		}
 		return nil
 	}
-	if err := add("author", authors); err != nil {
-		return fmt.Errorf("insert authors: %w", err)
+	if authors != nil {
+		if err := add("author", authors); err != nil {
+			return fmt.Errorf("insert authors: %w", err)
+		}
 	}
-	if err := add("narrator", narrators); err != nil {
-		return fmt.Errorf("insert narrators: %w", err)
+	if narrators != nil {
+		if err := add("narrator", narrators); err != nil {
+			return fmt.Errorf("insert narrators: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit people transaction: %w", err)
 	}
 	return nil
 }
@@ -839,10 +904,12 @@ func filterPeople(people []models.Person, role string) []models.Person {
 	return result
 }
 
-// parseInt64Param converts a string to int64, returning -1 on error.
+// parseInt64Param converts a string to int64, returning -1 on error. The
+// ENTIRE segment must be a base-10 integer: fmt.Sscanf would accept an
+// integer prefix ("17oops" -> 17) and delete the wrong book, so a strict
+// parse rejects any trailing non-numeric content.
 func parseInt64Param(s string) int64 {
-	var n int64
-	_, err := fmt.Sscanf(s, "%d", &n)
+	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		return -1
 	}

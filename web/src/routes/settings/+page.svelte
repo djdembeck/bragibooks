@@ -47,6 +47,9 @@
 
 	// Client-side validation helpers
 	function validateNonNegativeInt(value: number): string | null {
+		// A cleared number input binds undefined, which would stringify away
+		// and silently leave the saved count untouched.
+		if (typeof value !== 'number' || !Number.isFinite(value)) return 'Enter a CPU count (0 to use all cores)';
 		if (value < 0) return 'Must be zero or greater';
 		return null;
 	}
@@ -342,6 +345,9 @@
 	}
 
 	// m4b-merge template tokens a relative format must contain at least one of.
+	// {asin} is deliberately excluded: the engine leaves it unsubstituted, so
+	// a scheme whose only placeholder is {asin} is rejected server-side and
+	// the client must agree.
 	const PROFILE_SCHEME_TOKENS: readonly string[] = [
 		'author',
 		'narrator',
@@ -349,8 +355,7 @@
 		'series_position',
 		'subtitle',
 		'title',
-		'year',
-		'asin'
+		'year'
 	];
 
 	async function loadProfiles() {

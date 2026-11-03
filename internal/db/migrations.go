@@ -198,6 +198,17 @@ CREATE TABLE IF NOT EXISTS book_source_metadata (
 );
 `,
 	},
+	{
+		// v13: the book status the job found at queue time. Cancelling a
+		// RUNNING job must restore the book to that pre-queue status, not to
+		// a hard-coded 'matched' (which demotes a reprocessed 'done' book
+		// and promotes a 'pending' one). Pre-v13 rows are NULL: the cancel
+		// path falls back to the old 'matched' behavior for them.
+		version: 13,
+		sql: `
+ALTER TABLE processing_jobs ADD COLUMN book_pre_status TEXT;
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

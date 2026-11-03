@@ -367,6 +367,76 @@ func TestMigratePeople(t *testing.T) {
 	}
 }
 
+// TestRecoverPeopleIdempotent verifies that re-running the people recovery
+// pass does not append duplicate people rows.
+func TestRecoverPeopleIdempotent(t *testing.T) {
+	legacy := newLegacyDB(t)
+	t.Cleanup(func() { legacy.Close() })
+
+	newDB := newEmptyDB(t)
+	t.Cleanup(func() { newDB.Close() })
+	if err := setupNewSchema(newDB); err != nil {
+		t.Fatal(err)
+	}
+
+	// One legacy book with an author and a narrator.
+	_, err := legacy.Exec(`INSERT INTO importer_book (id, title, asin) VALUES (1, 'Book One', 'B001')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`INSERT INTO importer_author (id, first_name, last_name, asin) VALUES (1, 'Jane', 'Doe', '')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`INSERT INTO importer_narrator (id, first_name, last_name) VALUES (1, 'Alice', 'Wonder')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`INSERT INTO importer_author_books (id, book_id, author_id) VALUES (1, 1, 1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`INSERT INTO importer_narrator_books (id, book_id, narrator_id) VALUES (1, 1, 1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Books must already exist in the new DB for the recovery pass.
+	_, err = newDB.Exec(`INSERT INTO books (id, title, asin) VALUES (1, 'Book One', 'B001')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mapping, err := buildBookMapping(newDB)
+	if err != nil {
+		t.Fatalf("buildBookMapping: %v", err)
+	}
+
+	authors, narrators, err := recoverPeople(legacy, newDB, mapping)
+	if err != nil {
+		t.Fatalf("first recoverPeople: %v", err)
+	}
+	if authors != 1 || narrators != 1 {
+		t.Errorf("first recovery = (%d authors, %d narrators), want (1, 1)", authors, narrators)
+	}
+
+	authors, narrators, err = recoverPeople(legacy, newDB, mapping)
+	if err != nil {
+		t.Fatalf("second recoverPeople: %v", err)
+	}
+	if authors != 0 || narrators != 0 {
+		t.Errorf("second recovery = (%d authors, %d narrators), want (0, 0) — re-run must be a no-op", authors, narrators)
+	}
+
+	var count int
+	if err := newDB.QueryRow("SELECT COUNT(*) FROM people").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Errorf("people rows after re-run = %d, want 2 (no duplicates)", count)
+	}
+}
+
 // --- TestMigrateSettings ---
 
 func TestMigrateSettings(t *testing.T) {
@@ -675,7 +745,8 @@ func TestRunLegacyMigration(t *testing.T) {
 			src_path, dest_path, cover_image_link, created_at, updated_at, status_id, converted)
 			VALUES
 			(1, 'Book One', 'B001', 'short1', 'long1', '2024-01-01', 'Series A', 'PubA', 'en', 120, 'm4b', '/in/1', '/out/1', 'http://cover/1', '2024-01-01', '2024-01-02', 1, 1),
-			(2, 'Book Two', 'B002', 'short2', '', '2024-02-01', '', 'PubB', 'en', 90, 'm4b', '/in/2', '/out/2', '', '2024-02-01', '2024-02-02', 2, 0)`)
+			(2, 'Book Two', 'B002', 'short2', '', '2024-02-01', '', 'PubB', 'en', 90, 'm4b', '/in/2', '/out/2', '', '2024-02-01', '2024-02-02', 2, 0),
+			(3, 'Book Three', '', 'short3', '', '2024-03-01', '', 'PubC', 'en', 60, 'm4b', '/in/3', '/out/3', '', '2024-03-01', '2024-03-02', 1, 0)`)
 
 		// Authors (with ASINs)
 		_, _ = db.Exec(`INSERT INTO importer_author (id, first_name, last_name, asin) VALUES (1, 'Jane', 'Doe', 'B08T7RLZJ4'), (2, 'John', 'Smith', 'B01AY7PSG4')`)
@@ -699,8 +770,8 @@ func TestRunLegacyMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunLegacyMigration error: %v", err)
 	}
-	if result.Books != 2 {
-		t.Errorf("books = %d, want 2", result.Books)
+	if result.Books != 3 {
+		t.Errorf("books = %d, want 3", result.Books)
 	}
 	if result.People != 3 {
 		t.Errorf("people = %d, want 3 (2 authors + 1 narrator)", result.People)
@@ -711,8 +782,8 @@ func TestRunLegacyMigration(t *testing.T) {
 	if err := newDB.QueryRow("SELECT COUNT(*) FROM books").Scan(&bookCount); err != nil {
 		t.Fatal(err)
 	}
-	if bookCount != 2 {
-		t.Errorf("book count in DB = %d, want 2", bookCount)
+	if bookCount != 3 {
+		t.Errorf("book count in DB = %d, want 3", bookCount)
 	}
 
 	// Verify a specific book's fields
@@ -797,8 +868,8 @@ func TestRunLegacyMigration(t *testing.T) {
 	if err := legacyDB.QueryRow("SELECT COUNT(*) FROM importer_book").Scan(&legacyBookCount); err != nil {
 		t.Fatal(err)
 	}
-	if legacyBookCount != 2 {
-		t.Errorf("legacy DB book count = %d, want 2 (legacy DB should be untouched)", legacyBookCount)
+	if legacyBookCount != 3 {
+		t.Errorf("legacy DB book count = %d, want 3 (legacy DB should be untouched)", legacyBookCount)
 	}
 }
 
@@ -891,5 +962,59 @@ func TestRunLegacyMigration_LegacyDBUntouched(t *testing.T) {
 	}
 	if infoBefore.Size() != infoAfter.Size() {
 		t.Errorf("legacy DB file size changed: before=%d, after=%d (should be untouched)", infoBefore.Size(), infoAfter.Size())
+	}
+}
+
+// TestRunLegacyMigrationRollsBackPartialWrites covers the deferred-rollback
+// path: migrateBooks writes rows into the transaction first, then
+// migratePeople fails — the whole transaction must roll back, leaving the
+// new database empty.
+func TestRunLegacyMigrationRollsBackPartialWrites(t *testing.T) {
+	legacyPath := writeLegacyDB(t, func(db *sql.DB) {
+		_, _ = db.Exec(`INSERT INTO importer_status (id, status) VALUES (1, 'Done')`)
+		_, _ = db.Exec(`INSERT INTO importer_book (id, title, asin, short_desc, long_desc, release_date, series, publisher, lang, runtime_length_minutes, format_type, src_path, dest_path, cover_image_link, created_at, updated_at, status_id, converted)
+			VALUES (1, 'Book One', 'B001', 'short1', 'long1', '2024-01-01', '', 'PubA', 'en', 120, 'm4b', '/in/1', '/out/1', '', '2024-01-01', '2024-01-02', 1, 0)`)
+		_, _ = db.Exec(`INSERT INTO importer_author (id, first_name, last_name, asin) VALUES (1, 'Jane', 'Doe', 'B001')`)
+		_, _ = db.Exec(`INSERT INTO importer_narrator (id, first_name, last_name) VALUES (1, 'Alice', 'Wonder')`)
+		_, _ = db.Exec(`INSERT INTO importer_author_books (id, book_id, author_id) VALUES (1, 1, 1)`)
+		_, _ = db.Exec(`INSERT INTO importer_narrator_books (id, book_id, narrator_id) VALUES (1, 1, 1)`)
+	})
+
+	newDB, _ := newFileDB(t)
+	t.Cleanup(func() { newDB.Close() })
+
+	// Force every people insert to fail, after the books were already
+	// written into the migration transaction.
+	if _, err := newDB.Exec(`
+		CREATE TRIGGER fail_people_insert
+		BEFORE INSERT ON people
+		BEGIN
+			SELECT RAISE(ABORT, 'forced people insert failure');
+		END
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := RunLegacyMigration(legacyPath, newDB, "")
+	if err == nil {
+		t.Fatal("expected RunLegacyMigration to fail on people insert, got nil error")
+	}
+	if result != nil {
+		t.Errorf("expected nil result on failure, got %+v", result)
+	}
+
+	// The transaction must have rolled back: no books, no people.
+	var booksCount, peopleCount int
+	if err := newDB.QueryRow(`SELECT COUNT(*) FROM books`).Scan(&booksCount); err != nil {
+		t.Fatal(err)
+	}
+	if booksCount != 0 {
+		t.Errorf("books rows after rollback = %d, want 0", booksCount)
+	}
+	if err := newDB.QueryRow(`SELECT COUNT(*) FROM people`).Scan(&peopleCount); err != nil {
+		t.Fatal(err)
+	}
+	if peopleCount != 0 {
+		t.Errorf("people rows after rollback = %d, want 0", peopleCount)
 	}
 }

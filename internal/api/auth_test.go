@@ -96,8 +96,29 @@ func TestRequireAdminLocalModeRejectsForwardingHeaderFromNonTrustedPeer(t *testi
 	}
 }
 
-// A trusted proxy (BRAGIBOOKS_TRUSTED_PROXIES) that itself sits in the
-// loopback-LAN can forward: the chain is walked right to left and the
+// A trusted proxy address connecting directly (no forwarding headers) is a
+// plain LAN client: its own address decides, the same as the direct-loopback
+// UI path — even in the enabled state. The fail-closed case is a proxy that
+// FORWARDS (XFF present) but supplies no verifiable client.
+func TestRequireAdminEnabledTrustedProxyDirectConnectionIsLAN(t *testing.T) {
+	t.Setenv("BRAGIBOOKS_TRUSTED_PROXIES", "172.16.0.5")
+	rec := doAuthReq(t, sw(config.AdminAuthState{Enabled: true, KeyDigest: keyDigestOf("bk_real")}),
+		"GET", "/api/books", "172.16.0.5:3128", "", "", "")
+	if rec.Code != http.StatusOK {
+		t.Errorf("trusted proxy peer, direct connection, no headers = %d, want 200", rec.Code)
+	}
+}
+
+// A direct LAN peer is still eligible for the keyless path even when a
+// different address is configured as a trusted proxy.
+func TestRequireAdminLocalModeAcceptsDirectLANWithTrustedProxyConfigured(t *testing.T) {
+	t.Setenv("BRAGIBOOKS_TRUSTED_PROXIES", "172.16.0.5")
+	rec := doAuthReq(t, sw(config.AdminAuthState{}), "GET", "/api/books", "10.0.3.4:5555", "", "", "")
+	if rec.Code != http.StatusOK {
+		t.Errorf("direct LAN peer with trusted proxy configured = %d, want 200", rec.Code)
+	}
+}
+
 // first untrusted entry (10.0.3.4) is the end client.
 func TestRequireAdminLocalModeAcceptsXFFFromTrustedProxy(t *testing.T) {
 	t.Setenv("BRAGIBOOKS_TRUSTED_PROXIES", "172.16.0.5")
@@ -635,6 +656,52 @@ func TestRequireAdminLocalModeTrustedProxyRejectsInvalidRightmostXFF(t *testing.
 		"10.0.0.2:3128", "203.0.113.7, not-an-ip", "", "")
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("trusted proxy, non-IP rightmost XFF = %d, want 403", rec.Code)
+	}
+}
+
+// A trusted proxy that supplies no attributable client address — no XFF at
+// all, or a chain of only trusted hops — must NOT fall back to the proxy's
+// own (LAN) peer address: the request is unattributable and is rejected.
+func TestRequireAdminLocalModeTrustedProxyWithoutClientFailsClosed(t *testing.T) {
+	// 172.16.0.0/12: every 172.16.x entry in the chain is a trusted hop,
+	// so the chain contains ONLY trusted hops and no client can be
+	// attributed from it.
+	t.Setenv("BRAGIBOOKS_TRUSTED_PROXIES", "172.16.0.0/12")
+	t.Run("no forwarding headers is a direct connection", func(t *testing.T) {
+		// No forwarding header at all: the peer is talking to us directly
+		// (a LAN host that is also a configured proxy), so its own address
+		// decides — the same contract as the direct-loopback UI path. This
+		// is NOT the fail-closed case; the fail-closed case is a proxy that
+		// FORWARDS (XFF present) but supplies no verifiable client.
+		rec := doAuthReq(t, sw(config.AdminAuthState{}), "GET", "/api/books",
+			"172.16.0.5:3128", "", "", "")
+		if rec.Code != http.StatusOK {
+			t.Errorf("trusted-proxy peer with no forwarding headers = %d, want 200 (direct LAN connection)", rec.Code)
+		}
+	})
+	t.Run("trusted-only chain", func(t *testing.T) {
+		rec := doAuthReq(t, sw(config.AdminAuthState{}), "GET", "/api/books",
+			"172.16.0.5:3128", "172.16.0.6, 172.16.0.7", "", "")
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("trusted proxy, chain of only trusted hops = %d, want 403 (fail closed, no peer fallback)", rec.Code)
+		}
+	})
+}
+
+// A client-supplied first XFF field value with a private address, plus a
+// second value appended by the trusted proxy, must be treated as one chain:
+// the rightmost non-trusted hop across all values is the end client, so a
+// LAN first value cannot grant keyless access.
+func TestRequireAdminLocalModeTrustedProxyIgnoresAppendedClientXFF(t *testing.T) {
+	t.Setenv("BRAGIBOOKS_TRUSTED_PROXIES", "172.16.0.5")
+	req := httptest.NewRequest("GET", "/api/books", nil)
+	req.RemoteAddr = "172.16.0.5:3128"
+	req.Header.Set("X-Forwarded-For", "10.0.3.4")
+	req.Header.Add("X-Forwarded-For", "203.0.113.7")
+	rec := httptest.NewRecorder()
+	sw(config.AdminAuthState{})(okHandler()).ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("client-appended LAN XFF first value = %d, want 403 (multi-value XFF is one chain)", rec.Code)
 	}
 }
 

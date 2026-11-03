@@ -89,6 +89,9 @@ func TestRunMigrationsRealShape(t *testing.T) {
 			t.Errorf("book_source_metadata.%s missing (v11)", col)
 		}
 	}
+	if !hasColumn(t, db, "processing_jobs", "book_pre_status") {
+		t.Error("processing_jobs.book_pre_status missing (v13 regression)")
+	}
 	// Re-applying is a no-op (columns are idempotently skipped).
 	if err := RunMigrations(db); err != nil {
 		t.Fatalf("RunMigrations re-apply: %v", err)

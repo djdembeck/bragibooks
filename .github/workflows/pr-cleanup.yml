@@ -52,35 +52,78 @@ jobs:
             fi
           fi
 
-          # Find versions tagged with pr-N
-          version_ids=$(echo "$versions" | jq -r ".[] | select((.metadata.container.tags // [])[] | . == \"pr-${PR_NUMBER}\") | .id" | sort -u)
-
-          # Also match SHA tags from PR commits
+          # SHA tags from PR commits
           PR_SHAS=$(gh api --paginate \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "/repos/${ORG}/${PACKAGE_NAME}/pulls/${PR_NUMBER}/commits" \
             2>/dev/null | jq -r '.[].sha') || true
 
-          if [ -n "$PR_SHAS" ]; then
-            for sha in $PR_SHAS; do
-              short_sha="${sha:0:7}"
-              matched=$(echo "$versions" | jq -r ".[] | select((.metadata.container.tags // [])[] | . == \"sha-${short_sha}\") | .id" | sort -u)
-              if [ -n "$matched" ]; then
-                version_ids="${version_ids}"$'\n'"${matched}"
-              fi
-            done
-            version_ids=$(echo "$version_ids" | sort -u)
-          fi
+          # Tags owned by this PR: pr-N and sha-<short> of every PR commit.
+          # A version is only deletable when ALL of its tags are owned by
+          # this PR, except tags of branches that no longer exist (an
+          # auto-deleted head branch leaves an orphan tag). A PR's commit
+          # list is a subset of the head branch's history, so a PR whose
+          # head is a long-lived branch (develop→main) matches the version
+          # that also carries that branch's tag — the develop tip IS the
+          # PR head, same digest — and the branch image would be deleted
+          # along with the preview.
+          PR_OWNED="pr-${PR_NUMBER}"
+          for sha in $PR_SHAS; do
+            PR_OWNED="${PR_OWNED}"$'\n'"sha-${sha:0:7}"
+          done
+          PR_OWNED=$(echo "$PR_OWNED" | sort -u)
+
+          # Candidate versions: tagged pr-N or sha-<PR commit>.
+          version_ids=$(echo "$versions" | jq -r \
+            --arg pr "$PR_NUMBER" \
+            --argjson owned "$(echo "$PR_OWNED" | jq -R . | jq -s .)" '
+              [ .[]
+                | select(((.metadata.container.tags // [])
+                          | map(. as $t | . == ("pr-" + $pr)
+                                      or (($owned | index($t)) != null)))
+                         | any)
+                | .id ]
+              | unique
+              | .[]')
 
           if [ -z "$version_ids" ]; then
             echo "No images found for pr-${PR_NUMBER}"
             exit 0
           fi
 
-          # Delete each version
+          # Fetch the live branches ONCE. The docker metadata action
+          # sanitizes branch names when tagging (feature/foo -> feature-foo),
+          # so a tag matches a live branch when it equals the branch name
+          # OR the branch name with "/" replaced by "-".
+          LIVE_BRANCHES=$(gh api --paginate \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${ORG}/${PACKAGE_NAME}/branches" \
+            2>/dev/null | jq -r '.[].name') || true
+          # Union of every live branch name and its sanitized form, one per
+          # line; a tag is branch-owned when it appears in this set.
+          LIVE_TAGS=$(echo "$LIVE_BRANCHES" | sed 's|/|-|g' | { cat; echo "$LIVE_BRANCHES"; } | sort -u)
+
+          # Delete each version, skipping any that carries the tag of a
+          # currently-existing branch (develop, main, a live head branch):
+          # deleting the version would remove that branch image too.
           failures=""
           for version_id in $version_ids; do
+            protected=""
+            for tag in $(echo "$versions" | jq -r --argjson id "$version_id" '.[] | select(.id == $id) | .metadata.container.tags // [] | .[]' | sort -u); do
+              if echo "$PR_OWNED" | grep -qxF "$tag"; then
+                continue
+              fi
+              if echo "$LIVE_TAGS" | grep -qxF "$tag"; then
+                protected="$tag"
+                break
+              fi
+            done
+            if [ -n "$protected" ]; then
+              echo "Skipping version $version_id: carries live branch tag '$protected'"
+              continue
+            fi
             echo "Deleting package version: $version_id"
             if gh api \
               --method DELETE \
