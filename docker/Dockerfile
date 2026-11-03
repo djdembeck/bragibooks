@@ -26,7 +26,7 @@ RUN apt-get update && \
     mkdir -p /config /input /output
 WORKDIR /app
 COPY --from=builder /build/bragibooks /usr/local/bin/
-COPY --from=ghcr.io/djdembeck/m4b-merge:main-amd64@sha256:f36864ceba5867bd10f36ad8574ac9f4e2cf45d97a94c6c7c13b63015f80cfff /usr/local/bin/m4b-merge /usr/local/bin/
+COPY --from=ghcr.io/djdembeck/m4b-merge:v2.0.1@sha256:4ab05f233ddd10f7f6d5a9f009998884921958ffd2997e1098268349a1a0bd0e /usr/local/bin/m4b-merge /usr/local/bin/
 COPY docker/entrypoint.sh /usr/local/bin/bragibooks-entrypoint
 RUN chmod 0755 /usr/local/bin/bragibooks-entrypoint
 # The image runs as root by default (matching the legacy image); the
