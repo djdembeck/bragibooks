@@ -4,6 +4,7 @@
 	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt } from '#lib/components/index.js';
 	import { formatRuntime } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
+	import { nextAction as nextActionFor, libraryEmpty as libraryEmptyFor } from '#lib/nextAction.js';
 
 	// One-time notice pointing at the (default-off) external API key.
 	// localStorage here is the DISMISSAL marker only — never the key.
@@ -81,9 +82,9 @@
 	const safeDone = $derived(typeof totals.done === 'number' ? totals.done : 0);
 	const safeErrors = $derived(typeof totals.error === 'number' ? totals.error : 0);
 
-	// idle = no work in step, active = ready or in-flight work, done = settled
-	// output. Job failures stay on Queue's Recent activity; this report is
-	// stage state, so the gold CTA is the page's single failure statement.
+	// The strip reports state, not work: Import shows source configuration,
+	// Match, Queue, and Done show counts. Job failures stay on Queue's
+	// Recent activity, so the gold CTA is the page's single failure statement.
 	const queueRunning = $derived(jobs.some((j) => j.status === 'running' || j.status === 'queued'));
 
 	const totalBooks = $derived(
@@ -92,7 +93,9 @@
 	// An empty library gets one call to action: the Recent books empty state.
 	// Before the fetch settles, and after a failed one, it is not empty — it is
 	// unknown.
-	const libraryEmpty = $derived(dl.hasLoaded && !dl.error && totalBooks === 0);
+	const libraryEmpty = $derived(
+		libraryEmptyFor({ hasLoaded: dl.hasLoaded, error: dl.error, totalBooks })
+	);
 
 	const SOURCE_STATE_LABEL = {
 		checking: 'Checking…',
@@ -134,32 +137,15 @@
 
 	// Exactly one move is offered, chosen by urgency: failures first, then
 	// matching, then queued work, then intake.
-	const nextAction = $derived.by(() => {
-		if (safeErrors > 0) {
-			return {
-				href: '/books?status=error',
-				label: `Review ${safeErrors} error${safeErrors === 1 ? '' : 's'}`,
-			};
-		}
-		if (safePending > 0) {
-			return {
-				href: '/match',
-				label: `Match ${safePending} book${safePending === 1 ? '' : 's'}`,
-			};
-		}
-		// "View queue" is passive navigation; when the move is to work a
-		// ready batch, name that work instead.
-		if (safeMatched > 0 && safeProcessing === 0 && !queueRunning) {
-			return {
-				href: '/process',
-				label: `Review ${safeMatched} ready book${safeMatched === 1 ? '' : 's'}`,
-			};
-		}
-		if (safeMatched > 0 || safeProcessing > 0 || queueRunning) {
-			return { href: '/process', label: 'View queue' };
-		}
-		return { href: '/import', label: 'Import books' };
-	});
+	const nextAction = $derived(
+		nextActionFor({
+			errors: safeErrors,
+			pending: safePending,
+			matched: safeMatched,
+			processing: safeProcessing,
+			queueRunning,
+		})
+	);
 </script>
 
 <PageHeader title="Overview" description="What needs attention in your library, and where each book is right now." />
