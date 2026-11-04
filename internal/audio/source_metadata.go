@@ -77,11 +77,15 @@ type SourceFileTags struct {
 // embedded tags, embedded/filename IDs, and measured durations. It is
 // independent of catalog data: a Save-match never touches it.
 type SourceMetadata struct {
-	Schema          int                    `json:"schema"`
-	SourceKind      string                 `json:"source_kind"` // "file" | "folder" | "unknown"
-	FilesTotal      int                    `json:"files_total"`
-	FilesProbed     int                    `json:"files_probed"`
-	Truncated       bool                   `json:"truncated"`
+	Schema      int    `json:"schema"`
+	SourceKind  string `json:"source_kind"` // "file" | "folder" | "unknown"
+	FilesTotal  int    `json:"files_total"`
+	FilesProbed int    `json:"files_probed"`
+	Truncated   bool   `json:"truncated"`
+	// Degraded marks a snapshot that never probed anything: the source was
+	// unreadable, discovery failed, or every probe failed. Its surviving
+	// values (e.g. a filename ASIN) are not complete evidence.
+	Degraded        bool                   `json:"degraded"`
 	DurationSeconds float64                `json:"duration_seconds"` // sum of probed, non-errored files
 	Files           []SourceFile           `json:"files"`
 	Fields          map[string]SourceField `json:"fields"`
@@ -224,6 +228,7 @@ func DegradedSourceMetadata(cause string) *SourceMetadata {
 // errors) is retained: the degraded field message quotes the first file's
 // error, and consumers can see which probes failed.
 func degradedSnapshot(snap *SourceMetadata, cause string) *SourceMetadata {
+	snap.Degraded = true
 	for _, f := range fieldKeys {
 		snap.Fields[f] = SourceField{Values: []string{}, Source: SourceDegraded, Status: StatusError, Error: cause}
 	}
@@ -544,11 +549,13 @@ func mergeFields(snap *SourceMetadata, merged map[string][]string) {
 }
 
 // incomplete reports whether the pass ended without a clean probe of
-// every file: unprobed files, truncated discovery, or any probe error —
-// in each case a field that came up empty cannot claim the source
-// "has no such tag".
+// every file: a degraded pass (unreadable source, discovery failure, or
+// all probes failed), unprobed files, truncated discovery, or any probe
+// error — in each case a field that came up empty cannot claim the
+// source "has no such tag", and a surviving value is not complete
+// evidence.
 func (s *SourceMetadata) incomplete() bool {
-	if s.Truncated || s.FilesProbed < s.FilesTotal {
+	if s.Degraded || s.Truncated || s.FilesProbed < s.FilesTotal {
 		return true
 	}
 	for _, file := range s.Files {
@@ -560,9 +567,9 @@ func (s *SourceMetadata) incomplete() bool {
 }
 
 // Complete reports whether the pass ended with a clean probe of every
-// discovered file: no truncation, no unprobed files, and no per-file
-// probe errors. A field value that survived a partial pass is not
-// complete evidence.
+// discovered file: not degraded, no truncation, no unprobed files, and
+// no per-file probe errors. A field value that survived a partial pass
+// is not complete evidence.
 func (s *SourceMetadata) Complete() bool {
 	return !s.incomplete()
 }

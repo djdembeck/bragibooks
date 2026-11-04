@@ -22,7 +22,9 @@
 
 	const view = $derived(missingReleaseView(evidence));
 	const inline = $derived(variant === 'inline' ? missingReleaseInline(view, context) : null);
-	const linkLabel = $derived(missingReleaseLinkLabel(view, inline?.noun ?? 'audiobook'));
+	const blockLinkText = 'Add this audiobook to AudiobookDB';
+	// The accessible name must start with the visible link text.
+	const linkLabel = $derived(missingReleaseLinkLabel(view, inline ? inline.linkText : blockLinkText));
 </script>
 
 {#if variant === 'block'}
@@ -44,7 +46,7 @@
 				rel="noopener noreferrer"
 				aria-label={linkLabel}
 			>
-				Add this audiobook to AudiobookDB
+				{blockLinkText}
 				<svg class="nudge__icon" viewBox="0 0 24 24" aria-hidden="true">
 					<path d="M14 4h6v6m0-6L10 14M10 4H4v16h16v-6" />
 				</svg>

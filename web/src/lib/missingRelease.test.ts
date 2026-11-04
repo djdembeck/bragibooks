@@ -132,7 +132,6 @@ describe('nudge copy', () => {
 		expect(present.linkText).toBe('Add to AudiobookDB');
 		expect(present.linkText).not.toContain('edition');
 		expect(present.tail).toBe('.');
-		expect(present.noun).toBe('audiobook');
 
 		const view = missingReleaseView({ status: 'ambiguous', count: 2 });
 		const copy = missingReleaseInline(view, 'editor');
@@ -143,11 +142,11 @@ describe('nudge copy', () => {
 
 	it('names the ASIN and the new tab only when one exists', () => {
 		const present = missingReleaseView({ status: 'present', value: 'B0DNRN1H54' });
-		expect(missingReleaseLinkLabel(present, 'audiobook')).toBe(
-			'Add this audiobook to AudiobookDB with ASIN B0DNRN1H54 (opens in a new tab)'
+		expect(missingReleaseLinkLabel(present, 'Add to AudiobookDB')).toBe(
+			'Add to AudiobookDB with ASIN B0DNRN1H54 (opens in a new tab)'
 		);
-		expect(missingReleaseLinkLabel(missingReleaseView({ status: 'missing' }), 'edition')).toBe(
-			'Add this edition to AudiobookDB (opens in a new tab)'
+		expect(missingReleaseLinkLabel(missingReleaseView({ status: 'missing' }), 'add it to AudiobookDB')).toBe(
+			'add it to AudiobookDB (opens in a new tab)'
 		);
 	});
 

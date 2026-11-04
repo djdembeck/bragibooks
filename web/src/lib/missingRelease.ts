@@ -19,7 +19,6 @@ export interface MissingReleaseInline {
 	lead: string;
 	linkText: string;
 	tail: string;
-	noun: 'audiobook' | 'edition';
 }
 
 /** Normalize the API projection into the four states the nudge can speak to.
@@ -113,34 +112,34 @@ export function missingReleaseInline(
 		return {
 			lead: 'Choose one in Review, or ',
 			linkText: 'add it to AudiobookDB',
-			tail: '.',
-			noun: 'audiobook'
+			tail: '.'
 		};
 	}
 	if (context === 'editor') {
 		return {
 			lead: 'Not the right book? ',
 			linkText: 'Add to AudiobookDB',
-			tail: view.state === 'present' ? '.' : ' manually.',
-			noun: 'audiobook'
+			tail: view.state === 'present' ? '.' : ' manually.'
 		};
 	}
 	return {
 		lead: 'Not finding it? ',
 		linkText: 'Add to AudiobookDB',
-		tail: '.',
-		noun: 'audiobook'
+		tail: '.'
 	};
 }
 
+/** The accessible name must start with the visible link text (WCAG 2.5.3):
+ *  screen readers announce the full name, so the visible label cannot be
+ *  paraphrased away. */
 export function missingReleaseLinkLabel(
 	view: MissingReleaseView,
-	noun: 'audiobook' | 'edition'
+	linkText: string
 ): string {
 	if (view.state === 'present' && view.asin) {
-		return `Add this ${noun} to AudiobookDB with ASIN ${view.asin} (opens in a new tab)`;
+		return `${linkText} with ASIN ${view.asin} (opens in a new tab)`;
 	}
-	return `Add this ${noun} to AudiobookDB (opens in a new tab)`;
+	return `${linkText} (opens in a new tab)`;
 }
 
 export function missingReleaseProvenanceLabel(

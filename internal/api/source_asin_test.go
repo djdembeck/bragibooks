@@ -11,6 +11,22 @@ import (
 	"github.com/bragibooks/bragibooks/internal/models"
 )
 
+// sourceMetadataPayloadKeys is the set of top-level JSON keys a stored
+// audio.SourceMetadata payload carries. If any of these appears as a key
+// on a wire book object, the raw payload leaked into the response.
+var sourceMetadataPayloadKeys = map[string]bool{
+	"schema":           true,
+	"source_kind":      true,
+	"files_total":      true,
+	"files_probed":     true,
+	"truncated":        true,
+	"degraded":         true,
+	"duration_seconds": true,
+	"files":            true,
+	"fields":           true,
+	"raw_tags":         true,
+}
+
 // asinSnap builds a complete single-file snapshot with only the ASIN
 // field set to the given values/status/source.
 func asinSnap(values []string, fieldStatus, source string) *audio.SourceMetadata {
@@ -186,6 +202,22 @@ func TestDeriveSourceASINTruncatedSnapshotUnknown(t *testing.T) {
 	}
 }
 
+// TestDeriveSourceASINStatFailureFilenameASINUnknown reproduces the
+// stat-failed source: the snapshot is degraded, the ASIN field survived
+// from the filename as present, and the derivation must not prefill from
+// that incomplete evidence.
+func TestDeriveSourceASINStatFailureFilenameASINUnknown(t *testing.T) {
+	snap := asinSnap([]string{"B123456789"}, audio.StatusPresent, audio.SourceFilename)
+	snap.Degraded = true
+	snap.FilesTotal = 0
+	snap.FilesProbed = 0
+	got := deriveSourceASIN(snap)
+	expectASIN(t, got, models.SourceASINUnknown)
+	if got.Value != "" {
+		t.Errorf("stat-failed source must not prefill; got value %q", got.Value)
+	}
+}
+
 func TestDeriveSourceASINCompleteMissingField(t *testing.T) {
 	snap := &audio.SourceMetadata{
 		Schema:      audio.SourceMetadataSchema,
@@ -309,8 +341,9 @@ func TestListBooksDoneOmitsSourceASIN(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("list status = %d; want 200 — body: %s", w.Code, w.Body.String())
 	}
+	body := w.Body.String()
 	var resp ListBooksResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if len(resp.Books) != 1 {
@@ -319,14 +352,23 @@ func TestListBooksDoneOmitsSourceASIN(t *testing.T) {
 	if resp.Books[0].SourceASIN != nil {
 		t.Errorf("done list must omit source_asin; got %+v", resp.Books[0].SourceASIN)
 	}
-	// Raw payload must never leak: the wire body is just the contract.
-	if contains := w.Body.String(); len(contains) > 0 {
-		var raw map[string]any
-		if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
-			t.Fatalf("re-decode wire body: %v", err)
-		}
-		if _, ok := raw["raw_tags"]; ok {
-			t.Errorf("wire response leaks raw source metadata payload")
+	// Raw payload must never leak: the wire body is just the contract, and
+	// a SourceMetadata payload would only appear nested inside a book.
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		t.Fatalf("re-decode wire body: %v", err)
+	}
+	books, ok := raw["books"].([]any)
+	if !ok || len(books) != 1 {
+		t.Fatalf("wire body books = %v; want exactly one entry", raw["books"])
+	}
+	book, ok := books[0].(map[string]any)
+	if !ok {
+		t.Fatalf("wire body books[0] = %T; want an object", books[0])
+	}
+	for key := range book {
+		if _, isPayloadField := sourceMetadataPayloadKeys[key]; isPayloadField {
+			t.Errorf("wire response leaks source metadata payload field %q", key)
 		}
 	}
 }
