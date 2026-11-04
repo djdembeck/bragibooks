@@ -148,6 +148,21 @@ func TestDeriveSourceASINIncompleteSingleUnknown(t *testing.T) {
 	}
 }
 
+func TestDeriveSourceASINProbeErrorUnknown(t *testing.T) {
+	snap := asinSnap([]string{"B123456789"}, audio.StatusPresent, audio.SourceEmbedded)
+	snap.FilesTotal = 2
+	snap.FilesProbed = 2
+	snap.Files = []audio.SourceFile{
+		{File: "1.mp3"},
+		{File: "2.mp3", Error: "probe failed"},
+	}
+	got := deriveSourceASIN(snap)
+	expectASIN(t, got, models.SourceASINUnknown)
+	if got.Value != "" {
+		t.Errorf("probe error must not prefill; got value %q", got.Value)
+	}
+}
+
 func TestDeriveSourceASINIncompleteTwoAmbiguous(t *testing.T) {
 	snap := asinSnap([]string{"B123456789", "B987654321"}, audio.StatusPresent, audio.SourceEmbedded)
 	snap.FilesProbed = 0

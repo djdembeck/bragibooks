@@ -20,7 +20,7 @@ var sourceASINPattern = regexp.MustCompile(`^B[A-Z0-9]{9}$`)
 // discovered file probed. Only a complete snapshot may claim a field is
 // genuinely missing from the source.
 func sourceMetadataComplete(snap *audio.SourceMetadata) bool {
-	return snap.Schema == audio.SourceMetadataSchema && !snap.Truncated && snap.FilesProbed >= snap.FilesTotal
+	return snap.Schema == audio.SourceMetadataSchema && snap.Complete()
 }
 
 // deriveSourceASIN projects one parsed source metadata snapshot onto the

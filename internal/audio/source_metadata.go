@@ -559,6 +559,14 @@ func (s *SourceMetadata) incomplete() bool {
 	return false
 }
 
+// Complete reports whether the pass ended with a clean probe of every
+// discovered file: no truncation, no unprobed files, and no per-file
+// probe errors. A field value that survived a partial pass is not
+// complete evidence.
+func (s *SourceMetadata) Complete() bool {
+	return !s.incomplete()
+}
+
 // incompleteMsg is the shared message for fields that came up empty under
 // an incomplete pass.
 func (s *SourceMetadata) incompleteMsg() string {

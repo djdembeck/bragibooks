@@ -2517,7 +2517,8 @@
 								<p class="match__search-state">
 									No matches found for “{searchedQuery}”. Try different keywords.
 								</p>
-								{#if !c.details.book}
+								<!-- Same settled-lookup gate as the block; the selected-record footer is separate. -->
+								{#if !c.details.book && showPanelNudge({ loading: c.loading, error: !!c.error, searching, searchError: !!searchError })}
 									<MissingReleaseNudge variant="inline" context="search" evidence={c.sourceAsin} />
 								{/if}
 							{/if}
