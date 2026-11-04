@@ -90,10 +90,12 @@ type SourceMetadata struct {
 
 // Boundedness of the extraction pass.
 const (
-	sourceMetadataTimeout     = 60 * time.Second
-	maxDiscoveredEntries      = 1000
-	maxProbedParts            = 100
-	maxDistinctValuesPerField = 20
+	sourceMetadataTimeout = 60 * time.Second
+	maxDiscoveredEntries  = 1000
+	maxProbedParts        = 100
+	// MaxDistinctValuesPerField caps the distinct values retained per
+	// field in a snapshot's merged value lists.
+	MaxDistinctValuesPerField = 20
 	maxProbeOutputBytes       = 1 << 20 // 1 MiB
 	maxProbeStderrBytes       = 512
 	maxTagValueBytes          = 2048
@@ -365,7 +367,7 @@ func mergeDoc(merged map[string][]string, seen map[string]map[string]bool, doc m
 
 func addValue(merged map[string][]string, seen map[string]map[string]bool, field, value string) {
 	if s, ok := seen[field]; ok {
-		if s[value] || len(merged[field]) >= maxDistinctValuesPerField {
+		if s[value] || len(merged[field]) >= MaxDistinctValuesPerField {
 			return
 		}
 		s[value] = true
