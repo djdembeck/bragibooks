@@ -10,6 +10,7 @@
 		AudiobookDBBook,
 		AudiobookDBRelease,
 		Settings,
+		SourceASINEvidence,
 		UpdateBookRequest
 	} from '#lib/types.js';
 	import {
@@ -23,8 +24,10 @@
 	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, Modal } from '#lib/components/index.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { resolveScheme } from '#lib/scheme.js';
+	import { showEditorNudge, showPanelNudge } from '#lib/missingRelease.js';
 	import SourceEvidence from './SourceEvidence.svelte';
 	import RuntimeComparison from './RuntimeComparison.svelte';
+	import MissingReleaseNudge from './MissingReleaseNudge.svelte';
 	import { compareRuntimeDurations } from '#lib/runtimeComparison.js';
 	import {
 		currentEvidence, evidenceBadge, evidenceComparison, comparisonMark, conflictingEvidenceFields, comparisonLabels, evidenceFieldLabels,
@@ -46,6 +49,8 @@
 		/** Local cover assigned at intake — never confused with catalog art. */
 		coverUrl: string;
 		evidence: MatchEvidenceReport | undefined;
+		/** Read-only ASIN detection from the source, not the matched catalog ASIN. */
+		sourceAsin: SourceASINEvidence | null;
 		searchResults: AudiobookDBBook[];
 		selectedBookId: string | null;
 		selectedReleaseId: string | null;
@@ -267,6 +272,7 @@
 					title: book.title,
 					coverUrl: book.cover_image_url || '',
 					evidence: book.match_evidence,
+					sourceAsin: book.source_asin ?? null,
 					searchResults: [],
 					selectedBookId: null,
 					selectedReleaseId: null,
@@ -1893,7 +1899,7 @@
 								</div>
 							{:else}
 								{@render matchStatus(rowKind, statusText(c))}
-								{#if rowKind === 'none' || rowKind === 'low'}<p class="batch__empty-note">Choose a record in Review.</p>{/if}
+								{#if rowKind === 'none' || rowKind === 'low'}<MissingReleaseNudge variant="inline" context="batch" evidence={c.sourceAsin} />{/if}
 							{/if}
 							{#if c.error}<div class="batch__error" role="alert"><p>{c.error.message}</p><button type="button" class="match__text-action" disabled={saving || removingMany} onclick={() => retryCandidate(c)}>Retry lookup</button><ErrorDetail raw={c.error.raw} needsSettings={c.error.needsSettings} /></div>{/if}
 							{#if c.releaseError}<div class="batch__error" role="alert"><p>{c.releaseError.message}</p><button type="button" class="match__text-action" disabled={saving || removingMany || c.releaseLoading} onclick={() => chooseRelease(c, c.selectedReleaseId)}>Retry edition</button><ErrorDetail raw={c.releaseError.raw} needsSettings={c.releaseError.needsSettings} /></div>{/if}
@@ -2174,6 +2180,9 @@
 									{/if}
 									Search the catalog below to choose one.
 								</p>
+								{#if showPanelNudge({ loading: c.loading, error: !!c.error, searching, searchError: !!searchError })}
+									<MissingReleaseNudge variant="block" evidence={c.sourceAsin} />
+								{/if}
 							</div>
 						{/if}
 
@@ -2508,6 +2517,13 @@
 								<p class="match__search-state">
 									No matches found for “{searchedQuery}”. Try different keywords.
 								</p>
+								<!-- Same settled-lookup gate as the block; the selected-record footer is separate. -->
+								{#if !c.details.book && showPanelNudge({ loading: c.loading, error: !!c.error, searching, searchError: !!searchError })}
+									<MissingReleaseNudge variant="inline" context="search" evidence={c.sourceAsin} />
+								{/if}
+							{/if}
+							{#if showEditorNudge({ selected: !!c.details.book, loading: c.loading, error: !!c.error, releaseLoading: c.releaseLoading, releaseError: !!c.releaseError })}
+								<MissingReleaseNudge variant="inline" context="editor" evidence={c.sourceAsin} />
 							{/if}
 						</details>
 						{/key}
@@ -2870,7 +2886,6 @@
 	.batch__evidence--release { font-size: 14px; color: var(--m-ink-2); }
 	.batch__edition { font-style: italic; }
 	.batch__state { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 9px; }
-	.batch__empty-note { margin: 6px 0; font-size: 14px; color: var(--m-muted); }
 	.batch__error { margin-top: 8px; font-size: 13px; color: var(--state-red); }
 	.batch__footer { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 14px; padding: 5px 0; border-top: 1px solid var(--m-border-soft); }
 	.batch__check { display: inline-flex; align-items: center; gap: 9px; min-height: 44px; font-size: 13px; color: var(--m-ink-2); cursor: pointer; }

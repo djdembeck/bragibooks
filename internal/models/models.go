@@ -44,6 +44,30 @@ type BookWithPeople struct {
 	Book
 	Authors   []Person `json:"authors"`
 	Narrators []Person `json:"narrators"`
+	// SourceASIN is a read-only projection of the source metadata's ASIN
+	// field, populated only in the pending list view. A nil value means
+	// unknown (no row, malformed row, or incomplete snapshot). It never
+	// writes to books.asin.
+	SourceASIN *SourceASIN `json:"source_asin,omitempty"`
+}
+
+// SourceASIN status values.
+const (
+	SourceASINPresent   = "present"
+	SourceASINAmbiguous = "ambiguous"
+	SourceASINMissing   = "missing"
+	SourceASINUnknown   = "unknown"
+)
+
+// SourceASIN is the read-only source-ASIN projection attached to books in
+// the pending list response. The raw source metadata payload is never
+// exposed through this type.
+type SourceASIN struct {
+	Status         string `json:"status"` // "present" | "ambiguous" | "missing" | "unknown"
+	Value          string `json:"value,omitempty"`
+	Count          int    `json:"count,omitempty"`
+	Source         string `json:"source,omitempty"` // "embedded" | "filename"
+	CountTruncated bool   `json:"count_truncated,omitempty"`
 }
 
 // ProcessingJob tracks an m4b-merge processing job.

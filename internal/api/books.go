@@ -184,6 +184,12 @@ func (h *Handler) ListBooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The source-ASIN projection is a pending-queue aid only; other
+	// statuses and all_ids mode omit it entirely.
+	if status == "pending" {
+		h.attachSourceASINs(booksWithPeople)
+	}
+
 	writeJSON(w, http.StatusOK, ListBooksResponse{
 		Books: booksWithPeople,
 		Total: totalCount,

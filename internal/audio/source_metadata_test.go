@@ -337,6 +337,40 @@ func TestExtractSourceMetadataMissingSourceIsDegraded(t *testing.T) {
 	}
 }
 
+// TestExtractSourceMetadataMissingSourceFilenameASINIsDegraded checks that
+// a stat failure with a canonical ASIN in the filename keeps the value for
+// display but marks the pass degraded: the surviving ASIN is not complete
+// evidence, so Complete() must not report a clean extraction.
+func TestExtractSourceMetadataMissingSourceFilenameASINIsDegraded(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	srcPath := filepath.Join(t.TempDir(), "b012345678 - gone.m4b")
+	snap := runExtraction(t, ffprobe, srcPath)
+
+	// The filename ASIN survives for display.
+	wantField(t, snap, FieldASIN, StatusPresent, "B012345678")
+	if got := snap.Fields[FieldASIN].Source; got != SourceFilename {
+		t.Errorf("asin source = %q, want %q", got, SourceFilename)
+	}
+	// ...but the unreadable source degrades the whole pass.
+	if !snap.Degraded {
+		t.Error("degraded = false, want true for an unreadable source")
+	}
+	if snap.Complete() {
+		t.Error("Complete() = true; a stat-failed source is incomplete evidence")
+	}
+	for key, f := range snap.Fields {
+		if key == FieldASIN {
+			continue // the surviving filename value carries no probe error
+		}
+		if f.Status != StatusError || f.Error == "" {
+			t.Errorf("field %s = %+v, want the stat-failure error", key, f)
+		}
+	}
+}
+
 // TestExtractSourceMetadataProbeOutputCapExercises exercises the 1 MiB
 // probe-output cap: the probe is errored, which makes the pass incomplete,
 // so every empty field is errored (extraction incomplete), never claimed

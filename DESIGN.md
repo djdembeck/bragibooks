@@ -274,6 +274,9 @@ The row checkbox only means "include in this save" and never authorizes a delete
 ### Provenance Tag
 "AbDB" chip: `#f8edf5` fill, 1px `#dcc2d5` border, `#8a286d` 12px 600 uppercase; hover draws the full-provenance border; the full "AudiobookDB" label is secondary ink, un-cased. An anchor when a record URL exists. Match uses an unboxed magenta AbDB wordmark with an external-link icon instead of the chip, separating provider provenance from internal actions.
 
+### Missing Release Handoff
+When an active source has no usable catalog record, Match offers a quiet handoff instead of a dead end: **Missing from AudiobookDB?** It links to `https://audiobookdb.org/add`, prefilled with the source ASIN only when the source metadata pass was complete and exactly one valid ASIN was detected. The block sits under the no-match message, separated by a 1px hairline, and uses the primary 14px/44px action. Batch no-match/low rows use a compact 13px inline link with a 24px desktop / 32px phone target; the focused search repeat and wrong-match footer use a 13.5px action with a 32px desktop / 44px phone target. The compact repetitions use the short visible label “Add to AudiobookDB”; the block carries the full “Add this audiobook…” phrase, the ASIN, and its provenance. The wrong-match footer describes the source audiobook, never an edition of the selected record. The ASIN is mono and paired with its provenance ("from the file's tags" / "from the source name"). With no ASIN, several ASINs, an incomplete pass, or unknown evidence, the link opens the bare add page and the copy says why; no identifier is guessed. The action is a real anchor with `target="_blank"`/`rel="noopener noreferrer"`, the shared dark-gold link color and focus ring, and a visible new-tab/sign-in note. The source ASIN is read-only and distinct from `books.asin`, the matched catalog ASIN used by processing. Copy asks whether the release is missing; it never asserts absence from a failed title search. The external page remains the authority on duplicates and moderation.
+
 ### Cover Art
 Square always: 3rem row thumbnails (6px corner) and the 16rem record-page hero (10px). The placeholder spine stands in for missing art — never a stretched image. Match's dense rows keep a route-local compact grammar instead: 32–56px source, catalog, picker, and dialog art with the 4px route-local corner, and the diagonal split placeholder.
 
@@ -289,6 +292,8 @@ Square always: 3rem row thumbnails (6px corner) and the 16rem record-page hero (
 - **Do** pair the status chip with a quiet sentence-case activity label, grouped so a long title never separates operation from outcome.
 - **Do** keep removal explicit: the include-in-save box never deletes; the red Remove… action opens a dialog whose own checkboxes select the records, and that dialog lists every affected source before records are deleted, while files on disk stay untouched.
 - **Do** state a ready row's save exclusion in words ("Excluded from save") and keep the bar's ready/included count visible; dimming alone is never the state.
+- **Do** offer the AudiobookDB add handoff only with validated, unambiguous source evidence; when no single ASIN is available, say so and open the bare add page.
+- **Do** keep the source ASIN separate from the matched catalog ASIN; a missing-release handoff never changes what processing receives.
 - **Do** disable the removal dialog's close control while deletes run — no visible control may be dead.
 
 ### Don't:
@@ -298,3 +303,5 @@ Square always: 3rem row thumbnails (6px corner) and the 16rem record-page hero (
 - **Don't** redraw, replace, or invent the logo or favicon.
 - **Don't** give a job operation its own chip or uppercase it; the status is the row's only chip, and an unknown stored operation is never guessed as a merge.
 - **Don't** render raw JSON in operator-facing errors — the sentence walks the payload; the raw data stays under the ErrorDetail expander.
+- **Don't** claim a failed title search proves a book is missing; ask, hand off the known ASIN, and let AudiobookDB resolve duplicates.
+- **Don't** hide the AudiobookDB add handoff behind a hover-only tooltip or prefill an ambiguous/incomplete ASIN.

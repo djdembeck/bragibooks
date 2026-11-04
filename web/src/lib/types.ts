@@ -57,9 +57,24 @@ export interface Person {
 	created_at: string;
 }
 
+export type SourceASINStatus = 'present' | 'ambiguous' | 'missing' | 'unknown';
+
+/** Read-only evidence about the ASIN found in the source itself. The value is
+ *  only present when one valid, unambiguous identifier was detected in a
+ *  complete extraction pass; `books.asin` remains the matched catalog ASIN. */
+export interface SourceASINEvidence {
+	status: SourceASINStatus;
+	value?: string;
+	count?: number;
+	source?: 'embedded' | 'filename' | string;
+	count_truncated?: boolean;
+}
+
 export interface BookWithPeople {
 	/** Optional Match presentation report; not populated by current intake. */
 	match_evidence?: MatchEvidenceReport;
+	/** Populated only by the pending-books list response. */
+	source_asin?: SourceASINEvidence | null;
 	id: number;
 	title: string;
 	asin: NullString;
@@ -393,6 +408,29 @@ export function peopleByRole(
 		.map((p) => ({ name: p.person.name, audiobookdb_person_id: p.person.id || null }));
 }
 
+function normalizeSourceASIN(value: unknown): SourceASINEvidence | undefined {
+	if (!value || typeof value !== 'object') return undefined;
+	const v = value as Record<string, unknown>;
+	const status = v.status;
+	if (status !== 'present' && status !== 'ambiguous' && status !== 'missing' && status !== 'unknown') {
+		return undefined;
+	}
+	const evidence: SourceASINEvidence = { status };
+	if (typeof v.value === 'string' && v.value.trim()) {
+		evidence.value = v.value.trim().toUpperCase();
+	}
+	if (typeof v.count === 'number' && Number.isFinite(v.count) && v.count > 0) {
+		evidence.count = Math.floor(v.count);
+	}
+	if (typeof v.source === 'string' && v.source) {
+		evidence.source = v.source;
+	}
+	if (v.count_truncated === true) {
+		evidence.count_truncated = true;
+	}
+	return evidence;
+}
+
 /**
  * Normalize a raw API book payload (which may contain sql.Null* wrappers)
  * into a BookWithPeople with plain values.
@@ -424,6 +462,7 @@ export function normalizeBook(raw: unknown): BookWithPeople {
 		id: unwrapNum(r.id),
 		title: String(r.title ?? ''),
 		asin: unwrap(r.asin),
+		source_asin: normalizeSourceASIN(r.source_asin),
 		audiobookdb_book_id: unwrap(r.audiobookdb_book_id),
 		audiobookdb_release_id: unwrap(r.audiobookdb_release_id),
 		description: str(r.description),

@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file. See [standa
 
 - Kept the container's default HTTP port at `8000`, the same port the Python image used, so existing Docker port mappings keep working after upgrading; `SERVER_PORT` still overrides it.
 - Narrowed development Docker media access to configurable input/output directories rather than mounting the developer home directory; pinned Docker build, runtime, and media-tool image digests for reproducible builds, with Renovate digest updates.
+- **Missing-release handoff on Match**
+  - When an active source has no usable catalog record, Match offers a "Missing from AudiobookDB?" link. A complete, unambiguous source ASIN is carried to `audiobookdb.org/add` for prefill; absent, multiple, incomplete, or unreadable evidence opens the bare add page with truthful copy.
+  - The projection is read-only from `book_source_metadata` on the pending list; `books.asin` and processing are unchanged. Batch no-match rows, focused no-match, and the zero-result search repeat expose the handoff only after a settled lookup; search failures never suggest adding. The wrong-match editor footer remains an operator escape while a search is pending or failed.
+  - Compact handoff actions use the short “Add to AudiobookDB” label; the block keeps the full “Add this audiobook…” phrase and ASIN evidence, and the wrong-match footer describes the source audiobook rather than an edition. A ≤370px wrap safety keeps the compact actions inside a 320px viewport.
 
 ### Security
 
