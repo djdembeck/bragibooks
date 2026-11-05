@@ -441,8 +441,9 @@ def publish_assets(repository, source, version, fetcher=None):
                     "Existing checksum manifest does not describe the planned archive set")
     else:
         # No immutable manifest exists: generate one from the combined verified
-        # archive digests so a valid partial retry can complete even when the
-        # rebuild bytes nondeterministically differ.
+        # archive digests, so a partial retry completes only when every
+        # preserved asset verifies: provenance label for labelled assets,
+        # exact content-digest match for unlabelled ones.
         checksum_path = Path(checksums[0]["path"])
         checksum_path.write_bytes(manifest)
         pending.append(checksum_path)

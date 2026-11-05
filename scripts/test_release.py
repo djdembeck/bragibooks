@@ -647,6 +647,19 @@ class AssetsBehavior(unittest.TestCase):
             self.run_assets()
         self.assertEqual(self.store.uploads, [])
 
+    def test_unlabelled_existing_archive_matching_build_is_kept(self):
+        name = ARCHIVE_NAMES[1]
+        preserved = self.built[name]  # identical bytes: the digest matches the rebuild
+        self.store.assets.append(self.asset(2, name, digest=sha256(preserved), label=False))
+        self.store.bodies[name] = preserved
+        self.write_dist()
+        self.run_assets()
+        uploaded = self.uploaded()
+        self.assertNotIn(name, uploaded)  # reused, never re-uploaded
+        self.assertEqual(set(uploaded), set(ARCHIVE_NAMES) - {name} | {CHECKSUM_NAME})
+        self.assertIsNone(uploaded[CHECKSUM_NAME][0])
+        self.assertEqual(uploaded[CHECKSUM_NAME][1], manifest(dict(self.built)))
+
     def test_duplicate_release_assets_fail_closed(self):
         self.write_dist()
         self.store.assets.append(self.asset(1, ARCHIVE_NAMES[0],
@@ -684,6 +697,21 @@ class AssetsBehavior(unittest.TestCase):
         uploaded = self.uploaded()
         self.assertEqual(set(uploaded), set(ARCHIVE_NAMES) - {name})
         self.assertNotIn(CHECKSUM_NAME, uploaded)
+
+    def test_existing_checksum_body_describing_other_set_is_rejected(self):
+        preserved = "archive-preserved-v1".encode()
+        name = ARCHIVE_NAMES[0]
+        self.store.assets.append(self.asset(1, name, digest=sha256(preserved)))
+        self.store.bodies[name] = preserved
+        self.write_dist()
+        # Digest field absent: the manifest must be verified from downloaded
+        # bytes, and the body describes the rebuild, not the preserved archive.
+        self.store.assets.append({"id": 9, "name": CHECKSUM_NAME, "digest": None, "label": ""})
+        self.store.bodies[CHECKSUM_NAME] = manifest(dict(self.built))
+        with self.assertRaisesRegex(release.ReleaseError,
+                                    "does not describe the planned archive set"):
+            self.run_assets()
+        self.assertEqual(self.store.uploads, [])
 
     def test_list_failure_propagates_before_any_upload(self):
         self.write_dist()
