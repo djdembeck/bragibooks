@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file. See [standa
 
 ## [Unreleased]
 
+### Fixed
+
+- Release assets are uploaded with their plain file names
+  (`bragibooks_2.0.0_checksums.txt`, `bragibooks_Darwin_arm64.tar.gz`, …).
+  New uploads no longer attach a `bragibooks-publish-v1;…` display label,
+  which the GitHub web UI rendered as the asset name and made the release
+  page show long, unreadable names. Existing labeled assets (v2.0.0) are
+  reconciled by provenance as before; their labels were cleared by a
+  one-time manual API cleanup, and no code path re-uploads or relabels
+  them.
+- Release draft titles are the bare version (`vX.Y.Z`) instead of
+  `Release vX.Y.Z`.
+- Resume contract: a new unlabeled asset is reused on a partial-upload
+  retry only when its content digest matches the freshly built artifact.
+  An existing unlabeled archive that differs from a rebuild still fails
+  the run before any upload (previously pinned for the legacy path only
+  now applies to every plain-named asset); the stale asset must be
+  resolved out of band. Labeled historical assets keep the
+  provenance-bound reuse that tolerates a byte-differing rebuild.
+
 ### Features & Improvements
 
 - Kept the container's default HTTP port at `8000`, the same port the Python image used, so existing Docker port mappings keep working after upgrading; `SERVER_PORT` still overrides it.

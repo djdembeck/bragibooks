@@ -503,13 +503,15 @@ def store_upload(store):
         if args[0] == "gh" and args[1] == "release" and args[2] == "upload":
             tag, spec = args[3], args[4]
             require(tag == VERSION, f"unexpected release upload target {tag}")
-            path, label = spec.split("#", 1)
-            name = Path(path).name
+            # Uploads are plain file paths: a `#label` display suffix would
+            # render as the visible asset name on the release page.
+            require("#" not in spec, f"upload carries a display label: {spec}")
+            name = Path(spec).name
             require(name not in store.names(), "replaced an existing asset")
             if store.upload_error is not None and len(store.uploads) >= store.upload_error:
                 raise release.RegistryCommandError(subprocess.CalledProcessError(
                     1, args, output=b"", stderr=b"502 registry server error"))
-            store.uploads.append((name, label, Path(path).read_bytes()))
+            store.uploads.append((name, None, Path(spec).read_bytes()))
             return b""
         if args[0] == "gh" and args[1] == "api":
             endpoint = next((arg for arg in args if arg.startswith("repos/")), None)
@@ -579,17 +581,16 @@ class AssetsBehavior(unittest.TestCase):
     def uploaded(self):
         return {name: (label, body) for name, label, body in self.store.uploads}
 
-    def test_fresh_assets_upload_complete_verified_set(self):
+    def test_fresh_assets_upload_plain_names_without_labels(self):
         self.write_dist()
         self.run_assets()
         uploaded = self.uploaded()
         self.assertEqual(set(uploaded), set(ARCHIVE_NAMES) | {CHECKSUM_NAME})
-        for name in ARCHIVE_NAMES:
-            self.assertEqual(uploaded[name][0], release.asset_label(SOURCE, VERSION,
-                                                                    sha256(self.built[name])))
+        # New uploads carry no display label (gh's `#label` renders as the
+        # visible asset name); reconciliation enforces provenance instead.
+        for name in uploaded:
+            self.assertIsNone(uploaded[name][0])
         self.assertEqual(uploaded[CHECKSUM_NAME][1], self.checksum_bytes)
-        self.assertEqual(uploaded[CHECKSUM_NAME][0],
-                         release.asset_label(SOURCE, VERSION, sha256(self.checksum_bytes)))
 
     def test_partial_retry_generates_manifest_from_preserved_bytes(self):
         preserved = "archive-preserved-v1-not-rebuildable".encode()
@@ -646,6 +647,19 @@ class AssetsBehavior(unittest.TestCase):
             self.run_assets()
         self.assertEqual(self.store.uploads, [])
 
+    def test_unlabelled_existing_archive_matching_build_is_kept(self):
+        name = ARCHIVE_NAMES[1]
+        preserved = self.built[name]  # identical bytes: the digest matches the rebuild
+        self.store.assets.append(self.asset(2, name, digest=sha256(preserved), label=False))
+        self.store.bodies[name] = preserved
+        self.write_dist()
+        self.run_assets()
+        uploaded = self.uploaded()
+        self.assertNotIn(name, uploaded)  # reused, never re-uploaded
+        self.assertEqual(set(uploaded), set(ARCHIVE_NAMES) - {name} | {CHECKSUM_NAME})
+        self.assertIsNone(uploaded[CHECKSUM_NAME][0])
+        self.assertEqual(uploaded[CHECKSUM_NAME][1], manifest(dict(self.built)))
+
     def test_duplicate_release_assets_fail_closed(self):
         self.write_dist()
         self.store.assets.append(self.asset(1, ARCHIVE_NAMES[0],
@@ -683,6 +697,21 @@ class AssetsBehavior(unittest.TestCase):
         uploaded = self.uploaded()
         self.assertEqual(set(uploaded), set(ARCHIVE_NAMES) - {name})
         self.assertNotIn(CHECKSUM_NAME, uploaded)
+
+    def test_existing_checksum_body_describing_other_set_is_rejected(self):
+        preserved = "archive-preserved-v1".encode()
+        name = ARCHIVE_NAMES[0]
+        self.store.assets.append(self.asset(1, name, digest=sha256(preserved)))
+        self.store.bodies[name] = preserved
+        self.write_dist()
+        # Digest field absent: the manifest must be verified from downloaded
+        # bytes, and the body describes the rebuild, not the preserved archive.
+        self.store.assets.append({"id": 9, "name": CHECKSUM_NAME, "digest": None, "label": ""})
+        self.store.bodies[CHECKSUM_NAME] = manifest(dict(self.built))
+        with self.assertRaisesRegex(release.ReleaseError,
+                                    "does not describe the planned archive set"):
+            self.run_assets()
+        self.assertEqual(self.store.uploads, [])
 
     def test_list_failure_propagates_before_any_upload(self):
         self.write_dist()
