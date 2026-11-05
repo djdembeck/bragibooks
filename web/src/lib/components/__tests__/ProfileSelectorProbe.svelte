@@ -7,14 +7,17 @@
 		initialId: number | null;
 		/** Initial profile list; tests simulate refreshes via refreshProfiles. */
 		profiles: OutputProfile[];
-		/** Non-empty when the profile list is unavailable. */
-		profilesError?: string | null;
-	}
+	/** Non-empty when the profile list is unavailable. */
+	profilesError?: string | null;
+	/** Number of books the batch applies to (summary noun). */
+	batchCount?: number;
+}
 
 	let {
 		initialId,
 		profiles: initialProfiles,
-		profilesError = null
+		profilesError = null,
+		batchCount = 2
 	}: Props = $props();
 
 	// Seeded once from the initial props; every later change goes through
@@ -39,7 +42,7 @@
 	profiles={currentProfiles}
 	profilesError={currentError}
 	bind:selectedProfileId={selectedProfileId}
-	batchCount={2}
+	batchCount={batchCount}
 	selectId="probe-select"
 	summaryId="probe-summary"
 />

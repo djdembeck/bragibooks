@@ -95,9 +95,22 @@
 		{/each}
 	</select>
 	{#if selectedProfile}
-		<p id={summaryId} class="output-profile-selector__summary {summaryClass}" aria-live="polite">
-			{selectedProfile.output_dir || 'Uses the global output directory'} · {selectedProfile.output_scheme || 'Uses the global path format'} — applies only to {batchCount === 1 ? 'this' : `these ${batchCount}`} {countNoun(batchCount)} in this {batchScope}.
-		</p>
+		<div id={summaryId} class="output-profile-selector__summary {summaryClass}" aria-live="polite">
+			<p class="output-profile-selector__summary-line">
+				<span class="font-medium">{selectedProfile.name}</span>
+				<span class="text-[var(--text-muted)]">→</span>
+				<code class="output-profile-selector__path">{selectedProfile.output_dir || 'Global output directory'}</code>
+			</p>
+			{#if selectedProfile.output_scheme}
+				<p class="output-profile-selector__summary-line">
+					<span class="text-[var(--text-muted)]">Format</span>
+					<code class="output-profile-selector__path">{selectedProfile.output_scheme}</code>
+				</p>
+			{/if}
+			<p class="output-profile-selector__summary-scope">
+				Applies to {batchCount === 1 ? 'this' : `these ${batchCount}`} {countNoun(batchCount)} in this {batchScope} only.
+			</p>
+		</div>
 	{:else if profilesError}
 		<p id={summaryId} class="output-profile-selector__summary output-profile-selector__summary--warn {summaryClass}" aria-live="polite">{profilesError}</p>
 	{/if}
@@ -141,6 +154,23 @@
 		font-size: 0.75rem;
 		color: var(--text-muted);
 		overflow-wrap: anywhere;
+		display: flex;
+		flex-direction: column;
+		gap: 0.125rem;
+	}
+	.output-profile-selector__summary-line {
+		margin: 0;
+		display: flex;
+		align-items: baseline;
+		gap: 0.5rem;
+	}
+	.output-profile-selector__path {
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+		overflow-wrap: anywhere;
+	}
+	.output-profile-selector__summary-scope {
+		margin: 0;
 	}
 	.output-profile-selector__summary--warn {
 		color: var(--state-amber, var(--text-secondary));

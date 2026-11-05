@@ -33,6 +33,7 @@ function mountProbe(props: {
 	initialId: number | null;
 	profiles: OutputProfile[];
 	profilesError?: string | null;
+	batchCount?: number;
 }): ProbeHandle {
 	const target = document.createElement('div');
 	document.body.appendChild(target);
@@ -132,9 +133,24 @@ describe('OutputProfileSelector rendered selection', () => {
 		// The reported bug: bound id and summary move to the profile while the
 		// select itself renders blank.
 		expect(probe.boundText()).toBe('7');
-		expect(probe.summaryText()).toContain('applies only to these 2 books');
+		expect(probe.summaryText()).toContain('Applies to these 2 books in this batch only.');
 		expect(select.selectedIndex).toBe(1);
 		expect(select.options[select.selectedIndex].textContent?.trim()).toBe('Erotica');
+		probe.teardown();
+	});
+
+	it('uses the singular noun for a one-book batch', () => {
+		const probe = mountProbe({
+			initialId: null,
+			profiles: [makeProfile({ id: 7, name: 'Erotica' })],
+			profilesError: null,
+			batchCount: 1
+		});
+		const select = probe.select();
+		select.value = '7';
+		select.dispatchEvent(new Event('change', { bubbles: true }));
+		flushSync();
+		expect(probe.summaryText()).toContain('Applies to this book in this batch only.');
 		probe.teardown();
 	});
 
