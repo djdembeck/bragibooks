@@ -7,6 +7,7 @@
 	import { formatRuntime } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
+	import { createBookSelection } from '#lib/bookSelection.svelte.js';
 
 	const limit = 20;
 	const filters: { value: string; label: string }[] = [
@@ -33,27 +34,24 @@
 	// Selection model: a "select all matching" baseline (the server-capped
 	// ID list) plus row-level edits layered on top of it.
 	//   effective selection = (baseline − excluded) ∪ added
-	let allMatchedIds = $state<Set<number> | null>(null);
-	let allMatchedTotal = $state(0);
-	// The all_ids payload is capped server-side; when true the baseline
-	// holds only the first 1,000 matches, so the UI must say so.
-	let allMatchedTruncated = $state(false);
-	// Rows the operator unchecked after a select-all.
-	let excludedIds = $state<Set<number>>(new Set());
-	// Rows the operator checked individually (with no select-all baseline).
-	let addedIds = $state<Set<number>>(new Set());
+	const selection = createBookSelection();
 	let selectingAll = $state(false);
 	let selectAllControl = $state<HTMLInputElement | null>(null);
 	// Which bulk operation is running (its button shows progress); null = idle.
 	let bulkActing = $state<null | 'requeue' | 'done' | 'remove'>(null);
 	// Books finished by the running sequential loop — shown as "n of m".
 	let bulkProgress = $state(0);
+	// Total books in the running loop, captured when it starts: the live
+	// selection shrinks as rows land, so the denominator must not track it.
+	let bulkTotal = $state(0);
 	// Short-lived success line after a completed bulk operation.
 	let bulkSuccess = $state<string | null>(null);
 	let successTimer: ReturnType<typeof setTimeout> | null = null;
 	let bulkError = $state<CleanedAdbError | null>(null);
 	// Which operation produced bulkError, so Retry re-runs the right one.
-	let bulkErrorAction = $state<'select' | 'done' | 'remove'>('select');
+	// 'confirm' = the pre-confirmation title fetch failed; the deletion
+	// itself never ran, so Retry rebuilds the confirmation list.
+	let bulkErrorAction = $state<'select' | 'confirm' | 'done' | 'remove'>('select');
 	// Removal confirmation dialog.
 	let confirmRemoveOpen = $state(false);
 	let removeList = $state<BookWithPeople[]>([]);
@@ -171,19 +169,14 @@
 			const res = await get<{ ids: number[]; total: number; truncated: boolean }>(`/books?${params.toString()}`);
 			if (filter !== requestedFilter || q !== requestedQ) return;
 			if (!res || !Array.isArray(res.ids)) throw new Error('Could not load matching book IDs.');
-			allMatchedIds = new Set(res.ids);
 			// The server caps the all_ids payload: total/truncated make the
 			// cut explicit so the UI never treats a capped list as the whole
 			// matching set (finding: F21).
-			allMatchedTotal = res.total ?? res.ids.length;
-			allMatchedTruncated = Boolean(res.truncated);
-			// The new baseline redefines the set; individual edits no longer apply.
-			excludedIds = new Set();
-			addedIds = new Set();
+			selection.applyBaseline(new Set(res.ids), res.total ?? res.ids.length, Boolean(res.truncated));
 		} catch (e) {
 			if (filter !== requestedFilter || q !== requestedQ) return;
 			bulkError = toCleanedError(e);
-			allMatchedIds = null;
+			selection.dropBaseline();
 		} finally {
 			selectingAll = false;
 			selectAllOptimistic = null;
@@ -191,68 +184,20 @@
 	}
 
 	function deselectAllMatching() {
-		if (!allMatchedIds) return;
+		if (!selection.ids) return;
 		bulkError = null;
-		allMatchedIds = null;
-		allMatchedTotal = 0;
-		allMatchedTruncated = false;
-		addedIds = new Set();
+		selection.deselectAll();
 	}
 
 	function clearSelection() {
-		allMatchedIds = null;
-		allMatchedTotal = 0;
-		allMatchedTruncated = false;
-		excludedIds = new Set();
-		addedIds = new Set();
+		selection.clear();
 		bulkError = null;
 		selectedProfileId = null; // The batch it applied to no longer exists.
 	}
 
-	// Effective selection for a book: the baseline minus exclusions,
-	// plus individually checked rows.
-	function isBookSelected(book: BookWithPeople): boolean {
-		if (allMatchedIds) {
-			if (excludedIds.has(book.id)) return false;
-			if (allMatchedIds.has(book.id)) return true;
-			return addedIds.has(book.id);
-		}
-		return addedIds.has(book.id);
-	}
-
-	function toggleBook(book: BookWithPeople) {
-		const next = new Set(addedIds);
-		const nextExcluded = new Set(excludedIds);
-		if (isBookSelected(book)) {
-			if (allMatchedIds?.has(book.id)) {
-				// Uncheck a baseline row: record the exclusion.
-				nextExcluded.add(book.id);
-				next.delete(book.id);
-			} else {
-				next.delete(book.id);
-			}
-		} else {
-			if (allMatchedIds?.has(book.id)) {
-				// Re-check a previously excluded baseline row.
-				nextExcluded.delete(book.id);
-			}
-			next.add(book.id);
-		}
-		addedIds = next;
-		excludedIds = nextExcluded;
-	}
-
 	// Count of selected books across the WHOLE matching set (not just the
 	// visible page) — the size the bulk requeue will actually send.
-	const selectedCount = $derived.by(() => {
-		if (!allMatchedIds) return addedIds.size;
-		const base = Math.max(0, allMatchedIds.size - excludedIds.size);
-		// Added rows that are not in the baseline (a book matched by filter
-		// but missing from the capped ID list, checked individually).
-		let extra = 0;
-		for (const id of addedIds) if (!allMatchedIds.has(id)) extra++;
-		return base + extra;
-	});
+	const selectedCount = $derived.by(() => selection.countSelected());
 
 	// The select-all checkbox's visible state: checked when every matching
 	// book is selected (including off-page books), indeterminate otherwise.
@@ -288,16 +233,14 @@
 		bulkError = null;
 		if (checked) {
 			selectAllOptimistic = true;
-			if (!allMatchedIds) void selectAllMatching();
+			if (!selection.ids) void selectAllMatching();
 			else {
-				excludedIds = new Set();
-				addedIds = new Set();
+				selection.clearRowEdits();
 				selectAllOptimistic = null;
 			}
 		} else if (selectedCount > 0) {
 			deselectAllMatching();
-			excludedIds = new Set();
-			addedIds = new Set();
+			selection.clearRowEdits();
 			selectAllOptimistic = null;
 		} else {
 			selectAllOptimistic = true;
@@ -305,14 +248,9 @@
 		}
 	}
 
-	// The book IDs the bulk requeue will send — the effective selection.
+	// The book IDs a bulk operation will send — the effective selection.
 	function effectiveSelectedIds(): number[] {
-		const ids = new Set<number>();
-		if (allMatchedIds) {
-			for (const id of allMatchedIds) if (!excludedIds.has(id)) ids.add(id);
-		}
-		for (const id of addedIds) ids.add(id);
-		return [...ids];
+		return selection.effectiveSelectedIds();
 	}
 
 	function showBulkSuccess(message: string) {
@@ -371,33 +309,44 @@
 		bulkError = null;
 		bulkSuccess = null;
 		bulkProgress = 0;
+		bulkTotal = ids.length;
 		const requestedFilter = filter;
 		const requestedQ = q;
 		let failed: CleanedAdbError | null = null;
 		let done = 0;
-		for (const id of ids) {
-			try {
-				await put(`/books/${id}`, { status: 'done' });
-				done++;
-			} catch (e) {
-				failed = toCleanedError(e);
-				break;
+		try {
+			for (const id of ids) {
+				try {
+					await put(`/books/${id}`, { status: 'done' });
+					done++;
+				} catch (e) {
+					failed = toCleanedError(e);
+					break;
+				}
+				bulkProgress = done;
+				// Drop the finished books from the live view as they land so the
+				// counts and washes move one row at a time.
+				selection.pruneSelectionId(id);
 			}
-			bulkProgress = done;
-			// Drop the finished books from the live view as they land so the
-			// counts and washes move one row at a time.
-			pruneSelectionId(id);
+			if (!criteriaChanged(requestedFilter, requestedQ)) {
+				// Per-book PUTs do not refresh the list response: pull the
+				// catalog again so status badges, totals, and pagination match
+				// (partial success included — the re-fetch sees what landed).
+				await loadBooks();
+				if (failed) {
+					bulkError = failed;
+					bulkErrorAction = 'done';
+				} else {
+					showBulkSuccess(`${done} book${done === 1 ? '' : 's'} marked as done.`);
+					// Nothing matching is left in the selection — collapse the bar.
+					if (selectedCount === 0) clearSelection();
+				}
+			}
+			// A criteria change already reloaded the catalog via the URL $effect;
+			// its stale-results guard suppresses only the messaging above.
+		} finally {
+			bulkActing = null;
 		}
-		if (criteriaChanged(requestedFilter, requestedQ)) return;
-		if (failed) {
-			bulkError = failed;
-			bulkErrorAction = 'done';
-		} else {
-			showBulkSuccess(`${done} book${done === 1 ? '' : 's'} marked as done.`);
-			// Nothing matching is left in the selection — collapse the bar.
-			if (selectedCount === 0) clearSelection();
-		}
-		bulkActing = null;
 	}
 
 	// Removal is confirm-gated: open the dialog, then run it on confirm.
@@ -410,24 +359,49 @@
 		try {
 			// Titles for the confirmation list; the delete below uses the ids.
 			// Rows already on the current page come from the list response —
-			// only off-page ids need a fetch, so a large selection cannot fan
-			// out one request per book.
+			// only off-page ids need a fetch, and a select-all can leave
+			// ~1,000 of them, so the fan-out is capped at 16 in flight.
 			const known = new Map(
 				(response?.books ?? []).map((b) => [b.id, b] as [number, BookWithPeople]),
 			);
 			const missingIds = ids.filter((id) => !known.has(id));
-			const missing = await Promise.all(
-				missingIds.map((id) => get<BookWithPeople>(`/books/${id}`)),
-			);
+			const missing = await fetchInChunks(missingIds.map((id) => () => get<BookWithPeople>(`/books/${id}`)), 16);
 			for (const b of missing) known.set(b.id, b);
 			removeList = ids.map((id) => known.get(id)!);
 		} catch (e) {
 			confirmRemoveOpen = false;
 			bulkError = toCleanedError(e);
-			bulkErrorAction = 'remove';
+			// Nothing was deleted — Retry rebuilds the confirmation list
+			// (openRemoveConfirm), not the deletion loop.
+			bulkErrorAction = 'confirm';
 		} finally {
 			removeListLoading = false;
 		}
+	}
+
+	// Run task factories with at most `concurrency` promises in flight;
+	// results come back in input order. A rejection sets `failed`, so no
+	// worker dequeues further ids — only the requests already issued may
+	// still complete, and a retry cannot double-issue against this pool.
+	async function fetchInChunks<T>(fns: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+		const results: T[] = new Array(fns.length);
+		let next = 0;
+		let failed = false;
+		const workers = Array.from({ length: Math.min(concurrency, fns.length) }, async () => {
+			for (;;) {
+				if (failed) return;
+				const i = next++;
+				if (i >= fns.length) return;
+				try {
+					results[i] = await fns[i]();
+				} catch (e) {
+					failed = true;
+					throw e;
+				}
+			}
+		});
+		await Promise.all(workers);
+		return results;
 	}
 
 	async function bulkRemove() {
@@ -437,50 +411,47 @@
 		bulkError = null;
 		bulkSuccess = null;
 		bulkProgress = 0;
+		bulkTotal = removeList.length;
 		const requestedFilter = filter;
 		const requestedQ = q;
 		let failed: CleanedAdbError | null = null;
 		let done = 0;
 		let survivors: BookWithPeople[] = [];
-		for (const book of removeList) {
-			try {
-				await del(`/books/${book.id}`);
-				done++;
-			} catch (e) {
-				failed = toCleanedError(e);
-				// This book and every one after it stay selected and in the
-				// list, so Retry re-runs exactly the survivors.
-				survivors = removeList.slice(removeList.indexOf(book));
-				break;
+		try {
+			for (const book of removeList) {
+				try {
+					await del(`/books/${book.id}`);
+					done++;
+				} catch (e) {
+					failed = toCleanedError(e);
+					// This book and every one after it stay selected and in
+					// the list, so Retry re-runs exactly the survivors.
+					survivors = removeList.slice(removeList.indexOf(book));
+					break;
+				}
+				bulkProgress = done;
+				selection.pruneSelectionId(book.id);
 			}
-			bulkProgress = done;
-			pruneSelectionId(book.id);
+			confirmRemoveOpen = false;
+			removeList = failed ? survivors : [];
+			if (!criteriaChanged(requestedFilter, requestedQ)) {
+				// The list response still shows the deleted rows: pull the
+				// catalog again so rows, totals, and pagination match
+				// (partial success included — the re-fetch sees what landed).
+				await loadBooks();
+				if (failed) {
+					bulkError = failed;
+					bulkErrorAction = 'remove';
+				} else {
+					showBulkSuccess(`${done} book${done === 1 ? '' : 's'} removed.`);
+					if (selectedCount === 0) clearSelection();
+				}
+			}
+			// A criteria change already reloaded the catalog via the URL $effect;
+			// its stale-results guard suppresses only the messaging above.
+		} finally {
+			bulkActing = null;
 		}
-		confirmRemoveOpen = false;
-		removeList = failed ? survivors : [];
-		if (criteriaChanged(requestedFilter, requestedQ)) return;
-		if (failed) {
-			bulkError = failed;
-			bulkErrorAction = 'remove';
-		} else {
-			showBulkSuccess(`${done} book${done === 1 ? '' : 's'} removed.`);
-			if (selectedCount === 0) clearSelection();
-		}
-		bulkActing = null;
-	}
-
-	// Remove one id from every selection set the moment its operation
-	// succeeds, so the bar count and row washes track the live selection.
-	function pruneSelectionId(id: number) {
-		if (allMatchedIds) {
-			if (allMatchedIds.has(id)) allMatchedIds = new Set(allMatchedIds);
-			excludedIds = new Set(excludedIds);
-		}
-		if (allMatchedIds?.has(id)) allMatchedIds.delete(id);
-		excludedIds.delete(id);
-		addedIds = new Set(addedIds);
-		addedIds.delete(id);
-		if (allMatchedIds) allMatchedTotal = Math.max(0, allMatchedTotal - 1);
 	}
 
 	// Pagination jump
@@ -627,9 +598,9 @@
 				     single-line Global-settings state it centers on the row. -->
 				<p class="w-full text-sm text-[var(--text)] sm:w-auto sm:mr-auto {profileSummaryVisible ? '' : 'sm:self-center'}">
 					<span class="font-mono font-semibold">{selectedCount}</span> books selected
-					{#if allMatchedTruncated}
+					{#if selection.truncated}
 						<span class="text-xs text-[var(--state-amber)]"
-							>({selectedCount} of {allMatchedTotal} matching — server cap 1,000)</span
+							>({selectedCount} of {selection.total} matching — server cap 1,000)</span
 						>
 					{/if}
 				</p>
@@ -656,10 +627,10 @@
 							Requeue &amp; view progress
 						</Button>
 						<Button variant="secondary" loading={bulkActing === 'done'} disabled={bulkActing !== null} onclick={bulkMarkDone}>
-							{bulkActing === 'done' ? `Marking ${bulkProgress} of ${selectedCount}…` : 'Mark as done'}
+							{bulkActing === 'done' ? `Marking ${bulkProgress} of ${bulkTotal}…` : 'Mark as done'}
 						</Button>
 						<Button variant="danger" loading={bulkActing === 'remove'} disabled={bulkActing !== null} onclick={openRemoveConfirm}>
-							{bulkActing === 'remove' ? `Removing ${bulkProgress} of ${selectedCount}…` : 'Remove'}
+							{bulkActing === 'remove' ? `Removing ${bulkProgress} of ${bulkTotal}…` : 'Remove'}
 						</Button>
 						<Button variant="ghost" disabled={bulkActing !== null} onclick={clearSelection}>Clear</Button>
 					</div>
@@ -669,7 +640,7 @@
 						<p
 							class="sr-only"
 							role="status"
-							>{bulkActing === 'done' ? `Marking ${bulkProgress} of ${selectedCount}…` : `Removing ${bulkProgress} of ${selectedCount}…`}</p
+							>{bulkActing === 'done' ? `Marking ${bulkProgress} of ${bulkTotal}…` : `Removing ${bulkProgress} of ${bulkTotal}…`}</p
 						>
 					{/if}
 				</div>
@@ -681,7 +652,7 @@
 	{/if}
 	{#if bulkError}
 		<div class="mt-3">
-			<Alert variant="error" onretry={() => (bulkErrorAction === 'select' ? selectAllMatching() : bulkErrorAction === 'done' ? bulkMarkDone() : bulkRemove())}>
+			<Alert variant="error" onretry={() => (bulkErrorAction === 'select' ? selectAllMatching() : bulkErrorAction === 'confirm' ? openRemoveConfirm() : bulkErrorAction === 'done' ? bulkMarkDone() : bulkRemove())}>
 				{bulkError.message}
 				<ErrorDetail raw={bulkError.raw} needsSettings={bulkError.needsSettings} />
 			</Alert>
@@ -691,7 +662,7 @@
 
 <!-- ── Removal confirmation ──────────────────────────────────── -->
 <Modal
-	open={confirmRemoveOpen}
+	bind:open={confirmRemoveOpen}
 	title="Remove books"
 	closeDisabled={bulkActing === 'remove'}
 	beforeClose={() => bulkActing !== 'remove'}
@@ -769,12 +740,12 @@
 	<ul class="catalog-list overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]" aria-label="Book catalog">
 		{#each response.books as book (book.id)}
 			<li>
-				<div class="book-row" class:book-row--selected={isBookSelected(book)}>
+				<div class="book-row" class:book-row--selected={selection.isBookSelected(book)}>
 					<label class="book-check">
 						<input
 							type="checkbox"
-							checked={isBookSelected(book)}
-							onchange={() => toggleBook(book)}
+							checked={selection.isBookSelected(book)}
+							onchange={() => selection.toggleBook(book)}
 							aria-label="Select {book.title}"
 						/>
 					</label>
