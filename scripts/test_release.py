@@ -21,16 +21,18 @@ REPOSITORY = "djdembeck/bragibooks"
 VERSION = "v9.9.9"
 CHECKSUM_NAME = f"bragibooks_{VERSION.removeprefix('v')}_checksums.txt"
 ARCHIVE_NAMES = (
-    "bragibooks_Linux_x86_64.tar.gz",
-    "bragibooks_Linux_arm64.tar.gz",
-    "bragibooks_Darwin_x86_64.tar.gz",
-    "bragibooks_Darwin_arm64.tar.gz",
+    "bragibooks_9.9.9_linux-amd64.tar.gz",
+    "bragibooks_9.9.9_linux-arm64.tar.gz",
+    "bragibooks_9.9.9_darwin-amd64.tar.gz",
+    "bragibooks_9.9.9_darwin-arm64.tar.gz",
+    "bragibooks_9.9.9_windows-amd64.tar.gz",
 )
 ARCHIVE_PLATFORM = {
-    "bragibooks_Linux_x86_64.tar.gz": ("linux", "amd64"),
-    "bragibooks_Linux_arm64.tar.gz": ("linux", "arm64"),
-    "bragibooks_Darwin_x86_64.tar.gz": ("darwin", "amd64"),
-    "bragibooks_Darwin_arm64.tar.gz": ("darwin", "arm64"),
+    "bragibooks_9.9.9_linux-amd64.tar.gz": ("linux", "amd64"),
+    "bragibooks_9.9.9_linux-arm64.tar.gz": ("linux", "arm64"),
+    "bragibooks_9.9.9_darwin-amd64.tar.gz": ("darwin", "amd64"),
+    "bragibooks_9.9.9_darwin-arm64.tar.gz": ("darwin", "arm64"),
+    "bragibooks_9.9.9_windows-amd64.tar.gz": ("windows", "amd64"),
 }
 
 
