@@ -10,8 +10,8 @@
 	import { createBookSelection } from '#lib/bookSelection.svelte.js';
 	import { partitionForRemoval } from '#lib/removeGuard.js';
 	import { fetchInChunks } from '#lib/fetchInChunks.js';
-	import { bulkRetryHandler, shouldClearStaleBulkError, type BulkErrorAction } from '#lib/bulkRetry.js';
 	import { criteriaChanged } from '#lib/bulkCriteria.js';
+	import { shouldClearStaleBulkError, type BulkErrorAction } from '#lib/staleBulkError.js';
 
 	const limit = 20;
 	const filters: { value: string; label: string }[] = [
@@ -466,20 +466,18 @@
 
 	// Alert Retry dispatch: re-run the operation that produced the error.
 	function onBulkErrorRetry() {
-		// A done/remove/requeue retry with an empty effective selection
-		// would no-op silently — clear the stale error instead.
 		if (shouldClearStaleBulkError(bulkErrorAction, effectiveSelectedIds().length)) {
 			bulkError = null;
 			return;
 		}
-		const handler = bulkRetryHandler(bulkErrorAction, {
+		const handlers: Record<BulkErrorAction, () => void> = {
 			select: () => void selectAllMatching(),
 			requeue: () => void bulkRequeue(),
 			confirm: () => void openRemoveConfirm(),
 			done: () => void bulkMarkDone(),
 			remove: () => void bulkRemove()
-		});
-		handler();
+		};
+		handlers[bulkErrorAction]();
 	}
 
 	// Pagination jump

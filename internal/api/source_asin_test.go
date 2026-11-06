@@ -650,11 +650,12 @@ func TestListBooksPendingMalformedMetadataRow(t *testing.T) {
 }
 
 // TestSourceMetadataSchemaTwoFlagsRoundTrip pins the JSON tags of the two
-// load-bearing schema-2 flags: the snapshot Degraded flag and the per-field
-// Truncated flag must survive a marshal/unmarshal cycle exactly as a stored
-// payload does — a dropped key would silently turn incomplete evidence into
-// complete evidence. A decoded snapshot with both flags set must not
-// prefill the ASIN.
+// load-bearing flags — the snapshot Degraded flag and the per-field
+// Truncated flag, of which only the latter is new in schema 2: both must
+// survive a marshal/unmarshal cycle exactly as a stored payload does — a
+// dropped key would silently turn incomplete evidence into complete
+// evidence. A decoded snapshot with both flags set must not prefill the
+// ASIN.
 func TestSourceMetadataSchemaTwoFlagsRoundTrip(t *testing.T) {
 	snap := asinSnap([]string{"B123456789"}, audio.StatusPresent, audio.SourceEmbedded)
 	snap.Degraded = true

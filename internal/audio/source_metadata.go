@@ -17,10 +17,11 @@ import (
 )
 
 // SourceMetadataSchema is the payload schema version carried in every
-// SourceMetadata document. Version 2 added the snapshot Degraded flag and
-// the per-field Truncated flag; a version 1 payload cannot express either,
-// so a reader must treat it as incomplete evidence (see
-// api.sourceMetadataComplete) rather than trusting its derived defaults.
+// SourceMetadata document. Version 2 adds the per-field Truncated flag;
+// schema 1 cannot express it (and its older rows predate the snapshot
+// Degraded flag), so a reader must treat a version 1 payload as incomplete
+// evidence (see api.sourceMetadataComplete) rather than trusting its
+// derived defaults.
 const SourceMetadataSchema = 2
 
 // Field keys used in SourceMetadata.Fields.
