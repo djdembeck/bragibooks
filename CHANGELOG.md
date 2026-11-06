@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Fixed
 
+- Release workflow now creates the draft release record in the `reserve`
+  job, up front, and treats a release record that the listing does not
+  return as an empty asset store (every artifact is a fresh upload)
+  instead of failing with "Release vX.Y.Z does not exist". A draft create
+  rejected as "already exists" is likewise tolerated when the listing
+  lags behind the record. The v2.1.0 run hit exactly this: the asset
+  step ran seconds after the draft was created, the listing had not
+  reflected it, and the already-published image was left with no assets.
+
 - Release assets are uploaded with their plain file names
   (`bragibooks_2.0.0_checksums.txt`, `bragibooks_Darwin_arm64.tar.gz`, …).
   New uploads no longer attach a `bragibooks-publish-v1;…` display label,
