@@ -368,7 +368,7 @@ def checksum_entries(data):
         require(len(hexdigest) == 64 and re.fullmatch(r"[0-9a-f]{64}", hexdigest) and name,
                 f"Malformed checksum line: {line!r}")
         entries[name] = "sha256:" + hexdigest
-    require(len(entries) == 4, "Expected exactly four checksum entries")
+    require(len(entries) == 5, "Expected exactly five checksum entries")
     return entries
 
 
@@ -383,15 +383,16 @@ def publish_assets(repository, source, version, fetcher=None):
     metadata = json.loads(Path("dist/artifacts.json").read_text())
     archives = [item for item in metadata if item["type"] == "Archive"]
     checksums = [item for item in metadata if item["type"] == "Checksum"]
-    require(len(archives) == 4 and len(checksums) == 1,
-            "Expected the four native archives and their checksum file")
+    require(len(archives) == 5 and len(checksums) == 1,
+            "Expected the five native archives and their checksum file")
     require({(item.get("goos"), item.get("goarch")) for item in archives}
-            == {(system, arch) for system in ("linux", "darwin") for arch in ("amd64", "arm64")},
+            == ({(system, arch) for system in ("linux", "darwin")
+                 for arch in ("amd64", "arm64")} | {("windows", "amd64")}),
             "Native archive platform coverage differs")
     require(checksums[0]["name"] == checksum_name,
             "Checksum file has the wrong release identity")
     outputs = archives + checksums
-    require(len({item["name"] for item in outputs}) == 5, "Duplicate built asset names")
+    require(len({item["name"] for item in outputs}) == 6, "Duplicate built asset names")
     # Plan the ENTIRE set before entering the upload loop: every preserved
     # store asset plus every pending build must form one verifiable collection,
     # because a checksum manifest that cannot describe the store is never uploaded.

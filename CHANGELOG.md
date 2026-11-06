@@ -29,6 +29,10 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Features & Improvements
 
+- Release archives embed the version and use lowercase platform names
+  (`bragibooks_2.1.0_linux-amd64.tar.gz`, `bragibooks_2.1.0_darwin-arm64.tar.gz`,
+  …), and a Windows amd64 archive is now built alongside the existing
+  Linux and macOS amd64/arm64 archives.
 - Kept the container's default HTTP port at `8000`, the same port the Python image used, so existing Docker port mappings keep working after upgrading; `SERVER_PORT` still overrides it.
 - Narrowed development Docker media access to configurable input/output directories rather than mounting the developer home directory; pinned Docker build, runtime, and media-tool image digests for reproducible builds, with Renovate digest updates.
 - **Per-book selection and bulk book actions on the catalog** (#506)
