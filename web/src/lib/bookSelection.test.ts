@@ -1,27 +1,16 @@
-import { flushSync, mount, unmount } from 'svelte';
 import { describe, expect, it } from 'vitest';
-import type { BookSelection } from '#lib/bookSelection.svelte.js';
-import BookSelectionProbe from './__tests__/BookSelectionProbe.svelte';
+import { createBookSelection, type BookSelection } from '#lib/bookSelection.svelte.js';
 
 function book(id: number) {
 	return { id };
 }
 
 /**
- * Mount a fresh selection model. Every test gets its own instance, so the
- * table rows below can assume an empty model unless a row seeds one.
+ * A fresh selection model. Every test gets its own instance, so the table
+ * rows below can assume an empty model unless a row seeds one.
  */
-function mountSelection(): BookSelection {
-	const target = document.createElement('div');
-	document.body.appendChild(target);
-	const component = mount(BookSelectionProbe, { target });
-	flushSync();
-	try {
-		return component.getSelection();
-	} finally {
-		unmount(component);
-		target.remove();
-	}
+function newSelection(): BookSelection {
+	return createBookSelection();
 }
 
 // Seed helpers: one select-all with a known baseline, rows for the
@@ -32,7 +21,7 @@ const baseline = (ids: number[]) => new Set(ids);
 describe('book selection model', () => {
 	describe('isBookSelected', () => {
 		it('selects only individually checked rows without a baseline', () => {
-			const s = mountSelection();
+			const s = newSelection();
 			expect(s.isBookSelected(book(1))).toBe(false);
 			s.toggleBook(book(1));
 			expect(s.isBookSelected(book(1))).toBe(true);
@@ -46,7 +35,7 @@ describe('book selection model', () => {
 			['an added off-baseline row is selected', 12, true, true],
 			['an unchecked off-baseline row is unselected', 12, false, false]
 		] as const)('%s', (_name, id, toggleFirst, expected) => {
-			const s = mountSelection();
+			const s = newSelection();
 			s.applyBaseline(baseline([3, 4, 9]), CAP, false);
 			if (toggleFirst) s.toggleBook(book(id));
 			expect(s.isBookSelected(book(id))).toBe(expected);
@@ -55,13 +44,13 @@ describe('book selection model', () => {
 
 	describe('toggleBook', () => {
 		it('checks a row with no baseline', () => {
-			const s = mountSelection();
+			const s = newSelection();
 			s.toggleBook(book(7));
 			expect(s.effectiveSelectedIds()).toEqual([7]);
 		});
 
 		it('unchecking a baseline row records an exclusion', () => {
-			const s = mountSelection();
+			const s = newSelection();
 			s.applyBaseline(baseline([1, 2, 3]), CAP, false);
 			s.toggleBook(book(2));
 			expect(s.isBookSelected(book(2))).toBe(false);
@@ -70,7 +59,7 @@ describe('book selection model', () => {
 		});
 
 		it('re-checking a previously excluded baseline row clears the exclusion', () => {
-			const s = mountSelection();
+			const s = newSelection();
 			s.applyBaseline(baseline([1, 2, 3]), CAP, false);
 			s.toggleBook(book(2));
 			s.toggleBook(book(2));
@@ -80,7 +69,7 @@ describe('book selection model', () => {
 		});
 
 		it('checking an off-baseline row adds it alongside the baseline', () => {
-			const s = mountSelection();
+			const s = newSelection();
 			s.applyBaseline(baseline([1, 2]), CAP, false);
 			s.toggleBook(book(99));
 			expect(s.countSelected()).toBe(3);
@@ -88,7 +77,7 @@ describe('book selection model', () => {
 		});
 
 		it('unchecking an added off-baseline row removes it', () => {
-			const s = mountSelection();
+			const s = newSelection();
 			s.applyBaseline(baseline([1, 2]), CAP, false);
 			s.toggleBook(book(99));
 			s.toggleBook(book(99));
@@ -99,7 +88,7 @@ describe('book selection model', () => {
 
 	describe('countSelected', () => {
 		it('counts the baseline minus exclusions, plus off-baseline additions', () => {
-			const s = mountSelection();
+			const s = newSelection();
 			// Truncated baseline: 1,000 ids in the list, 1,042 total matches.
 			s.applyBaseline(baseline(Array.from({ length: CAP }, (_, i) => i + 1)), 1042, true);
 			expect(s.total).toBe(1042);
@@ -114,7 +103,7 @@ describe('book selection model', () => {
 		});
 
 		it('is zero in a fresh model and after clear', () => {
-			const s = mountSelection();
+			const s = newSelection();
 			expect(s.countSelected()).toBe(0);
 			s.toggleBook(book(1));
 			s.applyBaseline(baseline([1, 2]), 2, false);
@@ -129,7 +118,7 @@ describe('book selection model', () => {
 
 	describe('effectiveSelectedIds', () => {
 		it('merges baseline-minus-exclusions with added rows, without duplicates', () => {
-			const s = mountSelection();
+			const s = newSelection();
 			s.applyBaseline(baseline([1, 2, 3]), CAP, false);
 			s.toggleBook(book(2)); // excluded
 			s.toggleBook(book(3)); // exclude a baseline row…
@@ -139,7 +128,7 @@ describe('book selection model', () => {
 		});
 
 		it('is empty when the baseline is fully excluded', () => {
-			const s = mountSelection();
+			const s = newSelection();
 			s.applyBaseline(baseline([1]), 1, false);
 			s.toggleBook(book(1));
 			expect(s.effectiveSelectedIds()).toEqual([]);
@@ -147,25 +136,25 @@ describe('book selection model', () => {
 	});
 
 	describe('pruneSelectionId', () => {
-		it('removes an id from every set and decrements the total for a baseline id', () => {
-			const s = mountSelection();
-			s.applyBaseline(baseline([1, 2, 3]), 3, false);
+		it('removes a baseline id from the sets; the uncapped total is untouched', () => {
+			const s = newSelection();
+			s.applyBaseline(baseline([1, 2, 3]), 1042, true);
 			s.pruneSelectionId(2);
 			expect(s.effectiveSelectedIds().sort()).toEqual([1, 3]);
-			expect(s.total).toBe(2);
+			expect(s.total).toBe(1042); // uncapped server total; the post-op refetch supplies truth
 		});
 
-		it('does not decrement the total for an added-only id (never in the capped baseline)', () => {
-			const s = mountSelection();
-			s.applyBaseline(baseline([1, 2]), CAP, true);
+		it('leaves the uncapped total alone for an added-only id (never in the capped baseline)', () => {
+			const s = newSelection();
+			s.applyBaseline(baseline([1, 2]), 1002, true);
 			s.toggleBook(book(2000)); // matched by filter, absent from the capped list
 			s.pruneSelectionId(2000);
-			expect(s.total).toBe(CAP); // the capped-list count is untouched
+			expect(s.total).toBe(1002);
 			expect(s.effectiveSelectedIds().sort()).toEqual([1, 2]);
 		});
 
 		it('clears a pruned id out of excludedIds, so a later re-check works', () => {
-			const s = mountSelection();
+			const s = newSelection();
 			s.applyBaseline(baseline([1, 2]), 2, false);
 			s.toggleBook(book(2)); // excluded
 			s.pruneSelectionId(2);
@@ -177,7 +166,7 @@ describe('book selection model', () => {
 
 	describe('baseline lifecycle', () => {
 		it('a new baseline replaces the old one and drops the row edits', () => {
-			const s = mountSelection();
+			const s = newSelection();
 			s.applyBaseline(baseline([1]), 1, false);
 			s.toggleBook(book(9)); // off-baseline add
 			s.applyBaseline(baseline([5, 6]), 6, true);
@@ -188,7 +177,7 @@ describe('book selection model', () => {
 		});
 
 		it('deselectAll drops the baseline and adds but keeps exclusions', () => {
-			const s = mountSelection();
+			const s = newSelection();
 			s.applyBaseline(baseline([1, 2]), 2, false);
 			s.toggleBook(book(1)); // excluded
 			s.toggleBook(book(9)); // off-baseline add
@@ -196,15 +185,41 @@ describe('book selection model', () => {
 			expect(s.ids).toBeNull();
 			expect(s.countSelected()).toBe(0);
 			expect(s.total).toBe(0);
+			expect(s.isBookSelected(book(1))).toBe(false); // the exclusion survived
+			expect(s.isBookSelected(book(9))).toBe(false); // the add was dropped
 		});
 
-		it('dropBaseline keeps the row edits (a failed select-all)', () => {
-			const s = mountSelection();
-			s.toggleBook(book(7));
+		it('clearRowEdits drops exclusions and adds but keeps the baseline', () => {
+			const s = newSelection();
+			s.applyBaseline(baseline([1, 2, 3]), 3, false);
+			s.toggleBook(book(2)); // excluded
+			s.toggleBook(book(9)); // off-baseline add
+			s.clearRowEdits();
+			expect(s.ids).toEqual(new Set([1, 2, 3]));
+			expect(s.countSelected()).toBe(3);
+			expect(s.isBookSelected(book(2))).toBe(true); // exclusion dropped
+			expect(s.isBookSelected(book(9))).toBe(false); // add dropped
+			expect(s.total).toBe(3);
+		});
+
+		it('dropBaseline keeps the row edits and resets total/truncated (a failed select-all)', () => {
+			const s = newSelection();
+			s.applyBaseline(baseline([1, 2]), 1042, true);
+			s.toggleBook(book(7)); // off-baseline add
 			s.dropBaseline();
 			expect(s.ids).toBeNull();
+			expect(s.total).toBe(0);
+			expect(s.truncated).toBe(false);
 			expect(s.countSelected()).toBe(1);
 			expect(s.effectiveSelectedIds()).toEqual([7]);
+		});
+
+		it('the ids getter hands out a copy, so mutation cannot bypass the model', () => {
+			const s = newSelection();
+			s.applyBaseline(baseline([1, 2, 3]), 3, false);
+			s.ids?.add(99);
+			expect(s.countSelected()).toBe(3);
+			expect(s.effectiveSelectedIds().sort()).toEqual([1, 2, 3]);
 		});
 	});
 });

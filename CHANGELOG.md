@@ -10,28 +10,37 @@ All notable changes to this project will be documented in this file. See [standa
   (`bragibooks_2.0.0_checksums.txt`, `bragibooks_Darwin_arm64.tar.gz`, …).
   New uploads no longer attach a `bragibooks-publish-v1;…` display label,
   which the GitHub web UI rendered as the asset name and made the release
-  page show long, unreadable names. Existing labeled assets (v2.0.0) are
-  reconciled by provenance as before; their labels were cleared by a
-  one-time manual API cleanup, and no code path re-uploads or relabels
-  them.
+  page show long, unreadable names. The v2.0.0 archives previously carried
+  such labels, which a one-time manual API cleanup cleared; with no label,
+  a retry now reconciles them through the strict content-digest branch —
+  a GoReleaser rebuild is not bit-reproducible, so a v2.0.0 publication
+  retry after a partial failure fails closed unless the preserved archive
+  bytes match the rebuild exactly (stale assets resolve out of band). No
+  code path re-uploads or relabels them.
 - Release draft titles are the bare version (`vX.Y.Z`) instead of
   `Release vX.Y.Z`.
 - Resume contract: a new unlabeled asset is reused on a partial-upload
   retry only when its content digest matches the freshly built artifact.
   An existing unlabeled archive that differs from a rebuild still fails
-  the run before any upload (previously pinned for the legacy path only
-  now applies to every plain-named asset); the stale asset must be
-  resolved out of band. Labeled historical assets keep the
+  the run before any upload; that rule, previously pinned for the legacy
+  path only, now applies to every plain-named asset, so the stale asset
+  must be resolved out of band. Labeled historical assets keep the
   provenance-bound reuse that tolerates a byte-differing rebuild.
 
 ### Features & Improvements
 
 - Kept the container's default HTTP port at `8000`, the same port the Python image used, so existing Docker port mappings keep working after upgrading; `SERVER_PORT` still overrides it.
 - Narrowed development Docker media access to configurable input/output directories rather than mounting the developer home directory; pinned Docker build, runtime, and media-tool image digests for reproducible builds, with Renovate digest updates.
+- **Per-book selection and bulk book actions on the catalog** (#506)
+  - The Books catalog selects books individually: every row carries a checkbox, and the header checkbox is tri-state (all / some / none) that selects or clears every book matching the current filter and search (server-capped at 1,000 via the `GET /books?all_ids=1` ID list). The bulk bar's count follows that selection, and the bulk actions act on that explicit selection only — never on an implicit whole-catalog scope.
+  - The bulk bar offers three operations over the selected books: requeue for processing (with the chosen output profile's summary rendered under its picker as a caption, so the bar's actions stay on one line), mark as done, and remove. The bar reflows to a full-width stack on narrow screens.
+  - Removal is confirm-gated: the red Remove… action opens a dialog that lists the affected book titles, loads off-page titles with a capped fetch pool, and deletes only after that confirmation. The dialog's close control is disabled while deletes run, and files on disk are never touched.
+  - Server-side, `DELETE /api/books/:id` refuses to delete a book whose processing job is still queued or running, so a bulk removal cannot orphan a live job.
+  - Bulk done and remove re-fetch the catalog afterward so badges, totals, and pagination match the new state, and a failed operation releases the bar's lock instead of leaving it stuck. A failed pre-removal title fetch gets its own Retry that rebuilds the confirmation list.
 - **Missing-release handoff on Match**
   - When an active source has no usable catalog record, Match offers a "Missing from AudiobookDB?" link. A complete, unambiguous source ASIN is carried to `audiobookdb.org/add` for prefill; absent, multiple, incomplete, or unreadable evidence opens the bare add page with truthful copy.
   - The projection is read-only from `book_source_metadata` on the pending list; `books.asin` and processing are unchanged. Batch no-match rows, focused no-match, and the zero-result search repeat expose the handoff only after a settled lookup; search failures never suggest adding. The wrong-match editor footer remains an operator escape while a search is pending or failed.
-  - Compact handoff actions use the short “Add to AudiobookDB” label; the block keeps the full “Add this audiobook…” phrase and ASIN evidence, and the wrong-match footer describes the source audiobook rather than an edition. A ≤370px wrap safety keeps the compact actions inside a 320px viewport.
+  - The focused search repeat and the wrong-match footer use the short “Add to AudiobookDB” label; the batch no-match rows use the sentence label “add it to AudiobookDB”. The block keeps the full “Add this audiobook…” phrase and ASIN evidence, and the wrong-match footer describes the source audiobook rather than an edition. A ≤370px wrap safety keeps the compact actions inside a 320px viewport.
 
 ### Security
 

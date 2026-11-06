@@ -1,6 +1,12 @@
 import type { SourceASINEvidence } from './types.js';
 
 const ASIN_PATTERN = /^B[A-Z0-9]{9}$/;
+/** Deliberately the canonical AudiobookDB instance, not
+ *  `settings.audiobookdb_base_url`: that setting points at the JSON:API the app
+ *  reads from, while the public site stays the authority for new catalog
+ *  entries. A custom base URL therefore never gets an invented add endpoint —
+ *  the handoff always lands on the page a person can actually sign in to and
+ *  submit. Settings → AudiobookDB states the same constraint to the operator. */
 export const AUDIOBOOKDB_ADD_URL = 'https://audiobookdb.org/add';
 
 export type MissingReleaseState = 'present' | 'ambiguous' | 'missing' | 'unknown';
@@ -162,6 +168,22 @@ export function showPanelNudge(state: {
 	searchError: boolean;
 }): boolean {
 	return !state.loading && !state.error && !state.searching && !state.searchError;
+}
+
+/** The focused no-match block yields to the zero-result search repeat: both
+ *  sit in the same inspector when a search comes back empty, and the repeat
+ *  under the search box is the closer affordance to the action it offers.
+ *  Rendering the block too would put two identical handoffs on one screen. */
+export function showBlockNudge(state: {
+	loading: boolean;
+	error: boolean;
+	searching: boolean;
+	searchError: boolean;
+	searched: boolean;
+	resultCount: number;
+}): boolean {
+	if (state.searched && state.resultCount === 0) return false;
+	return showPanelNudge(state);
 }
 
 /** The wrong-match footer belongs to a loaded record and disappears while its

@@ -154,6 +154,22 @@ describe('OutputProfileSelector rendered selection', () => {
 		probe.teardown();
 	});
 
+	it('states both inherited fields when the profile overrides neither', () => {
+		const probe = mountProbe({
+			initialId: 7,
+			// A profile that overrides nothing still owns a destination and a
+			// path format — inherited from Global settings. Both lines must say
+			// so; an absent Format line silently hid half the inheritance.
+			profiles: [makeProfile({ id: 7, name: 'Erotica', output_dir: '', output_scheme: '' })],
+			profilesError: null
+		});
+		const summary = probe.summaryText() ?? '';
+		expect(summary).toContain('Global output directory');
+		expect(summary).toContain('Format');
+		expect(summary).toContain('Global path format');
+		probe.teardown();
+	});
+
 	it('falls back to Global settings when the bound id is cleared', () => {
 		const probe = mountProbe({
 			initialId: 7,

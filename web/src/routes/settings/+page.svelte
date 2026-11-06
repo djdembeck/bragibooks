@@ -768,6 +768,26 @@
 					</p>
 				</details>
 			</div>
+			<div class="settings-field">
+				<dl class="version-pair">
+					<dt class="settings-label">API base URL</dt>
+					<dd class="settings-value font-mono">
+						{settings.audiobookdb_base_url || 'https://audiobookdb.org/api'}
+					</dd>
+				</dl>
+				<p class="settings-help">
+					Read-only here: set it with <code>API_KEY_BASE_URL</code> or
+					<code>api_key.base_url</code> in the config file.
+				</p>
+				<p class="settings-help">
+					Every catalog lookup uses this URL, but Match's “Add to AudiobookDB”
+					handoff always opens the canonical
+					<a href="https://audiobookdb.org/add" target="_blank" rel="noopener noreferrer">audiobookdb.org/add</a>
+					page. That is deliberate: the public site, not this app, stays the
+					authority for new catalog entries, so a custom base URL never invents an
+					add endpoint it cannot verify.
+				</p>
+			</div>
 		</section>
 
 		<!-- External API -->

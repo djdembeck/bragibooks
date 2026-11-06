@@ -664,6 +664,12 @@ func TestCreateBooksPersistsSourceMetadata(t *testing.T) {
 	book := postBook(t, h, srcDir)
 
 	snap := metadataPayloadFor(t, h.svc.DB, book.ID)
+	// New snapshots must carry the current schema: the pending-list
+	// projection treats anything older as incomplete evidence, so a
+	// producer that forgot the bump would silently disable prefilling.
+	if snap["schema"] != float64(audio.SourceMetadataSchema) {
+		t.Errorf("schema = %v, want %d", snap["schema"], audio.SourceMetadataSchema)
+	}
 	if snap["source_kind"] != "folder" {
 		t.Errorf("source_kind = %v, want folder", snap["source_kind"])
 	}
@@ -913,6 +919,165 @@ func TestDeleteBookCascadesSourceMetadata(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("book_source_metadata rows = %d; want 0 (cascade)", count)
+	}
+}
+
+// TestDeleteBookRefusesInFlightJob pins the F3 server guard: a book whose
+// processing job is queued or running must not be deletable. Deleting it
+// would leave the worker running against a book row the job no longer
+// references (processing_jobs.book_id is ON DELETE SET NULL).
+func TestDeleteBookRefusesInFlightJob(t *testing.T) {
+	for _, status := range []string{jobStatusQueued, jobStatusRunning} {
+		t.Run(status, func(t *testing.T) {
+			h := newTestHandlerWithJobs(t)
+			if _, err := h.svc.DB.Exec(
+				`INSERT INTO books (id, title, status) VALUES (1, 'Busy Book', 'processing')`,
+			); err != nil {
+				t.Fatalf("seed book: %v", err)
+			}
+			if _, err := h.svc.DB.Exec(
+				`INSERT INTO processing_jobs (id, book_id, status) VALUES ('job-1', 1, ?)`, status,
+			); err != nil {
+				t.Fatalf("seed job: %v", err)
+			}
+
+			ctx := chi.NewRouteContext()
+			ctx.URLParams.Keys = append(ctx.URLParams.Keys, "id")
+			ctx.URLParams.Values = append(ctx.URLParams.Values, "1")
+			req := httptest.NewRequest("DELETE", "/api/books/1", nil)
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, ctx))
+			w := httptest.NewRecorder()
+			h.DeleteBook(w, req)
+			if w.Code != http.StatusConflict {
+				t.Fatalf("delete status = %d; want 409 — body: %s", w.Code, w.Body.String())
+			}
+			if body := w.Body.String(); !strings.Contains(body, "cancel") {
+				t.Errorf("refusal body = %q; want the cancel remedy", body)
+			}
+
+			var books int
+			if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM books WHERE id = 1").Scan(&books); err != nil {
+				t.Fatalf("count books: %v", err)
+			}
+			if books != 1 {
+				t.Errorf("books = %d; want the book preserved while its job is in flight", books)
+			}
+		})
+	}
+}
+
+// TestDeleteBookAllowsTerminalJobs is the guard's complement: a finished,
+// failed, or cancelled job no longer blocks deletion.
+func TestDeleteBookAllowsTerminalJobs(t *testing.T) {
+	for _, status := range []string{"done", "error", jobStatusCancelled} {
+		t.Run(status, func(t *testing.T) {
+			h := newTestHandlerWithJobs(t)
+			if _, err := h.svc.DB.Exec(
+				`INSERT INTO books (id, title, status) VALUES (1, 'Free Book', 'done')`,
+			); err != nil {
+				t.Fatalf("seed book: %v", err)
+			}
+			if _, err := h.svc.DB.Exec(
+				`INSERT INTO processing_jobs (id, book_id, status) VALUES ('job-1', 1, ?)`, status,
+			); err != nil {
+				t.Fatalf("seed job: %v", err)
+			}
+
+			ctx := chi.NewRouteContext()
+			ctx.URLParams.Keys = append(ctx.URLParams.Keys, "id")
+			ctx.URLParams.Values = append(ctx.URLParams.Values, "1")
+			req := httptest.NewRequest("DELETE", "/api/books/1", nil)
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, ctx))
+			w := httptest.NewRecorder()
+			h.DeleteBook(w, req)
+			if w.Code != http.StatusNoContent {
+				t.Fatalf("delete status = %d; want 204 — body: %s", w.Code, w.Body.String())
+			}
+			// A 204 alone does not prove the delete ran: the handler also
+			// answers 204 after a zero-row DELETE, so assert the row is gone
+			// or a predicate that blocks terminal jobs would pass this test.
+			var books int
+			if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM books WHERE id = 1").Scan(&books); err != nil {
+				t.Fatalf("count books: %v", err)
+			}
+			if books != 0 {
+				t.Errorf("books = %d; want 0 (a terminal job must not block the delete)", books)
+			}
+		})
+	}
+}
+
+// TestDeleteBookFailsClosedWhenJobStateUnreadable pins the guard's
+// fail-closed contract: a table-read failure (here: the jobs table is
+// absent) must answer 500, never a 204, and the book row must survive —
+// a book whose job state could not be established is never deleted.
+func TestDeleteBookFailsClosedWhenJobStateUnreadable(t *testing.T) {
+	h := newTestHandlerWithJobs(t)
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO books (id, title, status) VALUES (1, 'Unreadable State', 'pending')`,
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	// Dropping the table makes ONLY the job-state read fail deterministically
+	// ("no such table: processing_jobs"); the books table stays readable for
+	// the post-call assertion.
+	if _, err := h.svc.DB.Exec("DROP TABLE processing_jobs"); err != nil {
+		t.Fatalf("drop processing_jobs: %v", err)
+	}
+
+	ctx := chi.NewRouteContext()
+	ctx.URLParams.Keys = append(ctx.URLParams.Keys, "id")
+	ctx.URLParams.Values = append(ctx.URLParams.Values, "1")
+	req := httptest.NewRequest("DELETE", "/api/books/1", nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, ctx))
+	w := httptest.NewRecorder()
+	h.DeleteBook(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("delete status = %d; want 500 — body: %s", w.Code, w.Body.String())
+	}
+	var books int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM books WHERE id = 1").Scan(&books); err != nil {
+		t.Fatalf("count books: %v", err)
+	}
+	if books != 1 {
+		t.Errorf("books = %d; want the book preserved when its job state is unreadable", books)
+	}
+}
+
+// TestDeleteBookNeverSeededIDIsNoOp pins the guarded DELETE's zero-rows
+// fallthrough: an id that was never in the books table makes the guarded
+// statement match 0 rows, the re-count is 0, the exists check confirms 0,
+// and the handler answers 204 (idempotent) — not 409/500. A cover file for
+// that id is cleaned in the same pass: a rowless id with a stray cover is
+// an orphan by definition, so the idempotent delete removes it too.
+func TestDeleteBookNeverSeededIDIsNoOp(t *testing.T) {
+	coversDir := t.TempDir()
+	coverID := int64(99)
+	h := &Handler{svc: &Services{DB: newTestDB(t), CoversDir: coversDir}}
+	coverPath := filepath.Join(coversDir, fmt.Sprintf("%d.jpg", coverID))
+	if err := os.WriteFile(coverPath, []byte("art"), 0o644); err != nil {
+		t.Fatalf("seed cover: %v", err)
+	}
+
+	ctx := chi.NewRouteContext()
+	ctx.URLParams.Keys = append(ctx.URLParams.Keys, "id")
+	ctx.URLParams.Values = append(ctx.URLParams.Values, fmt.Sprint(coverID))
+	req := httptest.NewRequest("DELETE", fmt.Sprintf("/api/books/%d", coverID), nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, ctx))
+	w := httptest.NewRecorder()
+	h.DeleteBook(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d; want 204 — body: %s", w.Code, w.Body.String())
+	}
+	var books int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM books WHERE id = ?", coverID).Scan(&books); err != nil {
+		t.Fatalf("count books: %v", err)
+	}
+	if books != 0 {
+		t.Errorf("books = %d; want 0 (the fallthrough must not create a row)", books)
+	}
+	if _, err := os.Stat(coverPath); !os.IsNotExist(err) {
+		t.Errorf("stray cover for a rowless id must be cleaned by the idempotent delete: %v", err)
 	}
 }
 

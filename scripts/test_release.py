@@ -251,6 +251,9 @@ class ReleaseLifecycleBehavior(LifecycleFixture):
         self.repo.fetch()
         self.repo.release("v1.10.0", self.source)
         self.assertEqual([name for name, _ in self.repo.release_commands], ["create"])
+        # The draft title is the bare version tag, never "Release {tag}".
+        _, create_args = self.repo.release_commands[0]
+        self.assertEqual(create_args[create_args.index("--title") + 1], "v1.10.0")
         draft = self.repo.releases[-1]
         self.assertTrue(draft["draft"])
         self.repo.release("v1.10.0", self.source)
@@ -646,6 +649,30 @@ class AssetsBehavior(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "differs from tested build"):
             self.run_assets()
         self.assertEqual(self.store.uploads, [])
+
+    def test_unlabelled_existing_archive_without_digest_must_match_downloaded_body(self):
+        # Resume contract for the older asset shape: no stored digest, no
+        # provenance label. The digest is only knowable from the downloaded
+        # body, which must still match the tested rebuild.
+        name = ARCHIVE_NAMES[2]
+        other = "archive-other-bytes".encode()
+        self.store.assets.append({"id": 5, "name": name, "digest": None, "label": ""})
+        self.store.bodies[name] = other
+        self.write_dist()
+        with self.assertRaisesRegex(release.ReleaseError, "differs from tested build"):
+            self.run_assets()
+        self.assertEqual(self.store.uploads, [])
+
+    def test_unlabelled_existing_archive_without_digest_matching_body_is_kept(self):
+        name = ARCHIVE_NAMES[2]
+        preserved = self.built[name]
+        self.store.assets.append({"id": 5, "name": name, "digest": None, "label": ""})
+        self.store.bodies[name] = preserved
+        self.write_dist()
+        self.run_assets()
+        uploaded = self.uploaded()
+        self.assertNotIn(name, uploaded)
+        self.assertEqual(uploaded[CHECKSUM_NAME][1], manifest(dict(self.built)))
 
     def test_unlabelled_existing_archive_matching_build_is_kept(self):
         name = ARCHIVE_NAMES[1]
