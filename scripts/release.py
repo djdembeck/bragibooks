@@ -218,7 +218,7 @@ class Repository:
         if target is None:
             require(not publish, "Cannot finalize a missing draft release")
             self.run("gh", "release", "create", tag, "--repo", self.repository(),
-                     "--verify-tag", "--draft", "--title", f"Release {tag}", "--notes", "")
+                     "--verify-tag", "--draft", "--title", tag, "--notes", "")
             return
         if publish and target.get("draft"):
             current = semver(tag.removeprefix("v"))
@@ -412,7 +412,7 @@ def publish_assets(repository, source, version, fetcher=None):
             # immutable store asset or a generated pending upload.
             if item["type"] == "Archive":
                 planned[name] = expected
-                pending.append((path, asset_label(source, version, expected)))
+                pending.append(path)
             continue
         actual = asset_digest(asset, repository, registry_run)
         label = asset.get("label") or ""
@@ -441,15 +441,18 @@ def publish_assets(repository, source, version, fetcher=None):
                     "Existing checksum manifest does not describe the planned archive set")
     else:
         # No immutable manifest exists: generate one from the combined verified
-        # archive digests so a valid partial retry can complete even when the
-        # rebuild bytes nondeterministically differ.
+        # archive digests, so a partial retry completes only when every
+        # preserved asset verifies: provenance label for labelled assets,
+        # exact content-digest match for unlabelled ones.
         checksum_path = Path(checksums[0]["path"])
         checksum_path.write_bytes(manifest)
-        pending.append((checksum_path,
-                        asset_label(source, version,
-                                    "sha256:" + hashlib.sha256(manifest).hexdigest())))
-    for path, label in pending:
-        registry_run("gh", "release", "upload", version, f"{path}#{label}", "--repo", repository)
+        pending.append(checksum_path)
+    # The asset name is the plain file name. gh's `#label` display suffix
+    # renders as the visible asset name on the release page, so no provenance
+    # suffix is sent; provenance is enforced at reconciliation instead (label
+    # on historical assets, content digest on unlabeled ones).
+    for path in pending:
+        registry_run("gh", "release", "upload", version, str(path), "--repo", repository)
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)

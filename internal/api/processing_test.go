@@ -322,8 +322,19 @@ func TestCancelRunningJob(t *testing.T) {
 	if finalStatus != "cancelled" {
 		t.Fatalf("final job status = %q; want cancelled (process must be killed, not errored)", finalStatus)
 	}
-	if got := bookStatusFromDB(t, h.svc.DB, 1); got != "matched" {
-		t.Errorf("final book status = %q; want matched", got)
+	// The book restore follows the job's terminal write on the worker and
+	// can trail it briefly while a write lock drains; poll with the same
+	// window as the job status instead of reading once.
+	finalBook := "processing"
+	for time.Now().Before(deadline) {
+		finalBook = bookStatusFromDB(t, h.svc.DB, 1)
+		if finalBook == "matched" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if finalBook != "matched" {
+		t.Errorf("final book status = %q; want matched", finalBook)
 	}
 }
 

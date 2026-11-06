@@ -184,6 +184,12 @@ func (h *Handler) ListBooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The source-ASIN projection is a pending-queue aid only; other
+	// statuses and all_ids mode omit it entirely.
+	if status == "pending" {
+		h.attachSourceASINs(booksWithPeople)
+	}
+
 	writeJSON(w, http.StatusOK, ListBooksResponse{
 		Books: booksWithPeople,
 		Total: totalCount,
@@ -741,6 +747,10 @@ func replacePeople(db *sql.DB, bookID int64, authors, narrators []PersonUpdate) 
 }
 
 // DeleteBook handles DELETE /api/books/:id, deleting the book and cascading people.
+// A book with a queued or running processing job is refused with 409: the
+// worker holds the book's row only loosely (processing_jobs.book_id is ON
+// DELETE SET NULL), so deleting it would leave the job running against a
+// record that no longer exists.
 func (h *Handler) DeleteBook(w http.ResponseWriter, r *http.Request) {
 	id := chiURLParam(r, "id")
 	bookID := parseInt64Param(id)
@@ -756,10 +766,60 @@ func (h *Handler) DeleteBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = h.svc.DB.Exec("DELETE FROM books WHERE id = ?", bookID)
+	// Count rather than list: the refusal only needs to state that the book
+	// is busy, and a table-read failure must fail closed (never delete a
+	// book whose job state could not be established).
+	activeJobs, err := h.activeJobCount(bookID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("check active jobs: %v", err))
+		return
+	}
+	if activeJobs > 0 {
+		writeError(w, http.StatusConflict, busyBookMessage(bookID, activeJobs))
+		return
+	}
+
+	// The delete repeats the job check inside the statement: a job queued
+	// between the count above and this Exec must not be orphaned either.
+	res, err := h.svc.DB.Exec(
+		"DELETE FROM books WHERE id = ? AND NOT EXISTS (SELECT 1 FROM processing_jobs WHERE book_id = ? AND status IN (?, ?))",
+		bookID, bookID, jobStatusQueued, jobStatusRunning,
+	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("delete book: %v", err))
 		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Either the job appeared in the race window or the book vanished.
+		// Re-count so the caller gets the actionable refusal rather than a
+		// silent 204. The re-check is authoritative: a failed count fails
+		// closed, because reporting success for a row that may still exist
+		// would make the caller prune a book it did not delete.
+		remaining, err := h.activeJobCount(bookID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("check active jobs after delete: %v", err))
+			return
+		}
+		if remaining > 0 {
+			writeError(w, http.StatusConflict, busyBookMessage(bookID, remaining))
+			return
+		}
+		// No active job blocks it, so a surviving row means the book still
+		// exists (a job went terminal between the guard and the DELETE).
+		// Never answer 204 for a book that was not deleted.
+		var exists int
+		if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM books WHERE id = ?", bookID).Scan(&exists); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("confirm book deletion: %v", err))
+			return
+		}
+		if exists > 0 {
+			// The row survived while no job blocked it: a job reached the
+			// queue between the re-count and the statement. Report the
+			// conflict rather than deleting without knowing who owns it.
+			writeError(w, http.StatusConflict, fmt.Sprintf(
+				"book %d was not deleted; a processing job was queued concurrently — retry once it is visible", bookID))
+			return
+		}
 	}
 
 	// The extracted cover is keyed by book ID; leaving it behind would leak
@@ -769,6 +829,25 @@ func (h *Handler) DeleteBook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// activeJobCount returns the number of queued or running processing jobs
+// for a book.
+func (h *Handler) activeJobCount(bookID int64) (int, error) {
+	var activeJobs int
+	err := h.svc.DB.QueryRow(
+		"SELECT COUNT(*) FROM processing_jobs WHERE book_id = ? AND status IN (?, ?)",
+		bookID, jobStatusQueued, jobStatusRunning,
+	).Scan(&activeJobs)
+	return activeJobs, err
+}
+
+// busyBookMessage is the delete refusal's operator-facing text: it names
+// the remedy, since the client cannot cancel the job from the delete flow.
+func busyBookMessage(bookID int64, activeJobs int) string {
+	return fmt.Sprintf(
+		"book %d has %d queued or running processing job(s); cancel them before deleting",
+		bookID, activeJobs)
 }
 
 // getBook returns a single book by ID, or nil if not found.
@@ -846,20 +925,18 @@ func (h *Handler) enrichBooks(books []models.Book) ([]models.BookWithPeople, err
 		return []models.BookWithPeople{}, nil
 	}
 
-	// Build IN clause with literal integer IDs (safe: IDs are int64)
-	idParts := make([]string, len(books))
+	// One placeholder per book, bound with the IDs: the same idiom the
+	// source-ASIN projection uses.
+	placeholders := make([]string, len(books))
+	args := make([]any, len(books))
 	for i, b := range books {
-		idParts[i] = fmt.Sprintf("%d", b.ID)
+		placeholders[i] = "?"
+		args[i] = b.ID
 	}
-	query := "SELECT id, book_id, name, role, audiobookdb_person_id, created_at FROM people WHERE book_id IN (" + strings.Join(idParts, ",") + ")"
+	query := "SELECT id, book_id, name, role, audiobookdb_person_id, created_at FROM people WHERE book_id IN (" +
+		strings.Join(placeholders, ",") + ")"
 
-	stmt, err := h.svc.DB.Prepare(query)
-	if err != nil {
-		return nil, err
-	}
-	defer stmt.Close()
-
-	rows, err := stmt.Query()
+	rows, err := h.svc.DB.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

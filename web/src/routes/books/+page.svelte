@@ -1,12 +1,17 @@
 <script lang="ts">
-	import { get, post } from '#lib/api.js';
+	import { get, post, put, del } from '#lib/api.js';
 	import { goto } from '$app/navigation';
 	import { page as pageStore } from '$app/state';
-	import type { BooksListResponse, BookWithPeople, OutputProfile, OutputProfilesResponse } from '#lib/types.js';
-	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt, OutputProfileSelector } from '#lib/components/index.js';
+	import type { BooksListResponse, BookWithPeople, JobsListResponse, OutputProfile, OutputProfilesResponse } from '#lib/types.js';
+	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt, OutputProfileSelector, Modal } from '#lib/components/index.js';
 	import { formatRuntime } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
+	import { createBookSelection } from '#lib/bookSelection.svelte.js';
+	import { partitionForRemoval } from '#lib/removeGuard.js';
+	import { fetchInChunks } from '#lib/fetchInChunks.js';
+	import { criteriaChanged } from '#lib/bulkCriteria.js';
+	import { bulkErrorRetryDispatch, type BulkErrorAction } from '#lib/staleBulkError.js';
 
 	const limit = 20;
 	const filters: { value: string; label: string }[] = [
@@ -30,15 +35,35 @@
 	// Uncontrolled-style input value; the debounce below commits it to `q`.
 	let inputValue = $state('');
 
-	// Select-all-matching selection state
-	let allMatchedIds = $state<Set<number> | null>(null);
-	let allMatchedTotal = $state(0);
-	// The all_ids payload is capped server-side; when true the selection
-	// holds only the first page of matches, so the UI must say so.
-	let allMatchedTruncated = $state(false);
+	// Selection model: a "select all matching" baseline (the server-capped
+	// ID list) plus row-level edits layered on top of it.
+	//   effective selection = (baseline − excluded) ∪ added
+	const selection = createBookSelection();
 	let selectingAll = $state(false);
-	let bulkRequeueing = $state(false);
+	let selectAllControl = $state<HTMLInputElement | null>(null);
+	// Which bulk operation is running (its button shows progress); null = idle.
+	let bulkActing = $state<null | 'requeue' | 'done' | 'remove'>(null);
+	// Books finished by the running sequential loop — shown as "n of m".
+	let bulkProgress = $state(0);
+	// Total books in the running loop, captured when it starts: the live
+	// selection shrinks as rows land, so the denominator must not track it.
+	let bulkTotal = $state(0);
+	// Short-lived success line after a completed bulk operation.
+	let bulkSuccess = $state<string | null>(null);
+	let successTimer: ReturnType<typeof setTimeout> | null = null;
 	let bulkError = $state<CleanedAdbError | null>(null);
+	// Which operation produced bulkError, so Retry re-runs the right one.
+	// 'confirm' = the pre-confirmation title fetch failed; the deletion
+	// itself never ran, so Retry rebuilds the confirmation list.
+	let bulkErrorAction = $state<BulkErrorAction>('select');
+	// Removal confirmation dialog.
+	let confirmRemoveOpen = $state(false);
+	let removeList = $state<BookWithPeople[]>([]);
+	let removeListLoading = $state(false);
+	// Selected books the dialog will NOT delete because a processing job owns
+	// them. The server refuses such a delete anyway (409); excluding them here
+	// keeps the confirmation list honest instead of failing mid-loop.
+	let removeSkipped = $state<BookWithPeople[]>([]);
 	let profiles = $state<OutputProfile[]>([]);
 	let profilesError = $state<string | null>(null);
 	// null = "Global settings"; set only when the user picks a saved profile.
@@ -150,45 +175,128 @@
 			if (requestedQ) params.set('q', requestedQ);
 			params.set('all_ids', '1');
 			const res = await get<{ ids: number[]; total: number; truncated: boolean }>(`/books?${params.toString()}`);
-			if (filter !== requestedFilter || q !== requestedQ) return;
+			if (criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) return;
 			if (!res || !Array.isArray(res.ids)) throw new Error('Could not load matching book IDs.');
-			allMatchedIds = new Set(res.ids);
 			// The server caps the all_ids payload: total/truncated make the
 			// cut explicit so the UI never treats a capped list as the whole
 			// matching set (finding: F21).
-			allMatchedTotal = res.total ?? res.ids.length;
-			allMatchedTruncated = Boolean(res.truncated);
+			selection.applyBaseline(new Set(res.ids), res.total ?? res.ids.length, Boolean(res.truncated));
 		} catch (e) {
-			if (filter !== requestedFilter || q !== requestedQ) return;
+			if (criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) return;
 			bulkError = toCleanedError(e);
-			allMatchedIds = null;
+			// Retry re-runs the select-all that just failed, not the previous
+			// bulk operation (e.g. a failed requeue) whose action it would
+			// otherwise inherit.
+			bulkErrorAction = 'select';
+			selection.dropBaseline();
 		} finally {
 			selectingAll = false;
+			selectAllOptimistic = null;
 		}
 	}
 
+	function deselectAllMatching() {
+		if (!selection.ids) return;
+		bulkError = null;
+		selection.deselectAll();
+	}
+
 	function clearSelection() {
-		allMatchedIds = null;
-		allMatchedTotal = 0;
-		allMatchedTruncated = false;
+		selection.clear();
 		bulkError = null;
 		selectedProfileId = null; // The batch it applied to no longer exists.
 	}
 
-	async function bulkRequeue() {
-		if (!allMatchedIds || allMatchedIds.size === 0) return;
-		bulkRequeueing = true;
+	// Count of selected books across the WHOLE matching set (not just the
+	// visible page) — the size the bulk requeue, mark-done, and remove
+	// operations will each actually send.
+	const selectedCount = $derived.by(() => selection.countSelected());
+
+	// The select-all checkbox's visible state: checked when every matching
+	// book is selected (including off-page books), indeterminate otherwise.
+	const selectAllChecked = $derived(
+		response !== null && response.total > 0 && selectedCount === response.total
+	);
+	const selectAllIndeterminate = $derived(selectedCount > 0 && !selectAllChecked);
+	// While a select-all request is in flight, the derived state above has
+	// not moved yet; keep the tick on the side the operator clicked so a
+	// slow response does not visibly revert the checkbox.
+	let selectAllOptimistic = $state<boolean | null>(null);
+	const selectAllBoxChecked = $derived(
+		selectingAll && selectAllOptimistic !== null ? selectAllOptimistic : selectAllChecked
+	);
+	// The selector's summary row (profile picked, or the list unavailable)
+	// is what breaks the control row onto two lines; the bar's alignment
+	// switches on the same condition.
+	const profileSummaryVisible = $derived(selectedProfileId !== null || profilesError !== null);
+
+	$effect(() => {
+		if (selectAllControl) {
+			// While a select-all request is in flight the tick shows the
+			// optimistic state; a stale partial selection must not dash it.
+			selectAllControl.indeterminate = !selectingAll && selectAllIndeterminate;
+		}
+	});
+
+	// Toolbar select-all control: checked → the whole matching set;
+	// unchecked with a partial selection → deselect everything; unchecked
+	// with none selected → select all again (tri-state).
+	function onselectAllChange(event: Event) {
+		const checked = (event.currentTarget as HTMLInputElement).checked;
 		bulkError = null;
+		if (checked) {
+			if (!selection.ids) {
+				// Fresh select-all: the tick stays optimistically on until
+				// the response lands (or the optimistic null resets it).
+				selectAllOptimistic = true;
+				void selectAllMatching();
+			} else {
+				selection.clearRowEdits();
+				selectAllOptimistic = null;
+			}
+		} else {
+			// Unchecked: the box only renders checked/indeterminate when
+			// selectedCount > 0, so an uncheck always deselects a non-empty
+			// selection. (A "nothing selected" uncheck is unreachable.)
+			deselectAllMatching();
+			selection.clearRowEdits();
+			selectAllOptimistic = null;
+		}
+	}
+
+	// The book IDs a bulk operation will send — the effective selection.
+	function effectiveSelectedIds(): number[] {
+		return selection.effectiveSelectedIds();
+	}
+
+	function showBulkSuccess(message: string) {
+		bulkSuccess = message;
+		if (successTimer) clearTimeout(successTimer);
+		successTimer = setTimeout(() => (bulkSuccess = null), 4000);
+	}
+	$effect(() => () => {
+		if (successTimer) clearTimeout(successTimer);
+	});
+
+	// A filter/search change is a stale-selection signal for EVERY bulk
+	// operation, so all of them share this early-exit pattern: a request that
+	// outlives the criteria that created it is discarded, never applied.
+
+	async function bulkRequeue() {
+		if (selectedCount === 0) return;
+		bulkActing = 'requeue';
+		bulkError = null;
+		bulkSuccess = null;
 		try {
-			const ids = [...allMatchedIds];
+			const ids = effectiveSelectedIds();
 			// Snapshot with the ids: clearSelection() (filter/search change)
 			// nulls selectedProfileId mid-await, which would drop the pick.
 			const profileId = selectedProfileId;
 			// One POST whose src_dirs are parallel to book_ids: each book
 			// requeues from its own recorded source path, fetched per book.
-			const books = await Promise.all(
-				ids.map((id) => get<BookWithPeople>(`/books/${id}`)),
-			);
+			// Capped at 16 in flight (fetchInChunks preserves input order,
+			// which the parallel src_dirs require).
+			const books = await fetchInChunks(ids.map((id) => () => get<BookWithPeople>(`/books/${id}`)), 16);
 			const payload: { book_ids: number[]; src_dirs: string[]; output_profile_id?: number } = {
 				book_ids: ids,
 				src_dirs: books.map((b) => b.src_path),
@@ -199,9 +307,185 @@
 			await goto('/process');
 		} catch (e) {
 			bulkError = toCleanedError(e);
+			bulkErrorAction = 'requeue'; // Retry re-runs the requeue, not a select-all.
 		} finally {
-			bulkRequeueing = false;
+			bulkActing = null;
 		}
+	}
+
+	// Mark the selection done: one PUT per book, sequential so a mid-way
+	// failure leaves a coherent "n of m" and the survivors selected.
+	async function bulkMarkDone() {
+		const ids = effectiveSelectedIds();
+		if (ids.length === 0) return;
+		bulkActing = 'done';
+		bulkError = null;
+		bulkSuccess = null;
+		bulkProgress = 0;
+		bulkTotal = ids.length;
+		const requestedFilter = filter;
+		const requestedQ = q;
+		let failed: CleanedAdbError | null = null;
+		let done = 0;
+		try {
+			for (const id of ids) {
+				try {
+					await put(`/books/${id}`, { status: 'done' });
+					done++;
+				} catch (e) {
+					failed = toCleanedError(e);
+					break;
+				}
+				bulkProgress = done;
+				// Drop the finished books from the live view as they land so the
+				// counts and washes move one row at a time.
+				selection.pruneSelectionId(id);
+			}
+			if (!criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) {
+				// Per-book PUTs do not refresh the list response: pull the
+				// catalog again so status badges, totals, and pagination match
+				// (partial success included — the re-fetch sees what landed).
+				await loadBooks();
+				if (failed) {
+					bulkError = failed;
+					bulkErrorAction = 'done';
+				} else {
+					showBulkSuccess(`${done} book${done === 1 ? '' : 's'} marked as done.`);
+					// Nothing matching is left in the selection — collapse the bar.
+					if (selectedCount === 0) clearSelection();
+				}
+			}
+			// A criteria change already reloaded the catalog via the URL $effect;
+			// its stale-results guard suppresses only the messaging above.
+		} finally {
+			bulkActing = null;
+		}
+	}
+
+	// Removal is confirm-gated: open the dialog, then run it on confirm.
+	async function openRemoveConfirm() {
+		const ids = effectiveSelectedIds();
+		if (ids.length === 0) return;
+		confirmRemoveOpen = true;
+		removeListLoading = true;
+		removeList = [];
+		removeSkipped = [];
+		try {
+			// Titles for the confirmation list; the delete below uses the ids.
+			// Rows already on the current page come from the list response —
+			// only off-page ids need a fetch, and a select-all can leave
+			// ~1,000 of them, so the fan-out is capped at 16 in flight.
+			const known = new Map(
+				(response?.books ?? []).map((b) => [b.id, b] as [number, BookWithPeople]),
+			);
+			const missingIds = ids.filter((id) => !known.has(id));
+			const missing = await fetchInChunks(missingIds.map((id) => () => get<BookWithPeople>(`/books/${id}`)), 16);
+			for (const b of missing) known.set(b.id, b);
+			// A book with a queued or running job is owned by the queue until
+			// that job finishes, so deleting it would orphan the worker. The
+			// server refuses it too (409). Derive the set from the ACTIVE JOB
+			// list, not from books.status: the status only becomes 'processing'
+			// when a worker claims the job, so a book whose job is still queued
+			// keeps its pre-queue status and would slip through a status test.
+			// limit trims only the recent-history query; ListJobs appends the
+			// complete queued/running set regardless, so limit=1 keeps the
+			// payload small while still returning every in-flight job.
+			const activeJobs = await get<JobsListResponse>('/jobs?limit=1');
+			const { resolved, skipped } = partitionForRemoval(ids.map((id) => known.get(id)!), activeJobs.jobs);
+			removeSkipped = skipped;
+			removeList = resolved;
+			if (removeList.length === 0 && skipped.length > 0) {
+				// Nothing is deletable: keep the dialog closed and say why
+				// rather than offering a disabled Remove button.
+				confirmRemoveOpen = false;
+				bulkError = {
+					message: `Nothing to remove — ${skipped.length} book${skipped.length === 1 ? '' : 's'} still ${skipped.length === 1 ? 'has a' : 'have'} queued or running processing ${skipped.length === 1 ? 'job' : 'jobs'}. Cancel ${skipped.length === 1 ? 'it' : 'them'} first.`,
+					raw: '',
+					rateLimited: false,
+					needsSettings: false
+				};
+				bulkErrorAction = 'confirm';
+			}
+		} catch (e) {
+			confirmRemoveOpen = false;
+			bulkError = toCleanedError(e);
+			// Nothing was deleted — Retry rebuilds the confirmation list
+			// (openRemoveConfirm), not the deletion loop.
+			bulkErrorAction = 'confirm';
+		} finally {
+			removeListLoading = false;
+		}
+	}
+
+	async function bulkRemove() {
+		const ids = removeList.map((b) => b.id);
+		if (ids.length === 0) return;
+		bulkActing = 'remove';
+		bulkError = null;
+		bulkSuccess = null;
+		bulkProgress = 0;
+		bulkTotal = removeList.length;
+		const requestedFilter = filter;
+		const requestedQ = q;
+		let failed: CleanedAdbError | null = null;
+		let done = 0;
+		let survivors: BookWithPeople[] = [];
+		try {
+			for (const book of removeList) {
+				try {
+					await del(`/books/${book.id}`);
+					done++;
+				} catch (e) {
+					failed = toCleanedError(e);
+					// This book and every one after it stay selected and in
+					// the list, so Retry re-runs exactly the survivors.
+					survivors = removeList.slice(removeList.indexOf(book));
+					break;
+				}
+				bulkProgress = done;
+				selection.pruneSelectionId(book.id);
+			}
+			confirmRemoveOpen = false;
+			removeList = failed ? survivors : [];
+			removeSkipped = [];
+			if (!criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) {
+				// The list response still shows the deleted rows: pull the
+				// catalog again so rows, totals, and pagination match
+				// (partial success included — the re-fetch sees what landed).
+				await loadBooks();
+				if (failed) {
+					bulkError = failed;
+					bulkErrorAction = 'remove';
+				} else {
+					showBulkSuccess(`${done} book${done === 1 ? '' : 's'} removed.`);
+					if (selectedCount === 0) clearSelection();
+				}
+			}
+			// A criteria change already reloaded the catalog via the URL $effect;
+			// its stale-results guard suppresses only the messaging above.
+		} finally {
+			bulkActing = null;
+		}
+	}
+
+	// Alert Retry dispatch: re-run the operation that produced the error. The
+	// routing decision (clear vs. which handler) is pure — see
+	// bulkErrorRetryDispatch — so the regression (a failed select-all must take
+	// over a prior requeue's error) is testable without the page.
+	function onBulkErrorRetry() {
+		const dispatch = bulkErrorRetryDispatch(bulkErrorAction, effectiveSelectedIds().length);
+		if (dispatch === 'clear') {
+			bulkError = null;
+			return;
+		}
+		const handlers: Record<BulkErrorAction, () => void> = {
+			select: () => void selectAllMatching(),
+			requeue: () => void bulkRequeue(),
+			confirm: () => void openRemoveConfirm(),
+			done: () => void bulkMarkDone(),
+			remove: () => void bulkRemove()
+		};
+		handlers[dispatch]();
 	}
 
 	// Pagination jump
@@ -237,6 +521,12 @@
 		const nextFilter = normalizedFilter(pageStore.url.searchParams.get('status'));
 		const nextPage = normalizedPage(pageStore.url.searchParams.get('page'));
 		const nextQ = pageStore.url.searchParams.get('q') ?? '';
+		if (criteriaChanged({ filter, q }, { filter: nextFilter, q: nextQ })) {
+			// A criteria change from the URL (back/forward, deep link)
+			// redefines "all matching" — drop the selection so the bar
+			// cannot offer done/remove against the stale baseline.
+			clearSelection();
+		}
 		if (filter !== nextFilter) filter = nextFilter;
 		if (currentPage !== nextPage) currentPage = nextPage;
 		if (q !== nextQ) q = nextQ;
@@ -260,11 +550,6 @@
 	const totalPages = $derived(response ? Math.max(1, Math.ceil(response.total / limit)) : 1);
 	const startIndex = $derived(response && response.total > 0 ? currentPage * limit + 1 : 0);
 	const endIndex = $derived(response ? Math.min((currentPage + 1) * limit, response.total) : 0);
-	// The number of books the bulk requeue will actually send — the size of
-	// the ID set, which the server caps at 1,000. Kept distinct from
-	// allMatchedTotal (the FULL match count) so the UI never presents the
-	// capped selection as if the whole set were selected.
-	const allMatchedSelected = $derived(allMatchedIds ? allMatchedIds.size : 0);
 </script>
 
 <svelte:head>
@@ -275,7 +560,7 @@
 
 <PageHeader
 	title="Books"
-	description="Every book in your library, with status filters and bulk requeue."
+	description="Every book in your library, with status filters and bulk requeue, mark-as-done, and remove."
 />
 
 {#if dl.error}
@@ -302,17 +587,24 @@
 				oninput={onSearchInput}
 			/>
 			{#if response && response.total > 0}
-				<Button
-					variant="secondary"
-					loading={selectingAll}
-					onclick={() => (allMatchedIds ? clearSelection() : selectAllMatching())}
+				<label
+					class="flex min-h-11 cursor-pointer items-center gap-2 rounded-sm border border-[var(--border)] bg-[var(--surface)] px-3 text-sm font-medium text-[var(--text)] transition-colors hover:bg-[var(--surface-hover)]"
+					class:opacity-60={selectingAll}
 				>
-					{allMatchedIds ? 'Clear selection' : `Select all ${response.total}`}
-				</Button>
+					<input
+						bind:this={selectAllControl}
+						type="checkbox"
+						disabled={selectingAll}
+						checked={selectAllBoxChecked}
+						onchange={onselectAllChange}
+						aria-label={selectingAll ? 'Selecting all matching books…' : `Select all ${response.total} matching books`}
+					/>
+					{selectingAll ? 'Selecting…' : `Select all ${response.total}`}
+				</label>
 			{/if}
 		</div>
 	</div>
-	<div class="flex flex-wrap gap-2">
+	<div class="flex flex-wrap items-center gap-2">
 		{#each filters as f}
 			<button
 				type="button"
@@ -327,52 +619,128 @@
 				{f.label}
 			</button>
 		{/each}
+		<p class="ml-auto hidden items-center gap-1.5 text-xs text-[var(--text-muted)] sm:flex">
+			Shortcuts:
+			<kbd class="rounded-sm border border-[var(--border)] bg-[var(--bg-panel)] px-1.5 py-0.5 font-mono text-[11px]">/</kbd>
+			search
+			<kbd class="rounded-sm border border-[var(--border)] bg-[var(--bg-panel)] px-1.5 py-0.5 font-mono text-[11px]">j</kbd>
+			<kbd class="rounded-sm border border-[var(--border)] bg-[var(--bg-panel)] px-1.5 py-0.5 font-mono text-[11px]">k</kbd>
+			pages
+		</p>
 	</div>
 
-	<!-- ── Bulk requeue bar ──────────────────────────────────── -->
-	{#if allMatchedIds}
-		<div class="panel mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 p-3" role="region" aria-label="Bulk requeue" aria-live="polite">
-			<p class="text-sm text-[var(--text)]">
-				<span class="font-mono font-semibold">{allMatchedSelected}</span> books selected for bulk requeue
-				{#if allMatchedTruncated}
-					<span class="text-xs text-[var(--warning, var(--text-muted))]"
-						>({allMatchedSelected} of {allMatchedTotal} matching books — server cap 1,000)</span
-					>
-				{:else}
-					<span class="text-xs text-[var(--text-muted)]">· {activeFilterLabel.toLowerCase()}{q ? ` · “${q}”` : ''}</span>
-				{/if}
-			</p>
-			<div class="flex flex-wrap items-center gap-x-4 gap-y-1">
-				<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-					<OutputProfileSelector
-						{profiles}
-						bind:selectedProfileId
-						{profilesError}
-						batchCount={allMatchedSelected}
-						batchScope="queue"
-						selectId="bulk-output-profile-select"
-						summaryId="bulk-profile-summary"
-						labelClass="text-sm"
-						selectClass="min-h-11 border border-[var(--border)] bg-[var(--bg-panel)] px-2 text-sm text-[var(--text)]"
-						summaryClass="w-full text-xs"
-					/>
-				</div>
-				<div class="flex items-center gap-2">
-					<Button loading={bulkRequeueing} onclick={bulkRequeue}>Start requeue</Button>
-					<Button variant="ghost" disabled={bulkRequeueing} onclick={clearSelection}>Clear</Button>
+	<!-- ── Bulk action bar ───────────────────────────────────── -->
+	{#if selectedCount > 0}
+		<div class="panel mt-3 p-3" role="region" aria-label="Bulk actions" aria-live="polite">
+			<div class="flex flex-wrap items-start gap-3">
+				<!-- Shares the controls' top edge while the profile caption
+				     renders (a centered count floats in a tall block); on the
+				     single-line Global-settings state it centers on the row. -->
+				<p class="w-full text-sm text-[var(--text)] sm:w-auto sm:mr-auto {profileSummaryVisible ? '' : 'sm:self-center'}">
+					<span class="font-mono font-semibold">{selectedCount}</span> books selected
+					{#if selection.truncated}
+						<span class="text-xs text-[var(--state-amber)]"
+							>({selectedCount} of {selection.total} matching — server cap 1,000)</span
+						>
+					{/if}
+				</p>
+				<!-- One control row: the profile pick and the actions share a
+				     common top edge, so the select and buttons stay on the same
+				     line whether or not a profile summary renders below. -->
+				<div class="w-full min-w-0 sm:ml-auto sm:w-auto sm:flex sm:gap-x-3 {profileSummaryVisible ? 'sm:items-start' : 'sm:items-center'}">
+					<div class="w-full min-w-0 sm:w-72">
+						<OutputProfileSelector
+							{profiles}
+							bind:selectedProfileId
+							{profilesError}
+							batchCount={selectedCount}
+							batchScope="queue"
+							selectId="bulk-output-profile-select"
+							summaryId="bulk-profile-summary"
+							labelClass="text-sm"
+							selectClass="flex-1 min-h-11 border border-[var(--border)] bg-[var(--bg-panel)] px-2 text-sm text-[var(--text)]"
+							summaryClass="w-full text-xs"
+						/>
+					</div>
+					<div class="mt-2 grid w-full grid-cols-1 gap-2 sm:mt-0 sm:flex sm:w-auto sm:items-center">
+						<Button loading={bulkActing === 'requeue'} disabled={bulkActing !== null} onclick={bulkRequeue}>
+							Requeue &amp; view progress
+						</Button>
+						<Button variant="secondary" loading={bulkActing === 'done'} disabled={bulkActing !== null} onclick={bulkMarkDone}>
+							{bulkActing === 'done' ? `Marking ${bulkProgress} of ${bulkTotal}…` : 'Mark as done'}
+						</Button>
+						<Button variant="danger" loading={bulkActing === 'remove'} disabled={bulkActing !== null} onclick={openRemoveConfirm}>
+							{bulkActing === 'remove' ? `Removing ${bulkProgress} of ${bulkTotal}…` : 'Remove'}
+						</Button>
+						<Button variant="ghost" disabled={bulkActing !== null} onclick={clearSelection}>Clear</Button>
+					</div>
+					<!-- Screen readers: the per-item counter on the buttons is
+					     not in its own live region, so mirror it here. -->
+					{#if bulkActing === 'done' || bulkActing === 'remove'}
+						<p
+							class="sr-only"
+							role="status"
+							>{bulkActing === 'done' ? `Marking ${bulkProgress} of ${bulkTotal}…` : `Removing ${bulkProgress} of ${bulkTotal}…`}</p
+						>
+					{/if}
 				</div>
 			</div>
 		</div>
 	{/if}
+	{#if bulkSuccess}
+		<p class="mt-2 text-sm text-[var(--state-green)]" role="status">{bulkSuccess}</p>
+	{/if}
 	{#if bulkError}
 		<div class="mt-3">
-			<Alert variant="error" onretry={selectAllMatching}>
+			<Alert variant="error" onretry={onBulkErrorRetry}>
 				{bulkError.message}
 				<ErrorDetail raw={bulkError.raw} needsSettings={bulkError.needsSettings} />
 			</Alert>
 		</div>
 	{/if}
 </div>
+
+<!-- ── Removal confirmation ──────────────────────────────────── -->
+<Modal
+	bind:open={confirmRemoveOpen}
+	title="Remove books"
+	closeDisabled={bulkActing === 'remove'}
+	beforeClose={() => bulkActing !== 'remove'}
+>
+	<p class="text-sm text-[var(--text-secondary)]">
+		{removeList.length} book{removeList.length === 1 ? '' : 's'} will be removed from the library.
+		Files on disk are not touched.
+	</p>
+	{#if removeSkipped.length > 0}
+		<p class="mt-2 text-sm text-[var(--text-muted)]">
+			{removeSkipped.length} selected book{removeSkipped.length === 1 ? ' is' : 's are'} skipped — a queued or running
+			processing job owns {removeSkipped.length === 1 ? 'it' : 'them'}. Cancel the job first to remove the book.
+		</p>
+	{/if}
+	{#if removeListLoading}
+		<p class="mt-3 text-sm text-[var(--text-muted)]">Loading the list…</p>
+	{:else if removeList.length > 0}
+		<ul class="mt-3 max-h-72 overflow-y-auto rounded-sm border border-[var(--border-subtle)]" aria-label="Books to remove">
+			{#each removeList as book (book.id)}
+				<li class="border-b border-[var(--border-subtle)] px-3 py-2 last:border-b-0">
+					<p class="truncate text-sm" title={book.title}>{book.title}</p>
+					<p class="truncate text-xs text-[var(--text-muted)]">
+						{book.authors.map((a) => a.name).join(', ') || 'Unknown author'}
+						{#if book.series} · {book.series}{/if}
+					</p>
+				</li>
+			{/each}
+		</ul>
+	{/if}
+	{#snippet footer()}
+		<div class="flex items-center gap-2">
+			<Button variant="ghost" disabled={bulkActing === 'remove'} onclick={() => (confirmRemoveOpen = false)}>Cancel</Button>
+			<Button variant="danger" loading={bulkActing === 'remove'} disabled={removeListLoading || removeList.length === 0} onclick={bulkRemove}>
+				Remove {removeList.length || selectedCount} {removeList.length === 1 ? 'book' : 'books'}
+			</Button>
+		</div>
+	{/snippet}
+</Modal>
 
 <!-- ── Catalog list ──────────────────────────────────────────── -->
 {#if response && !dl.showSkeleton}
@@ -415,37 +783,41 @@
 	/>
 {:else}
 	<!-- Catalog list — whole row links to the book record -->
-	<ul class="divide-y divide-[var(--border-subtle)] overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]" aria-label="Book catalog">
+	<ul class="catalog-list overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-panel)]" aria-label="Book catalog">
 		{#each response.books as book (book.id)}
 			<li>
-				<a
-					href="/books/{book.id}"
-					class="flex items-center gap-4 px-4 py-3 no-underline transition-colors hover:bg-[var(--surface-hover)]"
-					aria-label="{book.title} — open record"
-				>
-				<CoverArt url={book.cover_image_url} title={book.title} size="sm" />
-
-				<div class="min-w-0 flex-1">
-					<h3 class="line-clamp-2 sm:truncate font-medium" title={book.title}>{book.title}</h3>
-					<p
-						class="truncate text-sm text-[var(--text-muted)]"
-						title={book.authors.map((a) => a.name).join(', ') || 'Unknown author'}
-					>
-						{book.authors.map((a) => a.name).join(', ') || 'Unknown author'}
-						{#if book.series}
-							<span class="text-[var(--text-muted)]"> · {book.series}</span>
-						{/if}
-						{#if book.runtime_length_minutes}
-							<span class="text-[var(--text-secondary)]"> · {formatRuntime(book.runtime_length_minutes)}</span>
-						{/if}
-					</p>
-					{#if book.status_message}
-						<p class="mt-0.5 truncate text-xs text-[var(--text-muted)]">{book.status_message}</p>
-					{/if}
+				<div class="book-row" class:book-row--selected={selection.isBookSelected(book)}>
+					<label class="book-check">
+						<input
+							type="checkbox"
+							checked={selection.isBookSelected(book)}
+							onchange={() => selection.toggleBook(book)}
+							aria-label="Select {book.title}"
+						/>
+					</label>
+					<a href="/books/{book.id}" class="book-row__link" aria-label="{book.title} — open record">
+						<CoverArt url={book.cover_image_url} title={book.title} size="sm" />
+						<div class="min-w-0 flex-1">
+							<h3 class="line-clamp-2 sm:truncate font-medium" title={book.title}>{book.title}</h3>
+							<p
+								class="truncate text-sm text-[var(--text-muted)]"
+								title={book.authors.map((a) => a.name).join(', ') || 'Unknown author'}
+							>
+								{book.authors.map((a) => a.name).join(', ') || 'Unknown author'}
+								{#if book.series}
+									<span class="text-[var(--text-muted)]"> · {book.series}</span>
+								{/if}
+								{#if book.runtime_length_minutes}
+									<span class="text-[var(--text-secondary)]"> · {formatRuntime(book.runtime_length_minutes)}</span>
+								{/if}
+							</p>
+							{#if book.status_message}
+								<p class="mt-0.5 truncate text-xs text-[var(--text-muted)]">{book.status_message}</p>
+							{/if}
+						</div>
+					</a>
+					<StatusBadge status={book.status} />
 				</div>
-
-				<StatusBadge status={book.status} />
-				</a>
 			</li>
 		{/each}
 	</ul>
@@ -485,3 +857,45 @@
 		</div>
 	{/if}
 {/if}
+
+<style>
+	.catalog-list {
+		display: flex;
+		flex-direction: column;
+	}
+	.catalog-list li + li .book-row {
+		border-top: 1px solid var(--border-subtle);
+	}
+	.book-row {
+		display: grid;
+		grid-template-columns: 2.75rem minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 0.5rem 1rem;
+		padding: 0.75rem 1rem 0.75rem 0.5rem;
+	}
+	.book-row:hover,
+	.book-row:hover .book-row__link {
+		background: var(--surface-hover);
+	}
+	.book-row--selected,
+	.book-row--selected:hover,
+	.book-row--selected:hover .book-row__link {
+		background: var(--workspace-selected);
+	}
+	.book-check {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		min-height: 2.75rem;
+		min-width: 2.75rem;
+		cursor: pointer;
+	}
+	.book-row__link {
+		display: flex;
+		align-items: center;
+		gap: 1rem;
+		min-width: 0;
+		text-decoration: none;
+		color: inherit;
+	}
+</style>

@@ -337,6 +337,46 @@ func TestExtractSourceMetadataMissingSourceIsDegraded(t *testing.T) {
 	}
 }
 
+// TestExtractSourceMetadataMissingSourceFilenameASINIsDegraded checks that
+// a stat failure with a canonical ASIN in the filename keeps the value for
+// display but marks the pass degraded: the surviving ASIN is not complete
+// evidence, so Complete() must not report a clean extraction.
+func TestExtractSourceMetadataMissingSourceFilenameASINIsDegraded(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	srcPath := filepath.Join(t.TempDir(), "b012345678 - gone.m4b")
+	snap := runExtraction(t, ffprobe, srcPath)
+
+	// The filename ASIN survives for display.
+	wantField(t, snap, FieldASIN, StatusPresent, "B012345678")
+	if got := snap.Fields[FieldASIN].Source; got != SourceFilename {
+		t.Errorf("asin source = %q, want %q", got, SourceFilename)
+	}
+	// ...but the unreadable source degrades the whole pass.
+	if !snap.Degraded {
+		t.Error("degraded = false, want true for an unreadable source")
+	}
+	if snap.Complete() {
+		t.Error("Complete() = true; a stat-failed source is incomplete evidence")
+	}
+	for key, f := range snap.Fields {
+		if key == FieldASIN {
+			continue // the surviving filename value carries no probe error
+		}
+		if f.Status != StatusError || f.Error == "" {
+			t.Errorf("field %s = %+v, want the stat-failure error", key, f)
+		}
+	}
+	// The stat failure short-circuits before any probe: the stub marker
+	// must be absent, proving the probe pass was skipped rather than merely
+	// unsuccessful.
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("probe ran on an unreadable source (marker present): %v", err)
+	}
+}
+
 // TestExtractSourceMetadataProbeOutputCapExercises exercises the 1 MiB
 // probe-output cap: the probe is errored, which makes the pass incomplete,
 // so every empty field is errored (extraction incomplete), never claimed
@@ -649,7 +689,8 @@ exit 1
 
 // TestExtractSourceMetadataDistinctValueCapPinsTheFirstTwenty pins the
 // per-field 20-distinct-value bound: 21 files with distinct titles keep
-// exactly the first 20 in first-seen (sorted path) order.
+// exactly the first 20 in first-seen (sorted path) order, and the field
+// carries the cap hit so a reader never has to infer it from the length.
 func TestExtractSourceMetadataDistinctValueCapPinsTheFirstTwenty(t *testing.T) {
 	respDir := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "ran")
@@ -671,6 +712,48 @@ func TestExtractSourceMetadataDistinctValueCapPinsTheFirstTwenty(t *testing.T) {
 		want[i] = fmt.Sprintf("T%02d", i)
 	}
 	wantField(t, snap, FieldTitle, StatusPresent, want...)
+	if !snap.Fields[FieldTitle].Truncated {
+		t.Error("title field truncated = false, want true (the 21st distinct value was dropped)")
+	}
+	// The snapshot-level flag covers discovery/probe/raw-tag bounds only:
+	// a per-field cap hit must not masquerade as snapshot truncation.
+	if snap.Truncated {
+		t.Error("snapshot truncated = true, want false (only the per-field cap was hit)")
+	}
+}
+
+// TestExtractSourceMetadataExactlyCappedFieldIsNotTruncated is the other
+// half of the cap contract: a field that retains exactly the cap's worth
+// of distinct values, with nothing dropped, must stay untruncated. The
+// old reader inferred "capped" from the retained length and degraded this
+// snapshot to unknown.
+func TestExtractSourceMetadataExactlyCappedFieldIsNotTruncated(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	srcDir := t.TempDir()
+	// Exactly maxDistinctValuesPerField distinct titles: the last addValue
+	// fills the list to the cap without dropping anything.
+	for i := range maxDistinctValuesPerField {
+		stem := fmt.Sprintf("%03d", i)
+		writeProbeResponse(t, respDir, stem,
+			fmt.Sprintf(`{"format": {"duration": "1", "tags": {"title": "T%02d"}}, "streams": []}`, i))
+		if err := os.WriteFile(filepath.Join(srcDir, stem+".mp3"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+
+	snap := runExtraction(t, ffprobe, srcDir)
+	if got := len(snap.Fields[FieldTitle].Values); got != maxDistinctValuesPerField {
+		t.Fatalf("title values = %d, want the cap %d", got, maxDistinctValuesPerField)
+	}
+	if snap.Fields[FieldTitle].Truncated {
+		t.Error("title field truncated = true, want false (nothing was dropped)")
+	}
+	if !snap.Complete() {
+		t.Error("Complete() = false; an exactly-capped field is still a complete pass")
+	}
 }
 
 // TestExtractSourceMetadataDiscoveryBoundTruncatesBeforeAudio pins the

@@ -17,8 +17,12 @@ import (
 )
 
 // SourceMetadataSchema is the payload schema version carried in every
-// SourceMetadata document.
-const SourceMetadataSchema = 1
+// SourceMetadata document. Version 2 adds the per-field Truncated flag;
+// schema 1 cannot express it (and its older rows predate the snapshot
+// Degraded flag), so a reader must treat a version 1 payload as incomplete
+// evidence (see api.sourceMetadataComplete) rather than trusting its
+// derived defaults.
+const SourceMetadataSchema = 2
 
 // Field keys used in SourceMetadata.Fields.
 const (
@@ -57,6 +61,11 @@ type SourceField struct {
 	Source string   `json:"source"` // "embedded" | "filename" | ""
 	Status string   `json:"status"` // "present" | "missing" | "error"
 	Error  string   `json:"error,omitempty"`
+	// Truncated marks a value list the per-field cap cut short: further
+	// distinct values existed in the source and were dropped. It is
+	// evidence about THIS field only — the snapshot-level Truncated flag
+	// covers discovery, probe, and raw-tag bounds.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // SourceFile is one probed file's measured outcome.
@@ -77,11 +86,16 @@ type SourceFileTags struct {
 // embedded tags, embedded/filename IDs, and measured durations. It is
 // independent of catalog data: a Save-match never touches it.
 type SourceMetadata struct {
-	Schema          int                    `json:"schema"`
-	SourceKind      string                 `json:"source_kind"` // "file" | "folder" | "unknown"
-	FilesTotal      int                    `json:"files_total"`
-	FilesProbed     int                    `json:"files_probed"`
-	Truncated       bool                   `json:"truncated"`
+	Schema      int    `json:"schema"`
+	SourceKind  string `json:"source_kind"` // "file" | "folder" | "unknown"
+	FilesTotal  int    `json:"files_total"`
+	FilesProbed int    `json:"files_probed"`
+	Truncated   bool   `json:"truncated"`
+	// Degraded marks a snapshot no file produced usable evidence for: the
+	// source was unreadable (stat failure), discovery failed, or every
+	// probe failed. Its surviving values (e.g. a filename ASIN) are not
+	// complete evidence.
+	Degraded        bool                   `json:"degraded"`
 	DurationSeconds float64                `json:"duration_seconds"` // sum of probed, non-errored files
 	Files           []SourceFile           `json:"files"`
 	Fields          map[string]SourceField `json:"fields"`
@@ -90,9 +104,14 @@ type SourceMetadata struct {
 
 // Boundedness of the extraction pass.
 const (
-	sourceMetadataTimeout     = 60 * time.Second
-	maxDiscoveredEntries      = 1000
-	maxProbedParts            = 100
+	sourceMetadataTimeout = 60 * time.Second
+	maxDiscoveredEntries  = 1000
+	maxProbedParts        = 100
+	// maxDistinctValuesPerField caps the distinct values retained per
+	// field in a snapshot's merged value lists. A cap hit is recorded on
+	// the field itself (SourceField.Truncated), never inferred by a reader
+	// from the retained length: a list of exactly the cap length is
+	// indistinguishable from an exactly-capped one.
 	maxDistinctValuesPerField = 20
 	maxProbeOutputBytes       = 1 << 20 // 1 MiB
 	maxProbeStderrBytes       = 512
@@ -186,7 +205,7 @@ func ExtractSourceMetadata(ctx context.Context, ffprobe, srcPath string) (*Sourc
 		return finalizeEmpty(snap), nil
 	}
 
-	merged, probedErrs := probeFiles(passCtx, ffprobe, paths, snap)
+	merged, mergedTruncated, probedErrs := probeFiles(passCtx, ffprobe, paths, snap)
 	if probedErrs == len(paths) {
 		firstErr := ""
 		if len(snap.Files) > 0 {
@@ -200,7 +219,7 @@ func ExtractSourceMetadata(ctx context.Context, ffprobe, srcPath string) (*Sourc
 		return snap, nil
 	}
 
-	mergeFields(snap, merged)
+	mergeFields(snap, merged, mergedTruncated)
 	applyASINFallback(snap, srcPath)
 	return finalize(snap), nil
 }
@@ -222,6 +241,7 @@ func DegradedSourceMetadata(cause string) *SourceMetadata {
 // errors) is retained: the degraded field message quotes the first file's
 // error, and consumers can see which probes failed.
 func degradedSnapshot(snap *SourceMetadata, cause string) *SourceMetadata {
+	snap.Degraded = true
 	for _, f := range fieldKeys {
 		snap.Fields[f] = SourceField{Values: []string{}, Source: SourceDegraded, Status: StatusError, Error: cause}
 	}
@@ -294,10 +314,12 @@ func discoverAudioFiles(ctx context.Context, dir string, snap *SourceMetadata) (
 
 // probeFiles runs ffprobe over every path in order, recording per-file
 // duration and effective tags, and returns the merged per-field value
-// lists. Returns the number of files whose probe failed.
-func probeFiles(ctx context.Context, ffprobe string, paths []string, snap *SourceMetadata) (map[string][]string, int) {
+// lists plus the set of fields whose list the per-field cap cut short.
+// Returns the number of files whose probe failed.
+func probeFiles(ctx context.Context, ffprobe string, paths []string, snap *SourceMetadata) (map[string][]string, map[string]bool, int) {
 	merged := make(map[string][]string, len(tagPrecedence))
 	seen := make(map[string]map[string]bool, len(tagPrecedence))
+	truncated := make(map[string]bool, len(tagPrecedence))
 	probedErrs := 0
 	rawBytes := 0
 
@@ -335,14 +357,14 @@ func probeFiles(ctx context.Context, ffprobe string, paths []string, snap *Sourc
 		// spellings. `lowered` folds the effective overlay
 		// case-insensitively with stream scope winning, so same-key,
 		// different-case format/stream collisions are deterministic.
-		mergeDoc(merged, seen, lowered)
+		mergeDoc(merged, seen, truncated, lowered)
 	}
-	return merged, probedErrs
+	return merged, truncated, probedErrs
 }
 
 // mergeDoc folds one file's lowercased-key tags into the per-field value
 // lists (distinct, first-seen order, capped per field).
-func mergeDoc(merged map[string][]string, seen map[string]map[string]bool, doc map[string]string) {
+func mergeDoc(merged map[string][]string, seen map[string]map[string]bool, truncated map[string]bool, doc map[string]string) {
 	for field, keys := range tagPrecedence {
 		for _, key := range keys {
 			value, ok := doc[key]
@@ -357,15 +379,24 @@ func mergeDoc(merged map[string][]string, seen map[string]map[string]bool, doc m
 			if value == "" {
 				continue
 			}
-			addValue(merged, seen, field, value)
+			addValue(merged, seen, truncated, field, value)
 			break
 		}
 	}
 }
 
-func addValue(merged map[string][]string, seen map[string]map[string]bool, field, value string) {
+// addValue appends one distinct value to a field's list and records a cap
+// hit on that field. The cap is silent evidence-wise unless it is
+// recorded here: a retained list of exactly maxDistinctValuesPerField
+// entries is otherwise indistinguishable from an exactly-capped one, and
+// a reader cannot tell a dropped differing value from a duplicate.
+func addValue(merged map[string][]string, seen map[string]map[string]bool, truncated map[string]bool, field, value string) {
 	if s, ok := seen[field]; ok {
-		if s[value] || len(merged[field]) >= maxDistinctValuesPerField {
+		if s[value] {
+			return
+		}
+		if len(merged[field]) >= maxDistinctValuesPerField {
+			truncated[field] = true
 			return
 		}
 		s[value] = true
@@ -526,11 +557,15 @@ func foldProbeTags(formatTags, streamTags map[string]string) map[string]string {
 }
 
 // mergeFields turns the accumulated value lists into per-field states.
-func mergeFields(snap *SourceMetadata, merged map[string][]string) {
+// truncated carries the fields whose list the per-field cap cut short; the
+// flag rides on the field so a reader never has to infer it from the
+// retained length.
+func mergeFields(snap *SourceMetadata, merged map[string][]string, truncated map[string]bool) {
 	for _, f := range fieldKeys {
 		values := merged[f]
 		if len(values) > 0 {
-			snap.Fields[f] = SourceField{Values: values, Source: SourceEmbedded, Status: StatusPresent}
+			snap.Fields[f] = SourceField{Values: values, Source: SourceEmbedded, Status: StatusPresent,
+				Truncated: truncated[f]}
 			continue
 		}
 		if !snap.incomplete() {
@@ -542,11 +577,13 @@ func mergeFields(snap *SourceMetadata, merged map[string][]string) {
 }
 
 // incomplete reports whether the pass ended without a clean probe of
-// every file: unprobed files, truncated discovery, or any probe error —
-// in each case a field that came up empty cannot claim the source
-// "has no such tag".
+// every file: a degraded pass (unreadable source, discovery failure, or
+// all probes failed), unprobed files, truncated discovery, or any probe
+// error — in each case a field that came up empty cannot claim the
+// source "has no such tag", and a surviving value is not complete
+// evidence.
 func (s *SourceMetadata) incomplete() bool {
-	if s.Truncated || s.FilesProbed < s.FilesTotal {
+	if s.Degraded || s.Truncated || s.FilesProbed < s.FilesTotal {
 		return true
 	}
 	for _, file := range s.Files {
@@ -555,6 +592,14 @@ func (s *SourceMetadata) incomplete() bool {
 		}
 	}
 	return false
+}
+
+// Complete reports whether the pass ended with a clean probe of every
+// discovered file: not degraded, no truncation, no unprobed files, and
+// no per-file probe errors. A field value that survived a partial pass
+// is not complete evidence.
+func (s *SourceMetadata) Complete() bool {
+	return !s.incomplete()
 }
 
 // incompleteMsg is the shared message for fields that came up empty under

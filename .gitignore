@@ -10,31 +10,55 @@
 !.env.example
 !.env.test
 
-# Impeccable: keep shared project artifacts (config.json, live/config.json,
-# design.json, surfaces/*.md, critique/*.md) tracked; ignore only ephemeral
-# output in the marked block below, per pbakaus/impeccable.
+# Impeccable: shared project artifacts (config.json, live/config.json,
+# design.json, surfaces/*.md, critique/ignore.md) stay tracked. The marked block
+# mirrors the "copy the .gitignore entries" template in pbakaus/impeccable's
+# README — the published snippet, not that repository's own .gitignore — plus
+# the extra runtime entries (codex-worker, artifacts/, accept-receipts/,
+# locks/, benchmarks/) its .gitignore also lists.
 # impeccable-ignore-start
-# Ephemeral output, runtime state, and per-developer overrides.
-**/.impeccable/config.local.json
+.impeccable/live/server.json
+.impeccable/live/codex-worker.json
+.impeccable/live/codex-worker.log
+# Ephemeral hook cache/state, at the project root and inside generated harness
+# skill dirs; anchored patterns would miss the nested copies.
 **/.impeccable/hook.cache.json
-**/.impeccable/hook.pending.json
+# Screenshots, per-run critique captures, and decision-round state. The tracked
+# surface notes cite review/*.png and rollout-*.png paths; those captures stay
+# local so a `git add -A` cannot commit them.
 **/.impeccable/*.png
 **/.impeccable/review/
 **/.impeccable/questions/
-**/.impeccable/live/server.json
-**/.impeccable/live/sessions/
-**/.impeccable/live/previews/
-**/.impeccable/live/annotations/
-**/.impeccable/live/cache/
-**/.impeccable/live/manual-edit-apply-transaction.json
-**/.impeccable/live/manual-edit-events.jsonl
-**/.impeccable/live/manual-edit-evidence/
-**/.impeccable/live/pending-manual-edits.json
-**/.impeccable/live/deferred-svelte-component-accepts.json
-**/.impeccable/live/*.png
+.impeccable/live/sessions/
+.impeccable/live/previews/
+.impeccable/live/annotations/
+.impeccable/live/artifacts/
+.impeccable/live/accept-receipts/
+.impeccable/live/locks/
+.impeccable/live/cache/
+.impeccable/live/benchmarks/
+.impeccable/live/manual-edit-apply-transaction.json
+.impeccable/live/manual-edit-events.jsonl
+.impeccable/live/manual-edit-evidence/
+.impeccable/live/pending-manual-edits.json
+.impeccable/live/deferred-svelte-component-accepts.json
+.impeccable/history/
+.impeccable/live/*.png
+# Per-developer overrides.
+.impeccable/config.local.json
+**/.impeccable/hook.pending.json
+# Per-run critique snapshots are local artifacts; ignore.md carries deferrals
+# worth sharing, so it is re-included.
+.impeccable/critique/*
+!.impeccable/critique/ignore.md
 # impeccable-ignore-end
 /bragibooks
 /webfs/build/
+# Python release artifacts (scripts/release.py builds archives into dist/;
+# running it from the repo creates bytecode caches)
+/dist/
+__pycache__/
+*.pyc
 # Go runtime artifacts (databases, secrets)
 .env
 config/*.db
