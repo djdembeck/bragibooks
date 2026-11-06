@@ -11,7 +11,7 @@
 	import { partitionForRemoval } from '#lib/removeGuard.js';
 	import { fetchInChunks } from '#lib/fetchInChunks.js';
 	import { criteriaChanged } from '#lib/bulkCriteria.js';
-	import { shouldClearStaleBulkError, type BulkErrorAction } from '#lib/staleBulkError.js';
+	import { bulkErrorRetryDispatch, type BulkErrorAction } from '#lib/staleBulkError.js';
 
 	const limit = 20;
 	const filters: { value: string; label: string }[] = [
@@ -184,6 +184,10 @@
 		} catch (e) {
 			if (criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) return;
 			bulkError = toCleanedError(e);
+			// Retry re-runs the select-all that just failed, not the previous
+			// bulk operation (e.g. a failed requeue) whose action it would
+			// otherwise inherit.
+			bulkErrorAction = 'select';
 			selection.dropBaseline();
 		} finally {
 			selectingAll = false;
@@ -464,9 +468,13 @@
 		}
 	}
 
-	// Alert Retry dispatch: re-run the operation that produced the error.
+	// Alert Retry dispatch: re-run the operation that produced the error. The
+	// routing decision (clear vs. which handler) is pure — see
+	// bulkErrorRetryDispatch — so the regression (a failed select-all must take
+	// over a prior requeue's error) is testable without the page.
 	function onBulkErrorRetry() {
-		if (shouldClearStaleBulkError(bulkErrorAction, effectiveSelectedIds().length)) {
+		const dispatch = bulkErrorRetryDispatch(bulkErrorAction, effectiveSelectedIds().length);
+		if (dispatch === 'clear') {
 			bulkError = null;
 			return;
 		}
@@ -477,7 +485,7 @@
 			done: () => void bulkMarkDone(),
 			remove: () => void bulkRemove()
 		};
-		handlers[bulkErrorAction]();
+		handlers[dispatch]();
 	}
 
 	// Pagination jump
