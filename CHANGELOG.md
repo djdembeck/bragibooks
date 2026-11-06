@@ -29,6 +29,10 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Features & Improvements
 
+- A Windows amd64 release archive is now built alongside the existing
+  Linux and macOS amd64/arm64 archives. On Windows, process cancellation
+  kills the spawned m4b-merge tree through a job object (kill-on-close),
+  the platform equivalent of the POSIX process-group kill used elsewhere.
 - Release archives embed the version and use lowercase platform names
   (`bragibooks_2.1.0_linux-amd64.tar.gz`, `bragibooks_2.1.0_darwin-arm64.tar.gz`,
   …) instead of `bragibooks_Linux_x86_64.tar.gz` / `bragibooks_Darwin_arm64.tar.gz`.

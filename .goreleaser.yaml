@@ -27,9 +27,14 @@ builds:
     goos:
       - linux
       - darwin
+      # windows: amd64 only — windows/arm64 is not a usable cross target.
+      - windows
     goarch:
       - amd64
       - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
 
 archives:
   - format: tar.gz

@@ -25,12 +25,14 @@ ARCHIVE_NAMES = (
     "bragibooks_9.9.9_linux-arm64.tar.gz",
     "bragibooks_9.9.9_darwin-amd64.tar.gz",
     "bragibooks_9.9.9_darwin-arm64.tar.gz",
+    "bragibooks_9.9.9_windows-amd64.tar.gz",
 )
 ARCHIVE_PLATFORM = {
     "bragibooks_9.9.9_linux-amd64.tar.gz": ("linux", "amd64"),
     "bragibooks_9.9.9_linux-arm64.tar.gz": ("linux", "arm64"),
     "bragibooks_9.9.9_darwin-amd64.tar.gz": ("darwin", "amd64"),
     "bragibooks_9.9.9_darwin-arm64.tar.gz": ("darwin", "arm64"),
+    "bragibooks_9.9.9_windows-amd64.tar.gz": ("windows", "amd64"),
 }
 
 
