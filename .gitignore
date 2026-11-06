@@ -11,9 +11,11 @@
 !.env.test
 
 # Impeccable: shared project artifacts (config.json, live/config.json,
-# design.json, surfaces/*.md) stay tracked; per-run critique snapshots and
-# ephemeral runtime output in the marked block below are ignored, mirroring
-# the .gitignore in the pbakaus/impeccable repository.
+# design.json, surfaces/*.md, critique/ignore.md) stay tracked. The marked block
+# mirrors the "copy the .gitignore entries" template in pbakaus/impeccable's
+# README — the published snippet, not that repository's own .gitignore — plus
+# the extra runtime entries (codex-worker, artifacts/, accept-receipts/,
+# locks/, benchmarks/) its .gitignore also lists.
 # impeccable-ignore-start
 .impeccable/live/server.json
 .impeccable/live/codex-worker.json
@@ -21,6 +23,12 @@
 # Ephemeral hook cache/state, at the project root and inside generated harness
 # skill dirs; anchored patterns would miss the nested copies.
 **/.impeccable/hook.cache.json
+# Screenshots, per-run critique captures, and decision-round state. The tracked
+# surface notes cite review/*.png and rollout-*.png paths; those captures stay
+# local so a `git add -A` cannot commit them.
+**/.impeccable/*.png
+**/.impeccable/review/
+**/.impeccable/questions/
 .impeccable/live/sessions/
 .impeccable/live/previews/
 .impeccable/live/annotations/
@@ -35,6 +43,7 @@
 .impeccable/live/pending-manual-edits.json
 .impeccable/live/deferred-svelte-component-accepts.json
 .impeccable/history/
+.impeccable/live/*.png
 # Per-developer overrides.
 .impeccable/config.local.json
 **/.impeccable/hook.pending.json

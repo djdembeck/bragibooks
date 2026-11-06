@@ -16,9 +16,15 @@ import (
 var sourceASINPattern = regexp.MustCompile(`^B[A-Z0-9]{9}$`)
 
 // sourceMetadataComplete reports whether the snapshot is a clean,
-// complete extraction pass: correct schema, no truncation, and every
+// complete extraction pass: current schema, no truncation, and every
 // discovered file probed. Only a complete snapshot may claim a field is
 // genuinely missing from the source.
+//
+// The schema check is the conservative half of the upgrade contract: a
+// schema-1 payload predates the snapshot Degraded flag, so its stat-failure
+// rows decode with Degraded == false and files_total/files_probed == 0,
+// which Complete() alone would accept. Rejecting every older schema makes
+// those rows derive "unknown" until the book is reprocessed.
 func sourceMetadataComplete(snap *audio.SourceMetadata) bool {
 	return snap.Schema == audio.SourceMetadataSchema && snap.Complete()
 }
@@ -81,10 +87,13 @@ func derivePresentSourceASIN(complete bool, field *audio.SourceField) *models.So
 		return &models.SourceASIN{Status: models.SourceASINUnknown}
 	}
 
-	capped := len(field.Values) >= audio.MaxDistinctValuesPerField
-	if capped {
-		// The retained value list hit the per-field cap, so the true
-		// distinct count is unknown: never prefill, mark truncation.
+	if field.Truncated {
+		// The per-field cap dropped at least one further distinct value, so
+		// the true distinct count is unknown: never prefill, mark
+		// truncation. A truncated-but-single value still degrades to
+		// "unknown" on purpose — the dropped value may have been a
+		// differing ASIN, and a retained-count of one is not evidence of
+		// agreement.
 		if len(normalized) > 1 {
 			return &models.SourceASIN{Status: models.SourceASINAmbiguous, Count: len(normalized), CountTruncated: true}
 		}
@@ -119,6 +128,16 @@ func derivePresentSourceASIN(complete bool, field *audio.SourceField) *models.So
 // and sets SourceASIN on each. Best-effort: a missing or malformed row
 // leaves SourceASIN nil, and a query failure logs and leaves everything
 // nil — it never fails the list.
+//
+// Element addresses are stable for the caller's slice: `&books[i]` points
+// into the caller's backing array, so the writes below are visible to the
+// caller without a second pass. Do NOT pass a copy of the slice here.
+//
+// Follow-up (deliberately not done): the payload is decoded in Go because
+// the whole snapshot is the contract. If the row count ever makes that
+// decode hot, project the field in SQL instead —
+// json_extract(payload,'$.fields.asin') — at the cost of a second place
+// that knows the payload shape.
 func (h *Handler) attachSourceASINs(books []models.BookWithPeople) {
 	if len(books) == 0 {
 		return

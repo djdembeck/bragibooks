@@ -7,6 +7,7 @@ import {
 	missingReleaseProvenanceLabel,
 	missingReleaseView,
 	showEditorNudge,
+	showBlockNudge,
 	showPanelNudge
 } from './missingRelease.js';
 
@@ -173,6 +174,19 @@ describe('nudge gates', () => {
 		expect(showPanelNudge({ ...settled, error: true })).toBe(false);
 		expect(showPanelNudge({ ...settled, searching: true })).toBe(false);
 		expect(showPanelNudge({ ...settled, searchError: true })).toBe(false);
+	});
+
+	it('drops the block while the zero-result search repeat is on screen', () => {
+		const settledBlock = { ...settled, searched: false, resultCount: 0 };
+		// Before any search the block is the only handoff, so it stays.
+		expect(showBlockNudge(settledBlock)).toBe(true);
+		// A settled zero-result search renders the repeat under the search box;
+		// the block must yield rather than show the same handoff twice.
+		expect(showBlockNudge({ ...settledBlock, searched: true })).toBe(false);
+		// Results mean a record exists to pick; the repeat is not rendered.
+		expect(showBlockNudge({ ...settledBlock, searched: true, resultCount: 3 })).toBe(true);
+		// The settled-lookup gate still holds while a new search runs.
+		expect(showBlockNudge({ ...settledBlock, searched: true, resultCount: 3, searching: true })).toBe(false);
 	});
 
 	it('shows the wrong-match footer only for a loaded record', () => {

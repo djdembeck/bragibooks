@@ -9,7 +9,7 @@
  * tick) from these values.
  */
 export interface BookSelection {
-	/** Baseline matching IDs from a select-all (server-capped); null = none. */
+	/** Baseline matching IDs from a select-all (server-capped); null = none. A copy — mutating it does not affect the model. */
 	readonly ids: Set<number> | null;
 	/** Full match count at select-all time (uncapped). */
 	readonly total: number;
@@ -18,7 +18,7 @@ export interface BookSelection {
 
 	/** Record a successful select-all; the new baseline redefines the set, so row edits reset. */
 	applyBaseline(ids: Set<number>, total: number, truncated: boolean): void;
-	/** Drop only the baseline (a failed select-all keeps the row edits). */
+	/** Drop only the baseline (a failed select-all keeps the row edits); resets total/truncated with it. */
 	dropBaseline(): void;
 	/** Drop the baseline and individual checks, keeping exclusions. */
 	deselectAll(): void;
@@ -57,6 +57,8 @@ export function createBookSelection(): BookSelection {
 
 	function dropBaseline() {
 		allMatchedIds = null;
+		allMatchedTotal = 0;
+		allMatchedTruncated = false;
 	}
 
 	function deselectAll() {
@@ -132,24 +134,20 @@ export function createBookSelection(): BookSelection {
 	}
 
 	function pruneSelectionId(id: number) {
-		// allMatchedTotal counts the matches in the (capped) baseline list,
-		// so it only decrements for rows that were in that list; a row checked
-		// individually outside the baseline was never counted there.
-		const wasInBaseline = allMatchedIds?.has(id) ?? false;
-		if (allMatchedIds) {
-			if (wasInBaseline) allMatchedIds = new Set(allMatchedIds);
-			excludedIds = new Set(excludedIds);
-		}
-		if (allMatchedIds?.has(id)) allMatchedIds.delete(id);
+		// allMatchedTotal is the server's UNCAPPED match count, so it is left
+		// alone: the post-operation catalog refetch supplies the new truth.
+		if (allMatchedIds?.has(id)) allMatchedIds = new Set(allMatchedIds);
+		allMatchedIds?.delete(id);
+		excludedIds = new Set(excludedIds);
 		excludedIds.delete(id);
 		addedIds = new Set(addedIds);
 		addedIds.delete(id);
-		if (wasInBaseline) allMatchedTotal = Math.max(0, allMatchedTotal - 1);
 	}
 
 	return {
 		get ids() {
-			return allMatchedIds;
+			// A copy: callers must not mutate the live baseline in place.
+			return allMatchedIds ? new Set(allMatchedIds) : null;
 		},
 		get total() {
 			return allMatchedTotal;

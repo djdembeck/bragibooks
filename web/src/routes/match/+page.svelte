@@ -24,7 +24,7 @@
 	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, Modal } from '#lib/components/index.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { resolveScheme } from '#lib/scheme.js';
-	import { showEditorNudge, showPanelNudge } from '#lib/missingRelease.js';
+	import { showBlockNudge, showEditorNudge, showPanelNudge } from '#lib/missingRelease.js';
 	import SourceEvidence from './SourceEvidence.svelte';
 	import RuntimeComparison from './RuntimeComparison.svelte';
 	import MissingReleaseNudge from './MissingReleaseNudge.svelte';
@@ -2180,7 +2180,10 @@
 									{/if}
 									Search the catalog below to choose one.
 								</p>
-								{#if showPanelNudge({ loading: c.loading, error: !!c.error, searching, searchError: !!searchError })}
+								<!-- The zero-result search repeat below is the closer
+								     affordance to the search box; the gate drops the
+								     block while that repeat is on screen. -->
+								{#if showBlockNudge({ loading: c.loading, error: !!c.error, searching, searchError: !!searchError, searched, resultCount: searchResults.length })}
 									<MissingReleaseNudge variant="block" evidence={c.sourceAsin} />
 								{/if}
 							</div>

@@ -2,12 +2,16 @@
 	import { get, post, put, del } from '#lib/api.js';
 	import { goto } from '$app/navigation';
 	import { page as pageStore } from '$app/state';
-	import type { BooksListResponse, BookWithPeople, OutputProfile, OutputProfilesResponse } from '#lib/types.js';
+	import type { BooksListResponse, BookWithPeople, JobsListResponse, OutputProfile, OutputProfilesResponse } from '#lib/types.js';
 	import { PageHeader, StatusBadge, Skeleton, EmptyState, Alert, ErrorDetail, Button, CoverArt, OutputProfileSelector, Modal } from '#lib/components/index.js';
 	import { formatRuntime } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { createBookSelection } from '#lib/bookSelection.svelte.js';
+	import { partitionForRemoval } from '#lib/removeGuard.js';
+	import { fetchInChunks } from '#lib/fetchInChunks.js';
+	import { criteriaChanged } from '#lib/bulkCriteria.js';
+	import { bulkErrorRetryDispatch, type BulkErrorAction } from '#lib/staleBulkError.js';
 
 	const limit = 20;
 	const filters: { value: string; label: string }[] = [
@@ -51,11 +55,15 @@
 	// Which operation produced bulkError, so Retry re-runs the right one.
 	// 'confirm' = the pre-confirmation title fetch failed; the deletion
 	// itself never ran, so Retry rebuilds the confirmation list.
-	let bulkErrorAction = $state<'select' | 'confirm' | 'done' | 'remove'>('select');
+	let bulkErrorAction = $state<BulkErrorAction>('select');
 	// Removal confirmation dialog.
 	let confirmRemoveOpen = $state(false);
 	let removeList = $state<BookWithPeople[]>([]);
 	let removeListLoading = $state(false);
+	// Selected books the dialog will NOT delete because a processing job owns
+	// them. The server refuses such a delete anyway (409); excluding them here
+	// keeps the confirmation list honest instead of failing mid-loop.
+	let removeSkipped = $state<BookWithPeople[]>([]);
 	let profiles = $state<OutputProfile[]>([]);
 	let profilesError = $state<string | null>(null);
 	// null = "Global settings"; set only when the user picks a saved profile.
@@ -167,15 +175,19 @@
 			if (requestedQ) params.set('q', requestedQ);
 			params.set('all_ids', '1');
 			const res = await get<{ ids: number[]; total: number; truncated: boolean }>(`/books?${params.toString()}`);
-			if (filter !== requestedFilter || q !== requestedQ) return;
+			if (criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) return;
 			if (!res || !Array.isArray(res.ids)) throw new Error('Could not load matching book IDs.');
 			// The server caps the all_ids payload: total/truncated make the
 			// cut explicit so the UI never treats a capped list as the whole
 			// matching set (finding: F21).
 			selection.applyBaseline(new Set(res.ids), res.total ?? res.ids.length, Boolean(res.truncated));
 		} catch (e) {
-			if (filter !== requestedFilter || q !== requestedQ) return;
+			if (criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) return;
 			bulkError = toCleanedError(e);
+			// Retry re-runs the select-all that just failed, not the previous
+			// bulk operation (e.g. a failed requeue) whose action it would
+			// otherwise inherit.
+			bulkErrorAction = 'select';
 			selection.dropBaseline();
 		} finally {
 			selectingAll = false;
@@ -196,7 +208,8 @@
 	}
 
 	// Count of selected books across the WHOLE matching set (not just the
-	// visible page) — the size the bulk requeue will actually send.
+	// visible page) — the size the bulk requeue, mark-done, and remove
+	// operations will each actually send.
 	const selectedCount = $derived.by(() => selection.countSelected());
 
 	// The select-all checkbox's visible state: checked when every matching
@@ -232,19 +245,22 @@
 		const checked = (event.currentTarget as HTMLInputElement).checked;
 		bulkError = null;
 		if (checked) {
-			selectAllOptimistic = true;
-			if (!selection.ids) void selectAllMatching();
-			else {
+			if (!selection.ids) {
+				// Fresh select-all: the tick stays optimistically on until
+				// the response lands (or the optimistic null resets it).
+				selectAllOptimistic = true;
+				void selectAllMatching();
+			} else {
 				selection.clearRowEdits();
 				selectAllOptimistic = null;
 			}
-		} else if (selectedCount > 0) {
+		} else {
+			// Unchecked: the box only renders checked/indeterminate when
+			// selectedCount > 0, so an uncheck always deselects a non-empty
+			// selection. (A "nothing selected" uncheck is unreachable.)
 			deselectAllMatching();
 			selection.clearRowEdits();
 			selectAllOptimistic = null;
-		} else {
-			selectAllOptimistic = true;
-			void selectAllMatching();
 		}
 	}
 
@@ -265,9 +281,6 @@
 	// A filter/search change is a stale-selection signal for EVERY bulk
 	// operation, so all of them share this early-exit pattern: a request that
 	// outlives the criteria that created it is discarded, never applied.
-	function criteriaChanged(requestedFilter: string, requestedQ: string) {
-		return filter !== requestedFilter || q !== requestedQ;
-	}
 
 	async function bulkRequeue() {
 		if (selectedCount === 0) return;
@@ -281,9 +294,9 @@
 			const profileId = selectedProfileId;
 			// One POST whose src_dirs are parallel to book_ids: each book
 			// requeues from its own recorded source path, fetched per book.
-			const books = await Promise.all(
-				ids.map((id) => get<BookWithPeople>(`/books/${id}`)),
-			);
+			// Capped at 16 in flight (fetchInChunks preserves input order,
+			// which the parallel src_dirs require).
+			const books = await fetchInChunks(ids.map((id) => () => get<BookWithPeople>(`/books/${id}`)), 16);
 			const payload: { book_ids: number[]; src_dirs: string[]; output_profile_id?: number } = {
 				book_ids: ids,
 				src_dirs: books.map((b) => b.src_path),
@@ -294,7 +307,7 @@
 			await goto('/process');
 		} catch (e) {
 			bulkError = toCleanedError(e);
-			bulkErrorAction = 'select';
+			bulkErrorAction = 'requeue'; // Retry re-runs the requeue, not a select-all.
 		} finally {
 			bulkActing = null;
 		}
@@ -328,7 +341,7 @@
 				// counts and washes move one row at a time.
 				selection.pruneSelectionId(id);
 			}
-			if (!criteriaChanged(requestedFilter, requestedQ)) {
+			if (!criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) {
 				// Per-book PUTs do not refresh the list response: pull the
 				// catalog again so status badges, totals, and pagination match
 				// (partial success included — the re-fetch sees what landed).
@@ -356,6 +369,7 @@
 		confirmRemoveOpen = true;
 		removeListLoading = true;
 		removeList = [];
+		removeSkipped = [];
 		try {
 			// Titles for the confirmation list; the delete below uses the ids.
 			// Rows already on the current page come from the list response —
@@ -367,7 +381,31 @@
 			const missingIds = ids.filter((id) => !known.has(id));
 			const missing = await fetchInChunks(missingIds.map((id) => () => get<BookWithPeople>(`/books/${id}`)), 16);
 			for (const b of missing) known.set(b.id, b);
-			removeList = ids.map((id) => known.get(id)!);
+			// A book with a queued or running job is owned by the queue until
+			// that job finishes, so deleting it would orphan the worker. The
+			// server refuses it too (409). Derive the set from the ACTIVE JOB
+			// list, not from books.status: the status only becomes 'processing'
+			// when a worker claims the job, so a book whose job is still queued
+			// keeps its pre-queue status and would slip through a status test.
+			// limit trims only the recent-history query; ListJobs appends the
+			// complete queued/running set regardless, so limit=1 keeps the
+			// payload small while still returning every in-flight job.
+			const activeJobs = await get<JobsListResponse>('/jobs?limit=1');
+			const { resolved, skipped } = partitionForRemoval(ids.map((id) => known.get(id)!), activeJobs.jobs);
+			removeSkipped = skipped;
+			removeList = resolved;
+			if (removeList.length === 0 && skipped.length > 0) {
+				// Nothing is deletable: keep the dialog closed and say why
+				// rather than offering a disabled Remove button.
+				confirmRemoveOpen = false;
+				bulkError = {
+					message: `Nothing to remove — ${skipped.length} book${skipped.length === 1 ? '' : 's'} still ${skipped.length === 1 ? 'has a' : 'have'} queued or running processing ${skipped.length === 1 ? 'job' : 'jobs'}. Cancel ${skipped.length === 1 ? 'it' : 'them'} first.`,
+					raw: '',
+					rateLimited: false,
+					needsSettings: false
+				};
+				bulkErrorAction = 'confirm';
+			}
 		} catch (e) {
 			confirmRemoveOpen = false;
 			bulkError = toCleanedError(e);
@@ -377,31 +415,6 @@
 		} finally {
 			removeListLoading = false;
 		}
-	}
-
-	// Run task factories with at most `concurrency` promises in flight;
-	// results come back in input order. A rejection sets `failed`, so no
-	// worker dequeues further ids — only the requests already issued may
-	// still complete, and a retry cannot double-issue against this pool.
-	async function fetchInChunks<T>(fns: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-		const results: T[] = new Array(fns.length);
-		let next = 0;
-		let failed = false;
-		const workers = Array.from({ length: Math.min(concurrency, fns.length) }, async () => {
-			for (;;) {
-				if (failed) return;
-				const i = next++;
-				if (i >= fns.length) return;
-				try {
-					results[i] = await fns[i]();
-				} catch (e) {
-					failed = true;
-					throw e;
-				}
-			}
-		});
-		await Promise.all(workers);
-		return results;
 	}
 
 	async function bulkRemove() {
@@ -434,7 +447,8 @@
 			}
 			confirmRemoveOpen = false;
 			removeList = failed ? survivors : [];
-			if (!criteriaChanged(requestedFilter, requestedQ)) {
+			removeSkipped = [];
+			if (!criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) {
 				// The list response still shows the deleted rows: pull the
 				// catalog again so rows, totals, and pagination match
 				// (partial success included — the re-fetch sees what landed).
@@ -452,6 +466,26 @@
 		} finally {
 			bulkActing = null;
 		}
+	}
+
+	// Alert Retry dispatch: re-run the operation that produced the error. The
+	// routing decision (clear vs. which handler) is pure — see
+	// bulkErrorRetryDispatch — so the regression (a failed select-all must take
+	// over a prior requeue's error) is testable without the page.
+	function onBulkErrorRetry() {
+		const dispatch = bulkErrorRetryDispatch(bulkErrorAction, effectiveSelectedIds().length);
+		if (dispatch === 'clear') {
+			bulkError = null;
+			return;
+		}
+		const handlers: Record<BulkErrorAction, () => void> = {
+			select: () => void selectAllMatching(),
+			requeue: () => void bulkRequeue(),
+			confirm: () => void openRemoveConfirm(),
+			done: () => void bulkMarkDone(),
+			remove: () => void bulkRemove()
+		};
+		handlers[dispatch]();
 	}
 
 	// Pagination jump
@@ -487,6 +521,12 @@
 		const nextFilter = normalizedFilter(pageStore.url.searchParams.get('status'));
 		const nextPage = normalizedPage(pageStore.url.searchParams.get('page'));
 		const nextQ = pageStore.url.searchParams.get('q') ?? '';
+		if (criteriaChanged({ filter, q }, { filter: nextFilter, q: nextQ })) {
+			// A criteria change from the URL (back/forward, deep link)
+			// redefines "all matching" — drop the selection so the bar
+			// cannot offer done/remove against the stale baseline.
+			clearSelection();
+		}
 		if (filter !== nextFilter) filter = nextFilter;
 		if (currentPage !== nextPage) currentPage = nextPage;
 		if (q !== nextQ) q = nextQ;
@@ -520,7 +560,7 @@
 
 <PageHeader
 	title="Books"
-	description="Every book in your library, with status filters and bulk requeue."
+	description="Every book in your library, with status filters and bulk requeue, mark-as-done, and remove."
 />
 
 {#if dl.error}
@@ -652,7 +692,7 @@
 	{/if}
 	{#if bulkError}
 		<div class="mt-3">
-			<Alert variant="error" onretry={() => (bulkErrorAction === 'select' ? selectAllMatching() : bulkErrorAction === 'confirm' ? openRemoveConfirm() : bulkErrorAction === 'done' ? bulkMarkDone() : bulkRemove())}>
+			<Alert variant="error" onretry={onBulkErrorRetry}>
 				{bulkError.message}
 				<ErrorDetail raw={bulkError.raw} needsSettings={bulkError.needsSettings} />
 			</Alert>
@@ -671,6 +711,12 @@
 		{removeList.length} book{removeList.length === 1 ? '' : 's'} will be removed from the library.
 		Files on disk are not touched.
 	</p>
+	{#if removeSkipped.length > 0}
+		<p class="mt-2 text-sm text-[var(--text-muted)]">
+			{removeSkipped.length} selected book{removeSkipped.length === 1 ? ' is' : 's are'} skipped — a queued or running
+			processing job owns {removeSkipped.length === 1 ? 'it' : 'them'}. Cancel the job first to remove the book.
+		</p>
+	{/if}
 	{#if removeListLoading}
 		<p class="mt-3 text-sm text-[var(--text-muted)]">Loading the list…</p>
 	{:else if removeList.length > 0}

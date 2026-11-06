@@ -101,12 +101,14 @@
 				<span class="text-[var(--text-muted)]">→</span>
 				<code class="output-profile-selector__path">{selectedProfile.output_dir || 'Global output directory'}</code>
 			</p>
-			{#if selectedProfile.output_scheme}
-				<p class="output-profile-selector__summary-line">
-					<span class="text-[var(--text-muted)]">Format</span>
-					<code class="output-profile-selector__path">{selectedProfile.output_scheme}</code>
-				</p>
-			{/if}
+			<!-- Always stated: an empty output_scheme inherits the global path
+			     format, and the summary owes the operator both inheritances
+			     (this row and the output directory above) rather than leaving
+			     Format silently absent. -->
+			<p class="output-profile-selector__summary-line">
+				<span class="text-[var(--text-muted)]">Format</span>
+				<code class="output-profile-selector__path">{selectedProfile.output_scheme || 'Global path format'}</code>
+			</p>
 			<p class="output-profile-selector__summary-scope">
 				Applies to {batchCount === 1 ? 'this' : `these ${batchCount}`} {countNoun(batchCount)} in this {batchScope} only.
 			</p>

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { SourceASINEvidence } from '../../lib/types.js';
+	import type { SourceASINEvidence } from '#lib/types.js';
 	import {
 		MISSING_RELEASE_HELPER,
 		missingReleaseBody,
@@ -8,7 +8,7 @@
 		missingReleaseProvenanceLabel,
 		missingReleaseView,
 		type MissingReleaseContext
-	} from '../../lib/missingRelease.js';
+	} from '#lib/missingRelease.js';
 
 	let {
 		evidence = null,
@@ -186,8 +186,12 @@
 		margin: 8px 0 0;
 	}
 
+	/* inline-flex, not flex: the span sits inside a sentence ("Not the right
+	   book? Add to AudiobookDB."), and a block-level box would break that
+	   sentence onto its own line and strand the trailing punctuation. The
+	   32px target is kept by min-height on the inline box. */
 	.nudge-inline__action {
-		display: flex;
+		display: inline-flex;
 		align-items: center;
 		min-height: 32px;
 		white-space: nowrap;
@@ -208,8 +212,9 @@
 		text-underline-offset: 2px;
 	}
 
+	/* Batch keeps the same inline box and differs only in target size: the
+	   scan hint sits inside a dense table row and does not need 32px. */
 	.nudge-inline--batch .nudge-inline__action {
-		display: inline;
 		min-height: 0;
 	}
 
