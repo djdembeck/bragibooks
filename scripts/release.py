@@ -222,8 +222,14 @@ class Repository:
         target = self.release_record(tag)
         if target is None:
             require(not publish, "Cannot finalize a missing draft release")
-            self.run("gh", "release", "create", tag, "--repo", self.repository(),
-                     "--verify-tag", "--draft", "--title", tag, "--notes", "")
+            try:
+                self.run("gh", "release", "create", tag, "--repo", self.repository(),
+                         "--verify-tag", "--draft", "--title", tag, "--notes", "")
+            except ReleaseError as error:
+                # The listing lagged: the record exists and the create was
+                # rejected. That is the desired outcome, not an error.
+                require("already exists" in str(error),
+                        f"Draft creation failed for {tag}: {error}")
             return
         if publish and target.get("draft"):
             current = semver(tag.removeprefix("v"))
