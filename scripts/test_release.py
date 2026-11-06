@@ -108,7 +108,8 @@ class LocalGitHub(release.Repository):
                 if existing:
                     raise release.ReleaseError(f"gh release create: release {tag} already exists")
                 self.release_commands.append(("create", args))
-                self.releases.append({"tag_name": tag, "draft": "--draft" in args, "prerelease": False})
+                self.releases.append({"tag_name": tag, "draft": "--draft" in args,
+                                      "prerelease": False, "assets": []})
                 return ""
             self.release_commands.append((args[2], args))
             record = existing[0]
@@ -327,6 +328,17 @@ class ReleaseLifecycleBehavior(LifecycleFixture):
         with self.assertRaisesRegex(release.ReleaseError, "HTTP 403"):
             self.repo.release("v1.0.0", initial, publish=True)
         self.assertEqual(self.repo.release_commands, [])
+
+    def test_missing_release_record_yields_empty_asset_store(self):
+        # The asset step can run seconds after the draft is created, when
+        # the release listing has not reflected it yet. That listing state
+        # must be treated as an empty store (every artifact a fresh upload),
+        # not as an error that strands the already-published image.
+        self.assertEqual(self.repo.release_assets("v1.0.0"), [])
+        initial = self.git("rev-parse", "v1.0.0")
+        self.repo.release("v1.0.0", initial)
+        self.repo.releases[-1]["assets"] = [{"id": 1, "name": "a"}]
+        self.assertEqual(self.repo.release_assets("v1.0.0"), [{"id": 1, "name": "a"}])
 
 
 class FakeRegistry(release.Registry):

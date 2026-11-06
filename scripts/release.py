@@ -144,11 +144,16 @@ class Repository:
         return records[0] if records else None
 
     def release_assets(self, tag):
-        """Asset of the draft-aware release record; a missing record is true absence."""
+        """Assets of the draft-aware release record.
+
+        A missing record yields the empty store: every built artifact is
+        then a fresh upload, which is exactly the state right after a
+        draft was created and the listing has not reflected it yet.
+        Failing closed here would strand an already-published immutable
+        image with no assets and force a full re-run, so absence is a
+        state, not an error."""
         target = self.release_record(tag)
-        if target is None:
-            raise ReleaseError(f"Release {tag} does not exist")
-        return target["assets"]
+        return [] if target is None else target["assets"]
 
     def select(self, sha, version=None, bump="auto", automatic=False):
         sha = self.exact_oid(sha)
