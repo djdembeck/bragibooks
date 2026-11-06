@@ -851,11 +851,16 @@ func (s *ProcessingService) bookPreStatus(jobID string) string {
 
 // restoreBookOnCancel resets a cancelled job's book from 'processing' back
 // to preStatus, the status it had when the job was queued (finding: F28).
+// A failed restore is logged, not swallowed: when the job is already
+// terminal, the orphan sweep (which only touches active jobs) can never
+// recover a book stranded in 'processing', so the failure must be visible.
 func (s *ProcessingService) restoreBookOnCancel(bookID int64, preStatus string) {
-	s.db.Exec(
+	if _, err := s.db.Exec(
 		"UPDATE books SET status = ?, status_message = '' WHERE id = ? AND status = 'processing'",
 		preStatus, bookID,
-	)
+	); err != nil {
+		log.Printf("restore book %d to %q after cancel: %v", bookID, preStatus, err)
+	}
 }
 
 func (s *ProcessingService) processJob(ctx context.Context, job *models.ProcessingJob) {
