@@ -438,6 +438,27 @@ func TestBuildMatchEvidenceSelectedEditionMustBelongToBook(t *testing.T) {
 	}
 }
 
+// Regression for the review finding: an empty expanded releases list is
+// unknown membership, not proof. A source release ID matching the selection
+// must stay unresolved so the UI cannot render green "Exact edition ID".
+func TestBuildMatchEvidenceUnexpandedReleasesKeepEditionUnresolved(t *testing.T) {
+	catalog := evidenceTestCatalog()
+	catalog.Book.Releases = nil
+	snap := completeSourceSnap(map[string]audio.SourceField{
+		audio.FieldAudiobookdbReleaseID: {Values: []string{"release-a"}, Source: audio.SourceEmbedded, Status: audio.StatusPresent},
+	})
+	report := buildMatchEvidence(snap, catalog, false, evidenceSelection("book-a", "release-a"))
+	if report.Origin != models.MatchOriginTitle {
+		t.Errorf("origin = %q; want title (edition must not be verified)", report.Origin)
+	}
+	if len(report.Identifiers) != 1 || report.Identifiers[0].State != models.IdentifierUnresolved {
+		t.Fatalf("identifiers = %+v; want one unresolved edition identifier", report.Identifiers)
+	}
+	if report.Identifiers[0].ReleaseID != "" {
+		t.Errorf("unresolved edition identifier releaseId = %q; want empty", report.Identifiers[0].ReleaseID)
+	}
+}
+
 func TestGetMatchEvidenceRequiresCatalogBookID(t *testing.T) {
 	h := newTestHandler(t)
 	req := newMatchEvidenceRequest(t, "1", "")

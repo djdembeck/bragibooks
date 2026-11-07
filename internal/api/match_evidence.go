@@ -304,9 +304,17 @@ func resolveReleaseID(
 		evidence.Reason = "The source release ID points to a different edition."
 		return evidence
 	}
-	if !catalogBookHasRelease(catalog.Book, *selection.ReleaseID) {
+	switch catalogEditionMembership(catalog.Book, *selection.ReleaseID) {
+	case editionMembershipDisproven:
 		evidence.State = models.IdentifierConflict
 		evidence.Reason = "The selected edition does not belong to the selected book."
+		return evidence
+	case editionMembershipUnknown:
+		// The expanded book did not list its releases, so nothing proves the
+		// relationship. Never promote an unproven relationship to verified
+		// edition identity (which would render the green exact-edition label).
+		evidence.State = models.IdentifierUnresolved
+		evidence.Reason = "The selected book's releases were not expanded, so the source release ID could not be verified."
 		return evidence
 	}
 	evidence.State = models.IdentifierVerified
@@ -316,19 +324,27 @@ func resolveReleaseID(
 	return evidence
 }
 
-// catalogBookHasRelease reports whether the expanded book lists the
-// release. An empty releases list is not proof either way, so it does not
-// block verification.
-func catalogBookHasRelease(book *audiobookdb.Book, releaseID string) bool {
+// editionMembership is a tri-state check: only a positively listed release
+// proves the edition-to-book relationship. An absent or unexpanded
+// releases list is unknown, not proof.
+type editionMembership int
+
+const (
+	editionMembershipUnknown editionMembership = iota
+	editionMembershipProven
+	editionMembershipDisproven
+)
+
+func catalogEditionMembership(book *audiobookdb.Book, releaseID string) editionMembership {
 	if book == nil || len(book.Releases) == 0 {
-		return true
+		return editionMembershipUnknown
 	}
 	for _, release := range book.Releases {
 		if strings.EqualFold(release.ID, releaseID) {
-			return true
+			return editionMembershipProven
 		}
 	}
-	return false
+	return editionMembershipDisproven
 }
 
 func resolveBookID(
