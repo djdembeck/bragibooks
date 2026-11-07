@@ -87,6 +87,7 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 		r.Put("/books/{id}", h.UpdateBook)
 		r.Delete("/books/{id}", h.DeleteBook)
 		r.Get("/books/{id}/reprocess", h.GetBookReprocess)
+		r.Get("/books/{id}/match-evidence", h.GetMatchEvidence)
 
 		// Processing
 		r.Post("/process", h.StartProcessing)
