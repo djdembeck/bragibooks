@@ -39,6 +39,7 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 		"region":                   cfg.Processing.Region,
 		"audiobookdb_base_url":     cfg.APIKey.BaseURL,
 		"api_endpoint_enabled":     cfg.Server.APIEndpoint.Enabled,
+		"indexing_enabled":         cfg.Directories.IndexingEnabled,
 		"api_endpoint_env_managed": h.svc.Config.APIEndpointEnvManaged(),
 		"bragibooks_version":       version.Version,
 		"m4b_merge_version":        h.svc.Processor.ReadVersion(),
@@ -221,6 +222,7 @@ type UpdateSettingsRequest struct {
 	NumCPUs            *int    `json:"num_cpus"`
 	OutputScheme       *string `json:"output_scheme"`
 	Region             *string `json:"region"`
+	IndexingEnabled    *bool   `json:"indexing_enabled"`
 }
 
 // UpdateSettings handles PUT /api/settings.
@@ -349,6 +351,10 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		snap.Processing.Region = *req.Region
 		changed["processing"] = mergeChangedMap(changed, "processing", "region", *req.Region)
 	}
+	if req.IndexingEnabled != nil {
+		snap.Directories.IndexingEnabled = *req.IndexingEnabled
+		changed["directories"] = mergeChangedMap(changed, "directories", "indexing_enabled", *req.IndexingEnabled)
+	}
 
 	// 1. DB first.
 	if err := h.saveSettingsToDB(&snap); err != nil {
@@ -381,6 +387,18 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	h.svc.Processor.ApplyConfig(h.svc.Config.Config())
 	h.svc.AudiobookDB.Store(audiobookdb.NewClient(live.APIKey.APIKey, live.APIKey.BaseURL))
+
+	// Scan trigger: turning the index on, or re-pointing the input root
+	// while it is on, schedules a (re)scan so the index tracks the new
+	// root. Non-blocking; the caller polls GET /api/index.
+	if h.svc.IndexSvc != nil {
+		enabledOn := !prev.Directories.IndexingEnabled && snap.Directories.IndexingEnabled
+		rootMoved := snap.Directories.IndexingEnabled &&
+			canonicalRoot(prev.Directories.InputDir) != canonicalRoot(snap.Directories.InputDir)
+		if enabledOn || rootMoved {
+			h.svc.IndexSvc.RequestScan()
+		}
+	}
 
 	// Re-snapshot the m4b-merge version and pair its result with the live
 	// binary in the response: a second read here could observe the value
@@ -448,6 +466,10 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 	if cfg.Server.APIEndpoint.Enabled {
 		apiEnabled = 1
 	}
+	indexingEnabled := 0
+	if cfg.Directories.IndexingEnabled {
+		indexingEnabled = 1
+	}
 	// The whole row is replaced, so the legacy-token one-shot marker
 	// (schema v6) must be carried through: this INSERT is the only
 	// settings-row writer the UI's form save and the external-API state
@@ -461,8 +483,8 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 		return err
 	}
 	_, err := h.svc.DB.Exec(`
-		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, indexing_enabled, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 	`,
 		cfg.APIKey.APIKey,
 		cfg.APIKey.BaseURL,
@@ -476,6 +498,7 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 		apiEnabled,
 		cfg.Server.APIEndpoint.KeyDigest,
 		legacyMigrated,
+		indexingEnabled,
 	)
 	return err
 }

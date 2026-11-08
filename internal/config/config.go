@@ -64,6 +64,10 @@ type DirectoriesConfig struct {
 	InputDir     string `mapstructure:"input_dir" yaml:"input_dir" json:"input_dir"`
 	OutputDir    string `mapstructure:"output_dir" yaml:"output_dir" json:"output_dir"`
 	CompletedDir string `mapstructure:"completed_dir" yaml:"completed_dir" json:"completed_dir"`
+	// IndexingEnabled turns on the input-directory index (pre-extracted
+	// source evidence served by the Import page). Default off; the DB
+	// settings row is the runtime preference, env/YAML pin the deployment.
+	IndexingEnabled bool `mapstructure:"indexing_enabled" yaml:"indexing_enabled" json:"indexing_enabled"`
 }
 
 // ProcessingConfig holds audiobook processing configuration.
@@ -480,6 +484,9 @@ func applyEnvPriority(cfg *Config) {
 	if isEnvTrue("SERVER_API_ENDPOINT_ENABLED") {
 		cfg.Server.APIEndpoint.Enabled = true
 	}
+	if isEnvTrue("DIRECTORIES_INDEXING_ENABLED") {
+		cfg.Directories.IndexingEnabled = true
+	}
 	if v := envVal("m4b_merge.binary"); v != "" {
 		cfg.M4bMerge.Binary = v
 	}
@@ -557,6 +564,8 @@ func overrideKey(target, yamlOnly *Config, key string) {
 		target.Directories.OutputDir = yamlOnly.Directories.OutputDir
 	case "directories.completed_dir":
 		target.Directories.CompletedDir = yamlOnly.Directories.CompletedDir
+	case "directories.indexing_enabled":
+		target.Directories.IndexingEnabled = yamlOnly.Directories.IndexingEnabled
 	// Processing
 	case "processing.num_cpus":
 		target.Processing.NumCPUs = yamlOnly.Processing.NumCPUs
@@ -594,6 +603,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("directories.input_dir", "")
 	v.SetDefault("directories.output_dir", "")
 	v.SetDefault("directories.completed_dir", "")
+	v.SetDefault("directories.indexing_enabled", false)
 	v.SetDefault("processing.num_cpus", 1)
 	v.SetDefault("processing.path_format", "{author}/{title}")
 	v.SetDefault("processing.region", "us")
@@ -612,6 +622,7 @@ func setDefaultsOnConfig(cfg *Config) {
 	cfg.Directories.InputDir = ""
 	cfg.Directories.OutputDir = ""
 	cfg.Directories.CompletedDir = ""
+	cfg.Directories.IndexingEnabled = false
 	cfg.Processing.NumCPUs = 1
 	cfg.Processing.PathFormat = "{author}/{title}"
 	cfg.Processing.Region = "us"

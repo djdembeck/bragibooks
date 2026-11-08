@@ -172,6 +172,7 @@ The key environment variables are:
 | `DIRECTORIES_INPUT_DIR` | Source audiobook directory | unset |
 | `DIRECTORIES_OUTPUT_DIR` | Destination directory for processed books | unset |
 | `DIRECTORIES_COMPLETED_DIR` | Directory for completed source files | unset |
+| `DIRECTORIES_INDEXING_ENABLED` | Pre-index the input directory (faster Import, pre-read ASINs/titles) | `false` |
 | `PROCESSING_NUM_CPUS` | Number of processing workers | `1` |
 | `PROCESSING_PATH_FORMAT` | Output path format | `{author}/{title}` |
 | `PROCESSING_REGION` | Accepted for compatibility with older setups; no effect | `us` |
@@ -187,6 +188,7 @@ directories:
   input_dir: /input
   output_dir: /output
   completed_dir: /input/done
+  indexing_enabled: false
 
 processing:
   num_cpus: 1

@@ -3,7 +3,7 @@
 	import { Pencil, Trash2 } from '@lucide/svelte';
 	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker, Modal, PathFormatBuilder } from '#lib/components/index.js';
 	import { parseParts, validateScheme, trimSegment } from '#lib/scheme.js';
-	import type { Settings, OutputProfile } from '#lib/types.js';
+	import type { Settings, OutputProfile, IndexStatus, IndexState } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { Save, FolderOpen, Check, Copy, Plus } from '@lucide/svelte';
@@ -13,6 +13,11 @@
 	let settings = $state<Settings | null>(null);
 	let pickerOpen = $state(false);
 	let pickerField = $state<PathField>('input_dir');
+	// Source index status (GET /api/index). `indexStatus` mirrors the last
+	// response; `indexRefreshing` marks the manual refresh in flight.
+	let indexStatus = $state<IndexStatus | null>(null);
+	let indexRefreshing = $state(false);
+	let indexRefreshError = $state<string | null>(null);
 
 	const pickerTitles: Record<PathField, string> = {
 		input_dir: 'Choose input directory',
@@ -44,6 +49,87 @@
 	$effect(() => {
 		load();
 	});
+
+	// Fetch the index status once settings settle; the poller below keeps it
+	// fresh only while a scan is in flight. A failed read just hides the
+	// status line — the toggle and Refresh now are unaffected.
+	$effect(() => {
+		if (!settings?.indexing_enabled) return;
+		let cancelled = false;
+		void get<IndexStatus>('/index')
+			.then((st) => {
+				if (!cancelled) indexStatus = st;
+			})
+			.catch(() => {});
+		return () => {
+			cancelled = true;
+		};
+	});
+
+	// Poll the index while a scan is in flight; stop at any terminal status.
+	// The generation guard means a stale terminal from a prior scan can never
+	// be misread as this page's refresh completing.
+	$effect(() => {
+		const st = indexStatus?.state;
+		if (!st || !['queued', 'running'].includes(st.status)) return;
+		let cancelled = false;
+		const gen = st.generation;
+		const tick = async () => {
+			while (!cancelled) {
+				await new Promise((r) => setTimeout(r, 1000));
+				if (cancelled) return;
+				try {
+					const cur = await get<IndexStatus>('/index');
+					if (cancelled) return;
+					indexStatus = cur;
+					if (cur.state.generation === gen &&
+						!['queued', 'running'].includes(cur.state.status)) {
+						indexRefreshing = false;
+						return;
+					}
+				} catch {
+					// transient read failure: keep polling
+				}
+			}
+		};
+		void tick();
+		return () => {
+			cancelled = true;
+		};
+	});
+
+	async function refreshIndex() {
+		if (!settings || settings.indexing_enabled !== true) return;
+		indexRefreshError = null;
+		try {
+			const res = await post<{ state: IndexState }>('/index/refresh', {});
+			if (res?.state) {
+				indexRefreshing = true;
+				indexStatus = { enabled: true, state: res.state };
+			}
+		} catch (e) {
+			indexRefreshError = toCleanedError(e).message;
+		}
+	}
+
+	function indexStatusLabel(): string {
+		const st = indexStatus?.state;
+		if (!settings?.indexing_enabled || !st) return '';
+		if (st.status === 'queued' || st.status === 'running') return 'Indexing…';
+		if (!st.last_run_at) return 'Not indexed yet';
+		const ago = st.last_run_at ? relativeAgo(st.last_run_at) : '';
+		return `${st.entries} entries · last indexed ${ago}`;
+	}
+
+	function relativeAgo(iso: string): string {
+		const t = Date.parse(iso);
+		if (isNaN(t)) return iso;
+		const s = Math.max(0, (Date.now() - t) / 1000);
+		if (s < 60) return 'just now';
+		if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+		if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+		return `${Math.floor(s / 86400)}d ago`;
+	}
 
 	// Client-side validation helpers
 	function validateNonNegativeInt(value: number): string | null {
@@ -607,6 +693,45 @@
 					<p class="settings-help">Tap a part above to add it. Within a part, Arrows move, Delete removes, Alt+Arrows reorders.</p>
 					{#if fieldErrors.output_scheme}
 						<p class="settings-field-error" role="alert">{fieldErrors.output_scheme}</p>
+					{/if}
+				</div>
+			</div>
+		</section>
+
+		<!-- Source index -->
+		<section class="settings-section" aria-labelledby="settings-index">
+			<h2 class="settings-section__title" id="settings-index">Source index</h2>
+			<div class="settings-grid">
+				<div class="settings-field">
+					<label class="settings-checkbox-row" for="indexing_enabled">
+						<input
+							id="indexing_enabled"
+							type="checkbox"
+							checked={settings.indexing_enabled === true}
+							onchange={(e) => settings && (settings.indexing_enabled = e.currentTarget.checked)}
+						/>
+						<span>Enable the source index</span>
+					</label>
+					<p class="settings-help">
+						Prefetches the input directory and pre-reads ASINs and titles, so Import loads
+						instantly and matching starts faster. Saved with the rest of the form.
+					</p>
+					{#if settings.indexing_enabled === true}
+						<div class="settings-index-status">
+							<span class="text-xs text-[var(--text-muted)]" role="status" aria-live="polite">{indexStatusLabel()}</span>
+							<Button
+								variant="secondary"
+								class="shrink-0"
+								disabled={indexRefreshing}
+								loading={indexRefreshing}
+								onclick={refreshIndex}
+							>
+								Refresh now
+							</Button>
+						</div>
+						{#if indexRefreshError}
+							<p class="settings-field-error" role="alert">{indexRefreshError}</p>
+						{/if}
 					{/if}
 				</div>
 			</div>
@@ -1296,6 +1421,26 @@
 		font-size: 0.8rem;
 		font-weight: 600;
 		color: var(--text-secondary);
+	}
+
+	/* Checkbox row: the toggle reads as a setting, not a form field. */
+	.settings-checkbox-row {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		margin-bottom: 0.375rem;
+		font-size: 0.875rem;
+		font-weight: 500;
+		color: var(--text);
+		cursor: pointer;
+	}
+
+	.settings-index-status {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		margin-top: 0.5rem;
 	}
 
 	.settings-input-row {

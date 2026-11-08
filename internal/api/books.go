@@ -584,6 +584,14 @@ func (h *Handler) attachSourceCover(ctx context.Context, bookID int64, srcPath s
 // (including ffprobe-missing hosts, which persist a degraded row with
 // explicit error states); an INSERT failure never fails intake.
 func (h *Handler) attachSourceMetadata(ctx context.Context, bookID int64, srcPath string) {
+	// Fast path: an indexed folder's snapshot is already stored in the
+	// source index — reuse it and skip the ffprobe pass entirely. Best
+	// effort: any lookup/decode failure falls through to the live probe.
+	if snap := h.storedIndexMetadata(srcPath); snap != nil {
+		log.Printf("attach source metadata for book %d: reusing indexed snapshot for %s", bookID, srcPath)
+		h.persistSourceMetadata(bookID, snap)
+		return
+	}
 	var snap *audio.SourceMetadata
 	var err error
 	if h.svc.FFprobe == "" {
@@ -596,6 +604,26 @@ func (h *Handler) attachSourceMetadata(ctx context.Context, bookID int64, srcPat
 		}
 	}
 	h.persistSourceMetadata(bookID, snap)
+}
+
+// storedIndexMetadata returns the index's stored snapshot for srcPath when
+// one exists and is a complete extraction (the only kind intake may claim
+// fields from). Nil — and thus a live probe — on any miss, decode failure,
+// or incomplete (degraded) snapshot.
+func (h *Handler) storedIndexMetadata(srcPath string) *audio.SourceMetadata {
+	var payload string
+	if err := h.svc.DB.QueryRow(`SELECT payload FROM source_index WHERE path = ?`, srcPath).Scan(&payload); err != nil {
+		return nil
+	}
+	var snap audio.SourceMetadata
+	if err := json.Unmarshal([]byte(payload), &snap); err != nil {
+		log.Printf("stored index metadata for %s: decode: %v", srcPath, err)
+		return nil
+	}
+	if !sourceMetadataComplete(&snap) {
+		return nil
+	}
+	return &snap
 }
 
 // persistSourceMetadata writes one book's snapshot row; failures are

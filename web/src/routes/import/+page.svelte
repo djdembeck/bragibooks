@@ -1,16 +1,29 @@
 <script lang="ts">
-	import { get, post } from '#lib/api.js';
+	import { get, post, put } from '#lib/api.js';
 	import { goto } from '$app/navigation';
 	import { AUDIO_FILE_EXTS } from '#lib/types.js';
-	import type { DirectoryEntry, DirectoriesResponse, Settings, CreateBooksResponse } from '#lib/types.js';
+	import type {
+		DirectoryEntry, DirectoriesResponse, Settings, CreateBooksResponse,
+		IndexedDirectoryEntry, IndexedDirectoriesResponse, IndexEvidence,
+		IndexState
+	} from '#lib/types.js';
 	import { PageHeader, Alert, ErrorDetail, Button, Skeleton, EmptyState } from '#lib/components/index.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { ChevronUp, ChevronDown, Folder, FileAudio, File } from '@lucide/svelte';
 
 	let currentPath = $state('');
-	let entries: DirectoryEntry[] = $state([]);
-	let filtered: DirectoryEntry[] = $state([]);
+	let entries: IndexedDirectoryEntry[] = $state([]);
+	let filtered: IndexedDirectoryEntry[] = $state([]);
+	let settings: Settings | null = $state(null);
+	// First-run index prompt. localStorage is the DISMISSAL marker only
+	// (mirrors the overview api_notice), so a dismissed prompt stays gone.
+	const INDEX_PROMPT_KEY = 'bragibooks_index_prompt_dismissed';
+	let indexPromptDismissed = $state(false);
+	// "checking" until the settings fetch settles: a failed fetch is not
+	// evidence that the index is off, so the banner hides on "unknown".
+	let indexState = $state<IndexState | null>(null);
+	let indexBusy = $state(false);
 	let selectedPaths = $state<Set<string>>(new Set());
 	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 	let creating = $state(false);
@@ -56,47 +69,145 @@
 		}
 	}
 
+	// One fetch for the listing, used by initPath() and loadDirectory().
+	// With indexing on, the server answers from the index (fast, with
+	// evidence); the plain filesystem shape is the fallback. Both normalize
+	// into the same entry state, so selection/sort/columns work unchanged.
+	async function fetchListing(path: string): Promise<void> {
+		const useIndex = settings?.indexing_enabled === true;
+		if (useIndex) {
+			const response = await get<IndexedDirectoriesResponse>(
+				`/directories?path=${encodeURIComponent(path)}&index=1`
+			);
+			entries = validEntries(response.entries || []);
+			currentPath = response.path || path;
+			indexState = response.index ?? null;
+			return;
+		}
+		const response = await get<DirectoriesResponse>(`/directories?path=${encodeURIComponent(path)}`);
+		entries = validEntries(response.entries || []);
+		currentPath = response.path || path;
+		indexState = null;
+	}
+
 	async function initPath() {
 		loading = true;
 		// One delayed-load window spans the settings fetch and the first
 		// directory fetch, so the 200 ms skeleton delay covers both requests.
 		await dl.run(async () => {
-			let settings: Settings;
+			let cfg: Settings;
 			try {
-				settings = await get<Settings>('/settings', {});
+				cfg = await get<Settings>('/settings', {});
 			} catch (e) {
 				// Settings failures keep their own alert (with the Settings
 				// link); directory failures surface through dl.error.
 				settingsError = toCleanedError(e);
 				return;
 			}
-			if (!settings?.input_dir) {
+			if (!cfg?.input_dir) {
 				settingsError = toCleanedError('Source directory is not configured.');
 				return;
 			}
-			const response = await get<DirectoriesResponse>(
-				`/directories?path=${encodeURIComponent(settings.input_dir)}`
-			);
-			entries = validEntries(response.entries || []);
-			currentPath = response.path || settings.input_dir;
+			settings = cfg;
+			await fetchListing(cfg.input_dir);
+			// Append-while-you-browse: if the index is on but stale for this
+			// visit (never run, old, or pointing at a different root), kick a
+			// non-blocking refresh and re-list when it lands.
+			void maybeBackgroundRefresh();
 		});
 		loading = false;
 	}
 
-	function validEntries(list: DirectoryEntry[]): DirectoryEntry[] {
+	// After the first listing paints, refresh the index when it is on and
+	// any of: no index state (server fell back to the filesystem for a
+	// path outside the indexed root), never indexed, > 60 s old, or the
+	// indexed root differs from the configured input root. The refresh is
+	// fire-and-forget; the UI re-lists when its captured generation lands.
+	async function maybeBackgroundRefresh() {
+		if (settings?.indexing_enabled !== true) return;
+		const st = indexState;
+		const stale =
+			!st ||
+			!st.last_run_at ||
+			(Date.now() - Date.parse(st.last_run_at)) / 1000 > 60 ||
+			(settings.input_dir && st.root && st.root !== settings.input_dir.replace(/\/+$/, ''));
+		if (!stale) return;
+		indexBusy = true;
+		try {
+			const res = await post<{ state: IndexState }>('/index/refresh', {});
+			const gen = res?.state?.generation ?? -1;
+			for (let i = 0; i < 60; i++) {
+				await new Promise((r) => setTimeout(r, 2000));
+				const cur = await get<{ state: IndexState }>('/index');
+				const s = cur?.state;
+				if (s && s.generation === gen &&
+					['done', 'truncated', 'interrupted', 'error'].includes(s.status)) {
+					indexState = s;
+					await fetchListing(currentPath);
+					return;
+				}
+			}
+		} catch {
+			// Decorative: a failed background refresh just leaves the stale
+			// listing in place; the manual path is the Refresh control.
+		} finally {
+			indexBusy = false;
+		}
+	}
+
+	function validEntries(list: IndexedDirectoryEntry[]): IndexedDirectoryEntry[] {
 		return list.filter((e) => e.name && e.path && e.name !== '.' && e.name !== '..');
 	}
 
 	async function loadDirectory(path: string) {
 		loading = true;
 		await dl.run(async () => {
-			const response = await get<DirectoriesResponse>(`/directories?path=${encodeURIComponent(path)}`);
-			entries = validEntries(response.entries || []);
-			currentPath = response.path || path;
+			await fetchListing(path);
 			// Keep selectedPaths alive across directory navigation so user selections are not lost
 			filterAndSort();
 		});
 		loading = false;
+	}
+
+	function showIndexPrompt(): boolean {
+		return settings?.indexing_enabled === false && !indexPromptDismissed;
+	}
+
+	function dismissIndexPrompt() {
+		try {
+			localStorage.setItem(INDEX_PROMPT_KEY, '1');
+		} catch {
+			// storage unavailable — the banner stays for this page only
+		}
+		indexPromptDismissed = true;
+	}
+
+	async function enableIndex() {
+		try {
+			await put<Settings>('/settings', { indexing_enabled: true });
+		} catch {
+			// A failed enable is reported by the settings alert on the next
+			// load; the banner simply stays.
+			return;
+		}
+		settings = { ...(settings as Settings), indexing_enabled: true };
+		await initPath();
+	}
+
+	// ASIN evidence uses the books-list badge grammar: one valid unambiguous
+	// ASIN gets the monospace badge; everything else is an honest "—".
+	// ASIN is source evidence, not AudiobookDB provenance, so it is a neutral
+	// chip, not the magenta AbDB mark.
+	function asinCell(evidence: IndexEvidence | undefined): { kind: 'value' | 'many' | 'dash'; text: string } {
+		const a = evidence?.asin;
+		if (!a) return { kind: 'dash', text: '—' };
+		if (a.status === 'present' && a.value) return { kind: 'value', text: a.value };
+		if (a.status === 'ambiguous') return { kind: 'many', text: `${a.count ?? 2} ASINs` };
+		return { kind: 'dash', text: '—' };
+	}
+
+	function titleCell(evidence: IndexEvidence | undefined): string {
+		return evidence?.title || '—';
 	}
 
 	function filterAndSort() {
@@ -191,6 +302,16 @@
 		}
 	}
 
+	// Read the dismissal once on load so a dismissed prompt stays gone across
+	// visits; a failed read just leaves the prompt for this page.
+	$effect(() => {
+		try {
+			indexPromptDismissed = localStorage.getItem(INDEX_PROMPT_KEY) === '1';
+		} catch {
+			indexPromptDismissed = false;
+		}
+	});
+
 	$effect(() => {
 		initPath();
 	});
@@ -221,6 +342,20 @@
 	title="Import"
 	description="Select the source directories or files to add to your library. They move to Match next."
 />
+
+{#if showIndexPrompt()}
+	<div class="mb-6">
+		<Alert role="status">
+			{#snippet actions()}
+				<Button variant="primary" onclick={enableIndex}>Enable index</Button>
+				<Button variant="ghost" onclick={dismissIndexPrompt}>Dismiss</Button>
+			{/snippet}
+			<span>
+				Speed up Import and matching — enable the source index.
+			</span>
+		</Alert>
+	</div>
+{/if}
 
 {#if settingsError}
 	<div class="mb-6">
@@ -261,6 +396,18 @@
 			{/if}
 			<span class="truncate font-mono text-xs text-[var(--text-secondary)]" title={currentPath || '/'}>{currentPath || '/'}</span>
 		</div>
+
+		{#if settings?.indexing_enabled === true && indexState}
+			<div class="mb-2 flex items-center gap-2 text-xs text-[var(--text-muted)]" role="status" aria-live="polite">
+				{#if indexBusy || ['queued', 'running'].includes(indexState.status)}
+					<span>Checking for new sources…</span>
+				{:else if indexState.last_run_at}
+					<span><span class="font-mono text-[var(--text-secondary)]">{indexState.entries}</span> indexed · {formatDate(indexState.last_run_at)}</span>
+				{:else}
+					<span>Not indexed yet</span>
+				{/if}
+			</div>
+		{/if}
 
 		<!-- Controls row -->
 		<div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -347,12 +494,15 @@
 			<div class="import-column-header flex items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-1.5 text-xs font-medium text-[var(--text-muted)] bg-[var(--surface)]">
 				<div class="w-4" aria-hidden="true"></div>
 				<div class="flex-1">Source</div>
+				<div class="import-evidence-cell w-28">ASIN</div>
+				<div class="import-evidence-cell w-40">Title</div>
 				<div class="w-24 text-right">Date</div>
 				<div class="w-20 text-right">Size</div>
 			</div>
 
 			{#each filtered as entry (entry.path)}
 				{#if entry.type === 'dir'}
+					{@const asin = asinCell(entry.evidence)}
 					<!-- Directory row — navigable -->
 					<div class="import-entry group flex items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-2 last:border-b-0 hover:bg-[var(--surface-hover)] transition-colors">
 						<input
@@ -371,11 +521,22 @@
 							<Folder class="h-4 w-4 flex-shrink-0 text-[var(--workspace-action)]" aria-hidden="true" />
 							<span class="truncate">{entry.name}</span>
 						</button>
+						<div class="import-evidence-cell w-28 text-xs">
+							{#if asin.kind === 'value'}
+								<span class="import-asin-badge">{asin.text}</span>
+							{:else if asin.kind === 'many'}
+								<span class="text-[var(--text-muted)]">{asin.text}</span>
+							{:else}
+								<span class="text-[var(--text-muted)]">—</span>
+							{/if}
+						</div>
+						<div class="import-evidence-cell w-40 truncate text-xs text-[var(--text-muted)]" title={titleCell(entry.evidence) !== '—' ? titleCell(entry.evidence) : undefined}>{titleCell(entry.evidence)}</div>
 						<div class="import-entry__date w-24 text-right text-xs text-[var(--text-muted)]" aria-hidden="true">{formatDate(entry.mod_time)}</div>
 						<div class="import-entry__size w-20 text-right text-xs text-[var(--text-muted)]">—</div>
 					</div>
 				{:else}
 					{@const supported = isSupportedType(entry)}
+					{@const asin = asinCell(entry.evidence)}
 					<!-- File row — selectable; unsupported files are muted -->
 					<div class={["import-entry flex items-center gap-3 border-b border-[var(--border-subtle)] px-4 py-2 last:border-b-0 transition-colors", supported ? 'hover:bg-[var(--surface-hover)]' : 'opacity-50'].join(' ')}>
 						<input
@@ -396,6 +557,16 @@
 								{entry.name}
 							</span>
 						</div>
+						<div class="import-evidence-cell w-28 text-xs">
+							{#if asin.kind === 'value'}
+								<span class="import-asin-badge">{asin.text}</span>
+							{:else if asin.kind === 'many'}
+								<span class="text-[var(--text-muted)]">{asin.text}</span>
+							{:else}
+								<span class="text-[var(--text-muted)]">—</span>
+							{/if}
+						</div>
+						<div class="import-evidence-cell w-40 truncate text-xs text-[var(--text-muted)]" title={titleCell(entry.evidence) !== '—' ? titleCell(entry.evidence) : undefined}>{titleCell(entry.evidence)}</div>
 						<div class="import-entry__date w-24 text-right text-xs text-[var(--text-muted)]" aria-hidden="true">{formatDate(entry.mod_time)}</div>
 						<div class="import-entry__size w-20 text-right text-xs text-[var(--text-muted)]" aria-hidden="true">{formatSize(entry.size)}</div>
 					</div>
@@ -439,8 +610,29 @@
 {/if}
 
 <style>
+	/* Neutral monospace chip: ASIN is source evidence, not AudiobookDB
+	   provenance, so it never takes the magenta AbDB mark. */
+	.import-asin-badge {
+		display: inline-block;
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-family: var(--font-mono, ui-monospace, monospace);
+		font-size: 0.72rem;
+		padding: 0.125rem 0.375rem;
+		border: 1px solid var(--border);
+		border-radius: 0.125rem;
+		background: var(--surface);
+		color: var(--text-secondary);
+	}
+
 	@media (max-width: 639px) {
 		.import-column-header {
+			display: none;
+		}
+
+		.import-evidence-cell {
 			display: none;
 		}
 

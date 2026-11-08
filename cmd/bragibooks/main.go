@@ -150,6 +150,15 @@ func main() {
 	defer cancel()
 	go processingSvc.RunWorkers(ctx, cfg.Processing.NumCPUs)
 
+	// Input-directory index: one background scanner, opt-in via the
+	// settings flag. A cold index (fresh DB, new root) would be useless on
+	// first Import visit, so a warm boot schedules one incremental scan.
+	indexSvc := api.NewIndexService(database, cfgMgr, ffprobePath)
+	go indexSvc.Run(ctx)
+	if indexSvc.Enabled() {
+		indexSvc.RequestScan()
+	}
+
 	handler := api.NewHandler(&api.Services{
 		DB:            database,
 		Config:        cfgMgr,
@@ -159,6 +168,7 @@ func main() {
 		CoversDir:     coversDir,
 		FFmpeg:        ffmpegPath,
 		FFprobe:       ffprobePath,
+		IndexSvc:      indexSvc,
 	})
 
 	// Router
@@ -234,6 +244,9 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("graceful shutdown failed: %v", err)
 	}
+	// Join the index worker before returning: the deferred database.Close()
+	// runs last and must not close the DB under a live index writer.
+	indexSvc.Wait()
 }
 
 // externalAPIStatusLine renders the one startup line about the external
@@ -588,11 +601,12 @@ func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {
 	var m4bBinary, inputDir, outputDir, completedDir, outputScheme, region, apiKey, baseURL, endpointKeyDigest string
 	var numCPUs int
 	var endpointEnabled int
+	var indexingEnabled int
 
 	err := database.QueryRow(`
-		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url, api_enabled, api_key_digest
+		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url, api_enabled, api_key_digest, indexing_enabled
 		FROM settings WHERE id = 1
-	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &endpointEnabled, &endpointKeyDigest)
+	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &endpointEnabled, &endpointKeyDigest, &indexingEnabled)
 	if err != nil {
 		log.Printf("Warning: could not load settings from DB: %v", err)
 		return
@@ -636,6 +650,9 @@ func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {
 		cfg.Server.APIEndpoint.Enabled = endpointEnabled != 0
 	}
 	cfg.Server.APIEndpoint.KeyDigest = endpointKeyDigest
+	if !yamlKeys["directories.indexing_enabled"] && os.Getenv("DIRECTORIES_INDEXING_ENABLED") == "" {
+		cfg.Directories.IndexingEnabled = indexingEnabled != 0
+	}
 }
 
 func ensureDefaultSettings(database *sql.DB) error {

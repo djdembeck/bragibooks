@@ -29,6 +29,12 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Features & Improvements
 
+- **Opt-in input-directory source index**
+  - Settings gains a "Source index" toggle (off by default, `directories.indexing_enabled` / `DIRECTORIES_INDEXING_ENABLED`). When on, a background worker walks the input directory and stores one row per path with change-detection signals and the same pre-extracted source metadata intake would compute (embedded/filename ASINs, derived title, ffprobe tags), so Import renders from the index in milliseconds instead of re-walking the filesystem.
+  - The Import page shows the pre-extracted ASIN (monospace badge for one valid value, `N ASINs` for ambiguous, `—` for missing/unknown) and derived title per entry, a status line ("N indexed · <when>"), and a dismissible first-run banner that enables the index. New and changed files are appended on visit: a stale index (never run, >60 s old, or pointing at a different root) triggers a non-blocking refresh and re-lists when it lands. Columns are hidden on narrow viewports.
+  - Indexing is incremental: unchanged complete rows are kept (size + modtime match), changed/new rows are re-extracted, vanished rows are pruned — a truncated walk never prunes, and degraded rows (ffprobe missing, scan budget exhausted) self-heal on the next refresh. A non-terminal state left by a hard crash is recovered at boot.
+  - Intake reuses the stored complete snapshot, so importing an indexed folder skips the ffprobe pass entirely; any miss falls back to live probing.
+  - New API surface: `GET /api/index` (status + generation), `POST /api/index/refresh` (202, coalesced; 400 while disabled), and `GET /api/directories?path=…&index=1` (index-backed listing with per-entry evidence). Disabled deployments behave exactly as before.
 - Kept the container's default HTTP port at `8000`, the same port the Python image used, so existing Docker port mappings keep working after upgrading; `SERVER_PORT` still overrides it.
 - Narrowed development Docker media access to configurable input/output directories rather than mounting the developer home directory; pinned Docker build, runtime, and media-tool image digests for reproducible builds, with Renovate digest updates.
 - **Per-book selection and bulk book actions on the catalog** (#506)
