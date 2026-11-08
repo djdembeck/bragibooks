@@ -390,7 +390,10 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Scan trigger: turning the index on, or re-pointing the input root
 	// while it is on, schedules a (re)scan so the index tracks the new
-	// root. Non-blocking; the caller polls GET /api/index.
+	// root. When DIRECTORIES_INDEXING_ENABLED forces the flag on at boot,
+	// the "turning on" transition never happens here (the flag was
+	// already on) — the boot scan covers that case. Non-blocking; the
+	// caller polls GET /api/index.
 	if h.svc.IndexSvc != nil {
 		enabledOn := !prev.Directories.IndexingEnabled && snap.Directories.IndexingEnabled
 		rootMoved := snap.Directories.IndexingEnabled &&

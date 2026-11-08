@@ -609,10 +609,12 @@ func (h *Handler) attachSourceMetadata(ctx context.Context, bookID int64, srcPat
 // storedIndexMetadata returns the index's stored snapshot for srcPath when
 // one exists and is a complete extraction (the only kind intake may claim
 // fields from). Nil — and thus a live probe — on any miss, decode failure,
-// or incomplete (degraded) snapshot.
+// or incomplete (degraded) snapshot. The lookup key is canonicalized the
+// same way the index stores paths so non-canonical caller paths (trailing
+// separators, ./ segments, relative forms) still hit the row.
 func (h *Handler) storedIndexMetadata(srcPath string) *audio.SourceMetadata {
 	var payload string
-	if err := h.svc.DB.QueryRow(`SELECT payload FROM source_index WHERE path = ?`, srcPath).Scan(&payload); err != nil {
+	if err := h.svc.DB.QueryRow(`SELECT payload FROM source_index WHERE path = ?`, canonicalRoot(srcPath)).Scan(&payload); err != nil {
 		return nil
 	}
 	var snap audio.SourceMetadata

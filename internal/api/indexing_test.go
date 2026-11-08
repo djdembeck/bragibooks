@@ -219,3 +219,88 @@ func TestIndexServiceShutdownQueued(t *testing.T) {
 		t.Fatalf("post-shutdown status = %s, want interrupted or done", st.State.Status)
 	}
 }
+
+// TestIndexHelpersWildcardAndRoot pins likeEscape/indexImmediateChild
+// against the containment and pruning paths most likely to regress
+// silently: LIKE wildcards in a literal prefix and the filesystem-root
+// special case.
+func TestIndexHelpersWildcardAndRoot(t *testing.T) {
+	sep := string(os.PathSeparator)
+	like := []struct {
+		in, want string
+	}{
+		{"/a", "/a"},
+		{`a\b`, `a\\b`},
+		{`a\b%`, `a\\b\%`},
+		{"a%b", `a\%b`},
+		{"a_b", `a\_b`},
+		{"a_%\\b", `a\_\%\\b`},
+	}
+	for _, tc := range like {
+		if got := likeEscape(tc.in); got != tc.want {
+			t.Errorf("likeEscape(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	child := []struct {
+		dir, cand string
+		want      bool
+	}{
+		{"/", "/a", true},
+		{"/", "/a/b", false},
+		{"/a%", "/a%/x", true},
+		{"/a%", "/a%x", false},
+		{"/a_b", "/a_b/c", true},
+		{"/a_b", "/a_b_c/d", false},
+		{"/a" + sep + "b", "/a" + sep + "b" + sep + "c", true},
+		{"/a" + sep + "b", "/a" + sep + "bc", false},
+	}
+	for _, tc := range child {
+		if got := indexImmediateChild(tc.dir, tc.cand); got != tc.want {
+			t.Errorf("indexImmediateChild(%q, %q) = %v, want %v", tc.dir, tc.cand, got, tc.want)
+		}
+	}
+}
+
+// TestRequestScanRootChangeQueuedCoalesces pins the generation contract
+// when the input root changes while a rescan is queued: the second
+// request must coalesce into the accepted generation, not bump a new one
+// that no scan will ever terminate (activeRoot must be cleared at every
+// terminal state).
+func TestRequestScanRootChangeQueuedCoalesces(t *testing.T) {
+	root1 := t.TempDir()
+	root2 := t.TempDir()
+	svc, cm := newIndexTestService(t, root1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go svc.Run(ctx)
+
+	// Complete a scan on root1, then stop the worker.
+	st0 := svc.RequestScan()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st := svc.Status()
+		if st.State.Generation == st0.State.Generation && st.State.Status == "done" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("first scan did not finish: %+v", st.State)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	svc.Wait()
+
+	// Re-point the root: the rescan request is queued (no worker yet).
+	cfg := cm.Config()
+	cfg.Directories.InputDir = root2
+	cm.Store(cfg)
+	st1 := svc.RequestScan()
+	if st1.State.Status != "queued" {
+		t.Fatalf("root-change request status = %s, want queued", st1.State.Status)
+	}
+	// A repeated request before the worker consumes must coalesce.
+	st2 := svc.RequestScan()
+	if st2.State.Generation != st1.State.Generation {
+		t.Fatalf("second request generation %d != queued generation %d (coalescing broken by stale active root)", st2.State.Generation, st1.State.Generation)
+	}
+}

@@ -477,6 +477,19 @@ func TestRunMigrationsV14AddsInputDirectoryIndex(t *testing.T) {
 	if !hasColumn(t, db, "settings", "indexing_enabled") {
 		t.Error("settings missing column indexing_enabled")
 	}
+
+	// Re-running the full migration set must be a no-op: v14's
+	// ALTER TABLE ... ADD COLUMN is not IF NOT EXISTS-guarded, so a
+	// regression in the migration-log gate would fail here.
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("re-run RunMigrations: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM migration_log`).Scan(&n); err != nil {
+		t.Fatalf("count migration_log: %v", err)
+	}
+	if n != len(migrations) {
+		t.Errorf("migration_log rows after re-run = %d, want %d", n, len(migrations))
+	}
 }
 
 // captureMigrations temporarily swaps the package's migration list so a

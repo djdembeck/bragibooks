@@ -199,6 +199,7 @@ func (s *IndexService) markInterrupted() {
 	if s.last.Status == "running" || s.last.Status == "queued" {
 		s.last.Status = "interrupted"
 		s.last.Detail = "shutdown"
+		s.activeRoot = ""
 		s.persistLocked()
 	}
 }
@@ -297,13 +298,26 @@ func (s *IndexService) scan(ctx context.Context) {
 	if truncated {
 		status = "truncated"
 	}
-	if degraded > 0 && status == "done" {
-		detail = fmt.Sprintf("done with %d paths not extracted (budget)", degraded)
+	if degraded > 0 {
+		detail = appendDetail(detail, fmt.Sprintf("%d paths not extracted (budget)", degraded))
 	}
 	s.setTerminal(status, detail, len(rows), root)
 }
 
+// appendDetail joins a non-empty extra message onto a detail string so a
+// truncated walk and a budget-exhausted extraction both stay visible.
+func appendDetail(detail, extra string) string {
+	if detail == "" {
+		return extra
+	}
+	return detail + "; " + extra
+}
+
 // setTerminal records and persists a terminal state for the generation.
+// It clears activeRoot: the worker is no longer mid-walk, so a later
+// RequestScan must not treat a stale root as "scan in flight on a
+// different root" and bump the generation out from under a coalesced
+// caller.
 func (s *IndexService) setTerminal(status, detail string, entries int, root string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -312,6 +326,7 @@ func (s *IndexService) setTerminal(status, detail string, entries int, root stri
 	s.last.Entries = entries
 	s.last.Root = root
 	s.last.LastRunAt = time.Now().UTC().Format(time.RFC3339)
+	s.activeRoot = ""
 	s.persistLocked()
 }
 
@@ -442,48 +457,71 @@ func (s *IndexService) pruneVanished(walked map[string]bool) error {
 // needs-extraction. A row is unchanged iff size and modtime match AND its
 // stored snapshot is complete; degraded/incomplete rows are re-extracted
 // on every refresh (self-healing).
+//
+// It streams source_index once in path (primary-key) order and merges it
+// with the walked rows sorted the same way: one ordered index scan for the
+// whole tree, never a per-batch IN-list lookup (which would scan the table
+// per batch).
 func (s *IndexService) classify(rows []indexRow) (unchanged, extract []indexRow) {
-	for start := 0; start < len(rows); start += indexWriteBatch {
-		end := min(start+indexWriteBatch, len(rows))
-		batch := rows[start:end]
-		q := fmt.Sprintf(`SELECT path, size, modtime, payload FROM source_index WHERE path IN (%s)`, placeholders(len(batch)))
-		dbRows, err := s.db.Query(q, toArgs(pathsOf(batch))...)
-		if err != nil {
-			log.Printf("index: classify query: %v", err)
-			extract = append(extract, batch...)
-			continue
+	dbRows, err := s.db.Query(`SELECT path, size, modtime, payload FROM source_index ORDER BY path`)
+	if err != nil {
+		log.Printf("index: classify query: %v", err)
+		return nil, rows
+	}
+	defer dbRows.Close()
+	type stored struct {
+		Size    int64
+		ModTime string
+		Payload string
+	}
+	var nextStored *stored
+	var nextPath string
+	load := func() bool {
+		if !dbRows.Next() {
+			return false
 		}
-		type stored struct {
-			Size    int64
-			ModTime string
-			Payload string
+		var st stored
+		if err := dbRows.Scan(&nextPath, &st.Size, &st.ModTime, &st.Payload); err != nil {
+			return false
 		}
-		existing := make(map[string]stored, len(batch))
-		for dbRows.Next() {
-			var st stored
-			var p string
-			if err := dbRows.Scan(&p, &st.Size, &st.ModTime, &st.Payload); err != nil {
-				dbRows.Close()
-				extract = append(extract, batch...)
-				break
+		nextStored = &st
+		return true
+	}
+	walked := make([]indexRow, len(rows))
+	copy(walked, rows)
+	sort.Slice(walked, func(i, j int) bool { return walked[i].Path < walked[j].Path })
+	for i := 0; i < len(walked) || nextStored != nil; {
+		switch {
+		case i >= len(walked):
+			nextStored = nil // remaining stored rows are not walked: ignore
+		case nextStored == nil:
+			if load() {
+				continue // more stored rows to merge
 			}
-			existing[p] = st
-		}
-		dbRows.Close()
-		changed := false
-		for _, r := range batch {
-			st, ok := existing[r.Path]
-			if ok && st.Size == r.Size && st.ModTime == r.ModTime {
+			extract = append(extract, walked[i])
+			i++
+		case walked[i].Path < nextPath:
+			// Walked path has no stored row: new.
+			extract = append(extract, walked[i])
+			i++
+		case walked[i].Path > nextPath:
+			// Stored row not walked this pass: left for prune.
+			load()
+		default:
+			st := nextStored
+			if st.Size == walked[i].Size && st.ModTime == walked[i].ModTime {
 				var snap audio.SourceMetadata
 				if json.Unmarshal([]byte(st.Payload), &snap) == nil && sourceMetadataComplete(&snap) {
-					unchanged = append(unchanged, r)
+					unchanged = append(unchanged, walked[i])
+					i++
+					load()
 					continue
 				}
 			}
-			extract = append(extract, r)
-			changed = true
+			extract = append(extract, walked[i])
+			i++
+			load()
 		}
-		_ = changed
 	}
 	return unchanged, extract
 }
@@ -645,14 +683,6 @@ func toArgs(ss []string) []any {
 	return args
 }
 
-func pathsOf(rows []indexRow) []string {
-	out := make([]string, len(rows))
-	for i, r := range rows {
-		out[i] = r.Path
-	}
-	return out
-}
-
 func nullableString(s string) any {
 	if s == "" {
 		return nil
@@ -703,11 +733,18 @@ func (h *Handler) RefreshIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 // listIndexedChildren serves one level of the input directory from the
-// index table, returning entries with their pre-extracted evidence.
+// index table, returning entries with their pre-extracted evidence. It
+// reports ok=false (filesystem fallback) when the stored rows belong to a
+// different root than the current one — e.g. the input root was just
+// re-pointed and the rescan has not landed — so a stale index never
+// masquerades as an empty current directory.
 func (h *Handler) listIndexedChildren(dir string) ([]IndexedDirectoryEntry, bool, error) {
 	root := canonicalRoot(h.svc.Config.Config().Directories.InputDir)
 	if dir != root && !strings.HasPrefix(dir, indexChildPrefix(root)) {
 		return nil, false, nil // not under the root
+	}
+	if state := h.svc.IndexSvc.Status().State; state.Root != root {
+		return nil, false, nil // rows are from a previous root (or no scan yet)
 	}
 	q := fmt.Sprintf(`SELECT path, name, type, size, modtime, payload FROM source_index WHERE path LIKE ? ESCAPE '\'`)
 	rows, err := h.svc.DB.Query(q, likeEscape(indexChildPrefix(dir))+"%")

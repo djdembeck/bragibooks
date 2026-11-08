@@ -119,18 +119,22 @@
 	}
 
 	// After the first listing paints, refresh the index when it is on and
-	// any of: no index state (server fell back to the filesystem for a
-	// path outside the indexed root), never indexed, > 60 s old, or the
-	// indexed root differs from the configured input root. The refresh is
-	// fire-and-forget; the UI re-lists when its captured generation lands.
+	// any of: no index state (the server fell back to the filesystem for a
+	// path outside the indexed root — e.g. the input root changed and the
+	// rescan has not landed yet) or the last run is missing or > 60 s old.
+	// The root itself is not compared client-side: the server stores the
+	// canonical (absolute, tilde-expanded) root while settings holds the
+	// raw value, so a client comparison would spuriously fire for tilde
+	// configurations; a stale root already produces no index state for
+	// the listing. The refresh is fire-and-forget; the UI re-lists when
+	// its captured generation lands.
 	async function maybeBackgroundRefresh() {
 		if (settings?.indexing_enabled !== true) return;
 		const st = indexState;
 		const stale =
 			!st ||
 			!st.last_run_at ||
-			(Date.now() - Date.parse(st.last_run_at)) / 1000 > 60 ||
-			(settings.input_dir && st.root && st.root !== settings.input_dir.replace(/\/+$/, ''));
+			(Date.now() - Date.parse(st.last_run_at)) / 1000 > 60;
 		if (!stale) return;
 		indexBusy = true;
 		try {
