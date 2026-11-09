@@ -29,14 +29,17 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Features & Improvements
 
+- Release archives embed the version and use lowercase platform names
+  (`bragibooks_2.1.0_linux-amd64.tar.gz`, `bragibooks_2.1.0_darwin-arm64.tar.gz`,
+  …) instead of `bragibooks_Linux_x86_64.tar.gz` / `bragibooks_Darwin_arm64.tar.gz`.
+- Kept the container's default HTTP port at `8000`, the same port the Python image used, so existing Docker port mappings keep working after upgrading; `SERVER_PORT` still overrides it.
+- Narrowed development Docker media access to configurable input/output directories rather than mounting the developer home directory; pinned Docker build, runtime, and media-tool image digests for reproducible builds, with Renovate digest updates.
 - **Opt-in input-directory source index**
   - Settings gains a "Source index" toggle (off by default, `directories.indexing_enabled` / `DIRECTORIES_INDEXING_ENABLED`). When on, a background worker walks the input directory and stores one row per path with change-detection signals and the same pre-extracted source metadata intake would compute (embedded/filename ASINs, derived title, ffprobe tags), so Import renders from the index in milliseconds instead of re-walking the filesystem.
   - The Import page shows the pre-extracted ASIN (monospace badge for one valid value, `N ASINs` for ambiguous, `—` for missing/unknown) and derived title per entry, a status line ("N indexed · <when>"), and a dismissible first-run banner that enables the index. New and changed files are appended on visit: a stale index (never run, >60 s old, or pointing at a different root) triggers a non-blocking refresh and re-lists when it lands. Columns are hidden on narrow viewports.
   - Indexing is incremental: unchanged complete rows are kept (size + modtime match), changed/new rows are re-extracted, vanished rows are pruned — a truncated walk never prunes, and degraded rows (ffprobe missing, scan budget exhausted) are retried on each refresh (a refresh alone does not guarantee they complete). A non-terminal state left by a hard crash is recovered at boot.
   - Intake reuses the stored complete snapshot, so importing an indexed folder skips the ffprobe pass entirely; any miss falls back to live probing.
   - New API surface: `GET /api/index` (status + generation), `POST /api/index/refresh` (202, coalesced; 400 while disabled), and `GET /api/directories?path=…&index=1` (index-backed listing with per-entry evidence). Disabled deployments behave exactly as before.
-- Kept the container's default HTTP port at `8000`, the same port the Python image used, so existing Docker port mappings keep working after upgrading; `SERVER_PORT` still overrides it.
-- Narrowed development Docker media access to configurable input/output directories rather than mounting the developer home directory; pinned Docker build, runtime, and media-tool image digests for reproducible builds, with Renovate digest updates.
 - **Per-book selection and bulk book actions on the catalog** (#506)
   - The Books catalog selects books individually: every row carries a checkbox, and the header checkbox is tri-state (all / some / none) that selects or clears every book matching the current filter and search (server-capped at 1,000 via the `GET /books?all_ids=1` ID list). The bulk bar's count follows that selection, and the bulk actions act on that explicit selection only — never on an implicit whole-catalog scope.
   - The bulk bar offers three operations over the selected books: requeue for processing (with the chosen output profile's summary rendered under its picker as a caption, so the bar's actions stay on one line), mark as done, and remove. The bar reflows to a full-width stack on narrow screens.
