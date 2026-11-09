@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onDestroy } from 'svelte';
 	import { get, post, put } from '#lib/api.js';
 	import { goto } from '$app/navigation';
 	import { AUDIO_FILE_EXTS } from '#lib/types.js';
@@ -24,12 +25,19 @@
 	// evidence that the index is off, so the banner hides on "unknown".
 	let indexState = $state<IndexState | null>(null);
 	let indexBusy = $state(false);
+	// Cancels an in-flight background refresh poll when the page unmounts
+	// (or re-inits); the loop checks it between polls and stops.
+	let refreshCancelled = false;
 	let selectedPaths = $state<Set<string>>(new Set());
 	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 	let creating = $state(false);
 	let search = $state('');
 	let sortBy = $state<'name' | 'date' | 'size'>('name');
 	let sortDir = $state<'asc' | 'desc'>('asc');
+	onDestroy(() => {
+		refreshCancelled = true;
+	});
+
 	// Start in the loading state: initPath() awaits /settings before any
 	// directory request starts, so a false initial value renders the empty state.
 	let loading = $state(true);
@@ -121,27 +129,35 @@
 	// After the first listing paints, refresh the index when it is on and
 	// any of: no index state (the server fell back to the filesystem for a
 	// path outside the indexed root — e.g. the input root changed and the
-	// rescan has not landed yet) or the last run is missing or > 60 s old.
+	// rescan has not landed yet), the last run is missing or > 60 s old,
+	// OR the state is non-terminal (queued/running) — an in-flight scan
+	// must be polled to its terminal regardless of last_run_at age.
 	// The root itself is not compared client-side: the server stores the
 	// canonical (absolute, tilde-expanded) root while settings holds the
 	// raw value, so a client comparison would spuriously fire for tilde
 	// configurations; a stale root already produces no index state for
 	// the listing. The refresh is fire-and-forget; the UI re-lists when
-	// its captured generation lands.
+	// its captured generation lands. A refresh request coalesces with a
+	// running scan on the same root, so re-requesting is safe.
 	async function maybeBackgroundRefresh() {
 		if (settings?.indexing_enabled !== true) return;
 		const st = indexState;
+		const nonTerminal = !!st && (st.status === 'queued' || st.status === 'running');
 		const stale =
 			!st ||
 			!st.last_run_at ||
 			(Date.now() - Date.parse(st.last_run_at)) / 1000 > 60;
-		if (!stale) return;
+		if (!nonTerminal && !stale) return;
 		indexBusy = true;
 		try {
+			refreshCancelled = false;
 			const res = await post<{ state: IndexState }>('/index/refresh', {});
 			const gen = res?.state?.generation ?? -1;
-			for (let i = 0; i < 60; i++) {
+			// The server allows a 30-minute extraction budget per scan, so
+			// monitoring must outlive any single scan: 900 polls x 2 s.
+			for (let i = 0; i < 900; i++) {
 				await new Promise((r) => setTimeout(r, 2000));
+				if (refreshCancelled) return; // page unmounted
 				const cur = await get<{ state: IndexState }>('/index');
 				const s = cur?.state;
 				if (s && s.generation === gen &&

@@ -19,6 +19,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/bragibooks/bragibooks/internal/audio"
+	"github.com/bragibooks/bragibooks/internal/config"
 	"github.com/bragibooks/bragibooks/internal/models"
 )
 
@@ -1265,4 +1266,159 @@ func TestListBooksAllIDSCapTruncates(t *testing.T) {
 	if len(res.IDs) != maxBookIDs {
 		t.Errorf("ids = %d; want the cap %d", len(res.IDs), maxBookIDs)
 	}
+}
+
+// TestStoredIndexMetadataFreshness pins the stored-snapshot freshness gate:
+// an in-place source rewrite (same path, changed size or mtime) must NOT
+// reuse the stored index snapshot — the live probe runs instead.
+func TestStoredIndexMetadataFreshness(t *testing.T) {
+	h := newTestHandler(t)
+	if _, err := h.svc.DB.Exec(`
+		CREATE TABLE source_index (
+			path TEXT PRIMARY KEY,
+			name TEXT, type TEXT, size INTEGER, modtime TEXT, payload TEXT,
+			indexed_at TEXT, seen_at TEXT
+		)`); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.mp3")
+	body := []byte("0123456789")
+	if err := os.WriteFile(src, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(src)
+	modtime := info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z")
+	complete := `{"schema":2,"source_kind":"file","files_total":1,"files_probed":1,"degraded":false,"duration_seconds":5,"files":[{"file":"a.mp3","duration_seconds":5}],"fields":{}}`
+
+	t.Run("fresh source reuses snapshot", func(t *testing.T) {
+		if _, err := h.svc.DB.Exec(
+			`INSERT INTO source_index (path, name, type, size, modtime, payload, indexed_at, seen_at)
+			 VALUES (?, 'a.mp3', 'file', ?, ?, ?, datetime('now'), datetime('now'))`,
+			canonicalRoot(src), info.Size(), modtime, complete); err != nil {
+			t.Fatal(err)
+		}
+		if snap := h.storedIndexMetadata(src); snap == nil {
+			t.Fatal("fresh stored snapshot not reused")
+		}
+	})
+
+	t.Run("size changed falls to live probe", func(t *testing.T) {
+		if _, err := h.svc.DB.Exec(`UPDATE source_index SET size = ? WHERE path = ?`,
+			999, canonicalRoot(src)); err != nil {
+			t.Fatal(err)
+		}
+		if snap := h.storedIndexMetadata(src); snap != nil {
+			t.Fatal("stale (size-mismatched) snapshot was reused")
+		}
+	})
+
+	t.Run("mtime changed falls to live probe", func(t *testing.T) {
+		if _, err := h.svc.DB.Exec(`UPDATE source_index SET size = ? WHERE path = ?`,
+			info.Size(), canonicalRoot(src)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.svc.DB.Exec(`UPDATE source_index SET modtime = ? WHERE path = ?`,
+			"2020-01-01T00:00:00.000000000Z", canonicalRoot(src)); err != nil {
+			t.Fatal(err)
+		}
+		if snap := h.storedIndexMetadata(src); snap != nil {
+			t.Fatal("stale (mtime-mismatched) snapshot was reused")
+		}
+	})
+}
+
+// TestCreateBooksIntakeIndexGate pins the INTAKE-level Enabled() gate
+// (the freshness gate above is storedIndexMetadata-only, reachable with
+// the index off too): with a FRESH, complete stored row and a live probe
+// available, a disabled index must run the probe (persisted row reflects
+// the probe, not the stored snapshot) and an enabled index must reuse the
+// stored snapshot (the probe never runs).
+func TestCreateBooksIntakeIndexGate(t *testing.T) {
+	// The stored snapshot carries a distinctive ASIN so a reuse is
+	// observable; the live probe (stubbed ffprobe) carries a different one.
+	const storedASIN = "B0STORED00"
+	const probedASIN = "B0PROBED00"
+	complete := `{"schema":2,"source_kind":"file","files_total":1,"files_probed":1,"degraded":false,"duration_seconds":5,"files":[{"file":"1.mp3","duration_seconds":5}],"fields":{"asin":{"values":["` + storedASIN + `"],"source":"embedded","status":"present"}}}`
+
+	setup := func(t *testing.T, enabled bool) (*Handler, string, string) {
+		t.Helper()
+		srcDir := t.TempDir()
+		src := filepath.Join(srcDir, "1.mp3")
+		if err := os.WriteFile(src, []byte("0123456789"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		modtime := info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z")
+
+		db := newTestDB(t)
+		if _, err := db.Exec(`
+			CREATE TABLE source_index (
+				path TEXT PRIMARY KEY, name TEXT, type TEXT, size INTEGER, modtime TEXT, payload TEXT,
+				indexed_at TEXT, seen_at TEXT
+			)`); err != nil {
+			t.Fatal(err)
+		}
+		// Fresh, complete row: size and modtime match the live file.
+		if _, err := db.Exec(`INSERT INTO source_index (path, name, type, size, modtime, payload, indexed_at, seen_at)
+			VALUES (?, '1.mp3', 'file', ?, ?, ?, datetime('now'), datetime('now'))`,
+			canonicalRoot(src), info.Size(), modtime, complete); err != nil {
+			t.Fatal(err)
+		}
+
+		// A stub ffprobe whose sidecar carries the probe's ASIN: if the
+		// probe runs, the persisted snapshot shows B0PROBED00; a reuse of
+		// the stored snapshot shows B0STORED00.
+		ffprobe, respDir := stubFFprobeForMetadata(t)
+		writeProbeSidecar(t, respDir, "1.mp3",
+			`{"format": {"duration": "5.0", "tags": {"audible_asin": "`+probedASIN+`"}}, "streams": []}`)
+
+		h := &Handler{svc: &Services{DB: db, FFprobe: ffprobe}}
+		if enabled {
+			cm := config.NewConfigManager()
+			cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+			cm.Config().Directories.InputDir = srcDir
+			cm.Config().Directories.IndexingEnabled = true
+			cm.Store(cm.Config())
+			h.svc.IndexSvc = NewIndexService(db, cm, "")
+		}
+		return h, src, probedASIN
+	}
+
+	asinOf := func(t *testing.T, db *sql.DB, bookID int64) string {
+		t.Helper()
+		snap := metadataPayloadFor(t, db, bookID)
+		fields, ok := snap["fields"].(map[string]any)
+		if !ok {
+			t.Fatalf("payload fields = %T, want object", snap["fields"])
+		}
+		asin, ok := fields["asin"].(map[string]any)
+		if !ok {
+			t.Fatalf("payload has no asin field: %v", fields)
+		}
+		values, ok := asin["values"].([]any)
+		if !ok || len(values) != 1 {
+			t.Fatalf("asin values = %v, want a single value", asin["values"])
+		}
+		return values[0].(string)
+	}
+
+	t.Run("disabled index runs the live probe", func(t *testing.T) {
+		h, src, probedASIN := setup(t, false)
+		book := postBook(t, h, src)
+		if got := asinOf(t, h.svc.DB, book.ID); got != probedASIN {
+			t.Fatalf("persisted asin = %s, want %s (disabled index must run the live probe, not reuse the stored row)", got, probedASIN)
+		}
+	})
+
+	t.Run("enabled index reuses the stored snapshot", func(t *testing.T) {
+		h, src, _ := setup(t, true)
+		book := postBook(t, h, src)
+		if got := asinOf(t, h.svc.DB, book.ID); got != "B0STORED00" {
+			t.Fatalf("persisted asin = %s, want B0STORED00 (enabled index with a fresh complete row must reuse the stored snapshot, no probe)", got)
+		}
+	})
 }

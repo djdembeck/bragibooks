@@ -508,6 +508,51 @@ func TestLoadSettingsFromDBRestoresAPIState(t *testing.T) {
 	}
 }
 
+// TestLoadSettingsFromDBIndexingEnabledGate pins the on-only env gate in
+// loadSettingsFromDB: only a true value of DIRECTORIES_INDEXING_ENABLED
+// force-enables; ANY other value — including "false" — must fall through
+// to the persisted setting (a non-true pin that skipped the DB row would
+// override a saved true on every restart).
+func TestLoadSettingsFromDBIndexingEnabledGate(t *testing.T) {
+	tests := []struct {
+		name  string
+		env   string // "" = unset
+		saved int
+		want  bool
+	}{
+		// (a) Unset: the stored setting is restored.
+		{"unset-stored-enabled", "", 1, true},
+		// (b) The reported bug: env=false must NOT pin disabled over a
+		// saved true.
+		{"env-false-stored-enabled", "false", 1, true},
+		// (c) env=false with no saved value: default disabled.
+		{"env-false-stored-disabled", "false", 0, false},
+		// (d) Non-true value is case-insensitively non-true: same
+		// fall-through.
+		{"env-false-case-insensitive-stored-enabled", "FALSE", 1, true},
+		// (e) Only a true value force-enables over a saved disabled row.
+		{"env-true-stored-disabled", "true", 0, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv("DIRECTORIES_INDEXING_ENABLED", tc.env)
+			}
+			dbh, cm := newStartupTestEnv(t)
+			if _, err := dbh.Exec("UPDATE settings SET indexing_enabled = ? WHERE id = 1", tc.saved); err != nil {
+				t.Fatal(err)
+			}
+
+			loadSettingsFromDB(dbh, cm)
+
+			if got := cm.Config().Directories.IndexingEnabled; got != tc.want {
+				t.Fatalf("IndexingEnabled = %v, want %v (only a true env value pins; anything else falls through to the stored row)", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestLegacyTokenMigrationFreshSeedWriteFailure pins the fresh-path fail-
 // closed rule (the read-only failure subtest for the observation path,
 // extended to the seed): with the legacy var set and the settings row in
@@ -563,4 +608,81 @@ func TestLegacyTokenMigrationFreshSeedWriteFailure(t *testing.T) {
 	if enabled != 0 || rowDigest != "" || marker != 0 {
 		t.Fatalf("partial state persisted on a failed fresh seed: (enabled=%d, digest=%q, marker=%d), want (0, '', 0)", enabled, rowDigest, marker)
 	}
+}
+
+// TestStartupSettingsRowRewritesPreserveIndexingEnabled pins the
+// whole-row carry-through in every legacy-token startup flow that
+// REWRITES the settings row (fresh seed, observation marker-consumption):
+// a saved indexing_enabled=1 must survive, not be reset to the column
+// DEFAULT 0 that a rewrite forgetting the column would write.
+func TestStartupSettingsRowRewritesPreserveIndexingEnabled(t *testing.T) {
+	const legacy = "legacytoken"
+
+	seed := func(t *testing.T, enabled int, digest string, marker int) *sql.DB {
+		t.Helper()
+		dbh, _ := newStartupTestEnv(t)
+		if _, err := dbh.Exec("UPDATE settings SET indexing_enabled = ? WHERE id = 1", 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := dbh.Exec("UPDATE settings SET api_enabled = ?, api_key_digest = ?, legacy_token_migrated = ? WHERE id = 1",
+			enabled, digest, marker); err != nil {
+			t.Fatal(err)
+		}
+		return dbh
+	}
+
+	assertEnabled := func(t *testing.T, dbh *sql.DB) {
+		t.Helper()
+		var enabled int
+		if err := dbh.QueryRow("SELECT indexing_enabled FROM settings WHERE id = 1").Scan(&enabled); err != nil {
+			t.Fatal(err)
+		}
+		if enabled != 1 {
+			t.Fatalf("indexing_enabled = %d after startup rewrite, want 1 (whole-row rewrite reset the opt-in)", enabled)
+		}
+	}
+
+	t.Run("fresh-seed-rewrite", func(t *testing.T) {
+		t.Setenv("BRAGIBOOKS_ADMIN_TOKEN", legacy)
+		dbh := seed(t, 0, "", 0)
+
+		migrated, _, err := migrateLegacyAdminToken(dbh)
+		if err != nil {
+			t.Fatalf("fresh seed returned an error: %v", err)
+		}
+		if !migrated {
+			t.Fatal("fresh seed did not migrate — the rewrite path was not exercised")
+		}
+		assertEnabled(t, dbh)
+	})
+
+	t.Run("observation-marker-consumption-rewrite", func(t *testing.T) {
+		t.Setenv("BRAGIBOOKS_ADMIN_TOKEN", legacy)
+		// A populated row (api state present, marker unconsumed): the
+		// observation consumes the marker, rewriting the whole row.
+		dbh := seed(t, 1, sha256hex("preexistingkey"), 0)
+
+		migrated, _, err := migrateLegacyAdminToken(dbh)
+		if err != nil {
+			t.Fatalf("observation returned an error: %v", err)
+		}
+		if migrated {
+			t.Fatal("observation seeded the token — wrong path")
+		}
+		if _, _, marker := settingsState(t, dbh); marker != 1 {
+			t.Fatalf("marker = %d after observation, want 1 (rewrite path not exercised)", marker)
+		}
+		assertEnabled(t, dbh)
+	})
+
+	t.Run("no-rewrite-noop", func(t *testing.T) {
+		t.Setenv("BRAGIBOOKS_ADMIN_TOKEN", legacy)
+		// Marker already consumed: the observation is a no-op (no write).
+		dbh := seed(t, 1, sha256hex("preexistingkey"), 1)
+
+		if migrated, _, err := migrateLegacyAdminToken(dbh); err != nil || migrated {
+			t.Fatalf("no-op path migrated=%v err=%v", migrated, err)
+		}
+		assertEnabled(t, dbh)
+	})
 }

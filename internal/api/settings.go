@@ -473,12 +473,13 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 	if cfg.Directories.IndexingEnabled {
 		indexingEnabled = 1
 	}
-	// The whole row is replaced, so the legacy-token one-shot marker
-	// (schema v6) must be carried through: this INSERT is the only
-	// settings-row writer the UI's form save and the external-API state
-	// flows use, and dropping the marker to 0 would let the startup
-	// migration re-seed the digest after a user later disabled the API
-	// (finding: legacy token cutover).
+	// The whole row is replaced, so every column NOT written by this
+	// config must be carried through: the legacy-token one-shot marker
+	// (schema v6) — dropping it to 0 would let the startup migration
+	// re-seed the digest after a user later disabled the API (finding:
+	// legacy token cutover) — and indexing_enabled, whose DEFAULT 0
+	// would silently disable the index on the next settings save
+	// (finding: settings writers reset indexing_enabled).
 	var legacyMigrated int
 	if err := h.svc.DB.QueryRow(
 		`SELECT COALESCE(legacy_token_migrated, 0) FROM settings WHERE id = 1`,

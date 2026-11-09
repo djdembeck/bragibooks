@@ -22,7 +22,9 @@ import (
 
 // Bounds of the input-directory index scan. Depth and entry caps guard a
 // hostile or accidental tree; hitting either truncates the walk (and the
-// scan reports it) instead of running unbounded.
+// scan reports it) instead of running unbounded. The depth cap also stops
+// descending into over-depth directories (filepath.SkipDir), so their
+// contents are never visited.
 const (
 	indexMaxDepth   = 30
 	indexMaxEntries = 20000
@@ -69,13 +71,18 @@ type IndexEvidence struct {
 // channel; the generation counter lets a caller poll for ITS scan's
 // terminal state without misreading a prior scan's.
 type IndexService struct {
-	db         *sql.DB
-	cfg        *config.ConfigManager
-	ffprobe    string
-	mu         sync.Mutex
-	req        chan struct{} // cap 1: coalesce pending refresh requests
-	pending    bool          // a request has been accepted but scan() has not consumed it
-	activeRoot string        // the root scan() is currently walking (or "" when idle)
+	db      *sql.DB
+	cfg     *config.ConfigManager
+	ffprobe string
+	mu      sync.Mutex
+	req     chan struct{} // cap 1: coalesce pending refresh requests
+	// nextGen is the generation the worker must run on its next req
+	// receive. It decouples "the generation a scan publishes" from
+	// last.Generation, which a mid-scan root change may have already
+	// bumped for the queued rescan — the running scan must still
+	// terminate under ITS OWN generation.
+	nextGen    int64
+	activeRoot string        // root the accepted (active or queued) scan will target
 	done       chan struct{} // closed when Run returns; Wait() blocks on it
 	last       IndexState    // in-memory mirror of index_state for fast reads
 }
@@ -105,44 +112,55 @@ func (s *IndexService) Enabled() bool {
 	return s.cfg.Config().Directories.IndexingEnabled
 }
 
+// CurrentRoot is the canonical (symlink-resolved) form of the configured
+// input dir — the same form scan() stores as IndexState.Root. "" when the
+// configured dir is missing/invalid. Readers that compare stored-root vs
+// configured-root MUST use this, not canonicalRoot of the raw setting.
+func (s *IndexService) CurrentRoot() string {
+	return s.resolveScanRoot()
+}
+
 // RequestScan enqueues a scan (coalesced with any queued one) and returns
 // the status to poll. The returned State.Generation is stable for the
-// accepted scan: a second caller that coalesces into the same scan sees
-// the same generation, so both can poll to its terminal state.
+// accepted scan: callers that coalesce into the same scan (a repeated
+// refresh, or a refresh landing while a rescan is already queued) see the
+// same generation, so all can poll to its terminal state. A root change
+// mid-scan queues exactly one rescan generation; repeated requests in that
+// window coalesce into it instead of bumping the generation out from
+// under its first caller.
 func (s *IndexService) RequestScan() IndexStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	root := canonicalRoot(s.cfg.Config().Directories.InputDir)
-	terminal := s.last.Status != "running" && s.last.Status != "queued"
 	switch {
-	case terminal:
+	case s.last.Status != "running" && s.last.Status != "queued":
 		// Idle: accept a fresh scan.
 		s.last.Generation++
+		s.nextGen = s.last.Generation
 		s.last.Status = "queued"
+		s.activeRoot = root
 		s.persistLocked()
 		s.sendLocked()
 	case s.last.Status == "queued":
-		// Already queued: coalesce into the pending scan. The generation
-		// must NOT increment — the first caller is polling for it.
-	case s.activeRoot != root:
-		// Running on a different root: the input root changed mid-scan,
-		// so queue a rescan for the new root. activeRoot is only
-		// non-empty while scan() is mid-walk, so this is precise.
+		// A rescan (or first scan) is already queued: coalesce into that
+		// stable generation — never increment while a caller polls for it.
+	case s.activeRoot == root:
+		// Running on the same root: coalesce into the in-flight scan.
+	default:
+		// Running on a different root: the input root changed mid-scan.
+		// Queue ONE rescan for the new root; nextGen stays stable under
+		// repeated requests (the "queued" case above), so the rescan's
+		// generation cannot move under its first caller. The in-flight
+		// scan keeps its own generation via its captured nextGen.
 		s.last.Generation++
-		s.pendingFlagLocked()
+		s.nextGen = s.last.Generation
+		s.last.Status = "queued"
+		s.activeRoot = root
 		s.persistLocked()
 		s.sendLocked()
-	default:
-		// Running on the same root: coalesce.
 	}
 	return s.statusLocked()
-}
-
-// pendingFlagLocked records that a rescan must run after the current one;
-// it is consumed by the worker's next req receive.
-func (s *IndexService) pendingFlagLocked() {
-	s.pending = true
 }
 
 // sendLocked does the non-blocking cap-1 enqueue.
@@ -167,16 +185,36 @@ func (s *IndexService) statusLocked() IndexStatus {
 
 // Run is the worker loop: one bounded scan per accepted request. Started
 // as `go indexSvc.Run(ctx)` from main with the signal-derived ctx; a ctx
-// cancel stops the in-flight scan (recorded "interrupted") and returns.
+// cancel stops the in-flight scan (recorded "interrupted") and returns. On
+// that shutdown path, a rescan token that is still queued (a newer accepted
+// generation whose scan never started) is also marked interrupted, so every
+// accepted generation reaches a terminal before exit.
 func (s *IndexService) Run(ctx context.Context) {
 	defer close(s.done)
 	for {
 		select {
 		case <-ctx.Done():
-			s.markInterrupted()
+			s.mu.Lock()
+			gen := s.last.Generation
+			// A queued rescan token (a mid-scan root change bumped a newer
+			// accepted generation) dies here too. The running scan's
+			// terminal may have already regressed the mirror to its OWN
+			// generation, leaving the rescan's generation terminal-less —
+			// so interrupt the HIGHEST accepted generation, whichever
+			// generation the mirror currently sits on. Non-blocking drain:
+			// the usual shutdown has no token queued, and this must not
+			// block the worker (let alone hold the mutex while waiting).
+			select {
+			case <-s.req:
+				if s.nextGen > gen {
+					gen = s.nextGen
+				}
+			default:
+			}
+			s.mu.Unlock()
+			s.markInterrupted(gen)
 			return
 		case <-s.req:
-			s.pending = false
 			s.scan(ctx)
 		}
 	}
@@ -190,13 +228,24 @@ func (s *IndexService) Wait() {
 }
 
 // markInterrupted records the terminal state for an accepted generation
-// (running or queued) that ended by shutdown instead of by scan outcome.
-// A queued-but-unconsumed request dying on ctx.Done() and a scan cancelled
-// mid-walk both end here, so no generation is left without a terminal.
-func (s *IndexService) markInterrupted() {
+// (running or queued) that ended by shutdown (or cancellation mid-walk)
+// instead of by scan outcome. A queued-but-unconsumed request dying on
+// ctx.Done() and a scan cancelled mid-walk both end here, so no generation
+// is left without a terminal.
+//
+// It also advances a mirror that sits on an OLDER generation's terminal:
+// the running scan's done/truncated terminal can regress the mirror to
+// its own generation while a newer rescan generation is still queued, and
+// the shutdown path interrupts the rescan's generation. A terminal is
+// superseded by a later generation's terminal the same way a rescan
+// supersedes a scan (the old poller already sees the later terminal), so
+// overwriting it keeps every accepted generation terminal without
+// touching an equal-or-newer published terminal.
+func (s *IndexService) markInterrupted(gen int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.last.Status == "running" || s.last.Status == "queued" {
+	if s.last.Status == "running" || s.last.Status == "queued" || s.last.Generation < gen {
+		s.last.Generation = gen
 		s.last.Status = "interrupted"
 		s.last.Detail = "shutdown"
 		s.activeRoot = ""
@@ -215,34 +264,52 @@ type indexRow struct {
 }
 
 // scan performs one full-or-incremental walk of the input root and
-// upserts/prunes the index. All status transitions are persisted.
+// upserts/prunes the index. All status transitions are persisted. Each
+// accepted generation paired with a req-channel token runs exactly one
+// such scan: RequestScan sets nextGen and sends a token together, and
+// coalesced requests set neither, so this scan captures ITS OWN
+// generation at start and publishes its terminal under it — even if a
+// mid-scan root change has already bumped last.Generation for the queued
+// rescan.
 func (s *IndexService) scan(ctx context.Context) {
-	root := canonicalRoot(s.cfg.Config().Directories.InputDir)
-
 	s.mu.Lock()
+	// Capture the generation this token accepted. nextGen is the accepted
+	// scan's; a queued rescan (last.Generation > nextGen) runs on its own
+	// token after this one.
+	gen := s.nextGen
+	// Publish "running" at the captured generation WITHOUT touching
+	// root/entries: a failed scan must not publish its attempted root as
+	// authoritative (the listing guard would then serve stale/empty rows
+	// for it). Only a terminal done/truncated scan publishes the root.
+	s.last.Generation = gen
 	s.last.Status = "running"
 	s.last.Detail = ""
-	s.activeRoot = root
 	s.persistLocked()
 	s.mu.Unlock()
 
-	if _, err := os.Stat(root); err != nil {
-		s.setTerminal("error", err.Error(), 0, root)
+	root := s.resolveScanRoot()
+	if root == "" {
+		s.mu.Lock()
+		missing := s.last.Root
+		s.mu.Unlock()
+		s.setTerminal(gen, "error", "input directory not found", 0, missing)
 		return
 	}
 
 	rows, truncated, detail, cancelled := s.walk(ctx, root)
 	if cancelled {
-		s.markInterrupted()
+		s.markInterrupted(gen)
 		return
 	}
 
 	// Root change: clear old-root rows before treating everything as new.
 	// Separator-aware prefix + bounded batches (one giant DELETE would pin
-	// the writer past the busy timeout).
+	// the writer past the busy timeout). A failure here is terminal —
+	// the mixed old/new rows would be served as the index.
 	if oldRoot, changed := s.storeRoot(); changed && oldRoot != root {
 		if err := s.deletePrefix(oldRoot); err != nil {
-			log.Printf("index: clear old root %s: %v", oldRoot, err)
+			s.setTerminal(gen, "error", fmt.Sprintf("clear old root %s: %v", oldRoot, err), 0, s.last.Root)
+			return
 		}
 	}
 
@@ -252,17 +319,19 @@ func (s *IndexService) scan(ctx context.Context) {
 	}
 
 	// Prune only a complete walk: an incomplete walked-set would delete
-	// previously indexed paths beyond the cutoff.
+	// previously indexed paths beyond the cutoff. Failure is terminal:
+	// vanished rows would be served as if still present.
 	if !truncated {
 		if err := s.pruneVanished(walked); err != nil {
-			log.Printf("index: prune: %v", err)
+			s.setTerminal(gen, "error", fmt.Sprintf("prune: %v", err), 0, s.last.Root)
+			return
 		}
 	}
 
 	// Classify walked rows: unchanged (size+modtime match AND stored
 	// snapshot complete) vs needs-extraction (new, changed, or
 	// stored-incomplete — degraded rows re-attempt on every refresh).
-	unchanged, extract := s.classify(rows)
+	unchanged, extract := s.classify(rows, root)
 
 	// Extract the changed/new/incomplete set, bounded by the scan budget.
 	budgetStart := time.Now()
@@ -271,7 +340,7 @@ func (s *IndexService) scan(ctx context.Context) {
 		if ctx.Err() != nil {
 			// Cancellation mid-extraction: stop; the remaining paths stay
 			// stored-incomplete and the next refresh retries them.
-			s.markInterrupted()
+			s.markInterrupted(gen)
 			return
 		}
 		if time.Since(budgetStart) > indexScanBudget {
@@ -290,8 +359,12 @@ func (s *IndexService) scan(ctx context.Context) {
 		}
 	}
 
+	// A persistence failure is terminal "error": the walk's rows are NOT
+	// stored, so publishing done would claim an index the table does not
+	// have (and the attempted root must not become authoritative).
 	if err := s.upsertAll(append(unchanged, extract...)); err != nil {
-		log.Printf("index: upsert: %v", err)
+		s.setTerminal(gen, "error", fmt.Sprintf("persist index: %v", err), 0, s.last.Root)
+		return
 	}
 
 	status := "done"
@@ -301,7 +374,32 @@ func (s *IndexService) scan(ctx context.Context) {
 	if degraded > 0 {
 		detail = appendDetail(detail, fmt.Sprintf("%d paths not extracted (budget)", degraded))
 	}
-	s.setTerminal(status, detail, len(rows), root)
+	s.setTerminal(gen, status, detail, len(rows), root)
+}
+
+// resolveScanRoot returns the canonical directory to scan, or "" when the
+// configured input dir is missing/invalid. "" configured is an error, not
+// the process cwd. A symlinked root is resolved so WalkDir (which never
+// follows a symlinked root) sees the real directory: the resolved path is
+// stored, so canonicalRoot-comparing readers must compare the same form.
+func (s *IndexService) resolveScanRoot() string {
+	p := strings.TrimSpace(s.cfg.Config().Directories.InputDir)
+	if p == "" {
+		return ""
+	}
+	root := canonicalRoot(p)
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		log.Printf("index: stat %s: %v", root, err)
+		return ""
+	}
+	if info, err := os.Stat(resolved); err != nil || !info.IsDir() {
+		if err != nil {
+			log.Printf("index: stat %s: %v", resolved, err)
+		}
+		return ""
+	}
+	return resolved
 }
 
 // appendDetail joins a non-empty extra message onto a detail string so a
@@ -313,14 +411,19 @@ func appendDetail(detail, extra string) string {
 	return detail + "; " + extra
 }
 
-// setTerminal records and persists a terminal state for the generation.
-// It clears activeRoot: the worker is no longer mid-walk, so a later
-// RequestScan must not treat a stale root as "scan in flight on a
-// different root" and bump the generation out from under a coalesced
-// caller.
-func (s *IndexService) setTerminal(status, detail string, entries int, root string) {
+// setTerminal records and persists a terminal state for the given
+// generation. A scan passes the generation it captured at start: if a
+// mid-scan root change already bumped last.Generation for the queued
+// rescan, this publish (temporarily) regresses the mirror to the scan's
+// own generation so its pollers reach a terminal; the rescan's own token
+// then advances the mirror to the new root's terminal. It clears
+// activeRoot: the worker is no longer mid-walk, so a later RequestScan
+// must not treat a stale root as "scan in flight on a different root"
+// and bump the generation out from under a coalesced caller.
+func (s *IndexService) setTerminal(gen int64, status, detail string, entries int, root string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.last.Generation = gen
 	s.last.Status = status
 	s.last.Detail = detail
 	s.last.Entries = entries
@@ -352,6 +455,11 @@ func (s *IndexService) walk(ctx context.Context, root string) (rows []indexRow, 
 				truncated = true
 				detail = fmt.Sprintf("depth cap %d exceeded", indexMaxDepth)
 			}
+			// Stop descending into over-depth directories: a plain nil
+			// would keep walking their (unindexed) contents forever.
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if strings.HasPrefix(d.Name(), ".") {
@@ -370,7 +478,9 @@ func (s *IndexService) walk(ctx context.Context, root string) (rows []indexRow, 
 			row.Type = "dir"
 		} else if info, err := d.Info(); err == nil {
 			row.Size = info.Size()
-			row.ModTime = info.ModTime().UTC().Format("2006-01-02T15:04:05Z")
+			// Nanosecond precision: a same-size rewrite within the same
+			// second must still be detected as a change.
+			row.ModTime = info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z")
 		}
 		rows = append(rows, row)
 		return nil
@@ -399,7 +509,7 @@ func (s *IndexService) deletePrefix(oldRoot string) error {
 	sep := string(os.PathSeparator)
 	for {
 		rows, err := s.db.Query(`SELECT path FROM source_index WHERE path = ? OR path LIKE ? ESCAPE '\' LIMIT ?`,
-			oldRoot, likeEscape(oldRoot+sep+"%"), indexWriteBatch)
+			oldRoot, likeEscape(oldRoot+sep)+"%", indexWriteBatch)
 		if err != nil {
 			return err
 		}
@@ -458,11 +568,20 @@ func (s *IndexService) pruneVanished(walked map[string]bool) error {
 // stored snapshot is complete; degraded/incomplete rows are re-extracted
 // on every refresh (self-healing).
 //
+// Directory snapshots are a function of the files beneath them, so a dir
+// row is re-extracted whenever any stored file under it changed, vanished,
+// or is new — a dir's own mtime only moves on entry add/remove, never when
+// a child file is rewritten in place.
+//
+// Non-audio files carry a pre-built complete (empty) snapshot: there is
+// nothing for ffprobe to probe, and storing the empty complete snapshot is
+// what makes the row classify stable on every later refresh.
+//
 // It streams source_index once in path (primary-key) order and merges it
 // with the walked rows sorted the same way: one ordered index scan for the
 // whole tree, never a per-batch IN-list lookup (which would scan the table
 // per batch).
-func (s *IndexService) classify(rows []indexRow) (unchanged, extract []indexRow) {
+func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extract []indexRow) {
 	dbRows, err := s.db.Query(`SELECT path, size, modtime, payload FROM source_index ORDER BY path`)
 	if err != nil {
 		log.Printf("index: classify query: %v", err)
@@ -476,52 +595,121 @@ func (s *IndexService) classify(rows []indexRow) (unchanged, extract []indexRow)
 	}
 	var nextStored *stored
 	var nextPath string
-	load := func() bool {
+	// load advances the stored cursor; on exhaustion or a scan error it
+	// CLEARS nextStored — a stale cursor would pin the merge loop on a
+	// walked path that sorts after the last stored row (vanished-row
+	// infinite loop).
+	load := func() {
 		if !dbRows.Next() {
-			return false
+			nextStored = nil
+			return
 		}
 		var st stored
 		if err := dbRows.Scan(&nextPath, &st.Size, &st.ModTime, &st.Payload); err != nil {
-			return false
+			log.Printf("index: classify scan: %v", err)
+			nextStored = nil
+			return
 		}
 		nextStored = &st
-		return true
 	}
 	walked := make([]indexRow, len(rows))
 	copy(walked, rows)
 	sort.Slice(walked, func(i, j int) bool { return walked[i].Path < walked[j].Path })
+
+	isComplete := func(payload string) bool {
+		var snap audio.SourceMetadata
+		return json.Unmarshal([]byte(payload), &snap) == nil && sourceMetadataComplete(&snap)
+	}
+	// A non-audio file has nothing to probe: a complete (empty) snapshot
+	// is the honest stored form and keeps the row stable on refresh.
+	emptySnap := mustJSON(audio.SourceMetadata{Schema: audio.SourceMetadataSchema, SourceKind: "file"})
+	// dirDirty marks every walked directory that contains (at any depth) a
+	// new, changed, or vanished file — the only directories whose snapshot
+	// this pass can no longer claim. The root has no indexed row, so it is
+	// the walk's boundary.
+	dirDirty := map[string]bool{}
+	markDirty := func(path string) {
+		prefix := indexChildPrefix(path)
+		for d := filepath.Dir(prefix); d != prefix && d != root; d = filepath.Dir(d) {
+			dirDirty[d] = true
+		}
+	}
+	signalsMatch := func(r indexRow, st *stored) bool {
+		return st.Size == r.Size && st.ModTime == r.ModTime
+	}
 	for i := 0; i < len(walked) || nextStored != nil; {
 		switch {
 		case i >= len(walked):
 			nextStored = nil // remaining stored rows are not walked: ignore
 		case nextStored == nil:
-			if load() {
+			load()
+			if nextStored != nil {
 				continue // more stored rows to merge
 			}
-			extract = append(extract, walked[i])
+			// New path, no stored row.
+			r := walked[i]
+			if r.Type == "file" && !audio.IsAudioFile(r.Name) {
+				r.Payload = emptySnap
+			}
+			extract = append(extract, r)
+			markDirty(r.Path)
 			i++
 		case walked[i].Path < nextPath:
-			// Walked path has no stored row: new.
-			extract = append(extract, walked[i])
+			// New path below the next stored row: same as above.
+			r := walked[i]
+			if r.Type == "file" && !audio.IsAudioFile(r.Name) {
+				r.Payload = emptySnap
+			}
+			extract = append(extract, r)
+			markDirty(r.Path)
 			i++
 		case walked[i].Path > nextPath:
-			// Stored row not walked this pass: left for prune.
+			// Stored row not walked this pass: vanished (prune removes it).
+			markDirty(nextPath)
 			load()
 		default:
 			st := nextStored
-			if st.Size == walked[i].Size && st.ModTime == walked[i].ModTime {
-				var snap audio.SourceMetadata
-				if json.Unmarshal([]byte(st.Payload), &snap) == nil && sourceMetadataComplete(&snap) {
-					unchanged = append(unchanged, walked[i])
+			r := walked[i]
+			if r.Type == "dir" {
+				// A dir's own mtime only moves on entry add/remove, not on
+				// a child rewrite. Its signals+completeness are checked
+				// here; the child-change check needs the events of paths
+				// BELOW it, which sort after it, so the second pass below
+				// moves any dirty dir out of unchanged.
+				if signalsMatch(r, st) && isComplete(st.Payload) {
+					unchanged = append(unchanged, r)
 					i++
 					load()
 					continue
 				}
+				extract = append(extract, r)
+			} else if signalsMatch(r, st) && isComplete(st.Payload) {
+				unchanged = append(unchanged, r)
+				i++
+				load()
+				continue
+			} else {
+				markDirty(r.Path) // changed file dirties its ancestor dirs
+				extract = append(extract, r)
 			}
-			extract = append(extract, walked[i])
 			i++
 			load()
 		}
+	}
+	// Second pass: a directory sorts BEFORE its children, so while it was
+	// merged, dirDirty did not yet carry the events of the paths below it.
+	// Every unchanged dir that gained/lost/changed a child must be
+	// re-extracted so its snapshot reflects the new subtree.
+	if len(dirDirty) > 0 {
+		kept := unchanged[:0]
+		for _, r := range unchanged {
+			if r.Type == "dir" && dirDirty[r.Path] {
+				extract = append(extract, r)
+				continue
+			}
+			kept = append(kept, r)
+		}
+		unchanged = kept
 	}
 	return unchanged, extract
 }
@@ -739,9 +927,9 @@ func (h *Handler) RefreshIndex(w http.ResponseWriter, r *http.Request) {
 // re-pointed and the rescan has not landed — so a stale index never
 // masquerades as an empty current directory.
 func (h *Handler) listIndexedChildren(dir string) ([]IndexedDirectoryEntry, bool, error) {
-	root := canonicalRoot(h.svc.Config.Config().Directories.InputDir)
-	if dir != root && !strings.HasPrefix(dir, indexChildPrefix(root)) {
-		return nil, false, nil // not under the root
+	root := h.svc.IndexSvc.CurrentRoot()
+	if root == "" || dir != root && !strings.HasPrefix(dir, indexChildPrefix(root)) {
+		return nil, false, nil // root missing, or not under the root
 	}
 	if state := h.svc.IndexSvc.Status().State; state.Root != root {
 		return nil, false, nil // rows are from a previous root (or no scan yet)

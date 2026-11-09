@@ -347,11 +347,12 @@ func migrateLegacyAdminToken(database *sql.DB) (bool, string, error) {
 	var apiEnabled int
 	var digest string
 	var markerVal int
+	var indexingEnabled int
 	err := database.QueryRow(`
 		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url,
-		       api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0)
+		       api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0), COALESCE(indexing_enabled, 0)
 		FROM settings WHERE id = 1
-	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &apiEnabled, &digest, &markerVal)
+	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &apiEnabled, &digest, &markerVal, &indexingEnabled)
 	if err == sql.ErrNoRows {
 		// A new database with no settings row yet: nothing to migrate.
 		return false, "", nil
@@ -384,8 +385,8 @@ func migrateLegacyAdminToken(database *sql.DB) (bool, string, error) {
 	sum := sha256.Sum256([]byte(legacyToken))
 	migratedDigest := hex.EncodeToString(sum[:])
 	if _, err := database.Exec(`
-		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, datetime('now'))
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, indexing_enabled, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, datetime('now'))
 	`,
 		apiKey,
 		baseURL,
@@ -397,6 +398,7 @@ func migrateLegacyAdminToken(database *sql.DB) (bool, string, error) {
 		outputScheme,
 		region,
 		migratedDigest,
+		indexingEnabled,
 	); err != nil {
 		// Fail closed: the seed write is what makes the cutover a fact
 		// (row + marker persisted). Retrying on the next boot would
@@ -425,20 +427,20 @@ func consumeLegacyTokenMarkerOnObservation(database *sql.DB, reason string) erro
 	var m4bBinary, inputDir, outputDir, completedDir, outputScheme, region, apiKey, baseURL, created string
 	var numCPUs, apiEnabled int
 	var digest string
-	var marker int
+	var marker, indexingEnabled int
 	if err := database.QueryRow(`
 		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url,
-		       api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0), created_at
+		       api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0), COALESCE(indexing_enabled, 0), created_at
 		FROM settings WHERE id = 1
-	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &apiEnabled, &digest, &marker, &created); err != nil {
+	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &apiEnabled, &digest, &marker, &indexingEnabled, &created); err != nil {
 		return err
 	}
 	if marker != 0 {
 		return nil // already consumed: no write, no timestamp churn
 	}
 	_, err := database.Exec(`
-		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, created_at, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'))
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, indexing_enabled, created_at, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'))
 	`,
 		apiKey,
 		baseURL,
@@ -451,6 +453,7 @@ func consumeLegacyTokenMarkerOnObservation(database *sql.DB, reason string) erro
 		region,
 		apiEnabled,
 		digest,
+		indexingEnabled,
 		created,
 	)
 	if err != nil {
@@ -650,7 +653,14 @@ func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {
 		cfg.Server.APIEndpoint.Enabled = endpointEnabled != 0
 	}
 	cfg.Server.APIEndpoint.KeyDigest = endpointKeyDigest
-	if !yamlKeys["directories.indexing_enabled"] && os.Getenv("DIRECTORIES_INDEXING_ENABLED") == "" {
+	// DIRECTORIES_INDEXING_ENABLED is on-only: a true value force-enables
+	// (deployment pin); ANY other value — including "false" and the
+	// unset case — falls through to the persisted/YAML setting. Treating
+	// a non-true value as a pin would override a saved true on every
+	// restart (finding: env gate skips persisted setting).
+	if env := os.Getenv("DIRECTORIES_INDEXING_ENABLED"); strings.EqualFold(env, "true") {
+		cfg.Directories.IndexingEnabled = true
+	} else if !yamlKeys["directories.indexing_enabled"] {
 		cfg.Directories.IndexingEnabled = indexingEnabled != 0
 	}
 }

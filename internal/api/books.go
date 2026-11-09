@@ -585,12 +585,16 @@ func (h *Handler) attachSourceCover(ctx context.Context, bookID int64, srcPath s
 // explicit error states); an INSERT failure never fails intake.
 func (h *Handler) attachSourceMetadata(ctx context.Context, bookID int64, srcPath string) {
 	// Fast path: an indexed folder's snapshot is already stored in the
-	// source index — reuse it and skip the ffprobe pass entirely. Best
-	// effort: any lookup/decode failure falls through to the live probe.
-	if snap := h.storedIndexMetadata(srcPath); snap != nil {
-		log.Printf("attach source metadata for book %d: reusing indexed snapshot for %s", bookID, srcPath)
-		h.persistSourceMetadata(bookID, snap)
-		return
+	// source index — reuse it and skip the ffprobe pass entirely. Gated on
+	// the LIVE flag: after a toggle-off the rows survive, so the live
+	// probe runs until the index is re-enabled. Best effort: any
+	// lookup/decode/staleness failure falls through to the live probe.
+	if h.svc.IndexSvc != nil && h.svc.IndexSvc.Enabled() {
+		if snap := h.storedIndexMetadata(srcPath); snap != nil {
+			log.Printf("attach source metadata for book %d: reusing indexed snapshot for %s", bookID, srcPath)
+			h.persistSourceMetadata(bookID, snap)
+			return
+		}
 	}
 	var snap *audio.SourceMetadata
 	var err error
@@ -607,15 +611,24 @@ func (h *Handler) attachSourceMetadata(ctx context.Context, bookID int64, srcPat
 }
 
 // storedIndexMetadata returns the index's stored snapshot for srcPath when
-// one exists and is a complete extraction (the only kind intake may claim
-// fields from). Nil — and thus a live probe — on any miss, decode failure,
-// or incomplete (degraded) snapshot. The lookup key is canonicalized the
-// same way the index stores paths so non-canonical caller paths (trailing
-// separators, ./ segments, relative forms) still hit the row.
+// one exists, is a complete extraction (the only kind intake may claim
+// fields from), and is FRESH: the row's size/modtime change signals match
+// a current os.Stat of the source. Nil — and thus a live probe — on any
+// miss, decode failure, incomplete (degraded) snapshot, or a source that
+// changed (in-place rewrite, mtime bump) since the last scan. The lookup
+// key is canonicalized the same way the index stores paths so non-canonical
+// caller paths (trailing separators, ./ segments, relative forms) still
+// hit the row.
 func (h *Handler) storedIndexMetadata(srcPath string) *audio.SourceMetadata {
-	var payload string
-	if err := h.svc.DB.QueryRow(`SELECT payload FROM source_index WHERE path = ?`, canonicalRoot(srcPath)).Scan(&payload); err != nil {
+	var payload, modtime string
+	var size int64
+	if err := h.svc.DB.QueryRow(`SELECT payload, size, modtime FROM source_index WHERE path = ?`,
+		canonicalRoot(srcPath)).Scan(&payload, &size, &modtime); err != nil {
 		return nil
+	}
+	if info, err := os.Stat(srcPath); err != nil || info.Size() != size ||
+		info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z") != modtime {
+		return nil // source missing, or changed since the last scan
 	}
 	var snap audio.SourceMetadata
 	if err := json.Unmarshal([]byte(payload), &snap); err != nil {
