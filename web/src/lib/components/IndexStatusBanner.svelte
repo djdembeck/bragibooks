@@ -9,40 +9,37 @@
 	// states are owned by the pages that act on them (Import's status line,
 	// Settings' status row), so the banner never announces completion.
 	//
-	// Polling mirrors the in-page pollers: 1 s while in flight, stopped on
-	// any terminal status; a transient read failure just keeps polling.
+	// The observer is resident for the life of the layout: a scan started on
+	// any page after mount — the normal enable-from-Import journey — must be
+	// visible app-wide without a reload. Polling is 1 s while the last
+	// response said the index is enabled, 10 s while it is disabled (a tiny
+	// local endpoint; this also catches a disable→enable flip started on
+	// another page). A transient read failure just keeps polling.
 	let indexStatus = $state<IndexStatus | null>(null);
 	let busy = $derived(
 		!!indexStatus?.enabled &&
 			(indexStatus.state.status === 'queued' || indexStatus.state.status === 'running')
 	);
 
-	// Fetch once on mount, then keep polling every 1 s while a scan is in
-	// flight; stop after any terminal status. (Polling only "while busy"
-	// would never see the first in-flight state — busy comes from this
-	// fetch.) A transient read failure just keeps polling.
 	$effect(() => {
+		const interval = indexStatus?.enabled ? 1000 : 10000;
 		let cancelled = false;
-		const poll = async (): Promise<boolean> => {
-			try {
-				const cur = await get<IndexStatus>('/index');
-				if (cancelled) return false;
-				indexStatus = cur;
-				return cur.enabled &&
-					(cur.state.status === 'queued' || cur.state.status === 'running');
-			} catch {
-				return true;
+		const tick = async () => {
+			while (!cancelled) {
+				try {
+					const cur = await get<IndexStatus>('/index');
+					if (cancelled) return;
+					indexStatus = cur;
+				} catch {
+					// transient read failure: keep polling
+				}
+				await new Promise((r) => setTimeout(r, interval));
 			}
 		};
-		(async () => {
-			while (!cancelled) {
-				if (!(await poll())) return;
-				await new Promise((r) => setTimeout(r, 1000));
-			}
-		})();
+		void tick();
 		return () => {
 			cancelled = true;
-		};
+		}
 	});
 
 	function progressText(): string {
@@ -62,7 +59,8 @@
 	<div class="index-banner" role="status" aria-live="polite">
 		<div class="index-banner__inner">
 			<span class="index-banner__text">
-				<span class="sr-only">Source index in progress: </span>
+				<span class="index-banner__label">Source index <span aria-hidden="true">·</span></span>
+				<span class="sr-only">in progress: </span>
 				{progressText()}
 			</span>
 			<div class="index-banner__rail" aria-hidden="true"><span></span></div>
@@ -96,7 +94,15 @@
 		flex-shrink: 0;
 	}
 
-	/* Indeterminate rail: the job-card progress grammar (4px amber).
+	/* The quiet name of the operation, so the strip reads as the source
+	   index on every page, not just where the context is obvious. */
+	.index-banner__label {
+		color: var(--text-muted);
+		font-weight: 600;
+		margin-right: 0.375rem;
+	}
+
+	/* Indeterminate rail: the job-card progress grammar (3px amber).
 	   Placed as a bottom-edge line so the strip stays one line tall. */
 	.index-banner__rail {
 		position: absolute;
@@ -127,9 +133,12 @@
 		}
 	}
 
+	/* Reduced motion: the rail stays as a static activity mark (the shared
+	   in-flight grammar) instead of disappearing entirely. */
 	@media (prefers-reduced-motion: reduce) {
-		.index-banner__rail {
-			display: none;
+		.index-banner__rail > span {
+			animation: none;
+			width: 100%;
 		}
 	}
 </style>

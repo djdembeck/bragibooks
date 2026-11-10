@@ -409,7 +409,11 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	m4bMergeVersion := h.svc.Processor.UpdateVersion()
 
 	settings := map[string]any{
-		"m4b_merge_binary":     live.M4bMerge.Binary,
+		"m4b_merge_binary": live.M4bMerge.Binary,
+		// Included so the client's draft-vs-saved tracking (the index
+		// status row appears only once the preference is saved) reads the
+		// saved truth from this response, matching GET's shape.
+		"indexing_enabled":     live.Directories.IndexingEnabled,
 		"input_dir":            live.Directories.InputDir,
 		"output_dir":           live.Directories.OutputDir,
 		"completed_dir":        live.Directories.CompletedDir,

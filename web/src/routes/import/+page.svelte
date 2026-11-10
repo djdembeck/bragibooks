@@ -205,14 +205,21 @@
 		indexPromptDismissed = true;
 	}
 
+	let indexEnableBusy = $state(false);
+	let indexEnableError = $state<string | null>(null);
+
 	async function enableIndex() {
+		if (indexEnableBusy) return;
+		indexEnableBusy = true;
+		indexEnableError = null;
 		try {
 			await put<Settings>('/settings', { indexing_enabled: true });
 		} catch {
-			// A failed enable is reported by the settings alert on the next
-			// load; the banner simply stays.
+			indexEnableError =
+				"Couldn't enable source indexing. Check your connection and try again.";
 			return;
 		}
+		indexEnableBusy = false;
 		settings = { ...(settings as Settings), indexing_enabled: true };
 		await initPath();
 	}
@@ -370,13 +377,16 @@
 	<div class="mb-6">
 		<Alert role="status">
 			{#snippet actions()}
-				<Button variant="primary" onclick={enableIndex}>Enable index</Button>
+				<Button variant="primary" loading={indexEnableBusy} onclick={enableIndex}>Enable index</Button>
 				<Button variant="ghost" onclick={dismissIndexPrompt}>Dismiss</Button>
 			{/snippet}
 			<span>
-				The index makes the Import page load faster and matching start
-				sooner; you can turn it off in Settings.
+				Builds a source index of your input folder so Import loads faster and
+				matching starts sooner. You can turn it off in Settings.
 			</span>
+			{#if indexEnableError}
+				<span class="block text-xs font-medium text-[var(--state-red)]" role="alert">{indexEnableError}</span>
+			{/if}
 		</Alert>
 	</div>
 {/if}
@@ -425,6 +435,12 @@
 			<div class="mb-2 flex items-center gap-2 text-xs text-[var(--text-muted)]" role="status" aria-live="polite">
 				{#if indexBusy || ['queued', 'running'].includes(indexState.status)}
 					<span>Checking for new sources…</span>
+				{:else if indexState.status === 'truncated'}
+					<span class="text-[var(--state-amber)]"><span class="font-mono text-[var(--text-secondary)]">{indexState.entries}</span> sources indexed · index incomplete{indexState.detail ? ` (${indexState.detail})` : ''}</span>
+				{:else if indexState.status === 'interrupted'}
+					<span class="text-[var(--state-amber)]"><span class="font-mono text-[var(--text-secondary)]">{indexState.entries}</span> sources indexed · index interrupted</span>
+				{:else if indexState.status === 'error'}
+					<span class="text-[var(--state-red)]">Index failed{indexState.detail ? ` (${indexState.detail})` : ''}</span>
 				{:else if indexState.last_run_at}
 					<span><span class="font-mono text-[var(--text-secondary)]">{indexState.entries}</span> indexed · {formatDate(indexState.last_run_at)}</span>
 				{:else}

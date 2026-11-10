@@ -18,6 +18,11 @@
 	let indexStatus = $state<IndexStatus | null>(null);
 	let indexRefreshing = $state(false);
 	let indexRefreshError = $state<string | null>(null);
+	// The indexing preference as it is saved on the server, at load time and
+	// after each save. The checkbox edits the draft `settings` object; until
+	// Save lands, the server index is still off, so its live controls must
+	// not be presented as operational.
+	let indexingSaved = $state<boolean | null>(null);
 
 	const pickerTitles: Record<PathField, string> = {
 		input_dir: 'Choose input directory',
@@ -43,6 +48,7 @@
 	async function load() {
 		await dl.run(async () => {
 			settings = await get<Settings>('/settings', {});
+			indexingSaved = settings.indexing_enabled === true;
 		});
 	}
 
@@ -54,7 +60,8 @@
 	// fresh only while a scan is in flight. A failed read just hides the
 	// status line — the toggle and Refresh now are unaffected.
 	$effect(() => {
-		if (!settings?.indexing_enabled) return;
+		// Only when the server actually has indexing on (not a draft).
+		if (!settings?.indexing_enabled || indexingSaved !== true) return;
 		let cancelled = false;
 		void get<IndexStatus>('/index')
 			.then((st) => {
@@ -126,7 +133,15 @@
 		}
 		if (!st.last_run_at) return 'Not indexed yet';
 		const ago = st.last_run_at ? relativeAgo(st.last_run_at) : '';
-		return `${st.entries} entries · last indexed ${ago}`;
+		// A terminal that is not a clean "done" is a problem, not freshness:
+		// say so, and point at Refresh as the recovery.
+		if (st.status === 'truncated')
+			return `Last index incomplete — ${st.detail || 'some files were not read'} (${ago}). Use Refresh to finish.`;
+		if (st.status === 'interrupted')
+			return `Last index was interrupted (${ago}). Use Refresh to finish.`;
+		if (st.status === 'error')
+			return `Last index failed — ${st.detail || 'unknown error'}. Use Refresh to retry.`;
+		return `${st.entries} sources · last indexed ${ago}`;
 	}
 
 	function relativeAgo(iso: string): string {
@@ -194,6 +209,8 @@
 				settings.bragibooks_version = updated.bragibooks_version;
 				settings.m4b_merge_version = updated.m4b_merge_version;
 			}
+			// The server's response is the saved truth, not the draft.
+			indexingSaved = (updated ?? settings).indexing_enabled === true;
 			saved = true;
 			setTimeout(() => (saved = false), 3000);
 		} catch (e) {
@@ -720,29 +737,36 @@
 							id="indexing_enabled"
 							type="checkbox"
 							checked={settings.indexing_enabled === true}
+							aria-describedby="indexing_enabled_desc"
 							onchange={(e) => settings && (settings.indexing_enabled = e.currentTarget.checked)}
 						/>
 						<span>Enable indexing</span>
 					</label>
-					<p class="settings-help">
-						Prefetches the input directory and pre-reads ASINs and titles, so Import loads
-						instantly and matching starts faster. Saved with the rest of the form.
+					<p id="indexing_enabled_desc" class="settings-help">
+						Builds a source index of your input folder so Import loads faster and matching
+						starts sooner. Saved with the rest of the form.
 					</p>
 					{#if settings.indexing_enabled === true}
-						<div class="settings-index-status">
-							<span class="text-xs text-[var(--text-muted)]" role="status" aria-live="polite">{indexStatusLabel()}</span>
-							<Button
-								variant="secondary"
-								class="shrink-0"
-								disabled={indexRefreshing}
-								loading={indexRefreshing}
-								onclick={refreshIndex}
-							>
-								Refresh now
-							</Button>
-						</div>
-						{#if indexRefreshError}
-							<p class="settings-field-error" role="alert">{indexRefreshError}</p>
+						{#if indexingSaved === false}
+							<p class="settings-help">
+								Enable takes effect after you save settings.
+							</p>
+						{:else}
+							<div class="settings-index-status">
+								<span class="text-xs text-[var(--text-muted)]" role="status" aria-live="polite">{indexStatusLabel()}</span>
+								<Button
+									variant="secondary"
+									class="shrink-0"
+									disabled={indexRefreshing}
+									loading={indexRefreshing}
+									onclick={refreshIndex}
+								>
+									Refresh now
+								</Button>
+							</div>
+							{#if indexRefreshError}
+								<p class="settings-field-error" role="alert">{indexRefreshError}</p>
+							{/if}
 						{/if}
 					{/if}
 				</div>

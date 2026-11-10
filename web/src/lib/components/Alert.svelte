@@ -39,9 +39,9 @@
 
 </script>
 
-<div class="rounded-sm border border-2 p-3.5 {styles}" role={role}>
+<div class="alert rounded-sm border border-2 p-3.5 {styles}" role={role}>
 	<div class="flex items-start justify-between gap-4">
-		<div class="text-sm leading-relaxed">{@render children()}</div>
+		<div class="text-sm leading-relaxed min-w-0">{@render children()}</div>
 		{#if actions || onretry}
 			<div class="flex shrink-0 items-center gap-1">
 				{#if actions}
@@ -62,3 +62,15 @@
 		{/if}
 	</div>
 </div>
+
+<style>
+	/* Narrow viewports: the prose owns the full width and the actions
+	   move below it — a nowrap flex row would squeeze the text into a
+	   sliver (one word per line) while the buttons keep their 44px. */
+	@media (max-width: 640px) {
+		.alert > div {
+			flex-direction: column;
+			gap: 0.5rem;
+		}
+	}
+</style>
