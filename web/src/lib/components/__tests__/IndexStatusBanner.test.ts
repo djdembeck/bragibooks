@@ -12,19 +12,28 @@ vi.mock('#lib/api.js', () => ({
 }));
 
 import IndexStatusBanner from '../IndexStatusBanner.svelte';
+import type { IndexState, IndexStatus } from '../../types.js';
+
+function stateFixture(): IndexState {
+	return {
+		root: '/in',
+		entries: 1,
+		last_run_at: '',
+		status: 'done',
+		detail: '',
+		generation: 1
+	};
+}
 
 function indexFixture(enabled: boolean): Record<string, unknown> {
 	return {
 		enabled,
-		state: {
-			root: '/in',
-			entries: 1,
-			last_run_at: '',
-			status: 'done',
-			detail: '',
-			generation: 1
-		}
+		state: stateFixture()
 	};
+}
+
+function statusFixture(overrides: Partial<IndexState>): IndexStatus {
+	return { enabled: true, state: { ...stateFixture(), ...overrides } };
 }
 
 describe('index banner resident poll', () => {
@@ -104,6 +113,55 @@ describe('index banner resident poll', () => {
 		expect(indexCallCount()).toBe(2);
 		await vi.advanceTimersByTimeAsync(1000);
 		expect(indexCallCount()).toBe(3);
+	});
+
+	it('stays hidden while queued (the new-count is not known yet)', async () => {
+		getMock.mockImplementation(async (path: string) =>
+			path === '/index' ? statusFixture({ status: 'queued' }) : {}
+		);
+		component = mount(IndexStatusBanner, { target });
+		flushSync();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(target.querySelector('.index-banner')).toBeNull();
+	});
+
+	it('shows while running with new sources to add', async () => {
+		getMock.mockImplementation(async (path: string) =>
+			path === '/index' ? statusFixture({ status: 'running', added: 3, total: 3 }) : {}
+		);
+		component = mount(IndexStatusBanner, { target });
+		flushSync();
+		await vi.advanceTimersByTimeAsync(0);
+		const banner = target.querySelector('.index-banner');
+		expect(banner).not.toBeNull();
+		expect(banner?.textContent).toContain('Adding 3 new sources');
+	});
+
+	it('stays hidden for a running scan that found nothing new', async () => {
+		// The no-op rescan the 60 s staleness check triggers on every visit:
+		// the walk ran, classify counted zero new paths, extraction ticks
+		// over the unchanged set — the banner must not show.
+		getMock.mockImplementation(async (path: string) =>
+			path === '/index'
+				? statusFixture({ status: 'running', added: 0, total: 5, extracted: 2 })
+				: {}
+		);
+		component = mount(IndexStatusBanner, { target });
+		flushSync();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(target.querySelector('.index-banner')).toBeNull();
+	});
+
+	it('stays hidden once the scan reaches a terminal', async () => {
+		getMock.mockImplementation(async (path: string) =>
+			path === '/index'
+				? statusFixture({ status: 'done', last_run_at: '2026-11-10T12:00:00Z' })
+				: {}
+		);
+		component = mount(IndexStatusBanner, { target });
+		flushSync();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(target.querySelector('.index-banner')).toBeNull();
 	});
 
 	it('stops polling after unmount', async () => {

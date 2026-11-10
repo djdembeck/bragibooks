@@ -221,6 +221,9 @@ export interface IndexState {
 	root: string;
 	entries: number;
 	last_run_at: string; // "" if never
+	/** Transient: paths with no stored row before this scan (0 when the
+	 *  count is not known yet — queued, mid-walk — or nothing is new). */
+	added?: number;
 	status: 'never' | 'queued' | 'running' | 'done' | 'truncated' | 'interrupted' | 'error';
 	detail: string;
 	generation: number;

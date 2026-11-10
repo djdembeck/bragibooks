@@ -16,10 +16,16 @@
 	// local endpoint; this also catches a disable→enable flip started on
 	// another page). A transient read failure just keeps polling.
 	let indexStatus = $state<IndexStatus | null>(null);
-	let busy = $derived(
-		!!indexStatus?.enabled &&
-			(indexStatus.state.status === 'queued' || indexStatus.state.status === 'running')
-	);
+	// Show only while a scan is running AND new items are being indexed:
+	// the server counts genuinely new paths (no stored row before this
+	// scan) in `added`, which is unknown until the fast walk classifies
+	// (absent/0) and 0 for a refresh that finds nothing new — the no-op
+	// rescan must stay quiet. A scan that is merely queued (a previous
+	// scan still in flight) is covered by that scan's own published count.
+	let busy = $derived.by(() => {
+		const st = indexStatus?.enabled ? indexStatus.state : null;
+		return !!st && st.status === 'running' && (st.added ?? 0) > 0;
+	});
 
 	// ONE polling loop for the component's lifetime: the effect below
 	// starts it on mount and cancels it on unmount, and reads no reactive
@@ -59,11 +65,14 @@
 		if (!st) return '';
 		const total = st.total ?? 0;
 		const extracted = st.extracted ?? 0;
+		const added = st.added ?? 0;
 		if (total > 0) {
-			return `Reading audio files — ${extracted} of ${total}`;
+			return `Adding ${added} new sources — reading audio files, ${extracted} of ${total}`;
 		}
-		if (st.status === 'queued') return 'Index queued — starting…';
-		return 'Scanning the input directory…';
+		// The classify published new paths but the total is not set yet
+		// (extraction about to start) — or a tree whose extract set the
+		// walk has not finished counting.
+		return `Scanning the input directory — ${added} new`;
 	}
 </script>
 

@@ -50,10 +50,13 @@ type IndexState struct {
 	// only means something while this process's scan is in flight, and a
 	// restart interrupts the scan, so a freshly-seeded zero is honest.
 	// Total = paths needing (re-)extraction this scan; Extracted = how many
-	// of those are done. Total 0 while the (fast) walk is in flight; both
-	// read 0 when idle.
+	// of those are done; Added = how many of those paths have no stored row
+	// from a prior scan (genuinely new — a no-op refresh reads 0, which is
+	// what keeps the progress banner quiet). Added 0 until the fast walk
+	// classifies; both read 0 when idle.
 	Extracted int `json:"extracted,omitempty"`
 	Total     int `json:"total,omitempty"`
+	Added     int `json:"added,omitempty"`
 }
 
 // IndexStatus is the wire shape of GET /api/index.
@@ -258,6 +261,7 @@ func (s *IndexService) markInterrupted(gen int64) {
 		s.last.Detail = "shutdown"
 		s.last.Extracted = 0
 		s.last.Total = 0
+		s.last.Added = 0
 		s.activeRoot = ""
 		s.persistLocked()
 	}
@@ -344,14 +348,17 @@ func (s *IndexService) scan(ctx context.Context) {
 	// Classify walked rows: unchanged (size+modtime match AND stored
 	// snapshot complete) vs needs-extraction (new, changed, or
 	// stored-incomplete — degraded rows re-attempt on every refresh).
-	unchanged, extract := s.classify(rows, root)
+	// Added counts the extract set's genuinely new paths (no stored row
+	// before this walk), so a refresh that finds nothing new reads 0.
+	unchanged, extract, added := s.classify(rows, root)
 
 	// Extraction is the slow phase (one ffprobe per path, up to a 30-minute
-	// budget); the walk that just finished is fast. Publish the total so the
+	// budget); the walk that just finished is fast. Publish the totals so the
 	// UI can show "X of N" once extraction starts, then tick Extracted as
-	// paths complete. Both are transient in-memory progress (see IndexState).
+	// paths complete. All are transient in-memory progress (see IndexState).
 	s.mu.Lock()
 	s.last.Total = len(extract)
+	s.last.Added = added
 	s.mu.Unlock()
 
 	// Extract the changed/new/incomplete set, bounded by the scan budget.
@@ -491,6 +498,7 @@ func (s *IndexService) setTerminal(gen int64, status, detail string, entries int
 	// lingers past the terminal never shows a stale "X of N".
 	s.last.Extracted = 0
 	s.last.Total = 0
+	s.last.Added = 0
 	s.activeRoot = ""
 	s.persistLocked()
 }
@@ -650,11 +658,11 @@ func (s *IndexService) pruneVanished(walked map[string]bool) error {
 // with the walked rows sorted the same way: one ordered index scan for the
 // whole tree, never a per-batch IN-list lookup (which would scan the table
 // per batch).
-func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extract []indexRow) {
+func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extract []indexRow, added int) {
 	dbRows, err := s.db.Query(`SELECT path, size, modtime, payload FROM source_index ORDER BY path`)
 	if err != nil {
 		log.Printf("index: classify query: %v", err)
-		return nil, rows
+		return nil, rows, 0
 	}
 	defer dbRows.Close()
 	type stored struct {
@@ -740,6 +748,7 @@ func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extrac
 				r.Payload = emptySnap
 			}
 			extract = append(extract, r)
+			added++
 			markDirty(r.Path)
 			i++
 		case walked[i].Path < nextPath:
@@ -749,6 +758,7 @@ func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extrac
 				r.Payload = emptySnap
 			}
 			extract = append(extract, r)
+			added++
 			markDirty(r.Path)
 			i++
 		case walked[i].Path > nextPath:
@@ -809,7 +819,7 @@ func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extrac
 		}
 		unchanged = kept
 	}
-	return unchanged, extract
+	return unchanged, extract, added
 }
 
 // extractOne runs the existing extractor (or the degraded cause-string

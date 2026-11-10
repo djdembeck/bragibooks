@@ -492,7 +492,7 @@ func TestClassifyTerminatesOnVanishedStoredRow(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_, extract := svc.classify(mustWalk(t, svc, root), root)
+		_, extract, _ := svc.classify(mustWalk(t, svc, root), root)
 		_ = extract
 		close(done)
 	}()
@@ -530,7 +530,7 @@ func TestClassifyTerminatesOnVanishedLastStoredRow(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_, _ = svc.classify(mustWalk(t, svc, root), root)
+		_, _, _ = svc.classify(mustWalk(t, svc, root), root)
 		close(done)
 	}()
 	select {
@@ -585,7 +585,7 @@ func TestClassifyDirectoryReextractOnChildChange(t *testing.T) {
 	// it; the rule under test is the child change, not the mtime bump).
 	_ = os.Chtimes(folder, ts, ts)
 
-	_, extract := svc.classify(mustWalk(t, svc, root), root)
+	_, extract, _ := svc.classify(mustWalk(t, svc, root), root)
 	found := false
 	for _, r := range extract {
 		if r.Path == folder {
@@ -594,6 +594,63 @@ func TestClassifyDirectoryReextractOnChildChange(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("folder with changed children not in extract set: %+v", extract)
+	}
+}
+
+// TestClassifyCountsOnlyNewPaths: the added count is the number of extract
+// rows with no stored row from a prior scan. Changed signals and
+// re-extractions of existing rows must not count as new — that is what keeps
+// the progress banner quiet on a no-op refresh.
+func TestClassifyCountsOnlyNewPaths(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := dbpkg.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := dbpkg.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	existing := filepath.Join(root, "existing.mp3")
+	if err := os.WriteFile(existing, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(existing, ts, ts)
+	storeIndexRow(t, db, existing, 10, "2026-01-01T00:00:00.000000000Z", completeSnapPayload())
+
+	cm := config.NewConfigManager()
+	cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	cm.Config().Directories.InputDir = root
+	cm.Store(cm.Config())
+	svc := NewIndexService(db, cm, "")
+
+	// A rewrite of an existing path (new size, new mtime): re-extracted,
+	// NOT new.
+	if err := os.WriteFile(existing, []byte("01234567890123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(existing, ts.Add(time.Hour), ts.Add(time.Hour))
+
+	// Two genuinely new paths: a directory and a file under it.
+	folder := filepath.Join(root, "new folder")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "a.mp3"), []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	unchanged, extract, added := svc.classify(mustWalk(t, svc, root), root)
+	if len(unchanged) != 0 {
+		t.Fatalf("unchanged = %+v, want empty (the existing file was rewritten)", unchanged)
+	}
+	if len(extract) != 3 {
+		t.Fatalf("extract = %d paths, want 3 (rewritten file + new dir + new file)", len(extract))
+	}
+	if added != 2 {
+		t.Fatalf("added = %d, want 2 (the rewritten file is not new)", added)
 	}
 }
 
@@ -662,7 +719,7 @@ func TestClassifyStableTruncatedDirUnchanged(t *testing.T) {
 	svc := NewIndexService(db, cm, "")
 
 	// Unchanged subtree: the truncated dir must be unchanged.
-	unchanged, extract := svc.classify(mustWalk(t, svc, root), root)
+	unchanged, extract, _ := svc.classify(mustWalk(t, svc, root), root)
 	inExtract := func(rows []indexRow, p string) bool {
 		for _, r := range rows {
 			if r.Path == p {
@@ -685,7 +742,7 @@ func TestClassifyStableTruncatedDirUnchanged(t *testing.T) {
 		folder); err != nil {
 		t.Fatal(err)
 	}
-	_, extract2 := svc.classify(mustWalk(t, svc, root), root)
+	_, extract2, _ := svc.classify(mustWalk(t, svc, root), root)
 	if !inExtract(extract2, folder) {
 		t.Errorf("degraded dir not re-extracted on refresh: extract=%+v", extract2)
 	}
@@ -715,7 +772,7 @@ func TestClassifyNonAudioFileSkipsExtraction(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("hi"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, extract1 := svc.classify(mustWalk(t, svc, root), root)
+	_, extract1, _ := svc.classify(mustWalk(t, svc, root), root)
 	if len(extract1) != 1 || extract1[0].Path != filepath.Join(root, "notes.txt") {
 		t.Fatalf("first pass extract = %+v, want the non-audio file", extract1)
 	}
@@ -738,7 +795,7 @@ func TestClassifyNonAudioFileSkipsExtraction(t *testing.T) {
 		extract1[0].Payload); err != nil {
 		t.Fatal(err)
 	}
-	_, extract2 := svc.classify(mustWalk(t, svc, root), root)
+	_, extract2, _ := svc.classify(mustWalk(t, svc, root), root)
 	for _, r := range extract2 {
 		if r.Path == filepath.Join(root, "notes.txt") {
 			t.Errorf("non-audio file re-extracted on second refresh: %+v", extract2)
@@ -786,7 +843,7 @@ func TestClassifyLegacyDegradedNonAudioSelfHeals(t *testing.T) {
 	storeIndexRow(t, db, filepath.Join(root, "track.cue"), info.Size(),
 		info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z"), degradedFileSnapPayload())
 
-	_, extract := svc.classify(mustWalk(t, svc, root), root)
+	_, extract, _ := svc.classify(mustWalk(t, svc, root), root)
 	var row *indexRow
 	for i := range extract {
 		if extract[i].Path == filepath.Join(root, "track.cue") {
@@ -813,7 +870,7 @@ func TestClassifyLegacyDegradedNonAudioSelfHeals(t *testing.T) {
 		row.Payload, filepath.Join(root, "track.cue")); err != nil {
 		t.Fatal(err)
 	}
-	_, extract2 := svc.classify(mustWalk(t, svc, root), root)
+	_, extract2, _ := svc.classify(mustWalk(t, svc, root), root)
 	for _, r := range extract2 {
 		if r.Path == filepath.Join(root, "track.cue") {
 			t.Errorf("non-audio file re-extracted after self-heal: %+v", extract2)

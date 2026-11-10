@@ -23,6 +23,10 @@ All notable changes to this project will be documented in this file. See [standa
   settled. Such a row now re-enters the extract set with the complete
   empty snapshot (nothing to probe), and the budget-failure marker is
   only applied to rows that would actually have been probed.
+- The app-wide source-index progress strip now shows only when a scan
+  is genuinely adding new sources: the scan counts paths with no stored
+  row from a prior scan, and the strip stays hidden for a refresh that
+  finds nothing new (the no-op rescan a page visit triggers).
 - Test isolation: the API test suite unsets deployment environment
   variables (e.g. `DIRECTORIES_OUTPUT_DIR`) before running, so a shell
   that exports container paths can no longer make the queue-time
