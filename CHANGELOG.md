@@ -23,6 +23,19 @@ All notable changes to this project will be documented in this file. See [standa
   settled. Such a row now re-enters the extract set with the complete
   empty snapshot (nothing to probe), and the budget-failure marker is
   only applied to rows that would actually have been probed.
+- Test isolation: the API test suite unsets deployment environment
+  variables (e.g. `DIRECTORIES_OUTPUT_DIR`) before running, so a shell
+  that exports container paths can no longer make the queue-time
+  write-access probes fail on machines where those paths do not exist.
+- Source index ASIN extraction: a canonical ASIN carried by a book
+  folder name was dropped whenever the folder name contained a dot
+  before the ASIN (e.g. `M.R. Forbes - … {B0GVPM58JP}`) — the filename
+  scan stripped the "extension" with `filepath.Ext`, which cut the name
+  at the first interior dot and destroyed the ASIN. The strip now matches
+  only the known audio container extensions, so non-audio names (folders)
+  are scanned whole. A folder with no audio files (a book folder holding
+  only a `.cue`/`.txt`) now also surfaces a folder-name ASIN instead of
+  reading "—".
 - Release assets are uploaded with their plain file names
   (`bragibooks_2.0.0_checksums.txt`, `bragibooks_Darwin_arm64.tar.gz`, …).
   New uploads no longer attach a `bragibooks-publish-v1;…` display label,

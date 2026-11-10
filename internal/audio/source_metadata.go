@@ -204,7 +204,7 @@ func ExtractSourceMetadata(ctx context.Context, ffprobe, srcPath string) (*Sourc
 	snap.FilesTotal = len(paths)
 
 	if len(paths) == 0 {
-		return finalizeEmpty(snap), nil
+		return finalizeEmpty(snap, srcPath), nil
 	}
 
 	merged, mergedTruncated, probedErrs := probeFiles(passCtx, ffprobe, paths, snap)
@@ -261,7 +261,7 @@ func degradedSnapshot(snap *SourceMetadata, cause string) *SourceMetadata {
 // files. A clean scan marks every field explicitly missing; a truncated
 // scan (bound hit before the directory was exhausted) cannot claim the
 // unscanned entries held nothing, so the fields are errored instead.
-func finalizeEmpty(snap *SourceMetadata) *SourceMetadata {
+func finalizeEmpty(snap *SourceMetadata, srcPath string) *SourceMetadata {
 	snap.Files = []SourceFile{}
 	snap.RawTags = []SourceFileTags{}
 	for _, f := range fieldKeys {
@@ -272,6 +272,10 @@ func finalizeEmpty(snap *SourceMetadata) *SourceMetadata {
 		}
 		snap.Fields[f] = SourceField{Values: []string{}, Source: SourceEmbedded, Status: StatusMissing}
 	}
+	// No audio to probe, but the source name can still carry an ASIN —
+	// an empty book folder named "... [B0...]" is a real source, not a
+	// dead end.
+	applyASINFallback(snap, srcPath)
 	return snap
 }
 
@@ -601,16 +605,29 @@ func (s *SourceMetadata) incompleteMsg() string {
 		errored, s.FilesTotal-s.FilesProbed, s.FilesTotal)
 }
 
-// findASINs scans basenames (extension stripped) for ASINs, returning the
-// distinct matches normalized to uppercase in first-seen order.
+// stripAudioExt removes a trailing audio extension (case-insensitive) from
+// name. It matches only the known container list, never filepath.Ext: a
+// name that is not an audio file — a folder such as
+// "M.R. Forbes - Book {B0GVPM58JP}" — must come through untouched, since
+// filepath.Ext would cut at the first dot and destroy the ASIN.
+func stripAudioExt(name string) string {
+	lower := strings.ToLower(name)
+	for _, ext := range audioExtensions {
+		if strings.HasSuffix(lower, ext) {
+			return name[:len(name)-len(ext)]
+		}
+	}
+	return name
+}
+
+// findASINs scans basenames (audio extension stripped) for ASINs,
+// returning the distinct matches normalized to uppercase in first-seen
+// order.
 func findASINs(names []string) []string {
 	seen := map[string]bool{}
 	var values []string
 	for _, name := range names {
-		stripped := name
-		if ext := filepath.Ext(stripped); ext != "" {
-			stripped = stripped[:len(stripped)-len(ext)]
-		}
+		stripped := stripAudioExt(name)
 		for _, m := range asinPattern.FindAllString(stripped, -1) {
 			upper := strings.ToUpper(m)
 			if !seen[upper] {

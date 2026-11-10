@@ -323,6 +323,86 @@ func TestExtractSourceMetadataEmptyFolderIsAllMissing(t *testing.T) {
 	}
 }
 
+// TestFindASINsPreservesDottedNames pins the extension-strip contract: a
+// name that is not an audio file (a folder like "M.R. Forbes - Book
+// {B0GVPM58JP}") must be scanned whole — a filepath.Ext-based strip would
+// cut "M.R. Forbes" at the first dot and destroy the ASIN.
+func TestFindASINsPreservesDottedNames(t *testing.T) {
+	got := findASINs([]string{
+		"M.R. Forbes - Möbius - Toy Starship, Book 2 (Read by Daniel Wisniewski) {B0GVPM58JP}",
+		"Fertile Valley 1 [B0DNRN1H54]",
+	})
+	want := []string{"B0GVPM58JP", "B0DNRN1H54"}
+	if len(got) != len(want) {
+		t.Fatalf("findASINs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("findASINs = %v, want %v", got, want)
+		}
+	}
+	// A real audio extension is still stripped (no double-scan surprise).
+	if g := findASINs([]string{"B0DNRN1H54 book [B0DNRN1H54].m4b"}); len(g) != 1 || g[0] != "B0DNRN1H54" {
+		t.Errorf("findASINs on .m4b = %v, want [B0DNRN1H54]", g)
+	}
+}
+
+// TestExtractSourceMetadataEmptyFolderFilenameASIN checks that a folder
+// with no audio files still surfaces an ASIN carried by the folder name:
+// an empty book folder named "... [B0...]" is a real source, and the
+// read projection must not read "—".
+func TestExtractSourceMetadataEmptyFolderFilenameASIN(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	srcDir := filepath.Join(t.TempDir(), "Fertile Valley 1 [B0DNRN1H54]")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "desc.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := runExtraction(t, ffprobe, srcDir)
+	wantField(t, snap, FieldASIN, StatusPresent, "B0DNRN1H54")
+	if got := snap.Fields[FieldASIN].Source; got != SourceFilename {
+		t.Errorf("asin source = %q, want %q", got, SourceFilename)
+	}
+	if snap.FilesTotal != 0 || snap.FilesProbed != 0 {
+		t.Errorf("files_total/probed = %d/%d, want 0/0", snap.FilesTotal, snap.FilesProbed)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("probe ran on an empty folder (marker present): %v", err)
+	}
+}
+
+// TestExtractSourceMetadataFolderNameASINWithAudioFile is the reported
+// case: a book folder whose name carries the ASIN and whose audio file
+// has no embedded one. The folder basename must feed the fallback; a
+// filepath.Ext-based strip of the dotted author name destroys the ASIN.
+func TestExtractSourceMetadataFolderNameASINWithAudioFile(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	writeProbeResponse(t, respDir, "Mobius", `{"format": {"duration": "10", "tags": {"title": "Mobius"}}, "streams": []}`)
+
+	srcDir := filepath.Join(t.TempDir(), "M.R. Forbes - Mobius - Toy Starship, Book 2 {B0GVPM58JP}")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "Mobius.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := runExtraction(t, ffprobe, srcDir)
+	wantField(t, snap, FieldASIN, StatusPresent, "B0GVPM58JP")
+	if got := snap.Fields[FieldASIN].Source; got != SourceFilename {
+		t.Errorf("asin source = %q, want %q", got, SourceFilename)
+	}
+}
+
 func TestExtractSourceMetadataMissingSourceIsDegraded(t *testing.T) {
 	respDir := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "ran")
