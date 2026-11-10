@@ -16,6 +16,13 @@ All notable changes to this project will be documented in this file. See [standa
   (the child-change rule still re-extracts it when its contents
   gain/lose/modify files, and degraded directories still self-heal on
   every refresh).
+- Source index steady state (non-audio files): a non-audio file stored
+  with a degraded snapshot (as the pre-fix binary did for `.cue`,
+  `.txt`, …) was re-extracted on every refresh and stored back as
+  degraded with a misleading "budget exhausted" marker, so it never
+  settled. Such a row now re-enters the extract set with the complete
+  empty snapshot (nothing to probe), and the budget-failure marker is
+  only applied to rows that would actually have been probed.
 - Release assets are uploaded with their plain file names
   (`bragibooks_2.0.0_checksums.txt`, `bragibooks_Darwin_arm64.tar.gz`, …).
   New uploads no longer attach a `bragibooks-publish-v1;…` display label,

@@ -746,6 +746,81 @@ func TestClassifyNonAudioFileSkipsExtraction(t *testing.T) {
 	}
 }
 
+// degradedFileSnapPayload is the stored form a non-audio file took under
+// the pre-fix binary: ffprobed, failed, degraded — re-extracted on every
+// refresh.
+func degradedFileSnapPayload() string {
+	return `{"schema":2,"source_kind":"unknown","files_total":0,"files_probed":0,"truncated":false,"degraded":true,"duration_seconds":0,"files":[],"fields":{}}`
+}
+
+// TestClassifyLegacyDegradedNonAudioSelfHeals pins the self-heal for
+// non-audio rows stored degraded by an older binary: on refresh the row
+// must re-enter the extract set carrying the complete (empty) snapshot —
+// not an empty Payload (which the scan's post-loop would mislabel as a
+// budget failure, pinning the row degraded on every pass) — and a second
+// refresh must find it unchanged.
+func TestClassifyLegacyDegradedNonAudioSelfHeals(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := dbpkg.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := dbpkg.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	cm := config.NewConfigManager()
+	cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	cm.Config().Directories.InputDir = root
+	cm.Store(cm.Config())
+	svc := NewIndexService(db, cm, "")
+
+	if err := os.WriteFile(filepath.Join(root, "track.cue"), []byte("FILE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(root, "track.cue"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeIndexRow(t, db, filepath.Join(root, "track.cue"), info.Size(),
+		info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z"), degradedFileSnapPayload())
+
+	_, extract := svc.classify(mustWalk(t, svc, root), root)
+	var row *indexRow
+	for i := range extract {
+		if extract[i].Path == filepath.Join(root, "track.cue") {
+			row = &extract[i]
+			break
+		}
+	}
+	if row == nil {
+		t.Fatalf("degraded non-audio file not in extract set: %+v", extract)
+	}
+	if row.Payload == "" {
+		t.Fatal("degraded non-audio file must carry the empty snapshot, not an empty payload")
+	}
+	var snap audio.SourceMetadata
+	if err := json.Unmarshal([]byte(row.Payload), &snap); err != nil {
+		t.Fatalf("payload is not a snapshot: %v", err)
+	}
+	if !snap.Complete() || snap.Degraded {
+		t.Errorf("empty snapshot not complete: %+v", snap)
+	}
+
+	// Row lands with the empty snapshot: the next refresh is unchanged.
+	if _, err := db.Exec(`UPDATE source_index SET payload = ? WHERE path = ?`,
+		row.Payload, filepath.Join(root, "track.cue")); err != nil {
+		t.Fatal(err)
+	}
+	_, extract2 := svc.classify(mustWalk(t, svc, root), root)
+	for _, r := range extract2 {
+		if r.Path == filepath.Join(root, "track.cue") {
+			t.Errorf("non-audio file re-extracted after self-heal: %+v", extract2)
+		}
+	}
+}
+
 // TestIndexServiceRootChangeMidScanStableGeneration pins the generation
 // contract for a root change during a running scan: the rescan's generation
 // is stable under repeated requests, and the running scan publishes only

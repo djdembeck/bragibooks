@@ -406,9 +406,12 @@ func (s *IndexService) scan(ctx context.Context) {
 		s.mu.Unlock()
 	}
 	for i, r := range extract {
-		if r.Payload == "" {
+		if r.Payload == "" && (r.Type == "dir" || audio.IsAudioFile(r.Name)) {
 			// Not extracted (budget exhausted): the degraded snapshot is
-			// the honest representation of "extraction not run".
+			// the honest representation of "extraction not run". Non-audio
+			// files never probe, so an empty Payload on one is a
+			// programming fault, not a budget outcome — never label it as
+			// such (the row would degrade on every refresh).
 			extract[i].Payload = mustJSON(audio.DegradedSourceMetadata("index scan budget exhausted; extraction not run"))
 			degraded++
 		}
@@ -776,6 +779,15 @@ func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extrac
 				continue
 			} else {
 				markDirty(r.Path) // changed file dirties its ancestor dirs
+				// A non-audio file never extracts: a stored row that is
+				// not a complete (empty) snapshot (legacy degraded rows, a
+				// budget-broken pass) re-enters the extract set with the
+				// empty snapshot — not with an empty Payload, which the
+				// scan's post-loop would mislabel as a budget failure and
+				// pin the row degraded on every refresh.
+				if r.Type == "file" && !audio.IsAudioFile(r.Name) {
+					r.Payload = emptySnap
+				}
 				extract = append(extract, r)
 			}
 			i++
