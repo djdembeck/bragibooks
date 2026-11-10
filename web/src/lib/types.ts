@@ -224,6 +224,11 @@ export interface IndexState {
 	status: 'never' | 'queued' | 'running' | 'done' | 'truncated' | 'interrupted' | 'error';
 	detail: string;
 	generation: number;
+	// In-memory progress while a scan is running: total = paths needing
+	// (re-)extraction this scan, extracted = how many are done. Absent (0)
+	// while the fast directory walk is in flight and once the scan ends.
+	total?: number;
+	extracted?: number;
 }
 
 /** GET /api/index response. */

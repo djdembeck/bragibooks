@@ -46,6 +46,14 @@ type IndexState struct {
 	Status     string `json:"status"`      // "never"|"queued"|"running"|"done"|"truncated"|"interrupted"|"error"
 	Detail     string `json:"detail"`
 	Generation int64  `json:"generation"` // incremented per accepted scan; poll until terminal for this generation
+	// Transient in-memory progress for a running scan. NOT persisted: progress
+	// only means something while this process's scan is in flight, and a
+	// restart interrupts the scan, so a freshly-seeded zero is honest.
+	// Total = paths needing (re-)extraction this scan; Extracted = how many
+	// of those are done. Total 0 while the (fast) walk is in flight; both
+	// read 0 when idle.
+	Extracted int `json:"extracted,omitempty"`
+	Total     int `json:"total,omitempty"`
 }
 
 // IndexStatus is the wire shape of GET /api/index.
@@ -248,6 +256,8 @@ func (s *IndexService) markInterrupted(gen int64) {
 		s.last.Generation = gen
 		s.last.Status = "interrupted"
 		s.last.Detail = "shutdown"
+		s.last.Extracted = 0
+		s.last.Total = 0
 		s.activeRoot = ""
 		s.persistLocked()
 	}
@@ -281,9 +291,12 @@ func (s *IndexService) scan(ctx context.Context) {
 	// root/entries: a failed scan must not publish its attempted root as
 	// authoritative (the listing guard would then serve stale/empty rows
 	// for it). Only a terminal done/truncated scan publishes the root.
+	// Progress counters restart: each scan reports its own extraction.
 	s.last.Generation = gen
 	s.last.Status = "running"
 	s.last.Detail = ""
+	s.last.Extracted = 0
+	s.last.Total = 0
 	s.persistLocked()
 	s.mu.Unlock()
 
@@ -333,6 +346,14 @@ func (s *IndexService) scan(ctx context.Context) {
 	// stored-incomplete — degraded rows re-attempt on every refresh).
 	unchanged, extract := s.classify(rows, root)
 
+	// Extraction is the slow phase (one ffprobe per path, up to a 30-minute
+	// budget); the walk that just finished is fast. Publish the total so the
+	// UI can show "X of N" once extraction starts, then tick Extracted as
+	// paths complete. Both are transient in-memory progress (see IndexState).
+	s.mu.Lock()
+	s.last.Total = len(extract)
+	s.mu.Unlock()
+
 	// Extract the changed/new/incomplete set, bounded by the scan budget.
 	budgetStart := time.Now()
 	degraded := 0
@@ -349,6 +370,9 @@ func (s *IndexService) scan(ctx context.Context) {
 		}
 		snap := s.extractOne(ctx, extract[i].Path)
 		extract[i].Payload = mustJSON(snap)
+		s.mu.Lock()
+		s.last.Extracted = i + 1
+		s.mu.Unlock()
 	}
 	for i, r := range extract {
 		if r.Payload == "" {
@@ -429,6 +453,10 @@ func (s *IndexService) setTerminal(gen int64, status, detail string, entries int
 	s.last.Entries = entries
 	s.last.Root = root
 	s.last.LastRunAt = time.Now().UTC().Format(time.RFC3339)
+	// The scan is over: transient progress reads 0 again, so a poller that
+	// lingers past the terminal never shows a stale "X of N".
+	s.last.Extracted = 0
+	s.last.Total = 0
 	s.activeRoot = ""
 	s.persistLocked()
 }

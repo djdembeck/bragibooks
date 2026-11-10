@@ -115,7 +115,15 @@
 	function indexStatusLabel(): string {
 		const st = indexStatus?.state;
 		if (!settings?.indexing_enabled || !st) return '';
-		if (st.status === 'queued' || st.status === 'running') return 'Indexing…';
+		if (st.status === 'queued' || st.status === 'running') {
+			// Real progress while the scan runs: a count once the slow
+			// per-file pass has its total, a phase line before that.
+			const total = st.total ?? 0;
+			const extracted = st.extracted ?? 0;
+			if (total > 0) return `Reading audio files — ${extracted} of ${total}`;
+			if (st.status === 'queued') return 'Index queued — starting…';
+			return 'Scanning the input directory…';
+		}
 		if (!st.last_run_at) return 'Not indexed yet';
 		const ago = st.last_run_at ? relativeAgo(st.last_run_at) : '';
 		return `${st.entries} entries · last indexed ${ago}`;
@@ -702,7 +710,11 @@
 		<section class="settings-section" aria-labelledby="settings-index">
 			<h2 class="settings-section__title" id="settings-index">Source index</h2>
 			<div class="settings-grid">
-				<div class="settings-field">
+				<!-- Single-field section: span the 2-column grid (≥640px) so
+				     the row (label + status + Refresh) gets the full
+				     width. On the mobile single column, spanning the
+				     only track is a no-op. -->
+				<div class="settings-field col-span-2">
 					<label class="settings-checkbox-row" for="indexing_enabled">
 						<input
 							id="indexing_enabled"
@@ -710,7 +722,7 @@
 							checked={settings.indexing_enabled === true}
 							onchange={(e) => settings && (settings.indexing_enabled = e.currentTarget.checked)}
 						/>
-						<span>Enable the source index</span>
+						<span>Enable indexing</span>
 					</label>
 					<p class="settings-help">
 						Prefetches the input directory and pre-reads ASINs and titles, so Import loads

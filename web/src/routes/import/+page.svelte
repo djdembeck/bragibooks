@@ -189,6 +189,9 @@
 		loading = false;
 	}
 
+	// Live scan progress (the "X of N" count) is owned by the app-wide
+	// IndexStatusBanner under the nav; this line only reports the page's
+	// own listing freshness.
 	function showIndexPrompt(): boolean {
 		return settings?.indexing_enabled === false && !indexPromptDismissed;
 	}
@@ -371,7 +374,8 @@
 				<Button variant="ghost" onclick={dismissIndexPrompt}>Dismiss</Button>
 			{/snippet}
 			<span>
-				Speed up Import and matching — enable the source index.
+				The index makes the Import page load faster and matching start
+				sooner; you can turn it off in Settings.
 			</span>
 		</Alert>
 	</div>
