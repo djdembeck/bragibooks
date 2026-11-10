@@ -597,6 +597,100 @@ func TestClassifyDirectoryReextractOnChildChange(t *testing.T) {
 	}
 }
 
+// truncatedDirSnapPayload is a stored directory snapshot that hit the
+// discovery/probe caps: stable first-N evidence, not self-healing.
+func truncatedDirSnapPayload() string {
+	return `{"schema":2,"source_kind":"folder","files_total":100,"files_probed":100,"truncated":true,"degraded":false,"files":[],"fields":{}}`
+}
+
+// storeDirRow seeds a stored directory index row with the given signals.
+func storeDirRow(t *testing.T, db *sql.DB, path string, size int64, modtime, payload string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO source_index (path, name, type, size, modtime, payload, indexed_at, seen_at)
+		VALUES (?, ?, 'dir', ?, ?, ?, datetime('now'), datetime('now'))`,
+		path, filepath.Base(path), size, modtime, payload); err != nil {
+		t.Fatalf("seed dir row %s: %v", path, err)
+	}
+}
+
+// TestClassifyStableTruncatedDirUnchanged pins the steady state for dirs
+// whose stored snapshot hit the probe caps (box sets with >100 files):
+// with unchanged signals and no child events, the dir must stay out of the
+// extract set — re-probing ~100 files per dir on every refresh would spend
+// the scan budget and the index would never settle. A degraded dir must
+// still self-heal (re-extract) on the same signals.
+func TestClassifyStableTruncatedDirUnchanged(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "box-set")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(folder, "c.mp3")
+	if err := os.WriteFile(child, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := dbpkg.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := dbpkg.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	_ = os.Chtimes(folder, ts, ts) // force BEFORE the stat the signals come from
+	info, err := os.Stat(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mt := ts.Format("2006-01-02T15:04:05.000000000Z")
+	storeDirRow(t, db, folder, info.Size(), mt, truncatedDirSnapPayload())
+	cinfo, err := os.Stat(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmt := cinfo.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z")
+	storeIndexRow(t, db, child, cinfo.Size(), cmt, completeSnapPayload())
+
+	cm := config.NewConfigManager()
+	cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	cm.Config().Directories.InputDir = root
+	cm.Store(cm.Config())
+	svc := NewIndexService(db, cm, "")
+
+	// Unchanged subtree: the truncated dir must be unchanged.
+	unchanged, extract := svc.classify(mustWalk(t, svc, root), root)
+	inExtract := func(rows []indexRow, p string) bool {
+		for _, r := range rows {
+			if r.Path == p {
+				return true
+			}
+		}
+		return false
+	}
+	if inExtract(extract, folder) {
+		t.Errorf("stable truncated dir re-extracted with unchanged signals: extract=%+v", extract)
+	}
+	if !inExtract(unchanged, folder) {
+		t.Errorf("stable truncated dir not unchanged: unchanged=%+v", unchanged)
+	}
+
+	// A degraded stored dir with the same signals must still re-extract:
+	// its surviving values are not evidence (self-healing rule).
+	if _, err := db.Exec(`UPDATE source_index SET payload = ? WHERE path = ?`,
+		`{"schema":2,"source_kind":"folder","files_total":0,"files_probed":0,"degraded":true,"files":[],"fields":{}}`,
+		folder); err != nil {
+		t.Fatal(err)
+	}
+	_, extract2 := svc.classify(mustWalk(t, svc, root), root)
+	if !inExtract(extract2, folder) {
+		t.Errorf("degraded dir not re-extracted on refresh: extract=%+v", extract2)
+	}
+}
+
 // TestClassifyNonAudioFileSkipsExtraction pins the non-audio extract gate:
 // a non-audio file gets a complete (empty) snapshot and never re-enters the
 // extract set on a later refresh.

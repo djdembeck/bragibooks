@@ -626,14 +626,18 @@ func (s *IndexService) pruneVanished(walked map[string]bool) error {
 }
 
 // classify splits walked rows into unchanged (kept, seen_at bump only) and
-// needs-extraction. A row is unchanged iff size and modtime match AND its
-// stored snapshot is complete; degraded/incomplete rows are re-extracted
-// on every refresh (self-healing).
+// needs-extraction. A file row is unchanged iff size and modtime match AND
+// its stored snapshot is complete; degraded/incomplete rows are
+// re-extracted on every refresh (self-healing).
 //
 // Directory snapshots are a function of the files beneath them, so a dir
 // row is re-extracted whenever any stored file under it changed, vanished,
 // or is new — a dir's own mtime only moves on entry add/remove, never when
-// a child file is rewritten in place.
+// a child file is rewritten in place. A non-degraded truncated dir is the
+// exception to the completeness requirement: its first-N projection is
+// stable for an unchanged subtree, so accepting it keeps oversized box
+// sets in steady state instead of re-probing them every pass (see
+// dirSnapshotStable).
 //
 // Non-audio files carry a pre-built complete (empty) snapshot: there is
 // nothing for ffprobe to probe, and storing the empty complete snapshot is
@@ -681,6 +685,25 @@ func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extrac
 	isComplete := func(payload string) bool {
 		var snap audio.SourceMetadata
 		return json.Unmarshal([]byte(payload), &snap) == nil && sourceMetadataComplete(&snap)
+	}
+	// dirSnapshotStable reports whether a stored directory snapshot can be
+	// trusted as-is for an unchanged subtree: complete (fully probed), or a
+	// non-degraded truncated projection (the discovery/probe caps hit). A
+	// truncated projection of the SAME first-N files is stable across
+	// refreshes, so accepting it keeps box sets past maxProbedParts in
+	// steady state — re-extracting them every pass would spend the scan
+	// budget re-probing ~100 files per dir and the scan would never reach
+	// a clean steady state. A degraded dir is the opposite: its surviving
+	// values are not evidence, so it re-extracts to self-heal. Subtree
+	// changes are covered separately: the child-dirty rule re-extracts any
+	// unchanged dir whose children gained/lost/changed, truncated or not.
+	dirSnapshotStable := func(payload string) bool {
+		var snap audio.SourceMetadata
+		if json.Unmarshal([]byte(payload), &snap) != nil {
+			return false
+		}
+		return snap.Schema == audio.SourceMetadataSchema && !snap.Degraded &&
+			(snap.Complete() || snap.Truncated)
 	}
 	// A non-audio file has nothing to probe: a complete (empty) snapshot
 	// is the honest stored form and keeps the row stable on refresh.
@@ -734,11 +757,12 @@ func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extrac
 			r := walked[i]
 			if r.Type == "dir" {
 				// A dir's own mtime only moves on entry add/remove, not on
-				// a child rewrite. Its signals+completeness are checked
-				// here; the child-change check needs the events of paths
-				// BELOW it, which sort after it, so the second pass below
-				// moves any dirty dir out of unchanged.
-				if signalsMatch(r, st) && isComplete(st.Payload) {
+				// a child rewrite. Its signals+snapshot stability are
+				// checked here; the child-change check needs the events of
+				// paths BELOW it, which sort after it, so the second pass
+				// below moves any dirty dir out of unchanged (truncated
+				// dirs included — see dirSnapshotStable).
+				if signalsMatch(r, st) && dirSnapshotStable(st.Payload) {
 					unchanged = append(unchanged, r)
 					i++
 					load()
