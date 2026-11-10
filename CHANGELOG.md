@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Fixed
 
+- Source index steady state: directories whose stored snapshot hit the
+  probe caps (box sets with more than 100 files) were treated as
+  incomplete on every refresh and re-extracted (~100 ffprobe calls per
+  directory per pass), which spent the scan budget before the rest of
+  the tree was touched and kept the index from settling — every page
+  visit then triggered a multi-minute rescan. A non-degraded truncated
+  directory snapshot is now accepted as stable for an unchanged subtree
+  (the child-change rule still re-extracts it when its contents
+  gain/lose/modify files, and degraded directories still self-heal on
+  every refresh).
 - Release assets are uploaded with their plain file names
   (`bragibooks_2.0.0_checksums.txt`, `bragibooks_Darwin_arm64.tar.gz`, …).
   New uploads no longer attach a `bragibooks-publish-v1;…` display label,
