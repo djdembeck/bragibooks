@@ -957,10 +957,17 @@ func TestFileSnapshotFromFolderMatchesStandaloneProbe(t *testing.T) {
 	srcDir := t.TempDir()
 	// Three files, each with a distinct embedded title/author and a
 	// duration, plus one filename-ASIN file to exercise the fallback.
+	// d.m4b carries the precedence keys in ORIGINAL case (TITLE,
+	// AUDIBLE_ASIN) — a naive lowercase lookup in the derived snapshot
+	// would lose that evidence. e.m4b has a same-lowercase-key
+	// format-vs-stream collision: the stream scope must win, exactly as
+	// the standalone fold decides it.
 	files := map[string]string{
 		"a.m4b": `{"format": {"duration": "10", "tags": {"title": "Alpha", "album_artist": "Author A"}}, "streams": []}`,
 		"b.m4b": `{"format": {"duration": "20", "tags": {"title": "Beta", "album_artist": "Author B", "audible_asin": "B012345678"}}, "streams": []}`,
 		"c.m4b": `{"format": {"duration": "30", "tags": {}}, "streams": []}`,
+		"d.m4b": `{"format": {"duration": "40", "tags": {"TITLE": "Delta", "AUDIBLE_ASIN": "B0DELTA000"}}, "streams": []}`,
+		"e.m4b": `{"format": {"duration": "50", "tags": {"title": "E-Fmt"}}, "streams": [{"codec_type": "audio", "tags": {"TITLE": "E-Stream"}}]}`,
 	}
 	for name, doc := range files {
 		writeProbeResponse(t, respDir, strings.TrimSuffix(name, filepath.Ext(name)), doc)
@@ -1005,6 +1012,18 @@ func TestFileSnapshotFromFolderMatchesStandaloneProbe(t *testing.T) {
 	// embedded tag (audible_asin), so the derived one must match it.
 	if got := FileSnapshotFromFolder(folder, filepath.Join(srcDir, "b.m4b")).Fields[FieldASIN]; len(got.Values) != 1 || got.Values[0] != "B012345678" {
 		t.Errorf("b.m4b derived ASIN = %v, want [B012345678]", got.Values)
+	}
+	// Original-case keys: the derived snapshot must resolve TITLE /
+	// AUDIBLE_ASIN exactly as the standalone fold does.
+	if got := FileSnapshotFromFolder(folder, filepath.Join(srcDir, "d.m4b")).Fields[FieldTitle]; len(got.Values) != 1 || got.Values[0] != "Delta" {
+		t.Errorf("d.m4b derived title = %v, want [Delta]", got.Values)
+	}
+	if got := FileSnapshotFromFolder(folder, filepath.Join(srcDir, "d.m4b")).Fields[FieldASIN]; len(got.Values) != 1 || got.Values[0] != "B0DELTA000" {
+		t.Errorf("d.m4b derived ASIN = %v, want [B0DELTA000]", got.Values)
+	}
+	// Format-vs-stream same-lowercase-key collision: the stream scope wins.
+	if got := FileSnapshotFromFolder(folder, filepath.Join(srcDir, "e.m4b")).Fields[FieldTitle]; len(got.Values) != 1 || got.Values[0] != "E-Stream" {
+		t.Errorf("e.m4b derived title = %v, want [E-Stream]", got.Values)
 	}
 	// A file absent from the folder snapshot degrades (honest "not run").
 	if got := FileSnapshotFromFolder(folder, filepath.Join(srcDir, "missing.m4b")); !got.Degraded {

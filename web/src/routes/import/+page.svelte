@@ -215,11 +215,14 @@
 		try {
 			await put<Settings>('/settings', { indexing_enabled: true });
 		} catch {
+			// The busy flag clears in `finally`: a failed PUT must leave
+			// the button clickable so the retry path works.
 			indexEnableError =
 				"Couldn't enable source indexing. Check your connection and try again.";
 			return;
+		} finally {
+			indexEnableBusy = false;
 		}
-		indexEnableBusy = false;
 		settings = { ...(settings as Settings), indexing_enabled: true };
 		await initPath();
 	}

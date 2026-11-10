@@ -75,8 +75,10 @@ type SourceFile struct {
 	Error           string  `json:"error,omitempty"`
 }
 
-// SourceFileTags is one probed file's effective (format + first audio
-// stream) tag map, kept verbatim for recoverability.
+// SourceFileTags is one probed file's scope-aware normalized tag map
+// (format tags overlaid by the first audio stream's, case-folded with
+// stream scope winning collisions — the map the field projection runs
+// from), retained for recoverability.
 type SourceFileTags struct {
 	File string            `json:"file"` // basename
 	Tags map[string]string `json:"tags"`
@@ -331,7 +333,7 @@ func probeFiles(ctx context.Context, ffprobe string, paths []string, snap *Sourc
 		snap.FilesProbed++
 		snap.Files = append(snap.Files, SourceFile{File: filepath.Base(path)})
 
-		effective, lowered, duration, probeErr := probeOne(ctx, ffprobe, path)
+		tags, duration, probeErr := probeOne(ctx, ffprobe, path)
 		if probeErr != "" {
 			snap.Files[len(snap.Files)-1].Error = probeErr
 			probedErrs++
@@ -342,22 +344,21 @@ func probeFiles(ctx context.Context, ffprobe string, paths []string, snap *Sourc
 
 		// Retention cap: stop adding raw entries, keep merged values.
 		approx := len(filepath.Base(path))
-		for k, v := range effective {
+		for k, v := range tags {
 			approx += len(k) + len(v) + 8
 		}
 		if rawBytes+approx <= maxRawTagBytes {
-			snap.RawTags = append(snap.RawTags, SourceFileTags{File: filepath.Base(path), Tags: effective})
+			snap.RawTags = append(snap.RawTags, SourceFileTags{File: filepath.Base(path), Tags: tags})
 			rawBytes += approx
 		} else {
 			snap.Truncated = true
 		}
 
-		// Tag keys are matched case-insensitively (ID3 and M4B spell
-		// the same tag differently); RawTags above keeps the original
-		// spellings. `lowered` folds the effective overlay
-		// case-insensitively with stream scope winning, so same-key,
-		// different-case format/stream collisions are deterministic.
-		mergeDoc(merged, seen, truncated, lowered)
+		// The per-file projection (FileSnapshotFromFolder) and the
+		// folder merge both run against the same normalized map: the
+		// scope-aware fold with stream scope winning, so a derived
+		// child snapshot equals what a standalone probe would produce.
+		mergeDoc(merged, seen, truncated, tags)
 	}
 	return merged, truncated, probedErrs
 }
@@ -406,10 +407,12 @@ func addValue(merged map[string][]string, seen map[string]map[string]bool, trunc
 	merged[field] = append(merged[field], value)
 }
 
-// probeOne runs a single bounded ffprobe and returns the original-case
-// effective tag map, the same tags lowercased, the parsed duration, and
-// an error message ("" on success).
-func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, map[string]string, float64, string) {
+// probeOne runs a single bounded ffprobe and returns the scope-aware
+// normalized tag map (format tags overlaid by the first audio stream's
+// tags, case-folded with stream scope winning same-lowercase-key
+// collisions — the same map mergeDoc projects from), the parsed
+// duration, and an error message ("" on success).
+func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, float64, string) {
 	cmd := exec.CommandContext(ctx, ffprobe,
 		// ffprobe infers the format from file content, so a crafted
 		// playlist or container can reference remote resources; restrict
@@ -420,10 +423,10 @@ func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, map
 	cmd.Stderr = stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, nil, 0, fmt.Sprintf("probe pipe: %v", err)
+		return nil, 0, fmt.Sprintf("probe pipe: %v", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, nil, 0, fmt.Sprintf("start probe: %v", err)
+		return nil, 0, fmt.Sprintf("start probe: %v", err)
 	}
 
 	// reap kills the child and reaps it after closing stdout, so an early
@@ -445,19 +448,19 @@ func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, map
 		}
 		if len(out) > maxProbeOutputBytes {
 			reap()
-			return nil, nil, 0, "probe output exceeds 1 MiB"
+			return nil, 0, "probe output exceeds 1 MiB"
 		}
 		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
 			break
 		}
 		if rerr != nil {
 			reap()
-			return nil, nil, 0, fmt.Sprintf("read probe output: %v; stderr: %s", rerr, string(stderr.b))
+			return nil, 0, fmt.Sprintf("read probe output: %v; stderr: %s", rerr, string(stderr.b))
 		}
 	}
 	runErr := cmd.Wait()
 	if runErr != nil {
-		return nil, nil, 0, fmt.Sprintf("ffprobe: %v; stderr: %s", runErr, string(stderr.b))
+		return nil, 0, fmt.Sprintf("ffprobe: %v; stderr: %s", runErr, string(stderr.b))
 	}
 
 	var doc struct {
@@ -471,34 +474,18 @@ func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, map
 		} `json:"streams"`
 	}
 	if err := json.NewDecoder(bytes.NewReader(out)).Decode(&doc); err != nil {
-		return nil, nil, 0, fmt.Sprintf("parse probe output: %v", err)
+		return nil, 0, fmt.Sprintf("parse probe output: %v", err)
 	}
 
-	// Effective tags: format-level tags overlaid by the first audio
-	// stream's tags (stream-level keys win: the narrower scope is the
-	// more specific claim).
-	effective := make(map[string]string, len(doc.Format.Tags))
-	for k, v := range doc.Format.Tags {
-		effective[k] = v
-	}
-	for _, s := range doc.Streams {
-		if s.CodecType == "audio" {
-			for k, v := range s.Tags {
-				effective[k] = v
-			}
-			break
-		}
-	}
-	for k, v := range effective {
-		if len(v) > maxTagValueBytes {
-			effective[k] = v[:maxTagValueBytes] + "…"
-		}
-	}
-
-	lowered := foldProbeTags(doc.Format.Tags, firstAudioStreamTags(doc.Streams))
+	// The normalized tag map is the scope-aware fold of format + first
+	// audio stream: stream scope wins same-lowercase-key collisions, and
+	// it is the exact map the standalone single-file path projects fields
+	// from — so a folder pass's stored per-file tags feed
+	// FileSnapshotFromFolder identically.
+	tags := foldProbeTags(doc.Format.Tags, firstAudioStreamTags(doc.Streams))
 
 	duration, _ := strconv.ParseFloat(doc.Format.Duration, 64)
-	return effective, lowered, duration, ""
+	return tags, duration, ""
 }
 
 // firstAudioStreamTags returns the tags of the first audio stream, or nil.
@@ -520,8 +507,7 @@ func firstAudioStreamTags(streams []struct {
 // scope is decided by lexicographic key order — never map iteration order
 // (finding: nondeterministic extracted values). Collecting the source pairs
 // first and inserting them in sorted (scope, key) order makes the winner of
-// any collision deterministic. Values are capped at maxTagValueBytes,
-// matching the effective-tag pass.
+// any collision deterministic. Values are capped at maxTagValueBytes.
 func foldProbeTags(formatTags, streamTags map[string]string) map[string]string {
 	type tagPair struct {
 		scope int // 0 = format, 1 = stream
@@ -686,9 +672,11 @@ func finalize(snap *SourceMetadata) *SourceMetadata {
 // FileSnapshotFromFolder builds the per-file SourceMetadata for one audio
 // file from a COMPLETE folder snapshot, so the file is never probed a
 // second time when its parent folder was probed in the same pass. The
-// file's tags are the folder pass's RawTags entry for its basename (the
-// same effective tag map probeOne computed), its duration is the Files
-// entry, and its fields/ASIN run the exact single-file projection a
+// file's tags are the folder pass's RawTags entry for its basename — the
+// same scope-aware normalized map probeOne computed (and the standalone
+// single-file path projects from), so original-case precedence keys and
+// format-vs-stream collisions resolve identically — its duration is the
+// Files entry, and its fields/ASIN run the exact single-file projection a
 // standalone probe would have produced (tag precedence, series_part
 // slash-cut, embedded value with filename fallback).
 //

@@ -535,10 +535,13 @@ func (s *IndexService) walk(ctx context.Context, root string) (rows []indexRow, 
 		row := indexRow{Path: p, Name: d.Name(), Type: "file"}
 		if d.IsDir() {
 			row.Type = "dir"
-		} else if info, err := d.Info(); err == nil {
+		}
+		if info, err := d.Info(); err == nil {
 			row.Size = info.Size()
 			// Nanosecond precision: a same-size rewrite within the same
-			// second must still be detected as a change.
+			// second must still be detected as a change. A directory's
+			// modtime moves on entry add/remove — the signal classify
+			// relies on — so dir rows carry real signals, not zeros.
 			row.ModTime = info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z")
 		}
 		rows = append(rows, row)

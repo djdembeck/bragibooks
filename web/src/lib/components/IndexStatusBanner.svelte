@@ -21,10 +21,19 @@
 			(indexStatus.state.status === 'queued' || indexStatus.state.status === 'running')
 	);
 
+	// ONE polling loop for the component's lifetime: the effect below
+	// starts it on mount and cancels it on unmount, and reads no reactive
+	// state, so it never restarts. The delay is decided at schedule time
+	// from the CURRENT enabled flag (1 s while the last response said the
+	// index is enabled, 10 s while disabled — a tiny local endpoint; this
+	// also catches a disable→enable flip started on another page). Reading
+	// indexStatus inside the async loop is outside the effect's tracked
+	// scope, so each response write can't restart the loop and collapse
+	// the cadence to network round-trips; a transient read failure just
+	// keeps polling.
 	$effect(() => {
-		const interval = indexStatus?.enabled ? 1000 : 10000;
 		let cancelled = false;
-		const tick = async () => {
+		const loop = async () => {
 			while (!cancelled) {
 				try {
 					const cur = await get<IndexStatus>('/index');
@@ -33,10 +42,13 @@
 				} catch {
 					// transient read failure: keep polling
 				}
-				await new Promise((r) => setTimeout(r, interval));
+				// Read the CURRENT enabled flag at schedule time: outside
+				// the effect's tracked scope, so the write above cannot
+				// restart the loop.
+				await new Promise((r) => setTimeout(r, indexStatus?.enabled ? 1000 : 10000));
 			}
 		};
-		void tick();
+		void loop();
 		return () => {
 			cancelled = true;
 		}
