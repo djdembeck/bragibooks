@@ -292,3 +292,35 @@ func TestSaveAndSaveKeysUseDefaultConfigPath(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadYAMLIndexingEnabledPrecedence pins the overrideKey path for
+// directories.indexing_enabled: a YAML file containing the key is
+// authoritative when no env var is set, and the env var wins only with
+// the EXACT value "true" (any other value leaves the YAML preference in
+// effect — the on-only, exact-true contract, unlike the true-ish values
+// SERVER_API_ENDPOINT_ENABLED accepts).
+func TestLoadYAMLIndexingEnabledPrecedence(t *testing.T) {
+	tests := []struct {
+		name string
+		seed string
+		env  string // "" = unset
+		want bool
+	}{
+		{"yaml-true-no-env-enabled", "directories:\n  indexing_enabled: true\n", "", true},
+		{"yaml-false-no-env-disabled", "directories:\n  indexing_enabled: false\n", "", false},
+		{"yaml-false-env-true-enables", "directories:\n  indexing_enabled: false\n", "true", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env == "" {
+				t.Setenv("DIRECTORIES_INDEXING_ENABLED", "")
+			} else {
+				t.Setenv("DIRECTORIES_INDEXING_ENABLED", tc.env)
+			}
+			m, _ := newTestManager(t, tc.seed)
+			if got := m.Config().Directories.IndexingEnabled; got != tc.want {
+				t.Fatalf("IndexingEnabled = %v, want %v (YAML key is authoritative; only exact env \"true\" overrides)", got, tc.want)
+			}
+		})
+	}
+}

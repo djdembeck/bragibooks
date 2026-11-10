@@ -65,7 +65,12 @@
 		let cancelled = false;
 		void get<IndexStatus>('/index')
 			.then((st) => {
-				if (!cancelled) indexStatus = st;
+				// A response that resolves AFTER a manual refresh started
+				// is older than the in-flight scan: applying it would
+				// overwrite the queued running state with the pre-refresh
+				// terminal, stop the poller while indexRefreshing is
+				// still true, and leave Refresh disabled indefinitely.
+				if (!cancelled && !indexRefreshing) indexStatus = st;
 			})
 			.catch(() => {});
 		return () => {
@@ -131,16 +136,20 @@
 			if (st.status === 'queued') return 'Index queued — starting…';
 			return 'Scanning the input directory…';
 		}
-		if (!st.last_run_at) return 'Not indexed yet';
+		// Terminal statuses are a problem, not freshness — say so and
+		// point at Refresh as the recovery. Checked BEFORE the no-run
+		// fallback: a first scan interrupted during shutdown is
+		// terminal with an empty last_run_at, and must show the
+		// interruption (with Refresh guidance), not "Not indexed yet".
 		const ago = st.last_run_at ? relativeAgo(st.last_run_at) : '';
-		// A terminal that is not a clean "done" is a problem, not freshness:
-		// say so, and point at Refresh as the recovery.
+		const when = ago ? ` (${ago})` : '';
 		if (st.status === 'truncated')
-			return `Last index incomplete — ${st.detail || 'some files were not read'} (${ago}). Use Refresh to finish.`;
+			return `Last index incomplete — ${st.detail || 'some files were not read'}${when}. Use Refresh to finish.`;
 		if (st.status === 'interrupted')
-			return `Last index was interrupted (${ago}). Use Refresh to finish.`;
+			return `Last index was interrupted${when}. Use Refresh to finish.`;
 		if (st.status === 'error')
 			return `Last index failed — ${st.detail || 'unknown error'}. Use Refresh to retry.`;
+		if (!st.last_run_at) return 'Not indexed yet';
 		return `${st.entries} sources · last indexed ${ago}`;
 	}
 

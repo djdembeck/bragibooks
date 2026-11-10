@@ -484,7 +484,11 @@ func applyEnvPriority(cfg *Config) {
 	if isEnvTrue("SERVER_API_ENDPOINT_ENABLED") {
 		cfg.Server.APIEndpoint.Enabled = true
 	}
-	if isEnvTrue("DIRECTORIES_INDEXING_ENABLED") {
+	// On-only and exact: the documented contract is that ONLY the value
+	// "true" force-enables indexing; any other value (including "1",
+	// "yes", "on") loads the persisted/YAML preference, matching the
+	// DB-gate form in cmd/bragibooks/main.go.
+	if os.Getenv("DIRECTORIES_INDEXING_ENABLED") == "true" {
 		cfg.Directories.IndexingEnabled = true
 	}
 	if v := envVal("m4b_merge.binary"); v != "" {

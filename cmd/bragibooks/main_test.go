@@ -532,6 +532,10 @@ func TestLoadSettingsFromDBIndexingEnabledGate(t *testing.T) {
 		{"env-false-case-insensitive-stored-enabled", "FALSE", 1, true},
 		// (e) Only a true value force-enables over a saved disabled row.
 		{"env-true-stored-disabled", "true", 0, true},
+		// (f) The pin is EXACT "true": an uppercase variant is not a pin,
+		// so a saved disabled row stays disabled (no case-insensitive
+		// match, unlike the false case in (d) which also fell through).
+		{"env-true-uppercase-stored-disabled", "TRUE", 0, false},
 	}
 
 	for _, tc := range tests {

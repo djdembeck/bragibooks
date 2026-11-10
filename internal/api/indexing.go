@@ -92,10 +92,11 @@ type IndexService struct {
 	// last.Generation, which a mid-scan root change may have already
 	// bumped for the queued rescan — the running scan must still
 	// terminate under ITS OWN generation.
-	nextGen    int64
-	activeRoot string        // root the accepted (active or queued) scan will target
-	done       chan struct{} // closed when Run returns; Wait() blocks on it
-	last       IndexState    // in-memory mirror of index_state for fast reads
+	nextGen         int64
+	activeRoot      string        // root the accepted (active or queued) scan will target
+	done            chan struct{} // closed when Run returns; Wait() blocks on it
+	last            IndexState    // in-memory mirror of index_state for fast reads
+	writeFailedRoot string        // root whose table state a failed upsert left partially written
 }
 
 // NewIndexService builds the service and seeds the in-memory state mirror
@@ -180,6 +181,15 @@ func (s *IndexService) sendLocked() {
 	case s.req <- struct{}{}:
 	default:
 	}
+}
+
+// WriteFailedRoot returns the root whose source_index rows a failed scan
+// left partially written ("", when none): the indexed-listing guard serves
+// the filesystem for that root until a clean scan completes on it.
+func (s *IndexService) WriteFailedRoot() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writeFailedRoot
 }
 
 // Status returns the in-memory mirror, authoritative while the process is
@@ -377,6 +387,15 @@ func (s *IndexService) scan(ctx context.Context) {
 	// Non-audio files keep the pre-built complete (empty) snapshot classify
 	// set — there is nothing for ffprobe to probe, and the empty complete
 	// row is what makes them classify stable on every later refresh.
+	//
+	// classify's second pass appends child-dirtied directories to the END
+	// of the extract set, after the child files that dirtied them, so the
+	// set is NOT in path order as returned. The derive-once rule above
+	// needs the path order (a directory before its children): without the
+	// sort, an in-place-rewritten file probes standalone and its parent
+	// dir probes again — two ffprobe passes for one file every
+	// incremental refresh.
+	sort.Slice(extract, func(i, j int) bool { return extract[i].Path < extract[j].Path })
 	snapshotByParent := make(map[string]*audio.SourceMetadata, len(extract))
 	budgetStart := time.Now()
 	degraded := 0
@@ -426,8 +445,16 @@ func (s *IndexService) scan(ctx context.Context) {
 
 	// A persistence failure is terminal "error": the walk's rows are NOT
 	// stored, so publishing done would claim an index the table does not
-	// have (and the attempted root must not become authoritative).
+	// have (and the attempted root must not become authoritative). The
+	// failure may have left the table PARTIALLY written — upsertAll commits
+	// in bounded batches, so an earlier batch can land while a later one
+	// fails. Record the root so the listing guard keeps serving the
+	// filesystem (and not the half-written table) until the next scan
+	// completes cleanly.
 	if err := s.upsertAll(append(unchanged, extract...)); err != nil {
+		s.mu.Lock()
+		s.writeFailedRoot = root
+		s.mu.Unlock()
 		s.setTerminal(gen, "error", fmt.Sprintf("persist index: %v", err), 0, s.last.Root)
 		return
 	}
@@ -500,6 +527,15 @@ func (s *IndexService) setTerminal(gen int64, status, detail string, entries int
 	s.last.Total = 0
 	s.last.Added = 0
 	s.activeRoot = ""
+	// A clean terminal on this root means the table is fully written:
+	// release the partial-write listing guard (an error terminal on the
+	// root must NOT clear it — that is the partially-written state the
+	// guard exists to keep out of the listings).
+	if status == "done" || status == "truncated" {
+		if s.writeFailedRoot == root {
+			s.writeFailedRoot = ""
+		}
+	}
 	s.persistLocked()
 }
 
@@ -713,8 +749,28 @@ func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extrac
 		if json.Unmarshal([]byte(payload), &snap) != nil {
 			return false
 		}
-		return snap.Schema == audio.SourceMetadataSchema && !snap.Degraded &&
-			(snap.Complete() || snap.Truncated)
+		if snap.Schema != audio.SourceMetadataSchema || snap.Degraded {
+			return false
+		}
+		if snap.Complete() {
+			return true
+		}
+		// A truncated projection is stable only when the truncation came
+		// from a clean discovery/probe cap — every probed file recorded
+		// without a per-file error. A truncation that also carries
+		// per-file probe errors (a partial pass that broke down, not one
+		// that simply ran out of budget) is not first-N evidence: its
+		// surviving values are partial, so the dir re-extracts on the
+		// next pass and self-heals, the same rule as a degraded dir.
+		if !snap.Truncated {
+			return false
+		}
+		for _, f := range snap.Files {
+			if f.Error != "" {
+				return false
+			}
+		}
+		return true
 	}
 	// A non-audio file has nothing to probe: a complete (empty) snapshot
 	// is the honest stored form and keeps the row stable on refresh.
@@ -959,6 +1015,14 @@ func indexImmediateChild(dir, candidate string) bool {
 	return strings.HasPrefix(candidate, dir+sep) && !strings.Contains(candidate[len(dir)+1:], sep)
 }
 
+// rebaseUnder remaps p, a path known to sit strictly under from, onto to.
+// Joining (not concatenating) so a from of the filesystem root — a
+// symlink-configured InputDir whose target is "/" — yields "to/x", never
+// "to//x".
+func rebaseUnder(p, from, to string) string {
+	return filepath.Join(to, strings.TrimPrefix(p, indexChildPrefix(from)))
+}
+
 // likeEscape escapes the LIKE wildcards in a literal prefix.
 func likeEscape(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
@@ -1036,14 +1100,47 @@ func (h *Handler) RefreshIndex(w http.ResponseWriter, r *http.Request) {
 // masquerades as an empty current directory.
 func (h *Handler) listIndexedChildren(dir string) ([]IndexedDirectoryEntry, bool, error) {
 	root := h.svc.IndexSvc.CurrentRoot()
-	if root == "" || dir != root && !strings.HasPrefix(dir, indexChildPrefix(root)) {
-		return nil, false, nil // root missing, or not under the root
+	if root == "" {
+		return nil, false, nil // root missing
+	}
+	// The caller canonicalizes the requested path lexically (canonicalRoot)
+	// while the stored rows hang off the symlink-resolved root
+	// (resolveScanRoot). For a symlink-configured InputDir the two forms
+	// differ, so a lexical dir would fail containment and the listing would
+	// silently fall back to the filesystem. Rebase a dir under the lexical
+	// root onto the resolved root (the rows' prefix); when the root is not
+	// a symlink the two forms are equal and the rebase is a no-op. The
+	// entries are stored under the resolved root, but the client navigates
+	// with the lexical form — so rebase each entry path BACK onto the
+	// lexical root (displayRoot) on the way out; displayRoot stays "" when
+	// no rebase was applied, keeping the non-symlink path a no-op.
+	stored := dir
+	displayRoot := ""
+	if lexicalRoot := canonicalRoot(h.svc.Config.Config().Directories.InputDir); lexicalRoot != "" && lexicalRoot != root {
+		switch {
+		case dir == lexicalRoot:
+			stored = root
+			displayRoot = lexicalRoot
+		case strings.HasPrefix(dir, indexChildPrefix(lexicalRoot)):
+			stored = rebaseUnder(dir, lexicalRoot, root)
+			displayRoot = lexicalRoot
+		}
+	}
+	if stored != root && !strings.HasPrefix(stored, indexChildPrefix(root)) {
+		return nil, false, nil // not under the root
 	}
 	if state := h.svc.IndexSvc.Status().State; state.Root != root {
 		return nil, false, nil // rows are from a previous root (or no scan yet)
 	}
+	// A scan that failed mid-upsert on this root left the table partially
+	// written (bounded batches commit independently): missing new paths
+	// and stale evidence for the rest. Serve the filesystem until a
+	// clean scan completes on this root.
+	if failed := h.svc.IndexSvc.WriteFailedRoot(); failed == root {
+		return nil, false, nil // partial table: fall back to the filesystem
+	}
 	q := fmt.Sprintf(`SELECT path, name, type, size, modtime, payload FROM source_index WHERE path LIKE ? ESCAPE '\'`)
-	rows, err := h.svc.DB.Query(q, likeEscape(indexChildPrefix(dir))+"%")
+	rows, err := h.svc.DB.Query(q, likeEscape(indexChildPrefix(stored))+"%")
 	if err != nil {
 		return nil, false, err
 	}
@@ -1059,8 +1156,16 @@ func (h *Handler) listIndexedChildren(dir string) ([]IndexedDirectoryEntry, bool
 		if err := rows.Scan(&path, &name, &typ, &size, &modtime, &payload); err != nil {
 			return nil, false, err
 		}
-		if !indexImmediateChild(dir, path) {
+		if !indexImmediateChild(stored, path) {
 			continue
+		}
+		// Rebase the stored (resolved-root) path back onto the lexical root
+		// the client asked with: returning the resolved path would send the
+		// next navigation outside index mode (ListDirectories gates index
+		// mode on the LEXICAL configured root), and the fallback walk would
+		// answer the same directory from the filesystem.
+		if displayRoot != "" {
+			path = rebaseUnder(path, root, displayRoot)
 		}
 		e := DirectoryEntry{Name: name, Type: typ, Path: path, Size: size, ModTime: modtime}
 		ie := IndexedDirectoryEntry{DirectoryEntry: e}

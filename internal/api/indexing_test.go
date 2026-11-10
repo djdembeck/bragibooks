@@ -368,6 +368,37 @@ func TestIndexHelpersWildcardAndRoot(t *testing.T) {
 	}
 }
 
+// TestRebaseUnderPinsJoinSemantics pins the listIndexedChildren rebases
+// (incoming stored prefix, outgoing display paths) against the case raw
+// concatenation mangles: a lexical root whose symlink resolves to a
+// path that begins exactly one more separator — the degenerate form of
+// the "/" target. A stored prefix of "root//book" matches no stored row
+// (empty listing, silent filesystem fallback) and a displayed
+// "//book" is a mangled double-slash path; filepath.Join semantics
+// collapse the separator in both directions.
+func TestRebaseUnderPinsJoinSemantics(t *testing.T) {
+	cases := []struct {
+		p, from, to, want string
+	}{
+		// Filesystem-root target: the "/" case, directly.
+		{"/book", "/", "/mnt/sym", "/mnt/sym/book"},
+		{"/mnt/sym/book", "/mnt/sym", "/", "/book"},
+		// Nested form: the target begins the lexical root's tail plus one
+		// more separator (a "/"-adjacent target at depth).
+		{"/mnt/sym", "/base", "/mnt/base", "/mnt/base/mnt/sym"},
+		{"/mnt/base/mnt/sym", "/mnt/base", "/base", "/base/mnt/sym"},
+		// Normal nested symlink root: no separator doubling already, so
+		// the join must be a no-op there.
+		{"/link/book", "/link", "/real", "/real/book"},
+		{"/real/book", "/real", "/link", "/link/book"},
+	}
+	for _, tc := range cases {
+		if got := rebaseUnder(tc.p, tc.from, tc.to); got != tc.want {
+			t.Errorf("rebaseUnder(%q, %q, %q) = %q, want %q", tc.p, tc.from, tc.to, got, tc.want)
+		}
+	}
+}
+
 // TestRequestScanRootChangeQueuedCoalesces pins the generation contract
 // when the input root changes while a rescan is queued: the second
 // request must coalesce into the accepted generation, not bump a new one
@@ -745,6 +776,83 @@ func TestClassifyStableTruncatedDirUnchanged(t *testing.T) {
 	_, extract2, _ := svc.classify(mustWalk(t, svc, root), root)
 	if !inExtract(extract2, folder) {
 		t.Errorf("degraded dir not re-extracted on refresh: extract=%+v", extract2)
+	}
+}
+
+// TestClassifyTruncatedDirWithFileErrorsReextracts pins the boundary of
+// the truncated-dir steady-state exception: a truncated snapshot is
+// accepted as stable first-N evidence only when its truncation came from
+// a clean discovery/probe cap (every probed file without a per-file
+// error). A truncated snapshot that also carries per-file probe errors is
+// a partial pass, not a clean cap — its surviving values are partial, so
+// the dir must re-extract on the next pass (self-heal), the same rule as
+// a degraded dir.
+func TestClassifyTruncatedDirWithFileErrorsReextracts(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "box-set")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(folder, "c.mp3")
+	if err := os.WriteFile(child, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := dbpkg.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := dbpkg.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	_ = os.Chtimes(folder, ts, ts)
+	info, err := os.Stat(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mt := ts.Format("2006-01-02T15:04:05.000000000Z")
+	cinfo, err := os.Stat(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmt := cinfo.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z")
+	storeIndexRow(t, db, child, cinfo.Size(), cmt, completeSnapPayload())
+
+	cm := config.NewConfigManager()
+	cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	cm.Config().Directories.InputDir = root
+	cm.Store(cm.Config())
+	svc := NewIndexService(db, cm, "")
+	inExtract := func(rows []indexRow, p string) bool {
+		for _, r := range rows {
+			if r.Path == p {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Truncated WITH a per-file probe error: not clean-cap evidence — the
+	// dir must be re-extracted.
+	storeDirRow(t, db, folder, info.Size(), mt,
+		`{"schema":2,"source_kind":"folder","files_total":100,"files_probed":100,"truncated":true,"degraded":false,"files":[{"file":"c.mp3","error":"probe failed"}],"fields":{}}`)
+	_, extract, _ := svc.classify(mustWalk(t, svc, root), root)
+	if !inExtract(extract, folder) {
+		t.Fatalf("truncated dir with a per-file file error NOT re-extracted: extract=%+v", extract)
+	}
+
+	// The clean cap truncation (no per-file errors) stays stable.
+	if _, err := db.Exec(`UPDATE source_index SET payload = ? WHERE path = ?`,
+		truncatedDirSnapPayload(), folder); err != nil {
+		t.Fatal(err)
+	}
+	_, extract2, _ := svc.classify(mustWalk(t, svc, root), root)
+	if inExtract(extract2, folder) {
+		t.Errorf("clean cap truncation re-extracted on unchanged signals: extract=%+v", extract2)
 	}
 }
 
@@ -1219,6 +1327,93 @@ func TestIndexServicePersistenceFailureIsTerminal(t *testing.T) {
 	}
 }
 
+// TestListIndexedChildrenFallsBackAfterPartialWrite pins the
+// partial-upsert listing contract: when a scan's upsertAll fails mid-write
+// (bounded batches commit independently, so earlier batches can land while
+// a later one fails), the root is retained as authoritative and the table
+// is left half-written. The indexed listing must keep serving the
+// FILESYSTEM for that root — the half-written table is missing new paths
+// and stale evidence — until a clean scan completes on the same root,
+// which releases the guard.
+func TestListIndexedChildrenFallsBackAfterPartialWrite(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "d", "a.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := dbpkg.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := dbpkg.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	cm := config.NewConfigManager()
+	cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	cm.Config().Directories.InputDir = root
+	cm.Store(cm.Config())
+	svc := NewIndexService(db, cm, "")
+	h := &Handler{svc: &Services{DB: db, Config: cm, IndexSvc: svc}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go svc.Run(ctx)
+
+	// Clean scan: the listing serves the index.
+	st := runToTerminal(t, svc)
+	if st.Status != "done" || st.Root != root {
+		t.Fatalf("initial scan status = %s root %q, want done on %s", st.Status, st.Root, root)
+	}
+	if entries, ok, err := h.listIndexedChildren(root); err != nil || !ok || len(entries) != 1 {
+		t.Fatalf("clean listing = ok=%v n=%d err=%v, want ok with d", ok, len(entries), err)
+	}
+
+	// Partial write: the next scan commits no rows (the trigger aborts
+	// every upsert write), ends in "error", and retains the root — the
+	// table keeps the clean scan's rows, i.e. a partially-written state
+	// from the failed scan's perspective.
+	if _, err := db.Exec(`CREATE TRIGGER fail_upsert AFTER UPDATE ON source_index
+		FOR EACH ROW WHEN NEW.path IS NOT NULL
+		BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	st = runToTerminal(t, svc)
+	if st.Status != "error" {
+		t.Fatalf("failed scan status = %s, want error (detail %q)", st.Status, st.Detail)
+	}
+	if st.Root != root {
+		t.Fatalf("failed scan root = %q, want the retained root %q", st.Root, root)
+	}
+	if got := svc.WriteFailedRoot(); got != root {
+		t.Fatalf("WriteFailedRoot = %q, want %q after the failed scan", got, root)
+	}
+	// The listing must fall back to the filesystem for the half-written
+	// root: no index entries served.
+	if entries, ok, err := h.listIndexedChildren(root); err != nil || ok || len(entries) != 0 {
+		t.Fatalf("post-failure listing = ok=%v n=%d err=%v, want filesystem fallback (not the index)", ok, len(entries), err)
+	}
+
+	// Clean scan on the same root: the table is fully written again and
+	// the guard releases.
+	if _, err := db.Exec(`DROP TRIGGER fail_upsert`); err != nil {
+		t.Fatal(err)
+	}
+	st = runToTerminal(t, svc)
+	if st.Status != "done" {
+		t.Fatalf("healing scan status = %s, want done", st.Status)
+	}
+	if got := svc.WriteFailedRoot(); got != "" {
+		t.Fatalf("WriteFailedRoot = %q, want cleared after a clean scan on the root", got)
+	}
+	if entries, ok, err := h.listIndexedChildren(root); err != nil || !ok || len(entries) != 1 {
+		t.Fatalf("healed listing = ok=%v n=%d err=%v, want the index served again", ok, len(entries), err)
+	}
+}
+
 // seedPriorRootScan drives one clean scan to "done" so a prior root is the
 // authoritative stored root, then re-points the configured input dir.
 func seedPriorRootScan(t *testing.T, svc *IndexService, cm *config.ConfigManager, priorRoot, newRoot string) {
@@ -1673,6 +1868,43 @@ func TestIndexScanProbesEachFileOnce(t *testing.T) {
 	if n := len(strings.Fields(string(data))); n != 3 {
 		t.Errorf("rescan total probes = %d, want 3 (nothing changed)", n)
 	}
+
+	// Incremental ordering: an in-place rewrite of a child (size/mtime
+	// change) dirties the parent, and classify's second pass appends the
+	// parent AFTER the changed child to the extract set. The extraction
+	// loop must sort by path (parent before children) so the child
+	// DERIVES from the parent's single pass — exactly ONE probe for the
+	// file, not a standalone probe plus the parent's pass.
+	if err := os.WriteFile(filepath.Join(root, "book", "01.m4b"), []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st = runToTerminal(t, svc)
+	if st.Status != "done" {
+		t.Fatalf("rewrite rescan status = %s, want done", st.Status)
+	}
+	data, _ = os.ReadFile(logPath)
+	probed = strings.Fields(string(data))
+	count = map[string]int{}
+	for _, p := range probed {
+		count[p]++
+	}
+	// First scan: 3 probes (book/01, book/02, top). Rewrite pass: the
+	// rewritten child is covered by its parent's single folder pass,
+	// which probes the dir's audio children (01 and 02) — and the child
+	// must NOT be probed standalone a second time on top of that. top.m4b
+	// and everything else is untouched.
+	if n := len(probed); n != 5 {
+		t.Fatalf("total probes after in-place rewrite = %d (%v), want 5 (one folder pass: 01+02)", n, probed)
+	}
+	if count[filepath.Join(root, "book", "01.m4b")] != 2 {
+		t.Errorf("rewritten child probed %d times, want 2 (initial folder pass + rewrite folder pass; a standalone probe would make it 3)", count[filepath.Join(root, "book", "01.m4b")])
+	}
+	if count[filepath.Join(root, "book", "02.m4b")] != 2 {
+		t.Errorf("unrewritten child probed %d times, want 2 (folder pass re-probes the dir's children)", count[filepath.Join(root, "book", "02.m4b")])
+	}
+	if count[filepath.Join(root, "top.m4b")] != 1 {
+		t.Errorf("top.m4b probed %d times, want 1", count[filepath.Join(root, "top.m4b")])
+	}
 }
 
 func payloadFor(t *testing.T, db *sql.DB, path string) string {
@@ -1682,4 +1914,112 @@ func payloadFor(t *testing.T, db *sql.DB, path string) string {
 		t.Fatalf("payload for %s: %v", path, err)
 	}
 	return payload
+}
+
+// TestListDirectoriesIndexModeSymlinkedRoot pins the symlinked-root listing
+// contract: the stored rows hang off the RESOLVED root, the client
+// navigates with the LEXICAL (symlink) root, and the entries must come back
+// rebased onto the lexical form — the inverse of the stored-prefix rebase.
+// A resolved-form entry path would fail ListDirectories' lexical-root index
+// gate on the next navigation and silently fall back to the filesystem.
+func TestListDirectoriesIndexModeSymlinkedRoot(t *testing.T) {
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real")
+	if err := os.MkdirAll(filepath.Join(realRoot, "book"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realRoot, "top.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(realRoot, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := dbpkg.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := dbpkg.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	cm := config.NewConfigManager()
+	cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	cm.Config().Directories.InputDir = link
+	cm.Config().Directories.IndexingEnabled = true
+	cm.Store(cm.Config())
+	svc := NewIndexService(db, cm, "")
+	h := newIndexHandler(t, svc, cm, db)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go svc.Run(ctx)
+	st := runToTerminal(t, svc)
+	if st.Status != "done" {
+		t.Fatalf("scan = %s (detail %q), want done", st.Status, st.Detail)
+	}
+	if st.Root != realRoot {
+		t.Fatalf("scan root = %q, want resolved %q", st.Root, realRoot)
+	}
+
+	t.Run("listing-via-symlink-root-uses-index-with-lexical-paths", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/directories?path="+url.QueryEscape(link)+"&index=1", nil)
+		rec := httptest.NewRecorder()
+		h.ListDirectories(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET index mode: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		// Index state is present: the index answered, not the filesystem.
+		idx, ok := body["index"].(map[string]any)
+		if !ok {
+			t.Fatalf("response has no index state (filesystem fallback for a symlinked root): %s", rec.Body.String())
+		}
+		if idx["status"] != "done" {
+			t.Fatalf("index.status = %v, want done", idx["status"])
+		}
+		entries, ok := body["entries"].([]any)
+		if !ok {
+			t.Fatalf("entries = %T, want array", body["entries"])
+		}
+		// Dirs first, name ascending: book (dir), top.m4b (file).
+		if len(entries) != 2 {
+			t.Fatalf("entries = %d, want 2 (book, top.m4b)", len(entries))
+		}
+		book, _ := entries[0].(map[string]any)
+		top, _ := entries[1].(map[string]any)
+		// Entry paths are the LEXICAL form (the client's next navigation
+		// stays inside index mode), not the resolved root's rows.
+		wantBook := filepath.Join(link, "book")
+		wantTop := filepath.Join(link, "top.m4b")
+		if book["path"] != wantBook {
+			t.Fatalf("book path = %v, want lexical %q", book["path"], wantBook)
+		}
+		if top["path"] != wantTop {
+			t.Fatalf("top.m4b path = %v, want lexical %q", top["path"], wantTop)
+		}
+		if book["evidence"] == nil {
+			t.Fatalf("book entry has no evidence: %v", book)
+		}
+
+		// Navigation into a returned child must stay in index mode.
+		req = httptest.NewRequest(http.MethodGet, "/api/directories?path="+url.QueryEscape(wantBook)+"&index=1", nil)
+		rec = httptest.NewRecorder()
+		h.ListDirectories(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET child index mode: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+		}
+		var childBody map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &childBody); err != nil {
+			t.Fatalf("decode child: %v", err)
+		}
+		if _, ok := childBody["index"].(map[string]any); !ok {
+			t.Fatalf("child listing fell back to the filesystem (lexical child path rejected): %s", rec.Body.String())
+		}
+	})
 }

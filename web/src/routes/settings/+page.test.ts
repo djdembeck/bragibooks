@@ -1,6 +1,8 @@
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IndexState, IndexStatus, Settings } from '#lib/types.js';
+// vi.mock hoists above these, so the factory can name them directly.
+import RefreshButtonStub from './RefreshButtonStub.svelte';
 
 const { getMock, postMock } = vi.hoisted(() => ({
 	getMock: vi.fn(),
@@ -15,11 +17,13 @@ vi.mock('#lib/api.js', () => ({
 	ApiError: class ApiError extends Error {}
 }));
 
-// The settings page composes many presentational components; the poll
-// contract under test lives in the script, so the components stub out.
+// The settings page composes many presentational components; the poll and
+// refresh contracts under test live in the script, so the components stub
+// out. Button renders just enough (the children snippet, a clickable
+// button that respects `disabled`/`loading`) to drive the Refresh flow.
 vi.mock('#lib/components/index.js', () => ({
 	PageHeader: () => null,
-	Button: () => null,
+	Button: RefreshButtonStub,
 	Alert: () => null,
 	ErrorDetail: () => null,
 	Skeleton: () => null,
@@ -148,5 +152,81 @@ describe('settings index in-flight poll', () => {
 		expect(indexCallCount()).toBe(1);
 		await vi.advanceTimersByTimeAsync(5000);
 		expect(indexCallCount()).toBe(1);
+	});
+
+	it('ignores the initial /index response that resolves after a manual refresh started', async () => {
+		// The initial /index read is deferred: it resolves AFTER the manual
+		// refresh starts, carrying the PRE-refresh terminal state. Applying
+		// it would overwrite the queued running state with the stale
+		// terminal and strand Refresh disabled forever.
+		const { promise: initialRead, resolve: resolveInitial } =
+			Promise.withResolvers<IndexStatus>();
+		let indexCalls = 0;
+		getMock.mockImplementation(async (path: string) => {
+			if (path === '/settings') return settingsFixture();
+			if (path === '/output-profiles') return { profiles: [] };
+			if (path === '/index') {
+				indexCalls++;
+				if (indexCalls === 1) return initialRead; // initial effect's read
+				return indexState('queued', 2); // the poller sees the in-flight scan
+			}
+			return {};
+		});
+		postMock.mockResolvedValue({ state: indexState('queued', 2).state });
+		await mountPage();
+		expect(indexCallCount()).toBe(1);
+
+		const refresh = [...target.querySelectorAll<HTMLButtonElement>('button')].find(
+			(b) => b.textContent?.trim() === 'Refresh now'
+		);
+		if (!refresh) throw new Error('Refresh now button not rendered');
+		refresh.click();
+		await vi.advanceTimersByTimeAsync(0);
+		// The queued running state is visible and Refresh is in flight.
+		expect(target.textContent).toContain('Index queued — starting…');
+		expect((refresh as HTMLButtonElement).disabled).toBe(true);
+
+		// One poll tick observes the in-flight scan and keeps polling.
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(indexCallCount()).toBe(2);
+
+		// NOW the initial read resolves with the stale pre-refresh
+		// terminal (done, generation 1). It must be ignored.
+		resolveInitial(indexState('done', 1));
+		await vi.advanceTimersByTimeAsync(0);
+		// The queued running state is still displayed (the stale response
+		// did not overwrite it), the poller is still alive, and Refresh is
+		// still busy (not stranded in a terminal state of its own scan).
+		expect(target.textContent).toContain('Index queued — starting…');
+		expect(indexCallCount()).toBe(2);
+		expect((refresh as HTMLButtonElement).disabled).toBe(true);
+
+		// The refresh's OWN generation reaches its terminal: the next tick
+		// observes it, the poller stops, and Refresh comes back.
+		getMock.mockImplementation(async (path: string) =>
+			path === '/index' ? indexState('done', 2) : {}
+		);
+		await vi.advanceTimersByTimeAsync(1000);
+		const stoppedAt = indexCallCount();
+		expect(stoppedAt).toBe(3);
+		expect((refresh as HTMLButtonElement).disabled).toBe(false);
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(indexCallCount()).toBe(stoppedAt);
+	});
+
+	it('shows the interruption (with Refresh guidance) for an interrupted terminal with an empty last_run_at', async () => {
+		// A first scan interrupted during shutdown is terminal with an
+		// empty last_run_at: the line must say the index was interrupted
+		// and point at Refresh, not fall through to "Not indexed yet".
+		getMock.mockImplementation(async (path: string) => {
+			if (path === '/settings') return settingsFixture();
+			if (path === '/output-profiles') return { profiles: [] };
+			if (path === '/index') return indexState('interrupted', 1); // last_run_at ''
+			return {};
+		});
+		await mountPage();
+		expect(target.textContent).toContain('Last index was interrupted');
+		expect(target.textContent).toContain('Use Refresh to finish');
+		expect(target.textContent).not.toContain('Not indexed yet');
 	});
 });

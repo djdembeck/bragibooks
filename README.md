@@ -172,7 +172,7 @@ The key environment variables are:
 | `DIRECTORIES_INPUT_DIR` | Source audiobook directory | unset |
 | `DIRECTORIES_OUTPUT_DIR` | Destination directory for processed books | unset |
 | `DIRECTORIES_COMPLETED_DIR` | Directory for completed source files | unset |
-| `DIRECTORIES_INDEXING_ENABLED` | Force the input directory pre-index on at boot (true value only, like `SERVER_API_ENDPOINT_ENABLED`; disabling stays to the Settings toggle) | `false` |
+| `DIRECTORIES_INDEXING_ENABLED` | Force the input directory pre-index on at boot (exact `"true"` value only — unlike `SERVER_API_ENDPOINT_ENABLED`, any other value such as `false`, `1`, `yes`, or `TRUE` is ignored and the saved/YAML preference stays in effect; disabling stays to the Settings toggle) | `false` |
 | `PROCESSING_NUM_CPUS` | Number of processing workers | `1` |
 | `PROCESSING_PATH_FORMAT` | Output path format | `{author}/{title}` |
 | `PROCESSING_REGION` | Accepted for compatibility with older setups; no effect | `us` |

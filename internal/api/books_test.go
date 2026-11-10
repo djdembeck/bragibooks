@@ -1453,6 +1453,54 @@ func TestStoredIndexMetadataFreshness(t *testing.T) {
 			t.Fatal("stale (omitted-file-rewritten) folder snapshot was reused")
 		}
 	})
+
+	// Duplicate-basename shape: the omitted direct child's basename is
+	// shadowed by a NESTED file that HAS a stored row (the differing
+	// basename case above cannot be fooled this way). The gate matches the
+	// EXACT indexed child path (dirPath + basename), so the nested row must
+	// not satisfy the omitted child — the folder is not fresh.
+	dupDir := filepath.Join(dir, "dup")
+	dupNested := filepath.Join(dupDir, "nested")
+	if err := os.MkdirAll(dupNested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dupChild := filepath.Join(dupDir, "dup.mp3")
+	dupNestedFile := filepath.Join(dupNested, "dup.mp3")
+	for _, p := range []string{dupChild, dupNestedFile} {
+		if err := os.WriteFile(p, []byte("0123456789"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dupInfo, _ := os.Stat(dupDir)
+	nestedInfo, _ := os.Stat(dupNestedFile)
+	dupFolder := `{"schema":2,"source_kind":"folder","files_total":1,"files_probed":1,"degraded":false,"duration_seconds":5,"files":[{"file":"dup.mp3","duration_seconds":5}],"fields":{"asin":{"values":["B0FOLDER03"],"source":"embedded","status":"present"}}}`
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO source_index (path, name, type, size, modtime, payload, indexed_at, seen_at)
+		 VALUES (?, 'dup', 'dir', ?, ?, ?, datetime('now'), datetime('now'))`,
+		canonicalRoot(dupDir), dupInfo.Size(), dupInfo.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z"), dupFolder); err != nil {
+		t.Fatal(err)
+	}
+	// A stored row for the NESTED same-basename file (fresh): a basename
+	// match would make the omitted direct child look stored.
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO source_index (path, name, type, size, modtime, payload, indexed_at, seen_at)
+		 VALUES (?, 'dup.mp3', 'file', ?, ?, ?, datetime('now'), datetime('now'))`,
+		canonicalRoot(dupNestedFile), nestedInfo.Size(), nestedInfo.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z"), dupFolder); err != nil {
+		t.Fatal(err)
+	}
+	// No row for the direct dup.mp3: the entry-cap-truncated walk omitted it.
+
+	t.Run("omitted child shadowed by a nested same-basename row falls to live probe", func(t *testing.T) {
+		// Rewrite the omitted direct child in place: same name, same size
+		// (same content), so the dir's mtime and every stored child row
+		// (including the nested shadow) are untouched.
+		if err := os.WriteFile(dupChild, []byte("0123456789"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if snap := h.storedIndexMetadata(dupDir); snap != nil {
+			t.Fatal("stale (omitted child shadowed by a nested same-basename row) folder snapshot was reused")
+		}
+	})
 }
 
 // TestCreateBooksIntakeIndexGate pins the INTAKE-level Enabled() gate

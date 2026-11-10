@@ -657,8 +657,9 @@ func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {
 	// (deployment pin); ANY other value — including "false" and the
 	// unset case — falls through to the persisted/YAML setting. Treating
 	// a non-true value as a pin would override a saved true on every
-	// restart (finding: env gate skips persisted setting).
-	if env := os.Getenv("DIRECTORIES_INDEXING_ENABLED"); strings.EqualFold(env, "true") {
+	// restart (finding: env gate skips persisted setting). Exact "true"
+	// only: a case-variant or other true-ish value is NOT a pin.
+	if env := os.Getenv("DIRECTORIES_INDEXING_ENABLED"); env == "true" {
 		cfg.Directories.IndexingEnabled = true
 	} else if !yamlKeys["directories.indexing_enabled"] {
 		cfg.Directories.IndexingEnabled = indexingEnabled != 0

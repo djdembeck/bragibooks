@@ -702,40 +702,44 @@ func (h *Handler) indexedChildrenFresh(dirPath string) bool {
 // path would claim stale title/author/ASIN/duration. The check is bounded
 // to the payload's file list — it never walks the filesystem: a file that
 // EXISTS without a row (depth-cap omission) is the hazard, a file that is
-// gone is caught by the directory's own mtime signal. A folder snapshot
-// from a truncated pass is incomplete (Truncated/Degraded) and is rejected
-// by sourceMetadataComplete, so this check only ever sees a complete
-// payload: there is no completeness marker to gate on separately — if a
-// truncated payload reached here, the completeness check would also reject
-// it. Any query/scan failure returns false: the live probe.
+// gone is caught by the directory's own mtime signal. The match is against
+// the EXACT indexed child paths (dirPath + basename), not basenames: the
+// payload's discovery is immediate (one directory level), and a nested file
+// with the same basename as a direct child the walk omitted at its entry
+// cap must not satisfy the omitted child (a basename match made the omitted
+// file look stored). A folder snapshot from a truncated pass is incomplete
+// (Truncated/Degraded) and is rejected by sourceMetadataComplete, so this
+// check only ever sees a complete payload: there is no completeness marker
+// to gate on separately — if a truncated payload reached here, the
+// completeness check would also reject it. Any query/scan failure returns
+// false: the live probe.
 func (h *Handler) folderPayloadFilesStored(dirPath string, files []audio.SourceFile) bool {
-	if len(files) == 0 {
-		return true
-	}
-	present := make(map[string]bool, len(files))
+	paths := make([]string, 0, len(files))
 	for _, f := range files {
 		if f.File != "" {
-			present[f.File] = true
+			paths = append(paths, indexChildPrefix(dirPath)+f.File)
 		}
 	}
-	rows, err := h.svc.DB.Query(`SELECT name FROM source_index WHERE path LIKE ? ESCAPE '\'`,
-		likeEscape(indexChildPrefix(dirPath))+"%")
+	if len(paths) == 0 {
+		return true
+	}
+	rows, err := h.svc.DB.Query(`SELECT path FROM source_index WHERE path IN (`+placeholders(len(paths))+`)`,
+		toArgs(paths)...)
 	if err != nil {
 		log.Printf("stored index metadata payload files for %s: query: %v", dirPath, err)
 		return false
 	}
 	defer rows.Close()
+	found := 0
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var path string
+		if err := rows.Scan(&path); err != nil {
 			log.Printf("stored index metadata payload files for %s: scan: %v", dirPath, err)
 			return false
 		}
-		if present[name] {
-			delete(present, name)
-		}
+		found++
 	}
-	return len(present) == 0 && rows.Err() == nil
+	return found == len(paths) && rows.Err() == nil
 }
 
 // persistSourceMetadata writes one book's snapshot row; failures are
