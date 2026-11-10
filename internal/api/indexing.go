@@ -355,6 +355,22 @@ func (s *IndexService) scan(ctx context.Context) {
 	s.mu.Unlock()
 
 	// Extract the changed/new/incomplete set, bounded by the scan budget.
+	// ffprobe runs at most ONCE per audio file: a file that is a direct
+	// child of a directory extracted in this pass is NOT probed on its own —
+	// the folder pass already read its tags, so the file's snapshot is
+	// derived from the parent's (audio.FileSnapshotFromFolder).
+	//
+	// Safe because classify marks a parent dirty when any child is
+	// new/changed/vanished, so a file needing extraction always has its
+	// parent extracted in the same pass; extract is in path order (a
+	// directory sorts before its children), so the parent is processed
+	// first. A file at the input root (no indexed parent row) or under an
+	// incomplete parent (truncated pass) probes on its own.
+	//
+	// Non-audio files keep the pre-built complete (empty) snapshot classify
+	// set — there is nothing for ffprobe to probe, and the empty complete
+	// row is what makes them classify stable on every later refresh.
+	snapshotByParent := make(map[string]*audio.SourceMetadata, len(extract))
 	budgetStart := time.Now()
 	degraded := 0
 	for i := range extract {
@@ -368,8 +384,23 @@ func (s *IndexService) scan(ctx context.Context) {
 			log.Printf("index: scan of %s finished, %d paths not extracted (budget)", root, len(extract)-i)
 			break
 		}
-		snap := s.extractOne(ctx, extract[i].Path)
-		extract[i].Payload = mustJSON(snap)
+		r := &extract[i]
+		switch {
+		case r.Type == "file" && !audio.IsAudioFile(r.Name):
+			// Keep the pre-set empty snapshot; never run ffprobe on it.
+		case r.Type == "file":
+			if parent, ok := snapshotByParent[filepath.Dir(r.Path)]; ok {
+				r.Payload = mustJSON(audio.FileSnapshotFromFolder(parent, r.Path))
+			} else {
+				r.Payload = mustJSON(s.extractOne(ctx, r.Path))
+			}
+		default:
+			snap := s.extractOne(ctx, r.Path)
+			r.Payload = mustJSON(snap)
+			if snap.Complete() {
+				snapshotByParent[r.Path] = snap
+			}
+		}
 		s.mu.Lock()
 		s.last.Extracted = i + 1
 		s.mu.Unlock()

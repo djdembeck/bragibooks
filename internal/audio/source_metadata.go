@@ -682,3 +682,75 @@ func finalize(snap *SourceMetadata) *SourceMetadata {
 	}
 	return snap
 }
+
+// FileSnapshotFromFolder builds the per-file SourceMetadata for one audio
+// file from a COMPLETE folder snapshot, so the file is never probed a
+// second time when its parent folder was probed in the same pass. The
+// file's tags are the folder pass's RawTags entry for its basename (the
+// same effective tag map probeOne computed), its duration is the Files
+// entry, and its fields/ASIN run the exact single-file projection a
+// standalone probe would have produced (tag precedence, series_part
+// slash-cut, embedded value with filename fallback).
+//
+// Callers MUST pass a snapshot for which this file's probe succeeded
+// (snapshot Complete() and a RawTags entry for the basename): an absent
+// file returns a degraded snapshot, which the index stores as the
+// honest "extraction not run" marker and re-attempts on the next refresh.
+func FileSnapshotFromFolder(folder *SourceMetadata, filePath string) *SourceMetadata {
+	base := filepath.Base(filePath)
+	snap := &SourceMetadata{
+		Schema:      SourceMetadataSchema,
+		SourceKind:  "file",
+		FilesTotal:  1,
+		FilesProbed: 1,
+		Fields:      make(map[string]SourceField, len(fieldKeys)),
+		Files:       []SourceFile{{File: base}},
+	}
+	var tags map[string]string
+	for _, rt := range folder.RawTags {
+		if rt.File == base {
+			tags = rt.Tags
+			break
+		}
+	}
+	if tags == nil {
+		return degradedSnapshot(snap, "not found in folder snapshot; extraction not run")
+	}
+	for _, f := range folder.Files {
+		if f.File == base {
+			snap.Files[0].DurationSeconds = f.DurationSeconds
+			snap.DurationSeconds = f.DurationSeconds
+			break
+		}
+	}
+	// Per-file projection: one value per field (no cross-file merge, no
+	// per-field cap), mirroring mergeDoc/mergeFields for a single file.
+	for _, field := range fieldKeys {
+		value := ""
+		found := false
+		for _, key := range tagPrecedence[field] {
+			v, ok := tags[key]
+			if !ok {
+				continue
+			}
+			if field == FieldSeriesPart {
+				if slash := strings.IndexByte(v, '/'); slash >= 0 {
+					v = v[:slash]
+				}
+			}
+			if v == "" {
+				continue
+			}
+			value, found = v, true
+			break
+		}
+		if found {
+			snap.Fields[field] = SourceField{Values: []string{value}, Source: SourceEmbedded, Status: StatusPresent}
+		} else {
+			snap.Fields[field] = SourceField{Values: []string{}, Source: SourceEmbedded, Status: StatusMissing}
+		}
+	}
+	snap.RawTags = []SourceFileTags{{File: base, Tags: tags}}
+	applyASINFallback(snap, filePath)
+	return finalize(snap)
+}

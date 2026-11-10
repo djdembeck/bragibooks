@@ -943,3 +943,71 @@ func TestFoldProbeTagsResolvesCollisionsDeterministically(t *testing.T) {
 		})
 	}
 }
+
+// TestFileSnapshotFromFolderMatchesStandaloneProbe pins the de-dupe
+// contract: a file snapshot derived from a complete folder pass must
+// agree with a standalone probe of that same file on every field, the
+// ASIN, and the duration — so the index never re-probes a child whose
+// parent was probed in the same pass.
+func TestFileSnapshotFromFolderMatchesStandaloneProbe(t *testing.T) {
+	respDir := t.TempDir()
+	marker := t.TempDir()
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	srcDir := t.TempDir()
+	// Three files, each with a distinct embedded title/author and a
+	// duration, plus one filename-ASIN file to exercise the fallback.
+	files := map[string]string{
+		"a.m4b": `{"format": {"duration": "10", "tags": {"title": "Alpha", "album_artist": "Author A"}}, "streams": []}`,
+		"b.m4b": `{"format": {"duration": "20", "tags": {"title": "Beta", "album_artist": "Author B", "audible_asin": "B012345678"}}, "streams": []}`,
+		"c.m4b": `{"format": {"duration": "30", "tags": {}}, "streams": []}`,
+	}
+	for name, doc := range files {
+		writeProbeResponse(t, respDir, strings.TrimSuffix(name, filepath.Ext(name)), doc)
+		if err := os.WriteFile(filepath.Join(srcDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	folder := runExtraction(t, ffprobe, srcDir)
+	if !folder.Complete() {
+		t.Fatalf("folder snapshot not complete: %v", folder.Fields)
+	}
+
+	for name := range files {
+		path := filepath.Join(srcDir, name)
+		derived := FileSnapshotFromFolder(folder, path)
+		standalone := runExtraction(t, ffprobe, path)
+		if !derived.Complete() {
+			t.Errorf("%s: derived snapshot not complete", name)
+		}
+		for _, key := range fieldKeys {
+			d, s := derived.Fields[key], standalone.Fields[key]
+			if d.Status != s.Status {
+				t.Errorf("%s: field %s status = %q, standalone %q", name, key, d.Status, s.Status)
+			}
+			if len(d.Values) != len(s.Values) {
+				t.Errorf("%s: field %s values = %v, standalone %v", name, key, d.Values, s.Values)
+				continue
+			}
+			for i := range d.Values {
+				if d.Values[i] != s.Values[i] {
+					t.Errorf("%s: field %s values[%d] = %q, standalone %q", name, key, i, d.Values[i], s.Values[i])
+				}
+			}
+		}
+		if derived.DurationSeconds != standalone.DurationSeconds {
+			t.Errorf("%s: duration = %v, standalone %v", name, derived.DurationSeconds, standalone.DurationSeconds)
+		}
+	}
+
+	// The filename-ASIN file: the standalone pass finds the ASIN in the
+	// embedded tag (audible_asin), so the derived one must match it.
+	if got := FileSnapshotFromFolder(folder, filepath.Join(srcDir, "b.m4b")).Fields[FieldASIN]; len(got.Values) != 1 || got.Values[0] != "B012345678" {
+		t.Errorf("b.m4b derived ASIN = %v, want [B012345678]", got.Values)
+	}
+	// A file absent from the folder snapshot degrades (honest "not run").
+	if got := FileSnapshotFromFolder(folder, filepath.Join(srcDir, "missing.m4b")); !got.Degraded {
+		t.Errorf("missing.m4b derived snapshot = %v, want degraded", got)
+	}
+}

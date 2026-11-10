@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1316,11 +1317,143 @@ func TestListDirectoriesIndexMode(t *testing.T) {
 		}
 		entries, _ := body["entries"].([]any)
 		if len(entries) != 1 {
-			t.Fatalf("entries = %v, want 1 (fresh, from the filesystem)", body["entries"])
+			t.Fatalf("entries = %v, want 1 (fresh, from the filesystem)", entries)
 		}
 		first, _ := entries[0].(map[string]any)
 		if first["name"] != "fresh" {
 			t.Fatalf("first entry = %v, want dir fresh (filesystem fallback)", first)
 		}
 	})
+}
+
+// countingFFprobeStub writes an ffprobe stub that appends each input path
+// to logPath and answers with a valid, complete probe document, so callers
+// can count how many times the scanner probed.
+func countingFFprobeStub(t *testing.T, logPath string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ffprobe")
+	script := "#!/bin/sh\nfor last; do :; done\necho \"$last\" >> " + logPath + "\n" +
+		`echo '{"format":{"duration":"10","tags":{"title":"T"}}, "streams":[]}'
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write ffprobe stub: %v", err)
+	}
+	return path
+}
+
+// TestIndexScanProbesEachFileOnce pins the de-dupe: a first scan of a
+// tree probes a directory and its audio children with ONE ffprobe pass
+// (the folder's), derives the children's file rows from it, and never
+// re-probes an unchanged tree on a second scan.
+func TestIndexScanProbesEachFileOnce(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "book"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"01.m4b", "02.m4b"} {
+		if err := os.WriteFile(filepath.Join(root, "book", name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "book", "README.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "top.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	logPath := filepath.Join(t.TempDir(), "probes.log")
+	svc, _ := newIndexTestService(t, root)
+	svc.ffprobe = countingFFprobeStub(t, logPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go svc.Run(ctx)
+	st := runToTerminal(t, svc)
+	if st.Status != "done" {
+		t.Fatalf("initial scan status = %s, want done", st.Status)
+	}
+
+	// Probes: the book dir's single pass probes each of its audio children
+	// ONCE, and top.m4b probes once (its parent is the input root, which
+	// has no indexed row, so it cannot derive). Every audio child appears
+	// exactly once — a standalone probe of an already-covered child would
+	// show it twice. Non-audio files never appear.
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probed := strings.Fields(string(data))
+	count := map[string]int{}
+	for _, p := range probed {
+		count[p]++
+	}
+	if len(probed) != 3 {
+		t.Fatalf("probed %d invocations %v, want 3 (one per audio file total)", len(probed), probed)
+	}
+	for _, p := range []string{
+		filepath.Join(root, "book", "01.m4b"),
+		filepath.Join(root, "book", "02.m4b"),
+		filepath.Join(root, "top.m4b"),
+	} {
+		if count[p] != 1 {
+			t.Errorf("%s probed %d times, want exactly 1 (all: %v)", p, count[p], probed)
+		}
+	}
+	for _, p := range []string{
+		filepath.Join(root, "book", "README.txt"),
+		filepath.Join(root, "notes.txt"),
+	} {
+		if count[p] != 0 {
+			t.Errorf("%s probed %d times, want 0 (non-audio)", p, count[p])
+		}
+	}
+
+	// The non-audio file keeps the complete EMPTY snapshot (not a
+	// degraded "probe failed" row, and nothing probed).
+	var readmePayload string
+	if err := svc.db.QueryRow(`SELECT payload FROM source_index WHERE path = ?`, filepath.Join(root, "book", "README.txt")).Scan(&readmePayload); err != nil {
+		t.Fatal(err)
+	}
+	var readme audio.SourceMetadata
+	if err := json.Unmarshal([]byte(readmePayload), &readme); err != nil {
+		t.Fatalf("readme payload not json: %v", err)
+	}
+	if readme.Degraded || readme.SourceKind != "file" || readme.FilesTotal != 0 || len(readme.Files) != 0 {
+		t.Errorf("readme row = %+v, want complete empty file snapshot", readme)
+	}
+
+	// A derived audio child is complete and carries the folder pass's
+	// per-file duration.
+	var child audio.SourceMetadata
+	if err := json.Unmarshal([]byte(payloadFor(t, svc.db, filepath.Join(root, "book", "01.m4b"))), &child); err != nil {
+		t.Fatalf("child payload not json: %v", err)
+	}
+	if !sourceMetadataComplete(&child) {
+		t.Errorf("derived child not complete: %+v", child)
+	}
+	if child.DurationSeconds != 10 {
+		t.Errorf("derived child duration = %v, want 10", child.DurationSeconds)
+	}
+
+	// Second scan: nothing changed, so no path is re-probed.
+	st = runToTerminal(t, svc)
+	if st.Status != "done" {
+		t.Fatalf("rescan status = %s, want done", st.Status)
+	}
+	data, _ = os.ReadFile(logPath)
+	if n := len(strings.Fields(string(data))); n != 3 {
+		t.Errorf("rescan total probes = %d, want 3 (nothing changed)", n)
+	}
+}
+
+func payloadFor(t *testing.T, db *sql.DB, path string) string {
+	t.Helper()
+	var payload string
+	if err := db.QueryRow(`SELECT payload FROM source_index WHERE path = ?`, path).Scan(&payload); err != nil {
+		t.Fatalf("payload for %s: %v", path, err)
+	}
+	return payload
 }
