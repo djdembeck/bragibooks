@@ -34,8 +34,11 @@ type Release struct {
 	ChapterDetail    *ChapterDetail       `json:"chapterDetail"`
 	People           []PersonRoleRelation `json:"people"`
 	Publisher        IdName               `json:"publisher"`
-	Language         IdTitle              `json:"language"`
-	Images           []Image              `json:"images"`
+	// Upstream sends the release language as a name-only reference
+	// ({"name":"English"}), not the {id,title} shape used by genres,
+	// tags, and series.
+	Language NameRef `json:"language"`
+	Images   []Image `json:"images"`
 }
 
 // ChapterDetail wraps the chapters array on a release.
@@ -86,6 +89,12 @@ type IdTitle struct {
 // IdName is a lightweight reference with an ID and name.
 type IdName struct {
 	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// NameRef is a name-only reference, used where upstream sends just a label
+// (for example a release's language).
+type NameRef struct {
 	Name string `json:"name"`
 }
 
