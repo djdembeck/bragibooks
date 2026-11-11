@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,11 +36,39 @@ type ListDirectoriesResponse struct {
 }
 
 // ListDirectories handles GET /api/directories?path=/some/dir.
+// With ?index=1 (and indexing enabled and the path at/below the input
+// root) the listing is served from the source index with per-entry
+// evidence; any other case keeps the existing filesystem read and the
+// existing response shape.
 func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		writeError(w, http.StatusBadRequest, "path query parameter is required")
 		return
+	}
+
+	// Index mode: the flag is present, the feature is on, and the
+	// requested path equals the canonical root or is below it.
+	if r.URL.Query().Has("index") && h.svc.IndexSvc != nil && h.svc.IndexSvc.Enabled() {
+		cleanPath := canonicalRoot(path)
+		root := canonicalRoot(h.svc.Config.Config().Directories.InputDir)
+		if cleanPath == root || strings.HasPrefix(cleanPath, indexChildPrefix(root)) {
+			entries, ok, err := h.listIndexedChildren(cleanPath)
+			if err != nil {
+				// An index read failure falls back to the filesystem read
+				// below — the index is a cache, the tree is the truth.
+				log.Printf("index: list %s: %v (falling back to filesystem)", cleanPath, err)
+			} else if ok {
+				state := h.svc.IndexSvc.Status().State
+				resp := IndexedDirectoriesResponse{
+					Path:    cleanPath,
+					Entries: entries,
+					Index:   &state,
+				}
+				writeJSON(w, http.StatusOK, resp)
+				return
+			}
+		}
 	}
 
 	entries, err := readDirectory(path)

@@ -584,6 +584,18 @@ func (h *Handler) attachSourceCover(ctx context.Context, bookID int64, srcPath s
 // (including ffprobe-missing hosts, which persist a degraded row with
 // explicit error states); an INSERT failure never fails intake.
 func (h *Handler) attachSourceMetadata(ctx context.Context, bookID int64, srcPath string) {
+	// Fast path: an indexed folder's snapshot is already stored in the
+	// source index — reuse it and skip the ffprobe pass entirely. Gated on
+	// the LIVE flag: after a toggle-off the rows survive, so the live
+	// probe runs until the index is re-enabled. Best effort: any
+	// lookup/decode/staleness failure falls through to the live probe.
+	if h.svc.IndexSvc != nil && h.svc.IndexSvc.Enabled() {
+		if snap := h.storedIndexMetadata(srcPath); snap != nil {
+			log.Printf("attach source metadata for book %d: reusing indexed snapshot for %s", bookID, srcPath)
+			h.persistSourceMetadata(bookID, snap)
+			return
+		}
+	}
 	var snap *audio.SourceMetadata
 	var err error
 	if h.svc.FFprobe == "" {
@@ -596,6 +608,138 @@ func (h *Handler) attachSourceMetadata(ctx context.Context, bookID int64, srcPat
 		}
 	}
 	h.persistSourceMetadata(bookID, snap)
+}
+
+// storedIndexMetadata returns the index's stored snapshot for srcPath when
+// one exists, is a complete extraction (the only kind intake may claim
+// fields from), and is FRESH: the row's size/modtime change signals match
+// a current os.Stat of the source. For a directory the gate ALSO requires
+// every stored child row below it to still match a live stat: a dir's own
+// mtime moves only on entry add/remove directly under it, so a child
+// rewritten in place (same name, same entry set) is invisible to the dir's
+// own signals and the unchanged-folder fast path would otherwise claim
+// pre-rewrite title/author/ASIN/duration. It ALSO requires every file named
+// in the stored folder snapshot's Files list to have a stored row under the
+// directory: a walk truncated by the depth or entry cap records no rows for
+// the omitted entries, so a complete-looking payload written by an earlier
+// untruncated scan can name files the index never stored, and a rewrite of
+// such a file advances neither the dir's own signals nor any stored child
+// row. Nil — and thus a live probe — on any miss, decode failure,
+// incomplete (degraded) snapshot, a payload-named file lacking a stored
+// row, or a source that changed (in-place rewrite, mtime bump, child
+// rewrite, child deletion) since the last scan. The lookup key is
+// canonicalized the same way the index stores paths so non-canonical
+// caller paths (trailing separators, ./ segments, relative forms) still
+// hit the row.
+func (h *Handler) storedIndexMetadata(srcPath string) *audio.SourceMetadata {
+	var payload, modtime string
+	var size int64
+	if err := h.svc.DB.QueryRow(`SELECT payload, size, modtime FROM source_index WHERE path = ?`,
+		canonicalRoot(srcPath)).Scan(&payload, &size, &modtime); err != nil {
+		return nil
+	}
+	info, err := os.Stat(srcPath)
+	if err != nil || info.Size() != size ||
+		info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z") != modtime {
+		return nil // source missing, or changed since the last scan
+	}
+	if info.IsDir() && !h.indexedChildrenFresh(canonicalRoot(srcPath)) {
+		return nil // a stored descendant changed in place; the dir's own signals can't see it
+	}
+	var snap audio.SourceMetadata
+	if err := json.Unmarshal([]byte(payload), &snap); err != nil {
+		log.Printf("stored index metadata for %s: decode: %v", srcPath, err)
+		return nil
+	}
+	if info.IsDir() && !h.folderPayloadFilesStored(canonicalRoot(srcPath), snap.Files) {
+		return nil // a payload-named file has no stored row: its scan was cap-truncated
+	}
+	if !sourceMetadataComplete(&snap) {
+		return nil
+	}
+	return &snap
+}
+
+// indexedChildrenFresh mirrors classify's dirDirty pass for the intake
+// gate: it reports whether every stored index row BELOW dirPath (the
+// directory's full descendant set, since a dir's own mtime moves only on
+// entry add/remove directly under it) still matches a current os.Stat.
+// Any missing child, size/modtime mismatch, or lookup failure returns
+// false — the caller then falls through to the live probe. The file path
+// never consults this gate: a file row's own signals are the source of
+// truth for a file source.
+func (h *Handler) indexedChildrenFresh(dirPath string) bool {
+	rows, err := h.svc.DB.Query(`SELECT path, size, modtime FROM source_index WHERE path LIKE ? ESCAPE '\'`,
+		likeEscape(indexChildPrefix(dirPath))+"%")
+	if err != nil {
+		log.Printf("stored index metadata children for %s: query: %v", dirPath, err)
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var childPath, childModtime string
+		var childSize int64
+		if err := rows.Scan(&childPath, &childSize, &childModtime); err != nil {
+			log.Printf("stored index metadata children for %s: scan: %v", dirPath, err)
+			return false
+		}
+		info, err := os.Stat(childPath)
+		if err != nil || info.Size() != childSize ||
+			info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z") != childModtime {
+			return false // child missing, rewritten in place, or mtime-bumped
+		}
+	}
+	return rows.Err() == nil
+}
+
+// folderPayloadFilesStored reports whether every file named in a stored
+// folder snapshot's Files list has a stored source_index row under dirPath.
+// A depth-cap or entry-cap walk truncation stores no rows for the entries
+// it skipped, so a complete-looking payload can outlive its own scan's
+// coverage: a rewrite of a payload-named file without a stored row advances
+// neither the directory's own signals nor any stored child row (the
+// child check above has nothing to compare), and the unchanged-folder fast
+// path would claim stale title/author/ASIN/duration. The check is bounded
+// to the payload's file list — it never walks the filesystem: a file that
+// EXISTS without a row (depth-cap omission) is the hazard, a file that is
+// gone is caught by the directory's own mtime signal. The match is against
+// the EXACT indexed child paths (dirPath + basename), not basenames: the
+// payload's discovery is immediate (one directory level), and a nested file
+// with the same basename as a direct child the walk omitted at its entry
+// cap must not satisfy the omitted child (a basename match made the omitted
+// file look stored). A folder snapshot from a truncated pass is incomplete
+// (Truncated/Degraded) and is rejected by sourceMetadataComplete, so this
+// check only ever sees a complete payload: there is no completeness marker
+// to gate on separately — if a truncated payload reached here, the
+// completeness check would also reject it. Any query/scan failure returns
+// false: the live probe.
+func (h *Handler) folderPayloadFilesStored(dirPath string, files []audio.SourceFile) bool {
+	paths := make([]string, 0, len(files))
+	for _, f := range files {
+		if f.File != "" {
+			paths = append(paths, indexChildPrefix(dirPath)+f.File)
+		}
+	}
+	if len(paths) == 0 {
+		return true
+	}
+	rows, err := h.svc.DB.Query(`SELECT path FROM source_index WHERE path IN (`+placeholders(len(paths))+`)`,
+		toArgs(paths)...)
+	if err != nil {
+		log.Printf("stored index metadata payload files for %s: query: %v", dirPath, err)
+		return false
+	}
+	defer rows.Close()
+	found := 0
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			log.Printf("stored index metadata payload files for %s: scan: %v", dirPath, err)
+			return false
+		}
+		found++
+	}
+	return found == len(paths) && rows.Err() == nil
 }
 
 // persistSourceMetadata writes one book's snapshot row; failures are

@@ -6,6 +6,40 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Fixed
 
+- Source index steady state: directories whose stored snapshot hit the
+  probe caps (box sets with more than 100 files) were treated as
+  incomplete on every refresh and re-extracted (~100 ffprobe calls per
+  directory per pass), which spent the scan budget before the rest of
+  the tree was touched and kept the index from settling — every page
+  visit then triggered a multi-minute rescan. A non-degraded truncated
+  directory snapshot is now accepted as stable for an unchanged subtree
+  (the child-change rule still re-extracts it when its contents
+  gain/lose/modify files, and degraded directories still self-heal on
+  every refresh).
+- Source index steady state (non-audio files): a non-audio file stored
+  with a degraded snapshot (as the pre-fix binary did for `.cue`,
+  `.txt`, …) was re-extracted on every refresh and stored back as
+  degraded with a misleading "budget exhausted" marker, so it never
+  settled. Such a row now re-enters the extract set with the complete
+  empty snapshot (nothing to probe), and the budget-failure marker is
+  only applied to rows that would actually have been probed.
+- The app-wide source-index progress strip now shows only when a scan
+  is genuinely adding new sources: the scan counts paths with no stored
+  row from a prior scan, and the strip stays hidden for a refresh that
+  finds nothing new (the no-op rescan a page visit triggers).
+- Test isolation: the API test suite unsets deployment environment
+  variables (e.g. `DIRECTORIES_OUTPUT_DIR`) before running, so a shell
+  that exports container paths can no longer make the queue-time
+  write-access probes fail on machines where those paths do not exist.
+- Source index ASIN extraction: a canonical ASIN carried by a book
+  folder name was dropped whenever the folder name contained a dot
+  before the ASIN (e.g. `M.R. Forbes - … {B0GVPM58JP}`) — the filename
+  scan stripped the "extension" with `filepath.Ext`, which cut the name
+  at the first interior dot and destroyed the ASIN. The strip now matches
+  only the known audio container extensions, so non-audio names (folders)
+  are scanned whole. A folder with no audio files (a book folder holding
+  only a `.cue`/`.txt`) now also surfaces a folder-name ASIN instead of
+  reading "—".
 - The Match page's **Source details** panel now reflects the stored source-metadata snapshot instead of always reporting "Source metadata not read". `GET /api/books?status=pending` carries a source-only `match_evidence` report whose read status comes from snapshot completeness (a complete current-schema pass, a partial pass, a degraded pass, or no row), and `GET /api/books/{id}/match-evidence?book_id=…&release_id=…` resolves the snapshot's ASIN and AudiobookDB IDs against the selected catalog record and builds per-field source-vs-catalog comparisons. A failed catalog lookup degrades the report (`lookup_failed` / `unavailable`) rather than inventing agreement; `books.asin` and the save path are untouched.
 - Release workflow now creates the draft release record in the `reserve`
   job, up front, and treats a release record that the listing does not
@@ -47,6 +81,15 @@ All notable changes to this project will be documented in this file. See [standa
   …) instead of `bragibooks_Linux_x86_64.tar.gz` / `bragibooks_Darwin_arm64.tar.gz`.
 - Kept the container's default HTTP port at `8000`, the same port the Python image used, so existing Docker port mappings keep working after upgrading; `SERVER_PORT` still overrides it.
 - Narrowed development Docker media access to configurable input/output directories rather than mounting the developer home directory; pinned Docker build, runtime, and media-tool image digests for reproducible builds, with Renovate digest updates.
+- **Opt-in input-directory source index**
+  - Settings gains a "Source index" toggle (off by default, `directories.indexing_enabled` / `DIRECTORIES_INDEXING_ENABLED`). When on, a background worker walks the input directory and stores one row per path with change-detection signals and the same pre-extracted source metadata intake would compute (embedded/filename ASINs, derived title, ffprobe tags), so Import renders from the index in milliseconds instead of re-walking the filesystem.
+  - The Import page shows the pre-extracted ASIN (monospace badge for one valid value, `N ASINs` for ambiguous, `—` for missing/unknown) and derived title per entry, a status line ("N indexed · <when>"), and a dismissible first-run banner that enables the index and points to Settings for turning it off. New and changed files are appended on visit: a stale index (never run, >60 s old, or pointing at a different root) triggers a non-blocking refresh and re-lists when it lands. Columns are hidden on narrow viewports.
+  - While a scan is in flight, an app-wide banner under the nav names the operation and shows the live progress ("Source index · Reading audio files — N of M") on every page, including Settings, where the Source index section's status line carries the same count; the banner hides at the terminal state. Its observer stays resident (1 s while the index is enabled, 10 s while disabled), so a scan started on any page is visible app-wide without a reload; reduced-motion users see a static activity mark instead of the sweeping rail. The settings row now spans the section's full width. `GET /api/index` reports the in-flight `extracted`/`total` pair (in-memory, absent once the scan ends).
+  - Failed, incomplete, and interrupted index runs are surfaced instead of reading as freshness: the Settings status line and Import status line name the condition (truncated, interrupted, error) and point at Refresh, the Import enable button shows its in-flight and failure states, and a settings draft that turns the index on before saving shows "Enable takes effect after you save settings." instead of the live status controls. `PUT /api/settings` returns `indexing_enabled` so that saved truth comes from the response, matching `GET`.
+  - Indexing is incremental: unchanged complete rows are kept (size + modtime match), changed/new rows are re-extracted, vanished rows are pruned — a truncated walk never prunes, and degraded rows (ffprobe missing, scan budget exhausted) are retried on each refresh (a refresh alone does not guarantee they complete). A non-terminal state left by a hard crash is recovered at boot.
+  - ffprobe runs at most once per audio file: a file under a directory extracted in the same pass is not probed on its own — its row is derived from the folder's single pass (same tags, fields, ASIN, and duration a standalone probe would produce). Files at the input root and files under an incomplete parent probe on their own, and a truncated pass self-heals on the next refresh. Non-audio files keep their pre-built complete empty snapshot instead of a failed ffprobe pass, so they classify stable on every later refresh.
+  - Intake reuses the stored complete snapshot, so importing an indexed folder skips the ffprobe pass entirely; any miss falls back to live probing.
+  - New API surface: `GET /api/index` (status + generation), `POST /api/index/refresh` (202, coalesced; 400 while disabled), and `GET /api/directories?path=…&index=1` (index-backed listing with per-entry evidence). Disabled deployments behave exactly as before.
 - **Per-book selection and bulk book actions on the catalog** (#506)
   - The Books catalog selects books individually: every row carries a checkbox, and the header checkbox is tri-state (all / some / none) that selects or clears every book matching the current filter and search (server-capped at 1,000 via the `GET /books?all_ids=1` ID list). The bulk bar's count follows that selection, and the bulk actions act on that explicit selection only — never on an implicit whole-catalog scope.
   - The bulk bar offers three operations over the selected books: requeue for processing (with the chosen output profile's summary rendered under its picker as a caption, so the bar's actions stay on one line), mark as done, and remove. The bar reflows to a full-width stack on narrow screens.

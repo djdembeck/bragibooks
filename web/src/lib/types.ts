@@ -184,6 +184,8 @@ export interface Settings {
 	region: string;
 	api_endpoint_enabled?: boolean;
 	api_endpoint_env_managed?: boolean;
+	/** Opt-in input-directory index (pre-extracted ASIN/title evidence). */
+	indexing_enabled?: boolean;
 	created_at?: string;
 	updated_at?: string;
 	bragibooks_version?: string;
@@ -201,6 +203,50 @@ export interface DirectoryEntry {
 export interface DirectoriesResponse {
 	path: string;
 	entries: DirectoryEntry[];
+}
+
+/** Per-path ASIN + derived-title evidence served by the indexed listing.
+ *  `asin` is `SourceASINEvidence` (present/ambiguous/missing/unknown); a
+ *  null `asin` means the stored snapshot could not be decoded. */
+export interface IndexEvidence {
+	asin?: SourceASINEvidence | null;
+	title?: string;
+}
+
+/** A directory entry augmented with index evidence (index mode only). */
+export interface IndexedDirectoryEntry extends DirectoryEntry {
+	evidence?: IndexEvidence;
+}
+
+/** Last completed (or in-flight) input-directory index scan. */
+export interface IndexState {
+	root: string;
+	entries: number;
+	last_run_at: string; // "" if never
+	/** Transient: paths with no stored row before this scan (0 when the
+	 *  count is not known yet — queued, mid-walk — or nothing is new). */
+	added?: number;
+	status: 'never' | 'queued' | 'running' | 'done' | 'truncated' | 'interrupted' | 'error';
+	detail: string;
+	generation: number;
+	// In-memory progress while a scan is running: total = paths needing
+	// (re-)extraction this scan, extracted = how many are done. Absent (0)
+	// while the fast directory walk is in flight and once the scan ends.
+	total?: number;
+	extracted?: number;
+}
+
+/** GET /api/index response. */
+export interface IndexStatus {
+	enabled: boolean;
+	state: IndexState;
+}
+
+/** Indexed variant of the directory listing (GET /api/directories?index=1). */
+export interface IndexedDirectoriesResponse {
+	path: string;
+	entries: IndexedDirectoryEntry[];
+	index?: IndexState;
 }
 
 export interface SearchHit {

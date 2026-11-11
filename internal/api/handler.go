@@ -53,6 +53,11 @@ type Services struct {
 	// FFprobe is the ffprobe binary used to read embedded tags and durations.
 	// Empty disables source metadata extraction (ffprobe is not installed).
 	FFprobe string
+
+	// IndexSvc is the opt-in input-directory index (pre-extracted source
+	// evidence served by the Import page). Always wired; its Enabled() gate
+	// reads the live config flag, so a disabled deployment never touches it.
+	IndexSvc *IndexService
 }
 
 // Handler wraps services and registers routes.
@@ -119,6 +124,10 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 		r.Get("/directories", h.ListDirectories)
 		r.Get("/directories/stream", h.StreamDirectories)
 		r.Get("/directories/tree", h.GetDirectoryTree)
+
+		// Input-directory index
+		r.Get("/index", h.GetIndexStatus)
+		r.Post("/index/refresh", h.RefreshIndex)
 
 		// Migration
 		r.Post("/migrate", h.MigrateLegacyDB)

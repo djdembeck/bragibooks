@@ -117,6 +117,7 @@ func setupNewSchema(db *sql.DB) error {
 			api_enabled BOOLEAN NOT NULL DEFAULT 0,
 			api_key_digest TEXT NOT NULL DEFAULT '',
 			legacy_token_migrated BOOLEAN NOT NULL DEFAULT 0,
+			indexing_enabled BOOLEAN NOT NULL DEFAULT 0,
 			created_at TEXT DEFAULT (datetime('now')),
 			updated_at TEXT DEFAULT (datetime('now'))
 		)
@@ -649,6 +650,42 @@ func TestMigrateSettingsPreservesLegacyTokenMarker(t *testing.T) {
 					apiEnabled, apiDigest, apiKey, inputDir)
 			}
 		})
+	}
+}
+
+// TestMigrateSettingsCarriesIndexingEnabled pins the whole-row
+// INSERT OR REPLACE against silently resetting the indexing opt-in: the
+// new DB row's indexing_enabled (read as existingIndexingEnabled) must
+// survive the merge, not be reset to the column DEFAULT 0, which would
+// disable the index on every legacy migration.
+func TestMigrateSettingsCarriesIndexingEnabled(t *testing.T) {
+	legacy := newLegacyDB(t)
+	t.Cleanup(func() { legacy.Close() })
+	newDB := newEmptyDB(t)
+	t.Cleanup(func() { newDB.Close() })
+	if err := setupNewSchema(newDB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`INSERT INTO importer_setting (id, input_directory, output_directory,
+		completed_directory, num_cpus, output_scheme)
+		VALUES (1, '/legacy/in', '/legacy/out', '/legacy/done', 2, '{author}/{title}')`); err != nil {
+		t.Fatal(err)
+	}
+	// The existing new-DB row carries the opt-in flag the merge must
+	// preserve through the INSERT OR REPLACE.
+	if _, err := newDB.Exec(`INSERT INTO settings (id, indexing_enabled) VALUES (1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := migrateSettings(legacy, newDB, ""); err != nil {
+		t.Fatalf("migrateSettings: %v", err)
+	}
+	var enabled int
+	if err := newDB.QueryRow("SELECT indexing_enabled FROM settings WHERE id = 1").Scan(&enabled); err != nil {
+		t.Fatal(err)
+	}
+	if enabled != 1 {
+		t.Fatalf("indexing_enabled = %d after migration, want 1 (whole-row INSERT OR REPLACE reset the opt-in to DEFAULT 0)", enabled)
 	}
 }
 

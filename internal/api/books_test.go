@@ -19,6 +19,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/bragibooks/bragibooks/internal/audio"
+	"github.com/bragibooks/bragibooks/internal/config"
 	"github.com/bragibooks/bragibooks/internal/models"
 )
 
@@ -1265,4 +1266,334 @@ func TestListBooksAllIDSCapTruncates(t *testing.T) {
 	if len(res.IDs) != maxBookIDs {
 		t.Errorf("ids = %d; want the cap %d", len(res.IDs), maxBookIDs)
 	}
+}
+
+// TestStoredIndexMetadataFreshness pins the stored-snapshot freshness gate:
+// an in-place source rewrite (same path, changed size or mtime) must NOT
+// reuse the stored index snapshot — the live probe runs instead.
+func TestStoredIndexMetadataFreshness(t *testing.T) {
+	h := newTestHandler(t)
+	if _, err := h.svc.DB.Exec(`
+		CREATE TABLE source_index (
+			path TEXT PRIMARY KEY,
+			name TEXT, type TEXT, size INTEGER, modtime TEXT, payload TEXT,
+			indexed_at TEXT, seen_at TEXT
+		)`); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.mp3")
+	body := []byte("0123456789")
+	if err := os.WriteFile(src, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(src)
+	modtime := info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z")
+	complete := `{"schema":2,"source_kind":"file","files_total":1,"files_probed":1,"degraded":false,"duration_seconds":5,"files":[{"file":"a.mp3","duration_seconds":5}],"fields":{}}`
+
+	t.Run("fresh source reuses snapshot", func(t *testing.T) {
+		if _, err := h.svc.DB.Exec(
+			`INSERT INTO source_index (path, name, type, size, modtime, payload, indexed_at, seen_at)
+			 VALUES (?, 'a.mp3', 'file', ?, ?, ?, datetime('now'), datetime('now'))`,
+			canonicalRoot(src), info.Size(), modtime, complete); err != nil {
+			t.Fatal(err)
+		}
+		if snap := h.storedIndexMetadata(src); snap == nil {
+			t.Fatal("fresh stored snapshot not reused")
+		}
+	})
+
+	t.Run("size changed falls to live probe", func(t *testing.T) {
+		if _, err := h.svc.DB.Exec(`UPDATE source_index SET size = ? WHERE path = ?`,
+			999, canonicalRoot(src)); err != nil {
+			t.Fatal(err)
+		}
+		if snap := h.storedIndexMetadata(src); snap != nil {
+			t.Fatal("stale (size-mismatched) snapshot was reused")
+		}
+	})
+
+	t.Run("mtime changed falls to live probe", func(t *testing.T) {
+		if _, err := h.svc.DB.Exec(`UPDATE source_index SET size = ? WHERE path = ?`,
+			info.Size(), canonicalRoot(src)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.svc.DB.Exec(`UPDATE source_index SET modtime = ? WHERE path = ?`,
+			"2020-01-01T00:00:00.000000000Z", canonicalRoot(src)); err != nil {
+			t.Fatal(err)
+		}
+		if snap := h.storedIndexMetadata(src); snap != nil {
+			t.Fatal("stale (mtime-mismatched) snapshot was reused")
+		}
+	})
+
+	// Folder half: the rows are seeded through the REAL index worker's
+	// write path (walk → upsertAll), so the stored signals are whatever
+	// the walk recorded for the directory and its child — not hand-typed
+	// constants. The gate must accept the unchanged folder, reject an
+	// in-place child rewrite (which advances neither the dir's mtime nor
+	// its size), and reject an entry-add mtime bump.
+	bookDir := filepath.Join(dir, "book")
+	if err := os.MkdirAll(bookDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// An audio child in the folder: its stored row is the signal the gate
+	// must consult for in-place child rewrites.
+	bookChild := filepath.Join(bookDir, "child.mp3")
+	if err := os.WriteFile(bookChild, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	svc, _ := newIndexTestService(t, dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go svc.Run(ctx)
+	st := runToTerminal(t, svc)
+	if st.Status != "done" {
+		t.Fatalf("scan = %s (detail %q), want done", st.Status, st.Detail)
+	}
+	// Copy the worker-written directory and child rows into the handler's
+	// DB so the stored signals match the walk's records.
+	var dirRowName, dirRowType, dirRowModtime, childRowName, childRowType, childRowModtime string
+	var dirRowSize, childRowSize int64
+	if err := svc.db.QueryRow(`SELECT name, type, size, modtime FROM source_index WHERE path = ?`,
+		canonicalRoot(bookDir)).Scan(&dirRowName, &dirRowType, &dirRowSize, &dirRowModtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.db.QueryRow(`SELECT name, type, size, modtime FROM source_index WHERE path = ?`,
+		canonicalRoot(bookChild)).Scan(&childRowName, &childRowType, &childRowSize, &childRowModtime); err != nil {
+		t.Fatal(err)
+	}
+	// A complete folder snapshot referencing the child — the payload
+	// sourceMetadataComplete accepts for this fixture.
+	completeFolder := `{"schema":2,"source_kind":"folder","files_total":1,"files_probed":1,"degraded":false,"duration_seconds":5,"files":[{"file":"child.mp3","duration_seconds":5}],"fields":{"asin":{"values":["B0FOLDER01"],"source":"embedded","status":"present"}}}`
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO source_index (path, name, type, size, modtime, payload, indexed_at, seen_at)
+		 VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+		canonicalRoot(bookDir), dirRowName, dirRowType, dirRowSize, dirRowModtime, completeFolder); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO source_index (path, name, type, size, modtime, payload, indexed_at, seen_at)
+		 VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+		canonicalRoot(bookChild), childRowName, childRowType, childRowSize, childRowModtime, completeFolder); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("unchanged folder reuses snapshot", func(t *testing.T) {
+		if snap := h.storedIndexMetadata(bookDir); snap == nil {
+			t.Fatal("fresh folder snapshot not reused (dir row signals do not match the live stat)")
+		}
+	})
+
+	t.Run("in-place child rewrite falls to live probe", func(t *testing.T) {
+		// Rewriting the child in place (same name, same entry set)
+		// advances neither the directory's mtime nor its size — the hole
+		// the child-signal gate plugs.
+		if err := os.WriteFile(bookChild, []byte("rewritten-content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if snap := h.storedIndexMetadata(bookDir); snap != nil {
+			t.Fatal("stale (child-rewritten) folder snapshot was reused")
+		}
+	})
+
+	t.Run("bumped-mtime folder falls to live probe", func(t *testing.T) {
+		// Adding an entry moves the directory's own mtime — the signal the
+		// index relies on for folders.
+		if err := os.WriteFile(filepath.Join(bookDir, "new.mp3"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if snap := h.storedIndexMetadata(bookDir); snap != nil {
+			t.Fatal("stale (mtime-bumped) folder snapshot was reused")
+		}
+	})
+
+	// Depth-limit shape: the stored state is hand-crafted (not
+	// worker-seeded) to mirror a walk truncated by the depth or entry cap:
+	// the complete folder payload names two files, but the index holds a
+	// row for only one — the omitted entry was never walked, so a rewrite
+	// of it advances neither the dir's own mtime nor any stored child row.
+	// The gate must reject on the payload's completeness, not find a
+	// signal to compare against.
+	omittedDir := filepath.Join(dir, "omitted")
+	if err := os.MkdirAll(omittedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keptChild := filepath.Join(omittedDir, "kept.mp3")
+	omittedChild := filepath.Join(omittedDir, "omitted.mp3")
+	for _, p := range []string{keptChild, omittedChild} {
+		if err := os.WriteFile(p, []byte("0123456789"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dirInfo, _ := os.Stat(omittedDir)
+	keptInfo, _ := os.Stat(keptChild)
+	omittedFolder := `{"schema":2,"source_kind":"folder","files_total":2,"files_probed":2,"degraded":false,"duration_seconds":10,"files":[{"file":"kept.mp3","duration_seconds":5},{"file":"omitted.mp3","duration_seconds":5}],"fields":{"asin":{"values":["B0FOLDER02"],"source":"embedded","status":"present"}}}`
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO source_index (path, name, type, size, modtime, payload, indexed_at, seen_at)
+		 VALUES (?, 'omitted', 'dir', ?, ?, ?, datetime('now'), datetime('now'))`,
+		canonicalRoot(omittedDir), dirInfo.Size(), dirInfo.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z"), omittedFolder); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO source_index (path, name, type, size, modtime, payload, indexed_at, seen_at)
+		 VALUES (?, 'kept.mp3', 'file', ?, ?, ?, datetime('now'), datetime('now'))`,
+		canonicalRoot(keptChild), keptInfo.Size(), keptInfo.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z"), omittedFolder); err != nil {
+		t.Fatal(err)
+	}
+	// No row for omitted.mp3: the cap-truncated walk never stored it.
+
+	t.Run("payload file without a stored row falls to live probe", func(t *testing.T) {
+		// Rewrite the omitted file in place: same name, same entry set, so
+		// neither the dir's mtime nor any stored child row moves.
+		if err := os.WriteFile(omittedChild, []byte("rewritten-content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if snap := h.storedIndexMetadata(omittedDir); snap != nil {
+			t.Fatal("stale (omitted-file-rewritten) folder snapshot was reused")
+		}
+	})
+
+	// Duplicate-basename shape: the omitted direct child's basename is
+	// shadowed by a NESTED file that HAS a stored row (the differing
+	// basename case above cannot be fooled this way). The gate matches the
+	// EXACT indexed child path (dirPath + basename), so the nested row must
+	// not satisfy the omitted child — the folder is not fresh.
+	dupDir := filepath.Join(dir, "dup")
+	dupNested := filepath.Join(dupDir, "nested")
+	if err := os.MkdirAll(dupNested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dupChild := filepath.Join(dupDir, "dup.mp3")
+	dupNestedFile := filepath.Join(dupNested, "dup.mp3")
+	for _, p := range []string{dupChild, dupNestedFile} {
+		if err := os.WriteFile(p, []byte("0123456789"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dupInfo, _ := os.Stat(dupDir)
+	nestedInfo, _ := os.Stat(dupNestedFile)
+	dupFolder := `{"schema":2,"source_kind":"folder","files_total":1,"files_probed":1,"degraded":false,"duration_seconds":5,"files":[{"file":"dup.mp3","duration_seconds":5}],"fields":{"asin":{"values":["B0FOLDER03"],"source":"embedded","status":"present"}}}`
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO source_index (path, name, type, size, modtime, payload, indexed_at, seen_at)
+		 VALUES (?, 'dup', 'dir', ?, ?, ?, datetime('now'), datetime('now'))`,
+		canonicalRoot(dupDir), dupInfo.Size(), dupInfo.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z"), dupFolder); err != nil {
+		t.Fatal(err)
+	}
+	// A stored row for the NESTED same-basename file (fresh): a basename
+	// match would make the omitted direct child look stored.
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO source_index (path, name, type, size, modtime, payload, indexed_at, seen_at)
+		 VALUES (?, 'dup.mp3', 'file', ?, ?, ?, datetime('now'), datetime('now'))`,
+		canonicalRoot(dupNestedFile), nestedInfo.Size(), nestedInfo.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z"), dupFolder); err != nil {
+		t.Fatal(err)
+	}
+	// No row for the direct dup.mp3: the entry-cap-truncated walk omitted it.
+
+	t.Run("omitted child shadowed by a nested same-basename row falls to live probe", func(t *testing.T) {
+		// Rewrite the omitted direct child in place: same name, same size
+		// (same content), so the dir's mtime and every stored child row
+		// (including the nested shadow) are untouched.
+		if err := os.WriteFile(dupChild, []byte("0123456789"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if snap := h.storedIndexMetadata(dupDir); snap != nil {
+			t.Fatal("stale (omitted child shadowed by a nested same-basename row) folder snapshot was reused")
+		}
+	})
+}
+
+// TestCreateBooksIntakeIndexGate pins the INTAKE-level Enabled() gate
+// (the freshness gate above is storedIndexMetadata-only, reachable with
+// the index off too): with a FRESH, complete stored row and a live probe
+// available, a disabled index must run the probe (persisted row reflects
+// the probe, not the stored snapshot) and an enabled index must reuse the
+// stored snapshot (the probe never runs).
+func TestCreateBooksIntakeIndexGate(t *testing.T) {
+	// The stored snapshot carries a distinctive ASIN so a reuse is
+	// observable; the live probe (stubbed ffprobe) carries a different one.
+	const storedASIN = "B0STORED00"
+	const probedASIN = "B0PROBED00"
+	complete := `{"schema":2,"source_kind":"file","files_total":1,"files_probed":1,"degraded":false,"duration_seconds":5,"files":[{"file":"1.mp3","duration_seconds":5}],"fields":{"asin":{"values":["` + storedASIN + `"],"source":"embedded","status":"present"}}}`
+
+	setup := func(t *testing.T, enabled bool) (*Handler, string, string) {
+		t.Helper()
+		srcDir := t.TempDir()
+		src := filepath.Join(srcDir, "1.mp3")
+		if err := os.WriteFile(src, []byte("0123456789"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		modtime := info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z")
+
+		db := newTestDB(t)
+		if _, err := db.Exec(`
+			CREATE TABLE source_index (
+				path TEXT PRIMARY KEY, name TEXT, type TEXT, size INTEGER, modtime TEXT, payload TEXT,
+				indexed_at TEXT, seen_at TEXT
+			)`); err != nil {
+			t.Fatal(err)
+		}
+		// Fresh, complete row: size and modtime match the live file.
+		if _, err := db.Exec(`INSERT INTO source_index (path, name, type, size, modtime, payload, indexed_at, seen_at)
+			VALUES (?, '1.mp3', 'file', ?, ?, ?, datetime('now'), datetime('now'))`,
+			canonicalRoot(src), info.Size(), modtime, complete); err != nil {
+			t.Fatal(err)
+		}
+
+		// A stub ffprobe whose sidecar carries the probe's ASIN: if the
+		// probe runs, the persisted snapshot shows B0PROBED00; a reuse of
+		// the stored snapshot shows B0STORED00.
+		ffprobe, respDir := stubFFprobeForMetadata(t)
+		writeProbeSidecar(t, respDir, "1.mp3",
+			`{"format": {"duration": "5.0", "tags": {"audible_asin": "`+probedASIN+`"}}, "streams": []}`)
+
+		h := &Handler{svc: &Services{DB: db, FFprobe: ffprobe}}
+		if enabled {
+			cm := config.NewConfigManager()
+			cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+			cm.Config().Directories.InputDir = srcDir
+			cm.Config().Directories.IndexingEnabled = true
+			cm.Store(cm.Config())
+			h.svc.IndexSvc = NewIndexService(db, cm, "")
+		}
+		return h, src, probedASIN
+	}
+
+	asinOf := func(t *testing.T, db *sql.DB, bookID int64) string {
+		t.Helper()
+		snap := metadataPayloadFor(t, db, bookID)
+		fields, ok := snap["fields"].(map[string]any)
+		if !ok {
+			t.Fatalf("payload fields = %T, want object", snap["fields"])
+		}
+		asin, ok := fields["asin"].(map[string]any)
+		if !ok {
+			t.Fatalf("payload has no asin field: %v", fields)
+		}
+		values, ok := asin["values"].([]any)
+		if !ok || len(values) != 1 {
+			t.Fatalf("asin values = %v, want a single value", asin["values"])
+		}
+		return values[0].(string)
+	}
+
+	t.Run("disabled index runs the live probe", func(t *testing.T) {
+		h, src, probedASIN := setup(t, false)
+		book := postBook(t, h, src)
+		if got := asinOf(t, h.svc.DB, book.ID); got != probedASIN {
+			t.Fatalf("persisted asin = %s, want %s (disabled index must run the live probe, not reuse the stored row)", got, probedASIN)
+		}
+	})
+
+	t.Run("enabled index reuses the stored snapshot", func(t *testing.T) {
+		h, src, _ := setup(t, true)
+		book := postBook(t, h, src)
+		if got := asinOf(t, h.svc.DB, book.ID); got != "B0STORED00" {
+			t.Fatalf("persisted asin = %s, want B0STORED00 (enabled index with a fresh complete row must reuse the stored snapshot, no probe)", got)
+		}
+	})
 }

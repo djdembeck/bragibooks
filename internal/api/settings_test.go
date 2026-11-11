@@ -53,6 +53,7 @@ func newSettingsTestDB(t *testing.T) *sql.DB {
 			api_enabled BOOLEAN NOT NULL DEFAULT 0,
 			api_key_digest TEXT NOT NULL DEFAULT '',
 			legacy_token_migrated BOOLEAN NOT NULL DEFAULT 0,
+			indexing_enabled BOOLEAN NOT NULL DEFAULT 0,
 			created_at TEXT DEFAULT (datetime('now')),
 			updated_at TEXT DEFAULT (datetime('now'))
 		)`); err != nil {
@@ -838,4 +839,100 @@ func TestUpdateSettingsDirectoryWriteAccess(t *testing.T) {
 	if rec := doPutSettings(t, h, `{"completed_dir":""}`); rec.Code != http.StatusOK {
 		t.Fatalf("clearing completed_dir: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
+}
+
+// TestUpdateSettingsReplacePreservesIndexingEnabled pins the whole-row
+// carry-through: a settings save that does not mention indexing_enabled
+// must not reset the stored opt-in flag to DEFAULT 0 (finding: settings
+// writers reset indexing_enabled).
+func TestUpdateSettingsReplacePreservesIndexingEnabled(t *testing.T) {
+	h := newTestSettingsHandler(t)
+	// The live config reflects the stored row (boot loads it); set both so
+	// the save's in-memory snapshot carries the flag.
+	if _, err := h.svc.DB.Exec(`UPDATE settings SET indexing_enabled = 1 WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	cfg := h.svc.Config.Config()
+	cfg.Directories.IndexingEnabled = true
+	h.svc.Config.Store(cfg)
+	// A partial save that does not touch the flag.
+	if rec := doPutSettings(t, h, `{"input_dir":"/i"}`); rec.Code != http.StatusOK {
+		t.Fatalf("PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var got int
+	if err := h.svc.DB.QueryRow(`SELECT indexing_enabled FROM settings WHERE id = 1`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 1 {
+		t.Fatalf("indexing_enabled = %d after unrelated save, want 1 (reset to DEFAULT 0)", got)
+	}
+}
+
+// TestUpdateSettingsIndexingEnabledTriggersScan pins the settings-save
+// scan trigger: turning the index ON persists the flag AND schedules a
+// (re)scan, and re-pointing the input root while it is on schedules a
+// rescan. A save that touches neither transition schedules nothing.
+func TestUpdateSettingsIndexingEnabledTriggersScan(t *testing.T) {
+	newHandlerWithIndexSvc := func(t *testing.T, inputDir string, enabled bool) (*Handler, *IndexService) {
+		t.Helper()
+		h := newTestSettingsHandler(t)
+		cm := h.svc.Config
+		cm.Config().Directories.InputDir = inputDir
+		cm.Config().Directories.IndexingEnabled = enabled
+		cm.Store(cm.Config())
+		svc := NewIndexService(h.svc.DB, cm, "")
+		h.svc.IndexSvc = svc
+		return h, svc
+	}
+
+	t.Run("enable-persists-and-queues-scan", func(t *testing.T) {
+		h, svc := newHandlerWithIndexSvc(t, t.TempDir(), false)
+		genBefore := svc.Status().State.Generation
+		if rec := doPutSettings(t, h, fmt.Sprintf(`{"input_dir":%q,"indexing_enabled":true}`, t.TempDir())); rec.Code != http.StatusOK {
+			t.Fatalf("PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+		}
+		var got int
+		if err := h.svc.DB.QueryRow(`SELECT indexing_enabled FROM settings WHERE id = 1`).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != 1 {
+			t.Fatalf("indexing_enabled = %d after enable PUT, want 1 (flag not persisted)", got)
+		}
+		st := svc.Status().State
+		if st.Generation <= genBefore {
+			t.Fatalf("generation = %d, want > %d (enable must queue a scan)", st.Generation, genBefore)
+		}
+		if st.Status != "queued" {
+			t.Fatalf("status = %s, want queued (scan scheduled by the enable)", st.Status)
+		}
+	})
+
+	t.Run("root-move-while-enabled-rescans", func(t *testing.T) {
+		h, svc := newHandlerWithIndexSvc(t, t.TempDir(), true)
+		genBefore := svc.Status().State.Generation
+		if rec := doPutSettings(t, h, fmt.Sprintf(`{"input_dir":%q}`, t.TempDir())); rec.Code != http.StatusOK {
+			t.Fatalf("PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+		}
+		st := svc.Status().State
+		if st.Generation <= genBefore {
+			t.Fatalf("generation = %d, want > %d (root move while enabled must rescan)", st.Generation, genBefore)
+		}
+		if st.Status != "queued" {
+			t.Fatalf("status = %s, want queued", st.Status)
+		}
+	})
+
+	t.Run("disable-and-same-root-queue-nothing", func(t *testing.T) {
+		h, svc := newHandlerWithIndexSvc(t, t.TempDir(), false)
+		genBefore := svc.Status().State.Generation
+		// Re-send the SAME input dir while disabled: neither the
+		// enable transition nor a root move fires.
+		if rec := doPutSettings(t, h, fmt.Sprintf(`{"input_dir":%q}`, h.svc.Config.Config().Directories.InputDir)); rec.Code != http.StatusOK {
+			t.Fatalf("PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+		}
+		st := svc.Status().State
+		if st.Generation != genBefore {
+			t.Fatalf("generation = %d, want %d (no scan must be queued)", st.Generation, genBefore)
+		}
+	})
 }

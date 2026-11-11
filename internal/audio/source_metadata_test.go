@@ -320,6 +320,86 @@ func TestExtractSourceMetadataEmptyFolderIsAllMissing(t *testing.T) {
 	}
 }
 
+// TestFindASINsPreservesDottedNames pins the extension-strip contract: a
+// name that is not an audio file (a folder like "M.R. Forbes - Book
+// {B0GVPM58JP}") must be scanned whole — a filepath.Ext-based strip would
+// cut "M.R. Forbes" at the first dot and destroy the ASIN.
+func TestFindASINsPreservesDottedNames(t *testing.T) {
+	got := findASINs([]string{
+		"M.R. Forbes - Möbius - Toy Starship, Book 2 (Read by Daniel Wisniewski) {B0GVPM58JP}",
+		"Fertile Valley 1 [B0DNRN1H54]",
+	})
+	want := []string{"B0GVPM58JP", "B0DNRN1H54"}
+	if len(got) != len(want) {
+		t.Fatalf("findASINs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("findASINs = %v, want %v", got, want)
+		}
+	}
+	// A real audio extension is still stripped (no double-scan surprise).
+	if g := findASINs([]string{"B0DNRN1H54 book [B0DNRN1H54].m4b"}); len(g) != 1 || g[0] != "B0DNRN1H54" {
+		t.Errorf("findASINs on .m4b = %v, want [B0DNRN1H54]", g)
+	}
+}
+
+// TestExtractSourceMetadataEmptyFolderFilenameASIN checks that a folder
+// with no audio files still surfaces an ASIN carried by the folder name:
+// an empty book folder named "... [B0...]" is a real source, and the
+// read projection must not read "—".
+func TestExtractSourceMetadataEmptyFolderFilenameASIN(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	srcDir := filepath.Join(t.TempDir(), "Fertile Valley 1 [B0DNRN1H54]")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "desc.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := runExtraction(t, ffprobe, srcDir)
+	wantField(t, snap, FieldASIN, StatusPresent, "B0DNRN1H54")
+	if got := snap.Fields[FieldASIN].Source; got != SourceFilename {
+		t.Errorf("asin source = %q, want %q", got, SourceFilename)
+	}
+	if snap.FilesTotal != 0 || snap.FilesProbed != 0 {
+		t.Errorf("files_total/probed = %d/%d, want 0/0", snap.FilesTotal, snap.FilesProbed)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("probe ran on an empty folder (marker present): %v", err)
+	}
+}
+
+// TestExtractSourceMetadataFolderNameASINWithAudioFile is the reported
+// case: a book folder whose name carries the ASIN and whose audio file
+// has no embedded one. The folder basename must feed the fallback; a
+// filepath.Ext-based strip of the dotted author name destroys the ASIN.
+func TestExtractSourceMetadataFolderNameASINWithAudioFile(t *testing.T) {
+	respDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ran")
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	writeProbeResponse(t, respDir, "Mobius", `{"format": {"duration": "10", "tags": {"title": "Mobius"}}, "streams": []}`)
+
+	srcDir := filepath.Join(t.TempDir(), "M.R. Forbes - Mobius - Toy Starship, Book 2 {B0GVPM58JP}")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "Mobius.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := runExtraction(t, ffprobe, srcDir)
+	wantField(t, snap, FieldASIN, StatusPresent, "B0GVPM58JP")
+	if got := snap.Fields[FieldASIN].Source; got != SourceFilename {
+		t.Errorf("asin source = %q, want %q", got, SourceFilename)
+	}
+}
+
 func TestExtractSourceMetadataMissingSourceIsDegraded(t *testing.T) {
 	respDir := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "ran")
@@ -890,5 +970,92 @@ func TestFoldProbeTagsResolvesCollisionsDeterministically(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestFileSnapshotFromFolderMatchesStandaloneProbe pins the de-dupe
+// contract: a file snapshot derived from a complete folder pass must
+// agree with a standalone probe of that same file on every field, the
+// ASIN, and the duration — so the index never re-probes a child whose
+// parent was probed in the same pass.
+func TestFileSnapshotFromFolderMatchesStandaloneProbe(t *testing.T) {
+	respDir := t.TempDir()
+	marker := t.TempDir()
+	ffprobe := stubFFprobe(t, respDir, marker)
+
+	srcDir := t.TempDir()
+	// Three files, each with a distinct embedded title/author and a
+	// duration, plus one filename-ASIN file to exercise the fallback.
+	// d.m4b carries the precedence keys in ORIGINAL case (TITLE,
+	// AUDIBLE_ASIN) — a naive lowercase lookup in the derived snapshot
+	// would lose that evidence. e.m4b has a same-lowercase-key
+	// format-vs-stream collision: the stream scope must win, exactly as
+	// the standalone fold decides it.
+	files := map[string]string{
+		"a.m4b": `{"format": {"duration": "10", "tags": {"title": "Alpha", "album_artist": "Author A"}}, "streams": []}`,
+		"b.m4b": `{"format": {"duration": "20", "tags": {"title": "Beta", "album_artist": "Author B", "audible_asin": "B012345678"}}, "streams": []}`,
+		"c.m4b": `{"format": {"duration": "30", "tags": {}}, "streams": []}`,
+		"d.m4b": `{"format": {"duration": "40", "tags": {"TITLE": "Delta", "AUDIBLE_ASIN": "B0DELTA000"}}, "streams": []}`,
+		"e.m4b": `{"format": {"duration": "50", "tags": {"title": "E-Fmt"}}, "streams": [{"codec_type": "audio", "tags": {"TITLE": "E-Stream"}}]}`,
+	}
+	for name, doc := range files {
+		writeProbeResponse(t, respDir, strings.TrimSuffix(name, filepath.Ext(name)), doc)
+		if err := os.WriteFile(filepath.Join(srcDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	folder := runExtraction(t, ffprobe, srcDir)
+	if !folder.Complete() {
+		t.Fatalf("folder snapshot not complete: %v", folder.Fields)
+	}
+
+	for name := range files {
+		path := filepath.Join(srcDir, name)
+		derived := FileSnapshotFromFolder(folder, path)
+		standalone := runExtraction(t, ffprobe, path)
+		if !derived.Complete() {
+			t.Errorf("%s: derived snapshot not complete", name)
+		}
+		for _, key := range fieldKeys {
+			d, s := derived.Fields[key], standalone.Fields[key]
+			if d.Status != s.Status {
+				t.Errorf("%s: field %s status = %q, standalone %q", name, key, d.Status, s.Status)
+			}
+			if len(d.Values) != len(s.Values) {
+				t.Errorf("%s: field %s values = %v, standalone %v", name, key, d.Values, s.Values)
+				continue
+			}
+			for i := range d.Values {
+				if d.Values[i] != s.Values[i] {
+					t.Errorf("%s: field %s values[%d] = %q, standalone %q", name, key, i, d.Values[i], s.Values[i])
+				}
+			}
+		}
+		if derived.DurationSeconds != standalone.DurationSeconds {
+			t.Errorf("%s: duration = %v, standalone %v", name, derived.DurationSeconds, standalone.DurationSeconds)
+		}
+	}
+
+	// The filename-ASIN file: the standalone pass finds the ASIN in the
+	// embedded tag (audible_asin), so the derived one must match it.
+	if got := FileSnapshotFromFolder(folder, filepath.Join(srcDir, "b.m4b")).Fields[FieldASIN]; len(got.Values) != 1 || got.Values[0] != "B012345678" {
+		t.Errorf("b.m4b derived ASIN = %v, want [B012345678]", got.Values)
+	}
+	// Original-case keys: the derived snapshot must resolve TITLE /
+	// AUDIBLE_ASIN exactly as the standalone fold does.
+	if got := FileSnapshotFromFolder(folder, filepath.Join(srcDir, "d.m4b")).Fields[FieldTitle]; len(got.Values) != 1 || got.Values[0] != "Delta" {
+		t.Errorf("d.m4b derived title = %v, want [Delta]", got.Values)
+	}
+	if got := FileSnapshotFromFolder(folder, filepath.Join(srcDir, "d.m4b")).Fields[FieldASIN]; len(got.Values) != 1 || got.Values[0] != "B0DELTA000" {
+		t.Errorf("d.m4b derived ASIN = %v, want [B0DELTA000]", got.Values)
+	}
+	// Format-vs-stream same-lowercase-key collision: the stream scope wins.
+	if got := FileSnapshotFromFolder(folder, filepath.Join(srcDir, "e.m4b")).Fields[FieldTitle]; len(got.Values) != 1 || got.Values[0] != "E-Stream" {
+		t.Errorf("e.m4b derived title = %v, want [E-Stream]", got.Values)
+	}
+	// A file absent from the folder snapshot degrades (honest "not run").
+	if got := FileSnapshotFromFolder(folder, filepath.Join(srcDir, "missing.m4b")); !got.Degraded {
+		t.Errorf("missing.m4b derived snapshot = %v, want degraded", got)
 	}
 }

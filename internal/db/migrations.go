@@ -209,6 +209,38 @@ CREATE TABLE IF NOT EXISTS book_source_metadata (
 ALTER TABLE processing_jobs ADD COLUMN book_pre_status TEXT;
 `,
 	},
+	{
+		// v14: opt-in input-directory index. source_index stores one row per
+		// path under the input root (files + directories) with change-detection
+		// signals (size, modtime) and a JSON payload of pre-extracted evidence;
+		// index_state is a single id=1 row describing the last completed scan.
+		version: 14,
+		sql: `
+CREATE TABLE IF NOT EXISTS source_index (
+    path TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL,
+    size INTEGER NOT NULL DEFAULT 0,
+    modtime TEXT NOT NULL DEFAULT '',
+    payload TEXT NOT NULL DEFAULT '{}',
+    indexed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_source_index_modtime ON source_index(modtime);
+
+CREATE TABLE IF NOT EXISTS index_state (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    root TEXT NOT NULL DEFAULT '',
+    entries INTEGER NOT NULL DEFAULT 0,
+    last_run_at TEXT,
+    status TEXT NOT NULL DEFAULT 'never',
+    detail TEXT NOT NULL DEFAULT '',
+    generation INTEGER NOT NULL DEFAULT 0
+);
+
+ALTER TABLE settings ADD COLUMN indexing_enabled BOOLEAN NOT NULL DEFAULT 0;
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.
