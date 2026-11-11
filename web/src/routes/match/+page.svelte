@@ -324,6 +324,7 @@
 				candidate.details = { book, release };
 				candidate.selectedReleaseId = release?.id ?? null;
 				candidate.manualPick = false;
+				void loadEvidence(candidate);
 			}
 		} catch (e) {
 			if (seq === candidate.seq) candidate.error = toCleanedError(e);
@@ -543,6 +544,7 @@
 			// Publish the record actually selected so picker metadata and the
 			// inspector cannot disagree after a recovered or alternate choice.
 			hydration[bookId] = { book, release, loading: false, error: null };
+			void loadEvidence(candidate);
 		} catch (e) {
 			if (seq === candidate.seq) {
 				candidate.error = toCleanedError(e);
@@ -576,6 +578,7 @@
 			if (book) {
 				hydration[book.id] = { book, release, loading: false, error: null };
 			}
+			void loadEvidence(candidate);
 		} catch (e) {
 			if (seq === candidate.seq) candidate.releaseError = toCleanedError(e);
 		} finally {
@@ -1256,6 +1259,35 @@
 			loadedReleaseId: candidate.details.release?.id ?? null,
 			ready: isReady(candidate) && !candidate.loading && !candidate.releaseLoading && !candidate.error && !candidate.releaseError
 		});
+	}
+
+	/** Load the selection-scoped evidence report after the catalog record
+	 *  settles. The pending list only states the source read state; the
+	 *  identifiers and source-vs-catalog comparisons are derived against the
+	 *  selected record. A failed request leaves that source-only report in
+	 *  place, so the read banner never regresses to "not read". */
+	async function loadEvidence(candidate: MatchCandidate) {
+		const bookId = candidate.selectedBookId;
+		if (!bookId || candidate.details.book?.id !== bookId) return;
+		const releaseId = candidate.selectedReleaseId;
+		const seq = candidate.seq;
+		const params = new URLSearchParams({ book_id: bookId });
+		if (releaseId) params.set('release_id', releaseId);
+		try {
+			const report = await get<MatchEvidenceReport>(
+				`/books/${candidate.bookId}/match-evidence?${params.toString()}`
+			);
+			if (
+				seq !== candidate.seq ||
+				candidate.selectedBookId !== bookId ||
+				candidate.selectedReleaseId !== releaseId
+			) {
+				return;
+			}
+			candidate.evidence = report;
+		} catch {
+			// Keep the source-only list report.
+		}
 	}
 
 	type MatchStateKind = 'auto' | 'manual' | 'none' | 'low' | 'loading' | 'error';

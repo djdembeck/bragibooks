@@ -144,11 +144,16 @@ class Repository:
         return records[0] if records else None
 
     def release_assets(self, tag):
-        """Asset of the draft-aware release record; a missing record is true absence."""
+        """Assets of the draft-aware release record.
+
+        A missing record yields the empty store: every built artifact is
+        then a fresh upload, which is exactly the state right after a
+        draft was created and the listing has not reflected it yet.
+        Failing closed here would strand an already-published immutable
+        image with no assets and force a full re-run, so absence is a
+        state, not an error."""
         target = self.release_record(tag)
-        if target is None:
-            raise ReleaseError(f"Release {tag} does not exist")
-        return target["assets"]
+        return [] if target is None else target["assets"]
 
     def select(self, sha, version=None, bump="auto", automatic=False):
         sha = self.exact_oid(sha)
@@ -217,8 +222,14 @@ class Repository:
         target = self.release_record(tag)
         if target is None:
             require(not publish, "Cannot finalize a missing draft release")
-            self.run("gh", "release", "create", tag, "--repo", self.repository(),
-                     "--verify-tag", "--draft", "--title", tag, "--notes", "")
+            try:
+                self.run("gh", "release", "create", tag, "--repo", self.repository(),
+                         "--verify-tag", "--draft", "--title", tag, "--notes", "")
+            except ReleaseError as error:
+                # The listing lagged: the record exists and the create was
+                # rejected. That is the desired outcome, not an error.
+                require("already exists" in str(error),
+                        f"Draft creation failed for {tag}: {error}")
             return
         if publish and target.get("draft"):
             current = semver(tag.removeprefix("v"))
@@ -368,7 +379,7 @@ def checksum_entries(data):
         require(len(hexdigest) == 64 and re.fullmatch(r"[0-9a-f]{64}", hexdigest) and name,
                 f"Malformed checksum line: {line!r}")
         entries[name] = "sha256:" + hexdigest
-    require(len(entries) == 4, "Expected exactly four checksum entries")
+    require(len(entries) == 5, "Expected exactly five checksum entries")
     return entries
 
 
@@ -383,15 +394,16 @@ def publish_assets(repository, source, version, fetcher=None):
     metadata = json.loads(Path("dist/artifacts.json").read_text())
     archives = [item for item in metadata if item["type"] == "Archive"]
     checksums = [item for item in metadata if item["type"] == "Checksum"]
-    require(len(archives) == 4 and len(checksums) == 1,
-            "Expected the four native archives and their checksum file")
+    require(len(archives) == 5 and len(checksums) == 1,
+            "Expected the five native archives and their checksum file")
     require({(item.get("goos"), item.get("goarch")) for item in archives}
-            == {(system, arch) for system in ("linux", "darwin") for arch in ("amd64", "arm64")},
+            == ({(system, arch) for system in ("linux", "darwin") for arch in ("amd64", "arm64")}
+                | {("windows", "amd64")}),
             "Native archive platform coverage differs")
     require(checksums[0]["name"] == checksum_name,
             "Checksum file has the wrong release identity")
     outputs = archives + checksums
-    require(len({item["name"] for item in outputs}) == 5, "Duplicate built asset names")
+    require(len({item["name"] for item in outputs}) == 6, "Duplicate built asset names")
     # Plan the ENTIRE set before entering the upload loop: every preserved
     # store asset plus every pending build must form one verifiable collection,
     # because a checksum manifest that cannot describe the store is never uploaded.

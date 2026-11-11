@@ -40,6 +40,15 @@ All notable changes to this project will be documented in this file. See [standa
   are scanned whole. A folder with no audio files (a book folder holding
   only a `.cue`/`.txt`) now also surfaces a folder-name ASIN instead of
   reading "—".
+- The Match page's **Source details** panel now reflects the stored source-metadata snapshot instead of always reporting "Source metadata not read". `GET /api/books?status=pending` carries a source-only `match_evidence` report whose read status comes from snapshot completeness (a complete current-schema pass, a partial pass, a degraded pass, or no row), and `GET /api/books/{id}/match-evidence?book_id=…&release_id=…` resolves the snapshot's ASIN and AudiobookDB IDs against the selected catalog record and builds per-field source-vs-catalog comparisons. A failed catalog lookup degrades the report (`lookup_failed` / `unavailable`) rather than inventing agreement; `books.asin` and the save path are untouched.
+- Release workflow now creates the draft release record in the `reserve`
+  job, up front, and treats a release record that the listing does not
+  return as an empty asset store (every artifact is a fresh upload)
+  instead of failing with "Release vX.Y.Z does not exist". A draft create
+  rejected as "already exists" is likewise tolerated when the listing
+  lags behind the record. The v2.1.0 run hit exactly this: the asset
+  step ran seconds after the draft was created, the listing had not
+  reflected it, and the already-published image was left with no assets.
 - Release assets are uploaded with their plain file names
   (`bragibooks_2.0.0_checksums.txt`, `bragibooks_Darwin_arm64.tar.gz`, …).
   New uploads no longer attach a `bragibooks-publish-v1;…` display label,
@@ -63,6 +72,10 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Features & Improvements
 
+- A Windows amd64 release archive is now built alongside the existing
+  Linux and macOS amd64/arm64 archives. On Windows, process cancellation
+  kills the spawned m4b-merge tree through a job object (kill-on-close),
+  the platform equivalent of the POSIX process-group kill used elsewhere.
 - Release archives embed the version and use lowercase platform names
   (`bragibooks_2.1.0_linux-amd64.tar.gz`, `bragibooks_2.1.0_darwin-arm64.tar.gz`,
   …) instead of `bragibooks_Linux_x86_64.tar.gz` / `bragibooks_Darwin_arm64.tar.gz`.

@@ -71,7 +71,9 @@ export interface SourceASINEvidence {
 }
 
 export interface BookWithPeople {
-	/** Optional Match presentation report; not populated by current intake. */
+	/** Optional Match presentation report. The pending list carries the
+	 *  source read state only; GET /api/books/:id/match-evidence fills the
+	 *  identifiers and comparisons for the selected catalog record. */
 	match_evidence?: MatchEvidenceReport;
 	/** Populated only by the pending-books list response. */
 	source_asin?: SourceASINEvidence | null;
