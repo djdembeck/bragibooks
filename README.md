@@ -231,6 +231,7 @@ The web frontend uses the HTTP API below. Responses are JSON unless noted otherw
 | `GET` | `/api/books/{id}` | Read a book |
 | `PUT` | `/api/books/{id}` | Update a book |
 | `DELETE` | `/api/books/{id}` | Remove a book |
+| `GET` | `/api/books/{id}/match-evidence?book_id=...&release_id=...` | Match source-vs-catalog evidence for one selected record |
 | `GET` | `/api/search?query=...&types=books&skip=0&take=20` | Search AudiobookDB |
 | `GET` | `/api/search/books/{id}` | Fetch an AudiobookDB book |
 | `GET` | `/api/search/releases/{id}` | Fetch an AudiobookDB release |
