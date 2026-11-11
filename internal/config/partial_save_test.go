@@ -309,6 +309,20 @@ func TestLoadYAMLIndexingEnabledPrecedence(t *testing.T) {
 		{"yaml-true-no-env-enabled", "directories:\n  indexing_enabled: true\n", "", true},
 		{"yaml-false-no-env-disabled", "directories:\n  indexing_enabled: false\n", "", false},
 		{"yaml-false-env-true-enables", "directories:\n  indexing_enabled: false\n", "true", true},
+		// Non-exact env values are NOT pins (Viper env-layering must not
+		// win at Unmarshal time): the YAML preference stays in effect.
+		{"yaml-true-env-false-preserved", "directories:\n  indexing_enabled: true\n", "false", true},
+		{"yaml-true-env-TRUE-preserved", "directories:\n  indexing_enabled: true\n", "TRUE", true},
+		{"yaml-true-env-1-preserved", "directories:\n  indexing_enabled: true\n", "1", true},
+		{"yaml-true-env-on-preserved", "directories:\n  indexing_enabled: true\n", "on", true},
+		{"yaml-true-env-yes-preserved", "directories:\n  indexing_enabled: true\n", "yes", true},
+		// Default (no YAML key) is equally protected from non-exact env.
+		{"no-yaml-env-false-disabled", "", "false", false},
+		{"no-yaml-env-TRUE-disabled", "", "TRUE", false},
+		{"no-yaml-env-1-disabled", "", "1", false},
+		{"no-yaml-env-on-disabled", "", "on", false},
+		{"no-yaml-env-yes-disabled", "", "yes", false},
+		{"no-yaml-env-true-enables", "", "true", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

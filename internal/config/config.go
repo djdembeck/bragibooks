@@ -176,10 +176,26 @@ func loadWith(explicitPath string) (Config, string, error) {
 		}
 	}
 
+	// DIRECTORIES_INDEXING_ENABLED is on-only and exact: a non-exact
+	// value ("false", "TRUE", "1", "on", ...) must never override the
+	// YAML/default preference, and an unparseable value ("on", "yes")
+	// would also fail the whole decode. Unset it for Unmarshal so
+	// Viper's env layering cannot layer it over file/default; the exact
+	// "true" pin is re-asserted by applyEnvPriority after the load.
+	var indexingEnvRestore func()
+	if env := os.Getenv("DIRECTORIES_INDEXING_ENABLED"); env != "" && env != "true" {
+		_ = os.Unsetenv("DIRECTORIES_INDEXING_ENABLED")
+		indexingEnvRestore = func() { _ = os.Setenv("DIRECTORIES_INDEXING_ENABLED", env) }
+	}
+
 	var cfg Config
-	if err := v.Unmarshal(&cfg); err != nil {
-		setLoadError(fmt.Errorf("failed to unmarshal config: %w", err))
-		return Config{}, "", fmt.Errorf("failed to unmarshal config: %w", err)
+	unmarshalErr := v.Unmarshal(&cfg)
+	if indexingEnvRestore != nil {
+		indexingEnvRestore()
+	}
+	if unmarshalErr != nil {
+		setLoadError(fmt.Errorf("failed to unmarshal config: %w", unmarshalErr))
+		return Config{}, "", fmt.Errorf("failed to unmarshal config: %w", unmarshalErr)
 	}
 
 	var configPath string
@@ -485,9 +501,11 @@ func applyEnvPriority(cfg *Config) {
 		cfg.Server.APIEndpoint.Enabled = true
 	}
 	// On-only and exact: the documented contract is that ONLY the value
-	// "true" force-enables indexing; any other value (including "1",
-	// "yes", "on") loads the persisted/YAML preference, matching the
-	// DB-gate form in cmd/bragibooks/main.go.
+	// "true" force-enables indexing (deployment pin). Any other value —
+	// including "false", "1", "yes", "on", "TRUE" — is NOT a pin:
+	// loadWith strips it from the Viper env layer and overrideKey keeps
+	// the YAML preference, so no non-exact value reaches this branch.
+	// Matching the DB-gate form in cmd/bragibooks/main.go.
 	if os.Getenv("DIRECTORIES_INDEXING_ENABLED") == "true" {
 		cfg.Directories.IndexingEnabled = true
 	}
@@ -536,6 +554,15 @@ func flattenYAMLKeys(m map[string]any, prefix string) []string {
 // only when the env var for that key is unset (env wins, so deployment
 // config is never silently frozen by a settings save).
 func overrideKey(target, yamlOnly *Config, key string) {
+	if key == "directories.indexing_enabled" {
+		// On-only contract: the YAML value always stands — a non-exact
+		// env value must not pin the flag (loadWith reset the env layer
+		// over the default, so restoring the YAML preference here keeps
+		// it). The exact "true" pin is re-asserted by applyEnvPriority
+		// after this pass.
+		target.Directories.IndexingEnabled = yamlOnly.Directories.IndexingEnabled
+		return
+	}
 	if hasEnv(key) {
 		return
 	}
@@ -568,8 +595,6 @@ func overrideKey(target, yamlOnly *Config, key string) {
 		target.Directories.OutputDir = yamlOnly.Directories.OutputDir
 	case "directories.completed_dir":
 		target.Directories.CompletedDir = yamlOnly.Directories.CompletedDir
-	case "directories.indexing_enabled":
-		target.Directories.IndexingEnabled = yamlOnly.Directories.IndexingEnabled
 	// Processing
 	case "processing.num_cpus":
 		target.Processing.NumCPUs = yamlOnly.Processing.NumCPUs
