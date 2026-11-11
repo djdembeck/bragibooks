@@ -121,7 +121,7 @@ func evidenceTestCatalog() *matchCatalog {
 				{Role: audiobookdb.RoleRef{Name: "Narrator"}, Person: audiobookdb.PersonRef{ID: "p2", Name: "Nia Narrator"}},
 			},
 			Publisher: audiobookdb.IdName{ID: "pub", Name: "Test Press"},
-			Language:  audiobookdb.IdTitle{ID: "lang", Title: "English"},
+			Language:  audiobookdb.NameRef{Name: "English"},
 		},
 	}
 }

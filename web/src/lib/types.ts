@@ -312,7 +312,7 @@ export interface AudiobookDBRelease {
 	};
 	people: AudiobookDBPersonRole[];
 	publisher: { id: string; name: string };
-	language: { id: string; title: string };
+	language: { name: string };
 	images: AudiobookDBImage[];
 }
 
