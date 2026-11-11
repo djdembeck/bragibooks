@@ -268,20 +268,14 @@ func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, 
 	}
 
 	cmd := exec.CommandContext(ctx, binary, args...)
-	// Own process group: ctx cancellation must kill the whole tree, not just
-	// the direct child. m4b-merge is a script wrapper here (and may spawn
-	// children in general); a grandchild that inherits the stdout pipe would
-	// otherwise hold io.ReadAll open long after the child itself is killed.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// The whole tree: ctx cancellation must kill the spawned process and
+	// everything it spawned (see processTree), not just the direct child.
+	tree := newProcessTree(cmd)
 	cmd.Cancel = func() error {
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if err == syscall.ESRCH {
-				// Already gone: nothing for os/exec to do.
-				return os.ErrProcessDone
-			}
+		if err := tree.start(cmd); err != nil {
 			return err
 		}
-		return nil
+		return tree.kill()
 	}
 	// Guard against any writer we could not kill: force Wait to return
 	// shortly after cancel instead of blocking on inherited pipes.
@@ -311,6 +305,7 @@ func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, 
 	}
 
 	waitErr := cmd.Wait()
+	tree.finish()
 	if stream != nil {
 		stream.Flush()
 	}
@@ -509,22 +504,18 @@ func (p *Processor) UpdateVersion() string {
 			time.Sleep(time.Duration(50*attempt) * time.Millisecond)
 		}
 		cmd := exec.CommandContext(ctx, binary, "--version")
-		// Own process group: ctx cancellation must kill the whole tree,
-		// not just the direct child. m4b_merge_binary is user-settable
-		// and may be a script wrapper that spawns children in general; a
-		// grandchild that inherits the stdout pipe would otherwise hold
-		// the probe open long after the child itself is killed, stalling
-		// the settings request past the deadline.
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		// The whole tree: ctx cancellation must kill the spawned process
+		// and everything it spawned (see processTree), not just the direct
+		// child. m4b_merge_binary is user-settable and may be a script
+		// wrapper; a grandchild that inherits the stdout pipe would
+		// otherwise hold the probe open long after the child itself is
+		// killed, stalling the settings request past the deadline.
+		tree := newProcessTree(cmd)
 		cmd.Cancel = func() error {
-			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-				if err == syscall.ESRCH {
-					// Already gone: nothing for os/exec to do.
-					return os.ErrProcessDone
-				}
+			if err := tree.start(cmd); err != nil {
 				return err
 			}
-			return nil
+			return tree.kill()
 		}
 		// Guard against any writer we could not kill: force Wait to
 		// return shortly after cancel instead of blocking on inherited
@@ -540,6 +531,7 @@ func (p *Processor) UpdateVersion() string {
 		cmd.Stderr = &stderrBuf
 
 		err := cmd.Run()
+		tree.finish()
 		switch {
 		case err == nil:
 			version := strings.Fields(strings.TrimSpace(stdoutBuf.String()))
