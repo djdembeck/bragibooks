@@ -88,7 +88,10 @@
 			const [matched, pending, jobsResp] = await Promise.all([
 				get<BooksListResponse>('/books?status=matched&limit=100'),
 				get<BooksListResponse>('/books?status=pending&limit=100'),
-				get<JobsListResponse>('/jobs?limit=20'),
+				// 100 (the API cap) keeps a finished batch whole: the banner
+				// summarizes the latest contiguous run, and a run longer than
+				// the default window would read as a smaller one.
+				get<JobsListResponse>('/jobs?limit=100'),
 			]);
 			books = [...(matched.books || []), ...(pending.books || [])];
 			restoreJobs(jobsResp.jobs);
@@ -459,6 +462,10 @@
 			jobs.map((job) => ({
 				id: job.id,
 				status: job.status,
+				// An in-flight cancel holds an optimistic 'cancelled' badge;
+				// the run must not report itself stopped until the backend
+				// terminal row lands.
+				cancelRequested: job.cancelRequested,
 				action: job.action,
 				queueOrder: job.queueOrder,
 				startedAt: job.startedAt,
@@ -502,8 +509,11 @@
 		const id = firstFailedJobId;
 		if (!id) return;
 		// The row renders once the disclosure opens; land on it a frame later.
+		// 'smooth' is an animated page move — reduced-motion users get the
+		// jump, not the glide.
+		const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
 		requestAnimationFrame(() => {
-			document.querySelector(`[data-job-id="${id}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+			document.querySelector(`[data-job-id="${id}"]`)?.scrollIntoView({ block: 'center', behavior });
 		});
 	}
 
