@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file. See [standa
 
 ## [Unreleased]
 
+### Added
+
+- Queue completion banner: when the most recent merge batch finishes, the
+  queue page now states the result up front ("Batch complete — 3 of 3
+  processed", "Batch ended with 1 failure", "Batch failed",
+  "Batch stopped") with the run's wall clock, instead of leaving a
+  finished queue to be judged from Recent activity. A failed run carries
+  a "Review N failures" action that opens Recent activity and scrolls to
+  the first failed row; a single-book run links through to the book
+  record. The banner is dismissible per run (a newer batch re-announces
+  itself), and a fully failed run is announced with `role="alert"`
+  rather than the polite `status` used by other outcomes.
+
 ### Fixed
 
 - Source index steady state: directories whose stored snapshot hit the
