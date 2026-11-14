@@ -383,15 +383,16 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// keys were dropped from req above, so they are never in changed and
 	// never reach the file save.
 	if f, c := h.svc.Config.MetadataEnvManaged(); f || c {
-		storedFields, storedChapters, fieldsOK := h.svc.Config.StoredMetadataSelection()
-		fileUnreadable := f && !fieldsOK
-		if fileUnreadable {
-			// A malformed (non-list) file value is discarded by the typed
-			// loader, so the durable file carries no trustworthy
-			// selection: the settings row is the truth the pins must not
-			// clobber, frozen back from the row (UNSET INCLUDED). A
-			// silently converted file value would wipe a saved selection
-			// into the default on the next unrelated save.
+		storedFields, storedChapters, fieldsOK, chaptersOK := h.svc.Config.StoredMetadataSelection()
+		// A malformed (non-list) file value for the pinned fields key is
+		// discarded by the typed loader, so the durable file carries no
+		// trustworthy field selection: the settings row is the truth the
+		// pin must not clobber, frozen back from the row (UNSET INCLUDED).
+		// A silently converted file value would wipe a saved selection
+		// into the default on the next unrelated save. A valid file
+		// value for the chapters key stays authoritative on its own —
+		// only an unreadable chapters value falls back to the row.
+		if f && !fieldsOK {
 			rowFields, rowChapters, rowOK := h.storedMetadataRow()
 			if !rowOK {
 				// The row cannot be read: the live config carries the
@@ -401,14 +402,12 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 					"cannot save while a metadata write pin is set: the stored selection is unreadable (corrupt settings row or malformed config value); resolve the corruption, then retry")
 				return
 			}
-			if f {
-				snap.Processing.MetadataFields = rowFields
+			snap.Processing.MetadataFields = rowFields
+			if !chaptersOK {
+				snap.Processing.MetadataChapters = rowChapters
+			} else {
+				snap.Processing.MetadataChapters = storedChapters
 			}
-			// Chapters are always frozen from the row here (pinned or not):
-			// the file is unreadable, so the live chapters value is the
-			// default, not the stored selection — freezing the row is the
-			// only way an unpinned key cannot clobber the store either.
-			snap.Processing.MetadataChapters = rowChapters
 		} else {
 			if f {
 				snap.Processing.MetadataFields = storedFields

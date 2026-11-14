@@ -339,15 +339,17 @@ func ReassertMetadataPins(cfg *Config) {
 // selection: a nil pointer means "not set" (default all-supported-
 // available), a present empty list means the explicit none-selected save,
 // and a non-empty list is the saved selection. A missing file returns the
-// defaults, matching the empty-row baseline. fieldsOK reports that the
-// file's metadata_fields value is a valid list (or absent); a present
-// non-list value leaves fields nil AND fieldsOK false, so a caller that
-// freezes a pinned key to this result can preserve the durable row's
-// current value instead of writing a silently converted one.
-func (cm *ConfigManager) StoredMetadataSelection() (fields *[]string, chapters string, fieldsOK bool) {
+// defaults, matching the empty-row baseline. fieldsOK and chaptersOK
+// report that the file's value for each key is a valid list / a valid
+// string (absent counts as OK); a present malformed value leaves the
+// key's value at its default AND its OK flag false, so a caller that
+// freezes a pinned key can preserve the durable row's current value
+// instead of writing a silently converted one.
+func (cm *ConfigManager) StoredMetadataSelection() (fields *[]string, chapters string, fieldsOK, chaptersOK bool) {
 	fields = nil
 	chapters = "write"
 	fieldsOK = true
+	chaptersOK = false
 	path := cm.configPath
 	if path == "" {
 		return
@@ -367,6 +369,7 @@ func (cm *ConfigManager) StoredMetadataSelection() (fields *[]string, chapters s
 		if v, present := proc["metadata_chapters"]; present {
 			if s, ok := v.(string); ok {
 				chapters = s
+				chaptersOK = true
 			}
 		}
 	}

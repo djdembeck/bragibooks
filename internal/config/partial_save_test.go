@@ -425,13 +425,15 @@ func TestStoredMetadataSelectionShapes(t *testing.T) {
 		wantFields []string // nil = unset
 		wantOK     bool
 		wantChap   string
+		wantChapOK bool
 	}{
-		{"missing file", "", true, nil, true, "write"},
-		{"absent keys", "processing:\n  num_cpus: 1\n", true, nil, true, "write"},
-		{"explicit empty list", "processing:\n  metadata_fields: []\n", true, []string{}, true, "write"},
-		{"saved selection", "processing:\n  metadata_fields:\n    - title\n    - cover\n  metadata_chapters: preserve\n", true, []string{"title", "cover"}, true, "preserve"},
-		{"malformed non-list", "processing:\n  metadata_fields: title,cover\n", false, nil, false, "write"},
-		{"malformed string", "processing:\n  metadata_fields: \"title\"\n", false, nil, false, "write"},
+		{"missing file", "", true, nil, true, "write", false},
+		{"absent keys", "processing:\n  num_cpus: 1\n", true, nil, true, "write", false},
+		{"explicit empty list", "processing:\n  metadata_fields: []\n", true, []string{}, true, "write", false},
+		{"saved selection", "processing:\n  metadata_fields:\n    - title\n    - cover\n  metadata_chapters: preserve\n", true, []string{"title", "cover"}, true, "preserve", true},
+		{"malformed non-list", "processing:\n  metadata_fields: title,cover\n", false, nil, false, "write", false},
+		{"malformed string", "processing:\n  metadata_fields: \"title\"\n", false, nil, false, "write", false},
+		{"malformed chapters", "processing:\n  metadata_fields:\n    - title\n  metadata_chapters: [write]\n", false, []string{"title"}, true, "write", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -451,9 +453,12 @@ func TestStoredMetadataSelectionShapes(t *testing.T) {
 				m = NewConfigManager()
 				m.SetConfigPath(p)
 			}
-			fields, chapters, ok := m.StoredMetadataSelection()
+			fields, chapters, ok, chapOK := m.StoredMetadataSelection()
 			if ok != tc.wantOK {
 				t.Fatalf("fieldsOK: want %v, got %v", tc.wantOK, ok)
+			}
+			if chapOK != tc.wantChapOK {
+				t.Errorf("chaptersOK: want %v, got %v", tc.wantChapOK, chapOK)
 			}
 			if chapters != tc.wantChap {
 				t.Errorf("chapters: want %q, got %q", tc.wantChap, chapters)

@@ -241,7 +241,7 @@ func TestUpdateSettingsIgnoresPinnedMetadataSelection(t *testing.T) {
 		if storedChapters != "preserve" {
 			t.Errorf("pin leaked into DB row on second save: want the baseline preserve, got %s", storedChapters)
 		}
-		if gotF, gotC, _ := h.svc.Config.StoredMetadataSelection(); storedString(gotF) != `["title"]` || gotC != "preserve" {
+		if gotF, gotC, _, _ := h.svc.Config.StoredMetadataSelection(); storedString(gotF) != `["title"]` || gotC != "preserve" {
 			t.Errorf("pin leaked into config file on second save: want [\"title\"]/preserve, got %s/%s", storedString(gotF), gotC)
 		}
 		// The live config still carries the pin (env outranks the stores).
@@ -362,5 +362,28 @@ func TestUpdateSettingsPinnedAbortWhenStoredSelectionUnreadable(t *testing.T) {
 	}
 	if string(storedFields) != `["title"]` || storedChapters != "preserve" {
 		t.Errorf("row not frozen to its stored value under pin: got %s/%s, want [\"title\"]/preserve", storedFields, storedChapters)
+	}
+
+	// A VALID chapters value in the file stays authoritative for that key
+	// even while the fields value is malformed: the row's (differing)
+	// chapters must not clobber the file's, and the fields pin must not
+	// ride in from the live config.
+	if err := os.WriteFile(h.svc.Config.ConfigPath(),
+		[]byte("processing:\n  metadata_fields: title,subtitle\n  metadata_chapters: write\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp = put(`{"num_cpus":5}`)
+	if resp.code != 200 {
+		t.Fatalf("valid file chapters under malformed fields pin: want 200, got %d: %v", resp.code, resp.body)
+	}
+	if err := h.svc.DB.QueryRow(
+		`SELECT metadata_fields, metadata_chapters FROM settings WHERE id = 1`,
+	).Scan(&storedFields, &storedChapters); err != nil {
+		t.Fatal(err)
+	}
+	// fields frozen from the row (["title"]); chapters frozen from the
+	// FILE (write), not the row's preserve.
+	if string(storedFields) != `["title"]` || storedChapters != "write" {
+		t.Errorf("file chapters not kept under malformed fields pin: got %s/%s, want [\"title\"]/write (file value)", storedFields, storedChapters)
 	}
 }
