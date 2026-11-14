@@ -646,12 +646,56 @@ func TestUpdateSettingsPinnedRepairsNullStoredFieldsRow(t *testing.T) {
 	}
 }
 
+// TestUpdateSettingsPinnedRepairsBadJSONStoredFieldsRow pins the companion
+// corrupt-row case: a metadata_fields value that is not JSON at all
+// (unmarshal error, as opposed to the null case's successful unmarshal into
+// nil). Same contract: a readable file means the freeze repairs the row to
+// the documented default instead of aborting.
+func TestUpdateSettingsPinnedRepairsBadJSONStoredFieldsRow(t *testing.T) {
+	h := newSettingsTestService(t, newSettingsTestDB(t))
+	r := buildSettingsRouter(h)
+
+	put := func(body string) *httptestResponse {
+		req := httptest.NewRequest("PUT", "/api/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		var out map[string]any
+		if data, _ := io.ReadAll(rec.Result().Body); len(data) > 0 {
+			json.Unmarshal(data, &out)
+		}
+		return &httptestResponse{code: rec.Code, body: out}
+	}
+
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO settings (id, metadata_fields, metadata_chapters) VALUES (1, 'not-json', 'write')`,
+	); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	t.Setenv("PROCESSING_METADATA_FIELDS", "title,subtitle")
+	resp := put(`{"num_cpus":2}`)
+	if resp.code != 200 {
+		t.Fatalf("bad-JSON row under pin with a readable file: want 200, got %d: %v", resp.code, resp.body)
+	}
+	var storedFields string
+	if err := h.svc.DB.QueryRow(
+		`SELECT metadata_fields FROM settings WHERE id = 1`,
+	).Scan(&storedFields); err != nil {
+		t.Fatalf("read settings row: %v", err)
+	}
+	if storedFields != "" {
+		t.Fatalf("bad-JSON row repaired to %q; want empty (the documented default, not the pin)", storedFields)
+	}
+}
+
 // TestUpdateSettingsPinnedChaptersFirstSaveWithoutRow pins the ordinary
 // first save under a chapters pin: a valid YAML file that is silent on
 // metadata_chapters and no settings row yet. The missing row is not
 // corruption — nothing is stored, so the documented default (write) is the
 // durable value — and the save must proceed (200), creating the row with
-// the default, not the live pin's value (the pin must not ride in).
+// the default. The pin is set to a non-default value (preserve) so the
+// assertion proves the pin did not ride into the store.
 func TestUpdateSettingsPinnedChaptersFirstSaveWithoutRow(t *testing.T) {
 	h := newSettingsTestService(t, newSettingsTestDB(t))
 	r := buildSettingsRouter(h)
@@ -678,8 +722,11 @@ func TestUpdateSettingsPinnedChaptersFirstSaveWithoutRow(t *testing.T) {
 		t.Fatalf("test setup: no settings row expected")
 	}
 
-	// Pin ONLY the chapters key; the first save of an unrelated key.
-	t.Setenv("PROCESSING_METADATA_CHAPTERS", "write")
+	// Pin ONLY the chapters key to a NON-DEFAULT value so the assertion is
+	// discriminating: if the pin rode into the row, the row would read
+	// "preserve"; the correct durable value with nothing stored is the
+	// default "write".
+	t.Setenv("PROCESSING_METADATA_CHAPTERS", "preserve")
 	resp := put(`{"num_cpus":3}`)
 	if resp.code != 200 {
 		t.Fatalf("first save under a chapters pin with no row: want 200, got %d: %v", resp.code, resp.body)
@@ -691,11 +738,10 @@ func TestUpdateSettingsPinnedChaptersFirstSaveWithoutRow(t *testing.T) {
 		t.Fatalf("read settings row: %v", err)
 	}
 	// The row is created with the documented default for the pinned key,
-	// not the pin riding in from the live config (here both are "write",
-	// so the contract the pin must NOT break is the save succeeding and
-	// the row existing with the durable default).
+	// NOT the pin's live value: write != preserve proves the pin did not
+	// ride into the store.
 	if storedChapters != "write" {
-		t.Fatalf("first-save row chapters = %q, want the documented default write", storedChapters)
+		t.Fatalf("first-save row chapters = %q, want the documented default write (the pin is preserve — it must not ride in)", storedChapters)
 	}
 	if storedFields != "" {
 		t.Errorf("first-save row fields = %q, want empty (no selection saved)", storedFields)
