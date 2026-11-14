@@ -412,3 +412,72 @@ func TestMetadataFieldsNonEmptyListSurvivesFileReload(t *testing.T) {
 		t.Fatalf("non-empty selection not preserved: %v", got)
 	}
 }
+
+// TestStoredMetadataSelectionShapes pins the reader's nil-vs-empty-vs-
+// malformed distinction, which the settings save's pin freeze relies on:
+// nil pointer = unset (default all), present empty list = none-selected,
+// non-list = malformed (fieldsOK false, so a freeze must skip the key).
+func TestStoredMetadataSelectionShapes(t *testing.T) {
+	cases := []struct {
+		name       string
+		seed       string
+		validLoad  bool
+		wantFields []string // nil = unset
+		wantOK     bool
+		wantChap   string
+	}{
+		{"missing file", "", true, nil, true, "write"},
+		{"absent keys", "processing:\n  num_cpus: 1\n", true, nil, true, "write"},
+		{"explicit empty list", "processing:\n  metadata_fields: []\n", true, []string{}, true, "write"},
+		{"saved selection", "processing:\n  metadata_fields:\n    - title\n    - cover\n  metadata_chapters: preserve\n", true, []string{"title", "cover"}, true, "preserve"},
+		{"malformed non-list", "processing:\n  metadata_fields: title,cover\n", false, nil, false, "write"},
+		{"malformed string", "processing:\n  metadata_fields: \"title\"\n", false, nil, false, "write"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The malformed seeds fail the TYPED LoadFrom (which is why a
+			// bad pin is caught at boot), so only the valid shapes go
+			// through the full manager; the reader itself is exercised on
+			// the raw file for every shape.
+			var m *ConfigManager
+			if tc.validLoad {
+				m, _ = newTestManager(t, tc.seed)
+			} else {
+				dir := t.TempDir()
+				p := filepath.Join(dir, "config.yaml")
+				if err := os.WriteFile(p, []byte(tc.seed), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				m = NewConfigManager()
+				m.SetConfigPath(p)
+			}
+			fields, chapters, ok := m.StoredMetadataSelection()
+			if ok != tc.wantOK {
+				t.Fatalf("fieldsOK: want %v, got %v", tc.wantOK, ok)
+			}
+			if chapters != tc.wantChap {
+				t.Errorf("chapters: want %q, got %q", tc.wantChap, chapters)
+			}
+			switch {
+			case tc.wantFields == nil:
+				if fields != nil {
+					t.Errorf("fields: want nil (unset), got %v", *fields)
+				}
+			case len(tc.wantFields) == 0:
+				if fields == nil || len(*fields) != 0 {
+					t.Fatalf("fields: want present empty list, got %v", fields)
+				}
+			default:
+				if fields == nil || len(*fields) != len(tc.wantFields) {
+					t.Fatalf("fields: want %v, got %v", tc.wantFields, fields)
+				}
+				for i, s := range tc.wantFields {
+					if (*fields)[i] != s {
+						t.Errorf("fields[%d]: want %q, got %q", i, s, (*fields)[i])
+						break
+					}
+				}
+			}
+		})
+	}
+}

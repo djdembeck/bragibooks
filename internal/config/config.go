@@ -339,10 +339,15 @@ func ReassertMetadataPins(cfg *Config) {
 // selection: a nil pointer means "not set" (default all-supported-
 // available), a present empty list means the explicit none-selected save,
 // and a non-empty list is the saved selection. A missing file returns the
-// defaults, matching the empty-row baseline.
-func (cm *ConfigManager) StoredMetadataSelection() (fields *[]string, chapters string) {
+// defaults, matching the empty-row baseline. fieldsOK reports that the
+// file's metadata_fields value is a valid list (or absent); a present
+// non-list value leaves fields nil AND fieldsOK false, so a caller that
+// freezes a pinned key to this result can preserve the durable row's
+// current value instead of writing a silently converted one.
+func (cm *ConfigManager) StoredMetadataSelection() (fields *[]string, chapters string, fieldsOK bool) {
 	fields = nil
 	chapters = "write"
+	fieldsOK = true
 	path := cm.configPath
 	if path == "" {
 		return
@@ -353,8 +358,11 @@ func (cm *ConfigManager) StoredMetadataSelection() (fields *[]string, chapters s
 	}
 	if proc, ok := m["processing"].(map[string]any); ok {
 		if v, present := proc["metadata_fields"]; present {
-			list := yamlStringListValue(v)
-			fields = &list
+			if list, ok := yamlStringListValue(v); ok {
+				fields = &list
+			} else {
+				fieldsOK = false
+			}
 		}
 		if v, present := proc["metadata_chapters"]; present {
 			if s, ok := v.(string); ok {
@@ -376,12 +384,14 @@ func mustReadFile(path string) []byte {
 	return raw
 }
 
-// yamlStringListValue converts a parsed-YAML list value to a string slice,
-// returning nil for a non-list value.
-func yamlStringListValue(v any) []string {
+// yamlStringListValue converts a parsed-YAML list value to a string slice.
+// The second return reports that the value was a list (a present empty
+// list is valid and yields an empty slice); a non-list value is not valid
+// and yields ok=false.
+func yamlStringListValue(v any) ([]string, bool) {
 	l, ok := v.([]any)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	out := make([]string, 0, len(l))
 	for _, item := range l {
@@ -389,7 +399,7 @@ func yamlStringListValue(v any) []string {
 			out = append(out, s)
 		}
 	}
-	return out
+	return out, true
 }
 
 // normalizeMetadataPin splits a PROCESSING_METADATA_FIELDS pin into its

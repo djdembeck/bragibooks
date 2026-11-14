@@ -240,7 +240,7 @@ func TestUpdateSettingsIgnoresPinnedMetadataSelection(t *testing.T) {
 		if storedChapters != "preserve" {
 			t.Errorf("pin leaked into DB row on second save: want the baseline preserve, got %s", storedChapters)
 		}
-		if gotF, gotC := h.svc.Config.StoredMetadataSelection(); storedString(gotF) != `["title"]` || gotC != "preserve" {
+		if gotF, gotC, _ := h.svc.Config.StoredMetadataSelection(); storedString(gotF) != `["title"]` || gotC != "preserve" {
 			t.Errorf("pin leaked into config file on second save: want [\"title\"]/preserve, got %s/%s", storedString(gotF), gotC)
 		}
 		// The live config still carries the pin (env outranks the stores).

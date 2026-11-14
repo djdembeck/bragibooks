@@ -383,8 +383,17 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// keys were dropped from req above, so they are never in changed and
 	// never reach the file save.
 	if f, c := h.svc.Config.MetadataEnvManaged(); f || c {
-		storedFields, storedChapters := h.svc.Config.StoredMetadataSelection()
-		if f {
+		storedFields, storedChapters, fieldsOK := h.svc.Config.StoredMetadataSelection()
+		if f && !fieldsOK {
+			// A malformed (non-list) file value is discarded by the typed
+			// loader, so the durable row is the truth the pin must not
+			// clobber: read it back and preserve it. A silently converted
+			// file value would wipe a saved selection into the unset
+			// default on the next unrelated save.
+			if rowFields := h.storedMetadataFieldsRow(); rowFields != nil {
+				snap.Processing.MetadataFields = rowFields
+			}
+		} else if f {
 			snap.Processing.MetadataFields = storedFields
 		}
 		if c {
@@ -621,6 +630,28 @@ func changedDottedKeys(changed map[string]any) []string {
 func validateAudiobookdbBaseURL(raw string) error {
 	_, err := audiobookdb.TrustedBaseURL(raw)
 	return err
+}
+
+// storedMetadataFieldsRow reads the settings row's metadata_fields column
+// and decodes it the way saveSettingsToDB writes it (JSON array text, ”
+// = unset default). Returns nil for the unset default, a present empty
+// list for the none-selected save, and nil when the row cannot be read
+// (in which case the caller preserves the live value, never a guess).
+func (h *Handler) storedMetadataFieldsRow() *[]string {
+	var col string
+	if err := h.svc.DB.QueryRow(
+		`SELECT COALESCE(metadata_fields, '') FROM settings WHERE id = 1`,
+	).Scan(&col); err != nil {
+		return nil
+	}
+	if col == "" {
+		return nil
+	}
+	var fields []string
+	if err := json.Unmarshal([]byte(col), &fields); err != nil {
+		return nil
+	}
+	return &fields
 }
 
 // saveSettingsToDB persists the config to the settings table in the database.
