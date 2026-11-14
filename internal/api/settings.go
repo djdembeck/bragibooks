@@ -322,6 +322,18 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		changed["api_key"] = mergeChangedMap(changed, "api_key", "base_url", *req.AudiobookdbBaseURL)
 	}
 	if req.M4bMergeBinary != nil {
+		if *req.M4bMergeBinary != prev.M4bMerge.Binary {
+			// A re-pointed engine binary is gated BEFORE the save is
+			// accepted: a binary the boot gate would refuse (missing,
+			// too old, no protocol capabilities) must not become the live
+			// engine and start failing jobs. The gate probes the exact
+			// path requested, so a relative path resolves against the
+			// server's cwd the same way the launch will.
+			if _, err := h.svc.Processor.CheckCapabilitiesFor(r.Context(), *req.M4bMergeBinary); err != nil {
+				writeError(w, http.StatusBadRequest, "engine check failed for "+*req.M4bMergeBinary+": "+err.Error())
+				return
+			}
+		}
 		snap.M4bMerge.Binary = *req.M4bMergeBinary
 		changed["m4b_merge"] = mergeChangedMap(changed, "m4b_merge", "binary", *req.M4bMergeBinary)
 	}
@@ -386,6 +398,23 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		h.svc.Config.AddYAMLKeys(k)
 	}
 	h.svc.Processor.ApplyConfig(h.svc.Config.Config())
+	// A swapped engine binary means a new protocol surface: the capabilities
+	// document stored for the previous binary is now stale, and the Settings
+	// picker + every save-time format validation render from it. Re-probe
+	// the new binary (it already passed CheckCapabilitiesFor above, so this
+	// is a fast re-confirmation) and refresh the token registry.
+	if req.M4bMergeBinary != nil && *req.M4bMergeBinary != prev.M4bMerge.Binary {
+		if caps, err := h.svc.Processor.CheckCapabilitiesFor(r.Context(), live.M4bMerge.Binary); err != nil {
+			log.Printf("Warning: engine capability refresh after binary change failed: %v", err)
+		} else {
+			h.svc.Processor.StoreCapabilities(caps)
+			tokenNames := make([]string, 0, len(caps.PathTokens))
+			for _, t := range caps.PathTokens {
+				tokenNames = append(tokenNames, t.Name)
+			}
+			audio.SetPathFormatTokens(tokenNames)
+		}
+	}
 	h.svc.AudiobookDB.Store(audiobookdb.NewClient(live.APIKey.APIKey, live.APIKey.BaseURL))
 
 	// Scan trigger: turning the index on, or re-pointing the input root

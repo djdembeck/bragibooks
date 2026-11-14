@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,9 +74,13 @@ type BookSnapshot struct {
 // token (#480) resolves to the canonical AudiobookDB book id; the engine
 // (>= 2.2.0) accepts a supplied book_id directly.
 func (s *BookSnapshot) toSupplied() audio.SuppliedMetadata {
+	// authors must serialize as an array (even when empty): the engine's
+	// SuppliedInput.authors is a Vec<String> whose serde default accepts a
+	// MISSING field, not JSON null, so an authorless book would fail job
+	// parsing with null. make(..., 0, ...) yields a non-nil empty slice.
 	meta := audio.SuppliedMetadata{
 		Title:     s.Title,
-		Authors:   append([]string(nil), s.Authors...),
+		Authors:   append(make([]string, 0, len(s.Authors)), s.Authors...),
 		Narrators: append([]string(nil), s.Narrators...),
 		Genres:    append([]string(nil), s.Genres...),
 	}
@@ -281,7 +287,17 @@ func loadBookSnapshot(db *sql.DB, bookID int64) (*BookSnapshot, error) {
 // to "clear" (no cover) rather than failing the run: the selection's naming
 // and chapters are the load-bearing parts, and artwork loss is reported on
 // the snapshot capture, not hidden here.
-func buildEngineJob(args jobArgs, snap BookSnapshot, outputRoot, pathFormat string) (audio.JobFile, error) {
+// buildEngineJob returns the job file plus the absolute path of the cover
+// Bragi staged into the output root for this run ("" when none was staged);
+// the caller removes that file after RunJob in every case, since the engine
+// has already copied the bytes into the output on success.
+func buildEngineJob(args jobArgs, jobID string, snap BookSnapshot, outputRoot, pathFormat string) (audio.JobFile, string, error) {
+	// The engine requires a local cover file under its asset root: create
+	// the root up front so staging cannot write into a directory that only
+	// the engine later creates (or never creates on an early failure).
+	if err := os.MkdirAll(outputRoot, 0o755); err != nil {
+		return audio.JobFile{}, "", fmt.Errorf("create output root %s: %w", outputRoot, err)
+	}
 	supplied := snap.toSupplied()
 	jf := audio.JobFile{
 		SchemaVersion: audio.JobSchemaVersion,
@@ -294,14 +310,16 @@ func buildEngineJob(args jobArgs, snap BookSnapshot, outputRoot, pathFormat stri
 
 	// Cover: stage the captured file under the asset root, or clear.
 	jf.Cover = json.RawMessage(`"clear"`)
+	var stagedCover string
 	if snap.CoverFile != "" {
-		if staged, cerr := stageCoverUnderRoot(snap.CoverFile, outputRoot, snap.BookID); cerr == nil && staged != "" {
+		if staged, cerr := stageCoverUnderRoot(snap.CoverFile, outputRoot, jobID, snap.BookID); cerr == nil && staged != "" {
 			// The engine's object form for a local cover file.
 			if raw, merr := json.Marshal(map[string]string{"write": staged}); merr == nil {
 				jf.Cover = raw
 			} else {
 				log.Printf("encode cover policy for book %d: %v", snap.BookID, merr)
 			}
+			stagedCover = staged
 		} else if cerr != nil {
 			// No usable local cover: embed nothing rather than fetch at run
 			// time (supplied mode is offline) or fail.
@@ -323,7 +341,7 @@ func buildEngineJob(args jobArgs, snap BookSnapshot, outputRoot, pathFormat stri
 		}
 		enc, err := json.Marshal(list)
 		if err != nil {
-			return jf, fmt.Errorf("encode chapters: %w", err)
+			return jf, stagedCover, fmt.Errorf("encode chapters: %w", err)
 		}
 		jf.Chapters = json.RawMessage(`{"write":{"chapters":` + string(enc) + `}}`)
 	case snap.Chapters != nil:
@@ -332,7 +350,7 @@ func buildEngineJob(args jobArgs, snap BookSnapshot, outputRoot, pathFormat stri
 		jf.Chapters = nil
 	}
 
-	return jf, nil
+	return jf, stagedCover, nil
 }
 
 // coversDirPath is the app's on-disk covers directory, set once at startup
@@ -346,8 +364,11 @@ func SetCoversDir(dir string) { coversDirPath = dir }
 
 // stageCoverUnderRoot copies the book's captured cover (by filename in the
 // covers directory) into the output root under a job-owned hidden name and
-// returns its absolute path.
-func stageCoverUnderRoot(coverFile, outputRoot string, bookID int64) (string, error) {
+// returns its absolute path. The name carries the job ID so two runs of the
+// same book can never collide on the same staged file: the O_EXCL create is
+// the race detector, and a collision means the file already belongs to
+// another run's staging, not this one.
+func stageCoverUnderRoot(coverFile, outputRoot, jobID string, bookID int64) (string, error) {
 	if coversDirPath == "" {
 		return "", errors.New("covers directory is not configured")
 	}
@@ -359,7 +380,7 @@ func stageCoverUnderRoot(coverFile, outputRoot string, bookID int64) (string, er
 	if !info.Mode().IsRegular() {
 		return "", errors.New("cover file is not a regular file")
 	}
-	dest := filepath.Join(outputRoot, fmt.Sprintf(".bragi-cover-%d%s", bookID, filepath.Ext(coverFile)))
+	dest := filepath.Join(outputRoot, fmt.Sprintf(".bragi-cover-%d-%s%s", bookID, jobID, filepath.Ext(coverFile)))
 	in, err := os.Open(src)
 	if err != nil {
 		return "", err
@@ -497,23 +518,65 @@ const coverMaxBytes = 8 << 20
 
 // coverDownloadClient is the shared client for snapshot cover fetches. The
 // cover URL comes from the ADB client (already origin-gated by the ADB
-// trusted-base config); the bounded client adds the size and redirect
-// limits that an untrusted-ish image URL deserves.
+// trusted-base config); the bounded client adds the size, redirect, and
+// destination guards an untrusted-ish image URL deserves.
 var coverDownloadClient = &http.Client{
 	Timeout: coverDownloadTimeout,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 3 {
 			return errors.New("too many redirects")
 		}
-		return nil
+		// A redirect can escape the ADB trusted base: re-validate the
+		// destination the same way the initial URL is.
+		return assertPublicCoverURL(req.URL)
 	},
+}
+
+// assertPublicCoverURL refuses a cover destination that is not a public
+// http(s) URL: private, loopback, link-local, and multicast ranges are
+// internal infrastructure, and a catalog-provided (or redirect-hopped)
+// cover URL must never fetch from it. The host is resolved and EVERY
+// address checked, because a name resolving to mixed records must not
+// pass on the public one.
+func assertPublicCoverURL(u *url.URL) error {
+	if u == nil {
+		return errors.New("empty cover URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("cover URL scheme %q is not http(s)", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("cover URL has no host")
+	}
+	addrs, err := net.LookupHost(host)
+	if err != nil {
+		return fmt.Errorf("resolve cover host: %w", err)
+	}
+	for _, a := range addrs {
+		ip := net.ParseIP(a)
+		if ip == nil {
+			continue
+		}
+		if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+			return fmt.Errorf("cover host %s resolves to a non-public address", host)
+		}
+	}
+	return nil
 }
 
 // downloadCoverFile fetches url into dest with the bounded client, writing
 // to a temp file in the same directory and renaming into place so a partial
 // download never leaves a truncated cover served.
-func downloadCoverFile(ctx context.Context, url string, dest string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func downloadCoverFile(ctx context.Context, coverURL string, dest string) error {
+	parsed, err := url.Parse(coverURL)
+	if err != nil {
+		return fmt.Errorf("parse cover URL: %w", err)
+	}
+	if err := assertPublicCoverURL(parsed); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, coverURL, nil)
 	if err != nil {
 		return err
 	}

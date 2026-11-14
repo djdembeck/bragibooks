@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Fixed
 
+- Authoritative processing hardening (post-review):
+  - Every engine run re-verifies the exact binary it launches (version floor and protocol) before starting, so a re-pointed or swapped engine binary can no longer run queued jobs past the fail-closed gate; saving a new engine binary runs the same gate before the save is accepted, and a passing change refreshes the stored capabilities and token registry.
+  - Published-artifact containment is checked component by component: a symlinked directory (or file) that resolves outside the output root is rejected, not just a symlinked final file.
+  - Post-success staging cleanup is scoped to the run's own engine process ID, so a concurrently running job's in-flight staging in the same output root is never deleted; the per-run staged cover carries the job ID, the output root is created before staging, and the staged cover is removed after the run in every case.
+  - An authorless snapshot now sends an empty `authors` array (the engine rejects JSON `null` for it), and a blank title uses the `preserve` write policy instead of an unconditional write.
+  - Path formats containing a brace token the engine does not know are rejected at save time (server and Settings UI) instead of surfacing as an engine failure at run time.
+  - Match's proposed output name now feeds the engine the same series normalization a save captures (all named series, re-split by the last ` #`), so the previewed name cannot diverge from the stored snapshot's name.
+  - Snapshot cover downloads only follow public http(s) URLs: the host is resolved and every address must be public (private/loopback/link-local/multicast refused), on the initial URL and on every redirect hop.
+  - Engine preview errors no longer expose the server's temporary job-file path.
+
 - Source index steady state: directories whose stored snapshot hit the
   probe caps (box sets with more than 100 files) were treated as
   incomplete on every refresh and re-extracted (~100 ffprobe calls per

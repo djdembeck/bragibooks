@@ -86,7 +86,7 @@ type WritePolicies struct {
 // blank, so an unconditional all-write policy fails for partial snapshots.
 func AllSupportedWritePolicyFor(m SuppliedMetadata) WritePolicies {
 	p := WritePolicies{
-		Title:       "write",
+		Title:       "preserve",
 		Subtitle:    "preserve",
 		Authors:     "preserve",
 		Narrators:   "preserve",

@@ -40,9 +40,20 @@ func TestValidatePathFormat(t *testing.T) {
 		{name: "empty template", template: "", wantErrFr: "produces no path elements"},
 		{name: "separators only", template: "///", wantErrFr: "produces no path elements"},
 		{name: "whitespace only", template: "  / ", wantErrFr: "produces no path elements"},
-		{name: "asin alone has no substitutable placeholder", template: "{asin}", wantErrFr: "must include at least one placeholder"},
 		{name: "year scheme is valid (warnings are UI-only)", template: "{author}/{year}"},
-		{name: "unicode text allowed", template: "{author}/{.Grüße} mídia"},
+		{name: "unicode text allowed", template: "{author}/.Grüße mídia"},
+		// A closed brace is a token expression, so even a unicode "name" the
+		// engine does not know is an unsupported token, not literal text.
+		{name: "closed unicode brace is an unsupported token", template: "{author}/{.Grüße}", wantErrFr: `unsupported token {.Grüße}`},
+		// E0: a closed brace expression the engine does not know is rejected
+		// by the engine's parser, so it must be rejected here too.
+		{name: "unsupported token rejected", template: "{asin}", wantErrFr: `unsupported token {asin}`},
+		{name: "unsupported token mid-scheme", template: "{author}/{isbn}/{title}", wantErrFr: `unsupported token {isbn}`},
+		// A token the engine knows stays valid.
+		{name: "known token accepted", template: "{author}/{title}/{book_id}"},
+		// An UNCLOSED brace is literal text (the legacy pass-through), not a
+		// token: no E0, only the placeholder/element rules apply.
+		{name: "unclosed brace is literal text", template: "vol {x", wantErrFr: "must include at least one placeholder"},
 		{name: "control char forbidden", template: "{title}/a\x07b", wantErrFr: `path text cannot contain U+0007`},
 		// E1/E2 boundary on control-only segments: "\t" is a unicode.IsSpace
 		// rune, so trimming empties the segment and no element survives;

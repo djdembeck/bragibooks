@@ -980,6 +980,20 @@
 		return typeof value === 'string' ? value.trim() : '';
 	}
 
+	/** Mirror of the server's splitSeries (internal/api/snapshot.go): the
+	 *  stored books.series string is "Name #N" (or several, comma-joined);
+	 *  the last " #" separates name from position, a leading "#N" with no
+	 *  name is an empty name. Keeping the preview's re-parse identical to
+	 *  capture is what guarantees the previewed name matches the saved
+	 *  snapshot's name. */
+	function splitSeries(series: string): [string, string] {
+		series = series.trim();
+		if (!series) return ['', ''];
+		const i = series.lastIndexOf(' #');
+		if (i >= 0) return [series.slice(0, i).trim(), series.slice(i + 2).trim()];
+		return [series, ''];
+	}
+
 	/** Upstream sends series positions as a number, a string, or an object
 	 *  carrying `value`/`label`. Accept those forms, never invent one. */
 	function seriesPositionValue(series: unknown): string {
@@ -1131,7 +1145,6 @@
 	 *  people arrays, canonical ADB book id (#480), release year. */
 	function captureMetadata(book: AudiobookDBBook, release: AudiobookDBRelease | null): Record<string, unknown> {
 		const releaseDate = release?.releaseDate || book.originallyPublishedAt || '';
-		const series = book.series?.[0];
 		const meta: Record<string, unknown> = {
 			title: release?.title || book.title || '',
 			authors: rolePeople(book, release, 'author').map((p) => p.name),
@@ -1140,10 +1153,23 @@
 		if (book.id) meta.book_id = book.id;
 		const year = Number(yearOf(releaseDate));
 		if (Number.isFinite(year) && year > 0) meta.year = year;
-		const seriesName = seriesRecordName(series);
-		if (seriesName) meta.series_name = seriesName;
-		const seriesPosition = seriesPositionValue(series);
-		if (seriesPosition) meta.series_position = seriesPosition;
+		// Same series normalization the save captures: the stored books.series
+		// field is ALL named series entries comma-joined as "Name #N", and
+		// capture re-parses that string. A preview on only the first entry
+		// would diverge from the saved snapshot whenever a book has more
+		// than one named series.
+		const seriesName = (book.series ?? [])
+			.map((entry) => {
+				const name = seriesRecordName(entry);
+				if (!name) return '';
+				const position = seriesPositionValue(entry);
+				return [name, position ? `#${position}` : ''].filter(Boolean).join(' ');
+			})
+			.filter(Boolean)
+			.join(', ');
+		const [firstSeriesName, firstSeriesPosition] = splitSeries(seriesName);
+		if (firstSeriesName) meta.series_name = firstSeriesName;
+		if (firstSeriesPosition) meta.series_position = firstSeriesPosition;
 		const genre = (book.genres ?? [])[0]?.title;
 		if (genre) meta.genres = [genre];
 		return meta;

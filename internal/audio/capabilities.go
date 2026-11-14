@@ -74,7 +74,12 @@ func (p *Processor) ProbeCapabilities(ctx context.Context) (*Capabilities, error
 	p.mu.RLock()
 	binary := p.Binary
 	p.mu.RUnlock()
+	return p.ProbeCapabilitiesFor(ctx, binary)
+}
 
+// ProbeCapabilitiesFor runs --capabilities against the EXACT binary path
+// named, so a caller can probe a candidate binary before it becomes live.
+func (p *Processor) ProbeCapabilitiesFor(ctx context.Context, binary string) (*Capabilities, error) {
 	if binary == "" {
 		return nil, fmt.Errorf("m4b-merge binary is not set")
 	}
@@ -125,6 +130,28 @@ func (p *Processor) CheckCapabilities(ctx context.Context) (*Capabilities, error
 	if err != nil {
 		return nil, err
 	}
+	return p.validateCapabilities(caps)
+}
+
+// CheckCapabilitiesFor runs the same version + capabilities + protocol gate
+// as CheckCapabilities, but against the EXACT binary path named. The settings
+// save uses it before accepting a re-pointed engine binary: the path being
+// saved is the one that must pass, not whatever p.Binary holds today.
+func (p *Processor) CheckCapabilitiesFor(ctx context.Context, binary string) (*Capabilities, error) {
+	if _, err := p.CheckVersionFor(binary); err != nil {
+		return nil, err
+	}
+	caps, err := p.ProbeCapabilitiesFor(ctx, binary)
+	if err != nil {
+		return nil, err
+	}
+	return p.validateCapabilities(caps)
+}
+
+// validateCapabilities asserts the protocol Bragi depends on: the accepted
+// schema version, a non-empty token vocabulary, the canonical {book_id}
+// token in supplied mode (#480), and the plural people tokens (#479).
+func (p *Processor) validateCapabilities(caps *Capabilities) (*Capabilities, error) {
 	if caps.SchemaVersion != AcceptedEngineSchemaVersion {
 		return nil, fmt.Errorf("engine schema_version %d is unsupported, need %d", caps.SchemaVersion, AcceptedEngineSchemaVersion)
 	}

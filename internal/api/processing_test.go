@@ -147,7 +147,9 @@ func writeSleepingBinary(t *testing.T, dir string) string {
 func writeStreamingSleepBinary(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "stream-sleep-bin")
-	script := "#!/bin/sh\nprintf 'partial live line\\n' 1>&2\nexec sleep 300 1>&- 2>&-\n"
+	// The --version branch serves the pre-launch engine gate (the mock must
+	// report a version at or above the floor or RunJob refuses to start it).
+	script := "#!/bin/sh\ncase \"$*\" in *--version*) echo 'm4b-merge 2.2.0'; exit 0;; esac\nprintf 'partial live line\\n' 1>&2\nexec sleep 300 1>&- 2>&-\n"
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatalf("write streaming sleeping binary: %v", err)
 	}
@@ -1914,6 +1916,22 @@ func writeMergingBinary(t *testing.T, dir string) string {
 	script := `#!/usr/bin/env python3
 import json, os, sys
 
+if "--version" in sys.argv:
+    print("m4b-merge 2.2.0")
+    sys.exit(0)
+if "--capabilities" in sys.argv:
+    print(json.dumps({"schema_version": 1, "resolver_version": "1",
+        "default_path_format": "{author}/{title}",
+        "path_tokens": [{"name": k, "value": k, "example": k} for k in
+            ("author", "authors", "narrator", "narrators", "title", "subtitle",
+             "series_name", "series_position", "year", "genre",
+             "metadata_id", "book_id")],
+        "field_policies": {"values": ["write", "preserve", "clear"],
+            "scalar_fields": ["title", "subtitle", "authors", "narrators",
+                "series", "description", "genres", "year"]},
+        "cover_policies": {"constraint": "str", "variants": ["write", "clear"]},
+        "chapter_policies": {"constraint": "str", "variants": ["write", "clear"]}}))
+    sys.exit(0)
 job = None
 for i, a in enumerate(sys.argv):
     if a == "--job" and i + 1 < len(sys.argv):
@@ -1955,6 +1973,22 @@ func writeDerivedTitleBinary(t *testing.T, dir string) string {
 	script := `#!/usr/bin/env python3
 import json, os, sys
 
+if "--version" in sys.argv:
+    print("m4b-merge 2.2.0")
+    sys.exit(0)
+if "--capabilities" in sys.argv:
+    print(json.dumps({"schema_version": 1, "resolver_version": "1",
+        "default_path_format": "{author}/{title}",
+        "path_tokens": [{"name": k, "value": k, "example": k} for k in
+            ("author", "authors", "narrator", "narrators", "title", "subtitle",
+             "series_name", "series_position", "year", "genre",
+             "metadata_id", "book_id")],
+        "field_policies": {"values": ["write", "preserve", "clear"],
+            "scalar_fields": ["title", "subtitle", "authors", "narrators",
+                "series", "description", "genres", "year"]},
+        "cover_policies": {"constraint": "str", "variants": ["write", "clear"]},
+        "chapter_policies": {"constraint": "str", "variants": ["write", "clear"]}}))
+    sys.exit(0)
 job = None
 for i, a in enumerate(sys.argv):
     if a == "--job" and i + 1 < len(sys.argv):

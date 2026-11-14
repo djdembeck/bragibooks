@@ -233,10 +233,31 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 	const errors: string[] = [];
 	const warnings: string[] = [];
 	const segs = segments(parts);
+	const keys = new Set(get(engineTokens).map((t) => t.name));
 
 	// E1: zero path elements after trimming.
 	if (segs.every((s) => trimSegment(s.text) === '' && s.tokens.length === 0)) {
 		errors.push('Add at least one path element.');
+	}
+
+	// E0: a closed brace expression the engine does not know. The engine's
+	// template parser rejects unknown tokens (unlike an unclosed brace,
+	// which is literal text), so a format the UI accepts must be one the
+	// engine will run — same rule as the Go ValidatePathFormat gate.
+	for (const p of parts) {
+		if (p.kind !== 'text') continue;
+		for (let i = 0; i < p.value.length; i++) {
+			if (p.value[i] !== '{') continue;
+			const close = p.value.indexOf('}', i + 1);
+			if (close !== -1) {
+				const key = p.value.slice(i + 1, close);
+				if (!keys.has(key)) {
+					errors.push(`Path format contains unsupported token {${key}}.`);
+					return { errors, warnings };
+				}
+				i = close;
+			}
+		}
 	}
 
 	// E2: forbidden characters in literal text (only the literal pieces —
@@ -275,7 +296,6 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 
 	// E4: at least one placeholder from the engine's token set (a token part
 	// or a recognized token spelling typed inside text).
-	const keys = new Set(get(engineTokens).map((t) => t.name));
 	let hasToken = parts.some((p) => p.kind === 'token' && keys.has(p.key));
 	if (!hasToken) {
 		for (const p of parts) {

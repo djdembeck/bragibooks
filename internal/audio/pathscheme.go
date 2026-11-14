@@ -123,6 +123,27 @@ func ValidateRelativePathFormat(template string) error {
 // mounts). Mirrors the web scheme rules so live UI feedback and saved
 // 400s agree.
 func ValidatePathFormat(template string) error {
+	// E0: brace-delimited tokens the engine does not know are rejected by the
+	// engine's parser (PathResolutionError::UnknownToken), so a stored format
+	// containing one must fail validation HERE, before save — the legacy
+	// literal pass-through applied only to an UNCLOSED brace, which a closing
+	// brace is not. An engine-version capability gap (registry empty) is not
+	// a user typo: the boot gate already refused to start in that state.
+	if len(tokenRegistry) > 0 {
+		for i := 0; i < len(template); i++ {
+			if template[i] != '{' {
+				continue
+			}
+			if end := strings.IndexByte(template[i+1:], '}'); end >= 0 {
+				name := template[i+1 : i+1+end]
+				if !isPathFormatToken(name) {
+					return fmt.Errorf("path format contains unsupported token {%s}", name)
+				}
+				i += end
+			}
+		}
+	}
+
 	segs := parsePathFormat(template)
 
 	plainSegs := make([]string, 0, len(segs))

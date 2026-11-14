@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -98,6 +99,16 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	if opts.OutputRoot == "" {
 		return nil, errors.New("RunJob: output root is empty")
 	}
+	// Fail-closed version gate on the EXACT executable this run will launch.
+	// The startup gate covers first boot; this one catches a binary that was
+	// swapped, removed, or re-pointed to a too-old build by a settings update
+	// after startup. The same snapshot call that produced `binary` above is
+	// used throughout, so a single job observes one consistent executable,
+	// destination, and format (AGENTS: one settings snapshot per run).
+	if _, err := p.CheckVersionFor(binary); err != nil {
+		return nil, fmt.Errorf("pre-launch engine gate: %w", err)
+	}
+
 	absRoot, err := filepath.Abs(opts.OutputRoot)
 	if err != nil {
 		return nil, fmt.Errorf("abs output root: %w", err)
@@ -173,12 +184,15 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	if perr != nil {
 		return result, fmt.Errorf("m4b-merge exited %d with an unreadable machine result: %w", result.ExitCode, perr)
 	}
-	return p.finishJobRun(result, doc, opts, absRoot)
+	// Staging siblings are named with THIS engine process's pid; the pid is
+	// what scopes cleanup to this run (see removeStagingSiblings).
+	engPID := cmd.Process.Pid
+	return p.finishJobRun(result, doc, opts, absRoot, engPID)
 }
 
 // finishJobRun validates a parsed machine document and reports the outcome.
 // It never deletes recoverable staging on a non-success.
-func (p *Processor) finishJobRun(result *JobRunResult, doc machineResult, opts JobRunOptions, root string) (*JobRunResult, error) {
+func (p *Processor) finishJobRun(result *JobRunResult, doc machineResult, opts JobRunOptions, root string, engPID int) (*JobRunResult, error) {
 	result.Status = doc.Status
 	for _, g := range doc.Groups {
 		if g.Error != nil && *g.Error != "" {
@@ -233,8 +247,11 @@ func (p *Processor) finishJobRun(result *JobRunResult, doc machineResult, opts J
 
 	// On a clean success the engine's staging siblings are pure residue (the
 	// final files are already claimed); remove them so the output tree stays
-	// clean. This is a best-effort cleanup of Bragi's own claim root only.
-	if err := removeStagingSiblings(root); err != nil {
+	// clean. Cleanup is scoped to THIS engine process's staging prefix: the
+	// pid in the name is what separates this run's residue from a
+	// concurrently running job's in-flight staging in the same root.
+	// Best-effort, Bragi's own claim root only.
+	if err := removeStagingSiblings(root, engPID); err != nil {
 		// Cleanup failure after a validated success is logged, not fatal:
 		// the output is already published and correct.
 		log.Printf("remove staging siblings under %s: %v", root, err)
@@ -246,8 +263,14 @@ func (p *Processor) finishJobRun(result *JobRunResult, doc machineResult, opts J
 // machine-result artifact that the engine published under root: relative, no
 // absolute path, no ".." segment, and a regular file on disk. The engine
 // already validated its own paths, so this is a defense against a tampered or
-// misreported document (a swapped-in symlink is the escape vector this
-// check exists for).
+// misreported document.
+//
+// Containment is checked COMPONENT BY COMPONENT: each directory segment
+// between root and the file is lstat'd, and a symlinked component that
+// resolves outside the canonical root is rejected. Checking only the final
+// path is not sufficient — a symlinked intermediate directory makes the
+// final path a regular file from Lstat's point of view while its bytes live
+// outside the root.
 func validatePublishedArtifact(a mArtifact, root string) (string, error) {
 	if a.RelativePath == "" {
 		return "", errors.New("empty relative path")
@@ -255,12 +278,45 @@ func validatePublishedArtifact(a mArtifact, root string) (string, error) {
 	if filepath.IsAbs(a.RelativePath) {
 		return "", errors.New("absolute path from engine")
 	}
-	for _, seg := range strings.Split(filepath.ToSlash(a.RelativePath), "/") {
+	segs := strings.Split(filepath.ToSlash(a.RelativePath), "/")
+	for _, seg := range segs {
 		if seg == ".." {
 			return "", errors.New("path contains a '..' segment")
 		}
 	}
-	final := filepath.Join(root, filepath.FromSlash(a.RelativePath))
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return "", fmt.Errorf("output root does not resolve: %w", err)
+	}
+
+	// Walk every intermediate directory, rejecting any component that is a
+	// symlink escaping the root.
+	prefix := canonicalRoot
+	for _, seg := range segs[:len(segs)-1] {
+		prefix = filepath.Join(prefix, seg)
+		info, err := os.Lstat(prefix)
+		if err != nil {
+			return "", fmt.Errorf("published path missing: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			resolved, err := filepath.EvalSymlinks(prefix)
+			if err != nil {
+				return "", fmt.Errorf("symlink does not resolve: %w", err)
+			}
+			if !withinRoot(canonicalRoot, resolved) {
+				return "", fmt.Errorf("path component %q escapes output root", seg)
+			}
+		} else if !info.IsDir() {
+			return "", fmt.Errorf("path component %q is not a directory", seg)
+		}
+	}
+
+	// Final component.
+	final := filepath.Join(prefix, segs[len(segs)-1])
 	info, err := os.Lstat(final)
 	if err != nil {
 		return "", fmt.Errorf("published path missing: %w", err)
@@ -270,12 +326,7 @@ func validatePublishedArtifact(a mArtifact, root string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("symlink does not resolve: %w", err)
 		}
-		absRoot, err := filepath.Abs(root)
-		if err != nil {
-			return "", err
-		}
-		rel, err := filepath.Rel(absRoot, resolved)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if !withinRoot(canonicalRoot, resolved) {
 			return "", fmt.Errorf("symlink escapes output root: %s", resolved)
 		}
 		if info, err = os.Stat(resolved); err != nil {
@@ -288,15 +339,29 @@ func validatePublishedArtifact(a mArtifact, root string) (string, error) {
 	return final, nil
 }
 
-// stagingSiblingPattern matches the engine's per-run staging siblings
-// (.m4b-merge-staging-<pid>-<nanos>-<n>.<ext>) left in the output tree.
-var stagingSiblingPattern = ".m4b-merge-staging-*"
+// withinRoot reports whether resolved lies inside canonicalRoot (both
+// absolute, both symlink-resolved).
+func withinRoot(canonicalRoot, resolved string) bool {
+	rel, err := filepath.Rel(canonicalRoot, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
+// stagingSiblingPrefix matches the engine's per-run staging siblings
+// (.m4b-merge-staging-<pid>-<nanos>-<n>.<ext>) left in the output tree. The
+// pid is the engine process's own; scoping cleanup to one run's pid keeps a
+// concurrent job's in-flight staging in the same root untouched.
+const stagingSiblingPrefix = ".m4b-merge-staging-"
 
 // removeStagingSiblings walks root (the job's claim root, never the source
-// tree) and removes the engine's leftover staging siblings. It only touches
-// files matching the engine's own prefix, so a user's real output can never
-// be removed by cleanup.
-func removeStagingSiblings(root string) error {
+// tree) and removes this run's leftover staging siblings: files named with
+// the engine prefix followed by the run's engine pid. It only touches
+// files matching this run's own prefix, so a user's real output — and a
+// concurrent run's staging — can never be removed by cleanup.
+func removeStagingSiblings(root string, engPID int) error {
+	prefix := stagingSiblingPrefix + strconv.Itoa(engPID) + "-"
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // best-effort
@@ -304,7 +369,7 @@ func removeStagingSiblings(root string) error {
 		if d.IsDir() {
 			return nil
 		}
-		if ok, _ := filepath.Match(stagingSiblingPattern, d.Name()); ok {
+		if strings.HasPrefix(d.Name(), prefix) {
 			return os.Remove(path)
 		}
 		return nil

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -47,6 +48,17 @@ func (p *Processor) Preview(ctx context.Context, meta SuppliedMetadata, pathForm
 	f.Close()
 	defer os.Remove(probeFile)
 
+	// The preview job file lives in a temp dir the client should never see:
+	// the engine's stderr (and any start failure) can echo the path, so every
+	// user-facing error from this function is redacted of it and its parent.
+	redact := func(s string) string {
+		s = strings.ReplaceAll(s, probeFile, "<temp>")
+		if td := os.TempDir(); td != "" {
+			s = strings.ReplaceAll(s, td, "<temp>")
+		}
+		return s
+	}
+
 	cmd := newEngineCommand(ctx, binary, probeFile, logLevel, true)
 	tree := newProcessTree(cmd)
 	cmd.Cancel = func() error {
@@ -60,17 +72,17 @@ func (p *Processor) Preview(ctx context.Context, meta SuppliedMetadata, pathForm
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("m4b-merge preview start: %w", err)
+		return nil, fmt.Errorf("m4b-merge preview start: %s", redact(err.Error()))
 	}
 	waitErr := cmd.Wait()
 	tree.finish()
 	if waitErr != nil {
-		return nil, fmt.Errorf("m4b-merge --job-preview: %s", formattedStderr(stripEscapeSequences(stderrBuf.String())))
+		return nil, fmt.Errorf("m4b-merge --job-preview: %s", redact(formattedStderr(stripEscapeSequences(stderrBuf.String()))))
 	}
 
 	doc, err := parsePreviewResult(stdoutBuf.Bytes())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s", redact(err.Error()))
 	}
 	return &JobPreviewResponse{
 		Engine: EngineIdentity{

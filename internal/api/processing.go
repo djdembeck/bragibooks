@@ -1103,7 +1103,15 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		}
 	}
 
-	jf, err := buildEngineJob(args, args.Snapshot.Snapshot, effRoot, effFormat)
+	jf, stagedCover, err := buildEngineJob(args, job.ID, args.Snapshot.Snapshot, effRoot, effFormat)
+	// The staged cover is Bragi's own input staging: the engine copies its
+	// bytes into the output on success, so it is residue after RunJob in
+	// every case (success, failure, cancellation). Removed best-effort in a
+	// defer covering the whole run; on a build failure the run never
+	// started, so the same removal applies before returning.
+	if stagedCover != "" {
+		defer os.Remove(stagedCover)
+	}
 	if err != nil {
 		buildErr := fmt.Errorf("build engine job: %v", err)
 		if job.BookID.Valid {
