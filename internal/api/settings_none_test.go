@@ -179,6 +179,26 @@ func TestUpdateSettingsIgnoresPinnedMetadataSelection(t *testing.T) {
 		if getBody["metadata_fields_pinned"] != true || getBody["metadata_chapters_pinned"] != true {
 			t.Errorf("pinned GET: want both flags true, got %v / %v", getBody["metadata_fields_pinned"], getBody["metadata_chapters_pinned"])
 		}
+		// The persisted store must carry the pin values, not the submitted
+		// (non-pinned) ones.
+		raw, _ = json.Marshal(getBody["metadata_fields"])
+		if string(raw) != `["title","subtitle"]` {
+			t.Errorf("pinned fields in store: want the pin [title,subtitle], got %s", raw)
+		}
+		raw, _ = json.Marshal(getBody["metadata_chapters"])
+		if string(raw) != `"write"` {
+			t.Errorf("pinned chapters in store: want the pin (write), got %s", raw)
+		}
+
+		// A malformed value for the pinned key must not 400 the save of an
+		// unrelated key (the pinned key is dropped before validation).
+		resp = put(`{"num_cpus":4,"metadata_fields":["bogus_field"],"metadata_chapters":"not-a-policy"}`)
+		if resp.code != 200 {
+			t.Fatalf("malformed pinned values + unrelated key: want 200, got %d: %v", resp.code, resp.body)
+		}
+		if resp.body["num_cpus"] != 4.0 {
+			t.Errorf("unrelated num_cpus not saved alongside malformed pinned values: %v", resp.body["num_cpus"])
+		}
 	})
 
 	// Only the chapter value pinned: the field selection in the same PUT

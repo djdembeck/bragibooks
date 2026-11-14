@@ -299,12 +299,29 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Per-field write selection (#518): a PRESENT value is validated (an
-	// unknown field name is a 400 naming it — the UI derives its checkbox
-	// list from the verified engine capabilities, so a stale client that
-	// sends a dropped field must fail loudly); an ABSENT value leaves the
-	// saved selection untouched (partial-update semantics). The chapter
-	// policy accepts only the two Bragi-derived values (write/preserve).
+	// A deployment pin (PROCESSING_METADATA_FIELDS /
+	// PROCESSING_METADATA_CHAPTERS) outranks the settings stores: it stays
+	// authoritative for jobs while present (applyEnvPriority re-asserts it),
+	// so a save of the pinned value must not be persisted as if it had
+	// taken effect. The pinned key is dropped from this save BEFORE
+	// validation, so a stale client that posts a malformed value for the
+	// pinned key cannot 400 unrelated settings in the same PUT; GET
+	// reports the pin so the UI renders those controls read-only. Same
+	// env-managed contract as the API endpoint.
+	fieldsPinned, chaptersPinned := h.svc.Config.MetadataEnvManaged()
+	if fieldsPinned {
+		req.MetadataFields = nil
+	}
+	if chaptersPinned {
+		req.MetadataChapters = nil
+	}
+	// Per-field write selection (#518): a PRESENT (unpinned) value is
+	// validated — an unknown field name is a 400 naming it, since the UI
+	// derives its checkbox list from the verified engine capabilities and
+	// a stale client that sends a dropped field must fail loudly. An
+	// ABSENT value leaves the saved selection untouched (partial-update
+	// semantics). The chapter policy accepts only the two Bragi-derived
+	// values (write/preserve).
 	if req.MetadataFields != nil {
 		if _, err := audio.NormalizeSelectableFields(*req.MetadataFields); err != nil {
 			writeError(w, http.StatusBadRequest, "metadata fields: "+err.Error())
@@ -317,21 +334,6 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "chapter write policy must be \"write\" or \"preserve\"")
 			return
 		}
-	}
-	// A deployment pin (PROCESSING_METADATA_FIELDS /
-	// PROCESSING_METADATA_CHAPTERS) outranks the settings stores: it stays
-	// authoritative for jobs while present (applyEnvPriority re-asserts it),
-	// so a save of the pinned value must not be persisted as if it had
-	// taken effect. The pinned key is dropped from this save (unrelated
-	// settings in the same PUT still land); GET reports the pin so the UI
-	// renders those controls read-only. Same env-managed contract as the
-	// API endpoint.
-	fieldsPinned, chaptersPinned := h.svc.Config.MetadataEnvManaged()
-	if fieldsPinned {
-		req.MetadataFields = nil
-	}
-	if chaptersPinned {
-		req.MetadataChapters = nil
 	}
 
 	// Directories the server creates subdirectories in are probed before
