@@ -438,6 +438,20 @@ func (s *ProcessingService) loadSnapshotForQueue(bookID int64) (*snapshotJSON, e
 	if snap == nil {
 		return nil, nil
 	}
+	// The per-book manual overrides (B3) layer ON TOP of the catalog
+	// capture at queue time: the job's effective metadata is the capture
+	// with the operator's edited values / cleared fields / custom
+	// cover / chapter list applied, and the policies the override forces
+	// (explicit clears, the cover/chapter pins) freeze into the frozen
+	// write selection so a queued job's intent cannot drift under a later
+	// edit, catalog re-match, or settings change. The CATALOG ROW itself
+	// is untouched (it stays the pure capture, re-taken on match/save).
+	ov, err := loadBookMetadataOverride(s.db, bookID)
+	if err != nil {
+		return nil, err
+	}
+	eff, pins := applyMetadataOverride(snap, ov)
+	snap = &eff
 	// The per-field write selection is FROZEN AT QUEUE TIME (#518): the
 	// saved operator preference at this instant becomes part of the job's
 	// immutable snapshot, exactly like the output destination. A settings
@@ -495,6 +509,64 @@ func (s *ProcessingService) loadSnapshotForQueue(bookID int64) (*snapshotJSON, e
 			Fields:   nil,
 			Cover:    audio.WritePolicyValueWrite,
 			Chapters: chapters,
+		}
+	}
+	// The editor's per-book pins (B3) override the settings-derived
+	// selection on the frozen job: a cleared scalar runs under "clear"
+	// regardless of the selection, a custom cover/chapter list forces its
+	// policy, and a pin can FORCE a selection the settings default would
+	// omit (a nil selection gains a Selection just to carry the pins —
+	// the pins are the operator's explicit per-book intent and must
+	// survive the job's lifetime).
+	if pins != nil {
+		if out.Selection == nil {
+			out.Selection = &WriteSelection{
+				Fields:   nil,
+				Cover:    audio.WritePolicyValueWrite,
+				Chapters: audio.ChaptersPolicyValueWrite,
+			}
+		}
+		if pins.Cover != nil {
+			out.Selection.Cover = *pins.Cover
+			if *pins.Cover == "write_url" {
+				out.Selection.CoverURL = ov.CoverURL
+			}
+		}
+		if pins.Chapters != nil {
+			out.Selection.Chapters = *pins.Chapters
+		}
+		if pins.Scalars != nil {
+			s := *pins.Scalars
+			put := func(key, val string) {
+				if out.Selection.ScalarPins == nil {
+					out.Selection.ScalarPins = map[string]string{}
+				}
+				out.Selection.ScalarPins[key] = val
+			}
+			if s.Title != "" {
+				put("title", s.Title)
+			}
+			if s.Subtitle != "" {
+				put("subtitle", s.Subtitle)
+			}
+			if s.Authors != "" {
+				put("authors", s.Authors)
+			}
+			if s.Narrators != "" {
+				put("narrators", s.Narrators)
+			}
+			if s.Series != "" {
+				put("series", s.Series)
+			}
+			if s.Description != "" {
+				put("description", s.Description)
+			}
+			if s.Genres != "" {
+				put("genres", s.Genres)
+			}
+			if s.Year != "" {
+				put("year", s.Year)
+			}
 		}
 	}
 	return out, nil

@@ -94,6 +94,13 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 		r.Get("/books/{id}/reprocess", h.GetBookReprocess)
 		r.Get("/books/{id}/match-evidence", h.GetMatchEvidence)
 
+		// Manual metadata editor (per-book override layer, B3): state,
+		// save, reset-to-catalog, and the operator's own artwork upload.
+		r.Get("/books/{id}/metadata", h.GetBookMetadata)
+		r.Put("/books/{id}/metadata", h.UpdateBookMetadata)
+		r.Post("/books/{id}/metadata/reset", h.ResetBookMetadata)
+		r.Post("/books/{id}/metadata/cover", h.UploadBookMetadataCover)
+
 		// Processing
 		r.Post("/process", h.StartProcessing)
 		r.Post("/process/reprocess", h.StartReprocess)

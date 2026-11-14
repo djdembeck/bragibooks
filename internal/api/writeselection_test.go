@@ -159,17 +159,34 @@ func TestValidateWriteSelectionRejectsCorrupted(t *testing.T) {
 	if err := validateWriteSelection(valid); err != nil {
 		t.Fatalf("valid selection rejected: %v", err)
 	}
+	// B3: the per-book editor pins a cleared field to "clear" and a URL
+	// cover to "write_url" on top of the selection-derived baseline, so
+	// both are legitimate FROZEN job values and must validate.
+	clearPinned := &WriteSelection{Fields: []string{"title"}, Cover: audio.WritePolicyValueClear, Chapters: audio.ChaptersPolicyValuePreserve,
+		ScalarPins: map[string]string{"subtitle": audio.WritePolicyValueClear}}
+	if err := validateWriteSelection(clearPinned); err != nil {
+		t.Fatalf("clear/write_url selection rejected: %v", err)
+	}
+	writeURL := &WriteSelection{Fields: []string{"title"}, Cover: "write_url", Chapters: audio.ChaptersPolicyValuePreserve}
+	if err := validateWriteSelection(writeURL); err != nil {
+		t.Fatalf("write_url cover selection rejected: %v", err)
+	}
 	badField := &WriteSelection{Fields: []string{"isbn"}, Cover: audio.WritePolicyValuePreserve, Chapters: audio.ChaptersPolicyValuePreserve}
 	if err := validateWriteSelection(badField); err == nil {
 		t.Fatal("unknown field accepted")
 	}
-	badCover := &WriteSelection{Fields: []string{"title"}, Cover: "clear", Chapters: audio.ChaptersPolicyValuePreserve}
+	badCover := &WriteSelection{Fields: []string{"title"}, Cover: "bogus", Chapters: audio.ChaptersPolicyValuePreserve}
 	if err := validateWriteSelection(badCover); err == nil {
-		t.Fatal("out-of-vocabulary cover policy accepted (clear is a per-book editor operation, never a frozen job value)")
+		t.Fatal("out-of-vocabulary cover policy accepted")
 	}
 	badChapters := &WriteSelection{Fields: []string{"title"}, Cover: audio.WritePolicyValuePreserve, Chapters: "bogus"}
 	if err := validateWriteSelection(badChapters); err == nil {
 		t.Fatal("out-of-vocabulary chapter policy accepted")
+	}
+	badPin := &WriteSelection{Fields: []string{"title"}, Cover: audio.WritePolicyValuePreserve, Chapters: audio.ChaptersPolicyValuePreserve,
+		ScalarPins: map[string]string{"title": audio.WritePolicyValueWrite}}
+	if err := validateWriteSelection(badPin); err == nil {
+		t.Fatal("scalar pin with a non-clear policy accepted")
 	}
 }
 

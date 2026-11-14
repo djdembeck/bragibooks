@@ -30,12 +30,17 @@ func CoverHandler(dir string) http.Handler {
 	})
 }
 
-// validCoverName reports whether name is one of the `<book id>.jpg` files
-// written by CreateBooks. Requiring digits only rejects path separators,
-// parent references, and stray assets in the covers directory.
+// validCoverName reports whether name is a legal covers-directory asset:
+// the `<book id>.jpg` files written by CreateBooks, OR a manual-override
+// cover asset (`ovr-<book id>-<hex>.jpg`, the metadata editor's uploaded
+// artwork). Requiring the exact shapes rejects path separators, parent
+// references, and stray assets in the shared covers directory.
 func validCoverName(name string) bool {
 	if len(name) < 5 || name[len(name)-4:] != ".jpg" {
 		return false
+	}
+	if strings.HasPrefix(name, "ovr-") {
+		return overrideCoverName(name)
 	}
 	for _, c := range name[:len(name)-4] {
 		if c < '0' || c > '9' {
