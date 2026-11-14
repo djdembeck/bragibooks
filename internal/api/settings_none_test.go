@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -292,4 +293,74 @@ func TestUpdateSettingsIgnoresPinnedMetadataSelection(t *testing.T) {
 			t.Errorf("chapter pin leaked into DB row: want the baseline preserve, got %s", storedChapters)
 		}
 	})
+}
+
+// TestUpdateSettingsPinnedAbortWhenStoredSelectionUnreadable pins the last
+// freeze case: with the fields pin active and a malformed (non-list)
+// metadata_fields in the durable file, the save must NOT proceed with the
+// live pin value. No settings row at all → abort with 500 and write
+// nothing (a fresh INSERT would have persisted the pin); a readable row →
+// freeze to that row's value, including the confirmed-unset ”.
+func TestUpdateSettingsPinnedAbortWhenStoredSelectionUnreadable(t *testing.T) {
+	t.Setenv("PROCESSING_METADATA_FIELDS", "title,subtitle")
+	h := newSettingsTestService(t, newSettingsTestDB(t))
+	r := buildSettingsRouter(h)
+
+	put := func(body string) *httptestResponse {
+		req := httptest.NewRequest("PUT", "/api/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		out := map[string]any{}
+		if data, _ := io.ReadAll(rec.Result().Body); len(data) > 0 {
+			json.Unmarshal(data, &out)
+		}
+		return &httptestResponse{code: rec.Code, body: out}
+	}
+	rowExists := func() bool {
+		var id int
+		err := h.svc.DB.QueryRow(`SELECT id FROM settings WHERE id = 1`).Scan(&id)
+		return err == nil
+	}
+
+	// Malformed durable file (the typed loader discards it at boot, so the
+	// freeze cannot trust it).
+	if err := os.WriteFile(h.svc.Config.ConfigPath(),
+		[]byte("processing:\n  metadata_fields: title,subtitle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No row: the live config carries the pin, so the only safe behavior
+	// is to abort BEFORE any store write (a fresh INSERT would persist
+	// the pin).
+	resp := put(`{"num_cpus":2}`)
+	if resp.code != 500 {
+		t.Fatalf("unreadable stored selection under pin: want 500 abort, got %d: %v", resp.code, resp.body)
+	}
+	if !strings.Contains(resp.body["error"].(string), "cannot save") {
+		t.Errorf("abort message should name the pin and the stored selection: %v", resp.body["error"])
+	}
+	if rowExists() {
+		t.Fatalf("aborted save must not create the settings row (the pin would ride into it)")
+	}
+
+	// A readable row: the same malformed file now freezes to the row's
+	// stored value (the confirmed-unset '' included), and the save lands.
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO settings (id, metadata_fields, metadata_chapters) VALUES (1, '["title"]', 'preserve')`); err != nil {
+		t.Fatal(err)
+	}
+	resp = put(`{"num_cpus":3}`)
+	if resp.code != 200 {
+		t.Fatalf("readable row under pin: want 200, got %d: %v", resp.code, resp.body)
+	}
+	var storedFields, storedChapters string
+	if err := h.svc.DB.QueryRow(
+		`SELECT metadata_fields, metadata_chapters FROM settings WHERE id = 1`,
+	).Scan(&storedFields, &storedChapters); err != nil {
+		t.Fatal(err)
+	}
+	if string(storedFields) != `["title"]` || storedChapters != "preserve" {
+		t.Errorf("row not frozen to its stored value under pin: got %s/%s, want [\"title\"]/preserve", storedFields, storedChapters)
+	}
 }

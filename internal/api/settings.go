@@ -384,22 +384,38 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// never reach the file save.
 	if f, c := h.svc.Config.MetadataEnvManaged(); f || c {
 		storedFields, storedChapters, fieldsOK := h.svc.Config.StoredMetadataSelection()
-		if f && !fieldsOK {
+		fileUnreadable := f && !fieldsOK
+		if fileUnreadable {
 			// A malformed (non-list) file value is discarded by the typed
-			// loader, so the durable row is the truth the pin must not
-			// clobber: read it back and preserve it, UNSET INCLUDED. A
+			// loader, so the durable file carries no trustworthy
+			// selection: the settings row is the truth the pins must not
+			// clobber, frozen back from the row (UNSET INCLUDED). A
 			// silently converted file value would wipe a saved selection
-			// into the unset default on the next unrelated save. Only a
-			// failed read leaves the live value in place (never a guess).
-			rowFields, rowOK := h.storedMetadataFieldsRow()
-			if rowOK {
+			// into the default on the next unrelated save.
+			rowFields, rowChapters, rowOK := h.storedMetadataRow()
+			if !rowOK {
+				// The row cannot be read: the live config carries the
+				// pin, so proceeding would persist the pin into the
+				// freshly written row. Abort instead of guessing.
+				writeError(w, http.StatusInternalServerError,
+					"cannot save while a metadata write pin is set: the stored selection is unreadable (corrupt settings row or malformed config value); resolve the corruption, then retry")
+				return
+			}
+			if f {
 				snap.Processing.MetadataFields = rowFields
 			}
-		} else if f {
-			snap.Processing.MetadataFields = storedFields
-		}
-		if c {
-			snap.Processing.MetadataChapters = storedChapters
+			// Chapters are always frozen from the row here (pinned or not):
+			// the file is unreadable, so the live chapters value is the
+			// default, not the stored selection — freezing the row is the
+			// only way an unpinned key cannot clobber the store either.
+			snap.Processing.MetadataChapters = rowChapters
+		} else {
+			if f {
+				snap.Processing.MetadataFields = storedFields
+			}
+			if c {
+				snap.Processing.MetadataChapters = storedChapters
+			}
 		}
 	}
 	changed := make(map[string]any)
@@ -634,28 +650,31 @@ func validateAudiobookdbBaseURL(raw string) error {
 	return err
 }
 
-// storedMetadataFieldsRow reads the settings row's metadata_fields column
-// and decodes it the way saveSettingsToDB writes it (JSON array text,
-// empty string = unset default). ok=false means the row could not be read
-// (no row, decode failure): the caller must leave the live value in place,
-// never
-// guess. ok=true with a nil pointer is a successful read of the UNSET
-// default; a present empty list is the none-selected save.
-func (h *Handler) storedMetadataFieldsRow() (*[]string, bool) {
-	var col string
+// storedMetadataRow reads the settings row's metadata selection columns
+// and decodes them the way saveSettingsToDB writes them (fields: JSON
+// array text, ” = unset default; chapters: policy string, ” = default
+// write). ok=false means the row could not be read (no row, decode
+// failure): the caller must not proceed with a guessed value. ok=true
+// with a nil fields pointer is a successful read of the UNSET default;
+// a present empty list is the none-selected save.
+func (h *Handler) storedMetadataRow() (fields *[]string, chapters string, ok bool) {
+	var fieldsCol, chaptersCol string
 	if err := h.svc.DB.QueryRow(
-		`SELECT COALESCE(metadata_fields, '') FROM settings WHERE id = 1`,
-	).Scan(&col); err != nil {
-		return nil, false
+		`SELECT COALESCE(metadata_fields, ''), COALESCE(metadata_chapters, '') FROM settings WHERE id = 1`,
+	).Scan(&fieldsCol, &chaptersCol); err != nil {
+		return nil, "", false
 	}
-	if col == "" {
-		return nil, true
+	if fieldsCol != "" {
+		var f []string
+		if err := json.Unmarshal([]byte(fieldsCol), &f); err != nil {
+			return nil, "", false
+		}
+		fields = &f
 	}
-	var fields []string
-	if err := json.Unmarshal([]byte(col), &fields); err != nil {
-		return nil, false
+	if chaptersCol != "" {
+		chapters = chaptersCol
 	}
-	return &fields, true
+	return fields, chapters, true
 }
 
 // saveSettingsToDB persists the config to the settings table in the database.
