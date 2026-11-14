@@ -190,8 +190,32 @@ func (p *Processor) validateCapabilities(caps *Capabilities) (*Capabilities, err
 			return nil, fmt.Errorf("engine capabilities lack scalar field %q; the per-field metadata write selection cannot be honored (engine scalar fields: %s)", f, strings.Join(caps.FieldPolicies.ScalarFields, ", "))
 		}
 	}
+	// The derived job policies are not just the scalar write/preserve pair:
+	// a deselected field, a preserved cover, and a preserved chapter list all
+	// serialize the "preserve" policy strings into the job file. The engine
+	// advertises each policy path's accepted variants in cover_policies /
+	// chapter_policies, so the gate must require "preserve" there: an engine
+	// that dropped it would pass the field checks above, boot cleanly, and
+	// only reject every preserve job at run time.
+	if !policyVariant(caps.CoverPolicies.Variants, WritePolicyValuePreserve) {
+		return nil, fmt.Errorf("engine cover_policies do not advertise %q; an unselected field or preserved cover cannot be honored (cover variants: %s)", WritePolicyValuePreserve, strings.Join(caps.CoverPolicies.Variants, ", "))
+	}
+	if !policyVariant(caps.ChapterPolicies.Variants, WritePolicyValuePreserve) {
+		return nil, fmt.Errorf("engine chapter_policies do not advertise %q; a preserved chapter list cannot be honored (chapter variants: %s)", WritePolicyValuePreserve, strings.Join(caps.ChapterPolicies.Variants, ", "))
+	}
 	// A missing probe must never be silently swallowed into a start: log so
 	// an operator sees a capability that regressed at boot.
 	log.Printf("engine capabilities verified: schema %d, resolver %s, %d tokens, %d scalar fields", caps.SchemaVersion, caps.ResolverVersion, len(caps.PathTokens), len(caps.FieldPolicies.ScalarFields))
 	return caps, nil
+}
+
+// policyVariant reports whether the engine's advertised variant list for a
+// policy path includes the named policy string.
+func policyVariant(variants []string, want string) bool {
+	for _, v := range variants {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }

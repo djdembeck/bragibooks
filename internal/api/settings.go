@@ -48,6 +48,14 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 		// none checked (write nothing).
 		"metadata_fields":   cfg.Processing.MetadataFields,
 		"metadata_chapters": cfg.Processing.MetadataChapters,
+		"metadata_fields_pinned": func() bool {
+			f, _ := h.svc.Config.MetadataEnvManaged()
+			return f
+		}(),
+		"metadata_chapters_pinned": func() bool {
+			_, c := h.svc.Config.MetadataEnvManaged()
+			return c
+		}(),
 	}
 
 	writeJSON(w, http.StatusOK, settings)
@@ -310,6 +318,21 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A deployment pin (PROCESSING_METADATA_FIELDS /
+	// PROCESSING_METADATA_CHAPTERS) outranks the settings stores: it stays
+	// authoritative for jobs while present (applyEnvPriority re-asserts it),
+	// so a save of the pinned value must not be persisted as if it had
+	// taken effect. The pinned key is dropped from this save (unrelated
+	// settings in the same PUT still land); GET reports the pin so the UI
+	// renders those controls read-only. Same env-managed contract as the
+	// API endpoint.
+	fieldsPinned, chaptersPinned := h.svc.Config.MetadataEnvManaged()
+	if fieldsPinned {
+		req.MetadataFields = nil
+	}
+	if chaptersPinned {
+		req.MetadataChapters = nil
+	}
 
 	// Directories the server creates subdirectories in are probed before
 	// persisting, but only when this request CHANGES the value: the stored
@@ -461,6 +484,11 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	live.Directories.InputDir = expandTilde(live.Directories.InputDir)
 	live.Directories.OutputDir = expandTilde(live.Directories.OutputDir)
 	live.Directories.CompletedDir = expandTilde(live.Directories.CompletedDir)
+	// A settings save stores a freshly merged config; without this the
+	// active PROCESSING_METADATA_* pins would vanish from the live state
+	// for the rest of the process's lifetime (jobs would then run the
+	// saved value, not the deployment pin).
+	config.ReassertMetadataPins(&live)
 	h.svc.Config.Store(&live)
 	for _, k := range changedDottedKeys(changed) {
 		h.svc.Config.AddYAMLKeys(k)
@@ -518,18 +546,20 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		// Included so the client's draft-vs-saved tracking (the index
 		// status row appears only once the preference is saved) reads the
 		// saved truth from this response, matching GET's shape.
-		"indexing_enabled":     live.Directories.IndexingEnabled,
-		"input_dir":            live.Directories.InputDir,
-		"output_dir":           live.Directories.OutputDir,
-		"completed_dir":        live.Directories.CompletedDir,
-		"num_cpus":             live.Processing.NumCPUs,
-		"output_scheme":        live.Processing.PathFormat,
-		"region":               live.Processing.Region,
-		"audiobookdb_base_url": live.APIKey.BaseURL,
-		"bragibooks_version":   version.Version,
-		"m4b_merge_version":    m4bMergeVersion,
-		"metadata_fields":      live.Processing.MetadataFields,
-		"metadata_chapters":    live.Processing.MetadataChapters,
+		"indexing_enabled":         live.Directories.IndexingEnabled,
+		"input_dir":                live.Directories.InputDir,
+		"output_dir":               live.Directories.OutputDir,
+		"completed_dir":            live.Directories.CompletedDir,
+		"num_cpus":                 live.Processing.NumCPUs,
+		"output_scheme":            live.Processing.PathFormat,
+		"region":                   live.Processing.Region,
+		"audiobookdb_base_url":     live.APIKey.BaseURL,
+		"bragibooks_version":       version.Version,
+		"m4b_merge_version":        m4bMergeVersion,
+		"metadata_fields":          live.Processing.MetadataFields,
+		"metadata_chapters":        live.Processing.MetadataChapters,
+		"metadata_fields_pinned":   fieldsPinned,
+		"metadata_chapters_pinned": chaptersPinned,
 	}
 
 	writeJSON(w, http.StatusOK, settings)

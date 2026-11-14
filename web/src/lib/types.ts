@@ -190,6 +190,10 @@ export interface Settings {
 	metadata_fields?: string[];
 	/** Chapter write policy for the engine's chapter path (#518): write | preserve. */
 	metadata_chapters?: string;
+	/** True while PROCESSING_METADATA_FIELDS pins the selection deployment-side. */
+	metadata_fields_pinned?: boolean;
+	/** True while PROCESSING_METADATA_CHAPTERS pins the policy deployment-side. */
+	metadata_chapters_pinned?: boolean;
 	created_at?: string;
 	updated_at?: string;
 	bragibooks_version?: string;

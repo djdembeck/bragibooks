@@ -29,8 +29,8 @@ if "--capabilities" in sys.argv:
         "path_tokens": [{"name": "title", "value": "t", "example": "T"}],
         "field_policies": {"values": ["write", "preserve"],
             "scalar_fields": ["title"]},
-        "cover_policies": {"constraint": "str", "variants": ["write", "clear"]},
-        "chapter_policies": {"constraint": "str", "variants": ["write", "clear"]}}))
+        "cover_policies": {"constraint": "str", "variants": ["write", "preserve", "clear"]},
+        "chapter_policies": {"constraint": "str", "variants": ["write", "preserve", "clear"]}}))
     sys.exit(0)
 job = None
 for i, a in enumerate(sys.argv):

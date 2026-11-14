@@ -129,6 +129,8 @@ func TestValidateCapabilitiesRejectsMissingScalarFields(t *testing.T) {
 		ResolverVersion: "test",
 		PathTokens:      []PathToken{{Name: "book_id"}, {Name: "authors"}, {Name: "narrators"}},
 		FieldPolicies:   FieldPolicies{ScalarFields: SupportedWriteFields},
+		CoverPolicies:   PolicyVariantSet{Variants: []string{"write", "preserve", "clear"}},
+		ChapterPolicies: PolicyVariantSet{Variants: []string{"write", "preserve", "clear"}},
 	}
 	if _, err := p.validateCapabilities(good); err != nil {
 		t.Fatalf("valid capabilities rejected: %v", err)
@@ -137,5 +139,18 @@ func TestValidateCapabilitiesRejectsMissingScalarFields(t *testing.T) {
 	dropped.FieldPolicies.ScalarFields = []string{"title", "authors", "narrators", "series", "description", "genres", "year"}
 	if _, err := p.validateCapabilities(&dropped); err == nil {
 		t.Fatal("engine without the subtitle scalar field accepted; the write selection would silently ignore it")
+	}
+	// An engine that dropped "preserve" from a policy path would boot, then
+	// reject every unselected-field / preserve job at run time: the gate must
+	// name that at startup.
+	noCoverPreserve := *good
+	noCoverPreserve.CoverPolicies.Variants = []string{"write", "clear"}
+	if _, err := p.validateCapabilities(&noCoverPreserve); err == nil {
+		t.Fatal("engine without cover preserve accepted; a preserved cover would fail at job time")
+	}
+	noChapterPreserve := *good
+	noChapterPreserve.ChapterPolicies.Variants = []string{"write", "clear"}
+	if _, err := p.validateCapabilities(&noChapterPreserve); err == nil {
+		t.Fatal("engine without chapter preserve accepted; a preserved chapter list would fail at job time")
 	}
 }

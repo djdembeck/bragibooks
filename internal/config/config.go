@@ -304,6 +304,52 @@ func (cm *ConfigManager) APIEndpointEnvManaged() bool {
 	return os.Getenv("SERVER_API_ENDPOINT_ENABLED") != ""
 }
 
+// MetadataEnvManaged reports whether PROCESSING_METADATA_FIELDS and/or
+// PROCESSING_METADATA_CHAPTERS pin the per-field write selection
+// deployment-side. Env beats the settings stores in the documented
+// precedence: the UI renders the pinned controls read-only, the settings
+// save ignores the pinned keys, and ReassertMetadataPins keeps the pinned
+// values authoritative in the live config until the operator removes the
+// pin. Mirrors APIEndpointEnvManaged.
+func (cm *ConfigManager) MetadataEnvManaged() (fields, chapters bool) {
+	fields = os.Getenv("PROCESSING_METADATA_FIELDS") != ""
+	chapters = os.Getenv("PROCESSING_METADATA_CHAPTERS") != ""
+	return
+}
+
+// ReassertMetadataPins re-applies the PROCESSING_METADATA_* pins to a live
+// config. The full env priority runs at load time (applyEnvPriority), but
+// the settings save path stores a freshly merged config that would silently
+// drop an active pin from the live state for the rest of the process's
+// lifetime; callers that replace the live config must re-assert the pins so
+// the deployment value stays authoritative (and visible to readers) until
+// the operator removes it.
+func ReassertMetadataPins(cfg *Config) {
+	if v := os.Getenv("PROCESSING_METADATA_FIELDS"); v != "" {
+		list := normalizeMetadataPin(v)
+		cfg.Processing.MetadataFields = &list
+	}
+	if v := os.Getenv("PROCESSING_METADATA_CHAPTERS"); v != "" {
+		cfg.Processing.MetadataChapters = strings.TrimSpace(v)
+	}
+}
+
+// normalizeMetadataPin splits a PROCESSING_METADATA_FIELDS pin into its
+// field list (an all-whitespace pin is the explicit "write nothing"). The
+// values are NOT validated: the boot validation in main.go is the single
+// nameable gate (same as the path-format boot check), so a bad pin fails
+// startup with a clear diagnosis, not a silently dropped deployment value.
+func normalizeMetadataPin(v string) []string {
+	parts := strings.Split(v, ",")
+	list := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			list = append(list, p)
+		}
+	}
+	return list
+}
+
 // AddYAMLKeys records that the given dotted keys are now explicitly present
 // in the config file (e.g. after a settings update wrote them), so future
 // loads treat file values as authoritative for those keys.
@@ -550,18 +596,8 @@ func applyEnvPriority(cfg *Config) {
 	}
 	// PROCESSING_METADATA_FIELDS pins the per-field write selection as a
 	// comma-separated list (an empty list is the explicit "write nothing").
-	// The values are NOT validated here: the boot validation in main.go is
-	// the single nameable gate (same as the path-format boot check), so a
-	// bad pin fails startup with a clear diagnosis, not a silently dropped
-	// deployment value.
 	if v := envVal("processing.metadata_fields"); v != "" {
-		parts := strings.Split(v, ",")
-		list := make([]string, 0, len(parts))
-		for _, p := range parts {
-			if p = strings.TrimSpace(p); p != "" {
-				list = append(list, p)
-			}
-		}
+		list := normalizeMetadataPin(v)
 		cfg.Processing.MetadataFields = &list
 	}
 	if v := envVal("processing.metadata_chapters"); v != "" {

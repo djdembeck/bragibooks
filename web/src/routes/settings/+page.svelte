@@ -220,16 +220,21 @@
 	];
 	const engineFields = $derived(getEngineCapabilities()?.field_policies?.scalar_fields ?? []);
 	const selectionFields = $derived(FIELD_ORDER.filter((f) => f === 'cover' || engineFields.includes(f)));
-	const selectedFields = $derived(
-		(Array.isArray(settings?.metadata_fields) ? settings!.metadata_fields : []).filter(
-			(f) => f !== 'cover'
-		)
-	);
+	// null (never saved) is the DEFAULT: every supported field is written.
+	// It must render every checkbox checked; a present array (possibly
+	// empty = write nothing) renders exactly its members. Cover is stored
+	// in the same list (setFieldChecked round-trips it through it), so the
+	// saved list — not a cover-filtered one — drives the checkbox states.
+	const selectionDefault = $derived(settings?.metadata_fields == null);
+	const selectedFields = $derived(Array.isArray(settings?.metadata_fields) ? settings!.metadata_fields : []);
+	// Deployment pins (PROCESSING_METADATA_FIELDS /
+	// PROCESSING_METADATA_CHAPTERS) outrank this form: the server ignores
+	// saves of the pinned value, so render those controls read-only.
+	const fieldsPinned = $derived(!!settings?.metadata_fields_pinned);
+	const chaptersPinned = $derived(!!settings?.metadata_chapters_pinned);
 	const chapterPolicy = $derived(settings?.metadata_chapters || 'write');
 	function fieldChecked(field: string): boolean {
-		return field === 'cover'
-			? (settings?.metadata_fields ?? []).includes('cover')
-			: selectedFields.includes(field);
+		return selectionDefault || selectedFields.includes(field);
 	}
 	function setFieldChecked(field: string, checked: boolean) {
 		if (!settings) return;
@@ -997,6 +1002,7 @@
 										id="meta_field_{field}"
 										type="checkbox"
 										checked={fieldChecked(field)}
+										disabled={fieldsPinned}
 										onchange={(e) => setFieldChecked(field, e.currentTarget.checked)}
 									/>
 									<span>{FIELD_LABELS[field] ?? field}</span>
@@ -1005,6 +1011,12 @@
 						</div>
 						<fieldset class="metadata-chapter-policy">
 							<legend class="settings-label">Chapters</legend>
+							{#if fieldsPinned}
+								<p class="settings-help">
+									The field selection is set by the deployment
+									(PROCESSING_METADATA_FIELDS) and cannot be changed here.
+								</p>
+							{/if}
 							<label class="settings-checkbox-row" for="chapters_policy_write">
 								<input
 									id="chapters_policy_write"
@@ -1012,6 +1024,7 @@
 									name="chapters_policy"
 									checked={chapterPolicy === 'write'}
 									value="write"
+									disabled={chaptersPinned}
 									onchange={() => settings && (settings.metadata_chapters = 'write')}
 								/>
 								<span>Write chapters</span>
@@ -1023,10 +1036,17 @@
 									name="chapters_policy"
 									checked={chapterPolicy === 'preserve'}
 									value="preserve"
+									disabled={chaptersPinned}
 									onchange={() => settings && (settings.metadata_chapters = 'preserve')}
 								/>
 								<span>Preserve existing chapters</span>
 							</label>
+							{#if chaptersPinned}
+								<p class="settings-help">
+									The chapter policy is set by the deployment
+									(PROCESSING_METADATA_CHAPTERS) and cannot be changed here.
+								</p>
+							{/if}
 							<p class="settings-help">
 								Chapters take a separate engine path from tags: writing
 								embeds the matched edition’s explicit chapter list (and
@@ -1036,7 +1056,7 @@
 								supported — the engine reports an explicit error.
 							</p>
 						</fieldset>
-						{#if selectedFields.length === 0 && !(settings.metadata_fields ?? []).includes('cover')}
+						{#if !selectionDefault && selectedFields.length === 0}
 							<p class="settings-help">
 								Nothing is selected: processing will not touch embedded tags,
 								cover art, or chapters — it only produces the merged audio and
