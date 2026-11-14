@@ -57,7 +57,10 @@ type pathFormatSegment struct {
 // validatePathFormatParse walks a template: every '/' separates segments,
 // "{known-key}" is a token, and all other runs are literal text.
 func parsePathFormat(template string) []pathFormatSegment {
-	reg := pathTokenSet()
+	return parsePathFormatFor(template, pathTokenSet())
+}
+
+func parsePathFormatFor(template string, reg map[string]struct{}) []pathFormatSegment {
 	var segs []pathFormatSegment
 	var cur strings.Builder
 	var curHasToken bool
@@ -165,7 +168,7 @@ func ValidatePathFormat(template string) error {
 		}
 	}
 
-	segs := parsePathFormat(template)
+	segs := parsePathFormatFor(template, reg)
 
 	plainSegs := make([]string, 0, len(segs))
 	anyElement := false

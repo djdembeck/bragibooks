@@ -414,13 +414,18 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	for _, k := range changedDottedKeys(changed) {
 		h.svc.Config.AddYAMLKeys(k)
 	}
-	h.svc.Processor.ApplyConfig(h.svc.Config.Config())
+	// A swapped engine binary means a new protocol surface: the
+	// capabilities stored for the previous binary are stale, and the
+	// Settings picker + every save-time format validation render from
+	// them. Publish the pre-save-verified document and the token registry
+	// BEFORE the binary swap below: a reader then pairs either the complete
+	// old state (old binary + old capabilities) or the new capabilities
+	// with the old binary — never the new binary with the previous
+	// binary's capabilities. The latter pairing would record a stale
+	// engine identity at queue time that the new binary's run cannot match;
+	// the former self-heals (a job on the old binary reports the old
+	// identity, mismatches, fails closed, and re-queues onto the new one).
 	if newBinaryCaps != nil {
-		// A swapped engine binary means a new protocol surface: the
-		// capabilities stored for the previous binary are stale, and the
-		// Settings picker + every save-time format validation render from
-		// them. Publish the pre-save-verified document now, alongside the
-		// binary the run paths have just been pointed at.
 		h.svc.Processor.StoreCapabilities(newBinaryCaps)
 		tokenNames := make([]string, 0, len(newBinaryCaps.PathTokens))
 		for _, t := range newBinaryCaps.PathTokens {
@@ -428,6 +433,7 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		audio.SetPathFormatTokens(tokenNames)
 	}
+	h.svc.Processor.ApplyConfig(h.svc.Config.Config())
 	h.svc.AudiobookDB.Store(audiobookdb.NewClient(live.APIKey.APIKey, live.APIKey.BaseURL))
 
 	// Scan trigger: turning the index on, or re-pointing the input root

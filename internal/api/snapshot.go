@@ -651,9 +651,15 @@ func doPinnedCoverGet(ctx context.Context, hop coverHop) (*http.Response, error)
 		TLSHandshakeTimeout:   5 * time.Second,
 		ExpectContinueTimeout: time.Second,
 	}
+	// Redirects are NOT followed by the client: the manual hop loop in
+	// downloadCoverFile must see every 3xx so each destination is resolved,
+	// validated as public, and pinned to its own addresses. A client-side
+	// follow would dial the redirect target over this hop's pinned IP and
+	// skip that destination's validation entirely.
 	client := &http.Client{
-		Timeout:   coverDownloadTimeout,
-		Transport: transport,
+		Timeout:       coverDownloadTimeout,
+		Transport:     transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	defer transport.CloseIdleConnections()
 	target := scheme + "://" + net.JoinHostPort(hop.url.Hostname(), hop.port)
