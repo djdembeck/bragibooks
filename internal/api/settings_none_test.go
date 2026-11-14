@@ -360,8 +360,11 @@ func TestUpdateSettingsPinnedAbortWhenStoredSelectionUnreadable(t *testing.T) {
 	).Scan(&storedFields, &storedChapters); err != nil {
 		t.Fatal(err)
 	}
-	if string(storedFields) != `["title"]` || storedChapters != "preserve" {
-		t.Errorf("row not frozen to its stored value under pin: got %s/%s, want [\"title\"]/preserve", storedFields, storedChapters)
+	// The malformed fields value freezes from the row; the ABSENT
+	// chapters key is a VALID file default (T8), so the file's default
+	// (write) stays authoritative over the row's older preserve.
+	if string(storedFields) != `["title"]` || storedChapters != "write" {
+		t.Errorf("row not frozen correctly under pin: got %s/%s, want [\"title\"]/write (fields from row, chapters file default)", storedFields, storedChapters)
 	}
 
 	// A VALID chapters value in the file stays authoritative for that key
@@ -385,5 +388,96 @@ func TestUpdateSettingsPinnedAbortWhenStoredSelectionUnreadable(t *testing.T) {
 	// FILE (write), not the row's preserve.
 	if string(storedFields) != `["title"]` || storedChapters != "write" {
 		t.Errorf("file chapters not kept under malformed fields pin: got %s/%s, want [\"title\"]/write (file value)", storedFields, storedChapters)
+	}
+
+	// An ABSENT chapters key is a VALID default for that key, not an
+	// unreadable value (T8): the file actively manages the selection
+	// (its fields key is present), so the file's default chapters value
+	// (write) stays authoritative over the row's older preserve — the
+	// stale row selection must not win.
+	if err := os.WriteFile(h.svc.Config.ConfigPath(),
+		[]byte("processing:\n  metadata_fields: title,subtitle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp = put(`{"num_cpus":6}`)
+	if resp.code != 200 {
+		t.Fatalf("absent chapters key under malformed fields pin: want 200, got %d: %v", resp.code, resp.body)
+	}
+	if err := h.svc.DB.QueryRow(
+		`SELECT metadata_fields, metadata_chapters FROM settings WHERE id = 1`,
+	).Scan(&storedFields, &storedChapters); err != nil {
+		t.Fatal(err)
+	}
+	if string(storedFields) != `["title"]` || storedChapters != "write" {
+		t.Errorf("absent chapters key: got %s/%s, want [\"title\"]/write (the file's default beats the stale row)", storedFields, storedChapters)
+	}
+}
+
+// TestUpdateSettingsPinnedPreservesDBOnlySelection pins the env-pin contract
+// for DB-only selections: a selection that lives ONLY in the settings row
+// (startup's documented DB fallback — the YAML file carries no metadata
+// keys) must survive an unrelated save made while the env pins are active.
+// Freezing the file's default for an absent key would wipe the row, so
+// removing the pins and restarting would lose the user's selection.
+func TestUpdateSettingsPinnedPreservesDBOnlySelection(t *testing.T) {
+	h := newSettingsTestService(t, newSettingsTestDB(t))
+	r := buildSettingsRouter(h)
+
+	put := func(body string) *httptestResponse {
+		req := httptest.NewRequest("PUT", "/api/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		var out map[string]any
+		if data, _ := io.ReadAll(rec.Result().Body); len(data) > 0 {
+			json.Unmarshal(data, &out)
+		}
+		return &httptestResponse{code: rec.Code, body: out}
+	}
+
+	// DB-only selection: the row carries a saved selection, the durable
+	// config FILE carries no metadata keys — the startup-load scenario
+	// (the documented DB fallback) the pin must not clobber. A PUT would
+	// write the file keys, so seed the row directly.
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO settings (id, metadata_fields, metadata_chapters) VALUES (1, '["title"]', 'preserve')`,
+	); err != nil {
+		t.Fatalf("seed DB-only row: %v", err)
+	}
+	f, c, fOK, cOK := h.svc.Config.StoredMetadataSelection()
+	if storedString(f) == `["title"]` || c != "write" {
+		t.Fatalf("test setup: file must NOT carry the baseline selection, got %s/%s", storedString(f), c)
+	}
+	if !fOK || !cOK {
+		t.Fatalf("test setup: absent file keys are valid defaults; fieldsOK/chaptersOK = %v/%v", fOK, cOK)
+	}
+
+	// Both keys pinned; an unrelated save must keep the DB-only row.
+	t.Setenv("PROCESSING_METADATA_FIELDS", "title,subtitle")
+	t.Setenv("PROCESSING_METADATA_CHAPTERS", "write")
+	if resp := put(`{"num_cpus":3}`); resp.code != 200 {
+		t.Fatalf("unrelated pinned PUT: want 200, got %d: %v", resp.code, resp.body)
+	}
+	var storedFields, storedChapters string
+	if err := h.svc.DB.QueryRow(
+		`SELECT metadata_fields, metadata_chapters FROM settings WHERE id = 1`,
+	).Scan(&storedFields, &storedChapters); err != nil {
+		t.Fatalf("read settings row: %v", err)
+	}
+	if string(storedFields) != `["title"]` || storedChapters != "preserve" {
+		t.Fatalf("DB-only selection wiped under env pins: got %s/%s, want [\"title\"]/preserve", storedFields, storedChapters)
+	}
+	// The live config still carries the pin, and the row survives a second
+	// pinned save as well.
+	if resp := put(`{"num_cpus":4}`); resp.code != 200 {
+		t.Fatalf("second pinned PUT: want 200, got %d: %v", resp.code, resp.body)
+	}
+	if err := h.svc.DB.QueryRow(
+		`SELECT metadata_fields, metadata_chapters FROM settings WHERE id = 1`,
+	).Scan(&storedFields, &storedChapters); err != nil {
+		t.Fatalf("read settings row after second save: %v", err)
+	}
+	if string(storedFields) != `["title"]` || storedChapters != "preserve" {
+		t.Fatalf("DB-only selection wiped on second pinned save: got %s/%s, want [\"title\"]/preserve", storedFields, storedChapters)
 	}
 }

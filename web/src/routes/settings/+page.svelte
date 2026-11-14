@@ -238,11 +238,17 @@
 	}
 	function setFieldChecked(field: string, checked: boolean) {
 		if (!settings) return;
+		// A null (default) selection renders every supported field
+		// checked, so the FIRST edit must materialize the full
+		// supported list before toggling: building from `?? []` would
+		// persist a one-field selection and silently flip every other
+		// field from write to preserve.
+		const current = settings.metadata_fields ?? selectionFields;
 		if (field === 'cover') {
-			const cur = (settings.metadata_fields ?? []).filter((f) => f !== 'cover');
+			const cur = current.filter((f) => f !== 'cover');
 			settings.metadata_fields = checked ? [...cur, 'cover'] : cur;
 		} else {
-			const cur = (settings.metadata_fields ?? []).filter((f) => f !== field);
+			const cur = current.filter((f) => f !== field);
 			settings.metadata_fields = checked ? [...cur, field] : cur;
 		}
 	}
@@ -989,7 +995,7 @@
 						embedded in the source audio. Output naming always uses the selected
 						metadata, selected fields or not.
 					</p>
-					{#if engineFields.length === 0 && selectionFields.length === 0}
+					{#if engineFields.length === 0}
 						<p class="settings-field-error" role="alert">
 							The engine does not report per-field write support (m4b-merge ≥ 2.2.0
 							required), so this selection is unavailable.

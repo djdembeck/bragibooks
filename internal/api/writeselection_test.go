@@ -217,6 +217,57 @@ func TestLoadSnapshotForQueueFreezesSelection(t *testing.T) {
 	}
 }
 
+// TestQueueChaptersPreserveWithDefaultFields guards the independent
+// chapter setting (#518): a non-default chapter policy saved alongside the
+// DEFAULT (nil) scalar selection must freeze into the queue-time snapshot
+// — and the built job must honor it — even though no field selection was
+// ever saved. The scalar baseline stays the all-supported-available
+// default and the cover keeps its default write policy.
+func TestQueueChaptersPreserveWithDefaultFields(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	svc.proc = testProcessor(svc.proc)
+	bookID := seedTestBook(t, h.svc.DB, 1, "Book One")
+	seedSnapshot(t, h.svc.DB, bookID)
+
+	// Only the chapter policy is saved; the scalar selection stays nil.
+	svc.proc.ApplyWriteSelection(nil, audio.ChaptersPolicyValuePreserve)
+	snap, err := svc.loadSnapshotForQueue(bookID)
+	if err != nil {
+		t.Fatalf("loadSnapshotForQueue (chapters-only): %v", err)
+	}
+	if snap == nil || snap.Selection == nil {
+		t.Fatalf("chapters-only queue snapshot = %#v, want a frozen selection", snap)
+	}
+	if snap.Selection.Fields != nil {
+		t.Fatalf("chapters-only frozen fields = %v, want nil (default scalar baseline)", snap.Selection.Fields)
+	}
+	if snap.Selection.Cover != audio.WritePolicyValueWrite {
+		t.Fatalf("chapters-only frozen cover = %q, want write (no field selection pins cover)", snap.Selection.Cover)
+	}
+	if snap.Selection.Chapters != audio.ChaptersPolicyValuePreserve {
+		t.Fatalf("chapters-only frozen chapters = %q, want preserve", snap.Selection.Chapters)
+	}
+
+	// The built job must honor the frozen chapter policy: chapters
+	// preserve (no sidecar), scalar policies at the all-supported
+	// default, cover at the default write.
+	year := 2020
+	bookSnap := BookSnapshot{BookID: bookID, Title: "Book One", Subtitle: "The Sub", Authors: []string{"A"}, Year: &year, Chapters: []SnapshotChapter{{Title: "Ch 1", StartMillis: 0, DurationMillis: 1000}}}
+	jf, _, err := buildEngineJob(jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: snap}, "job-1", bookSnap, t.TempDir(), "{title}")
+	if err != nil {
+		t.Fatalf("buildEngineJob (chapters-only): %v", err)
+	}
+	if string(jf.Chapters) != `"preserve"` {
+		t.Fatalf("chapters-only job chapters = %s, want \"preserve\"", jf.Chapters)
+	}
+	if jf.Policies.Title != audio.WritePolicyValueWrite || jf.Policies.Subtitle != audio.WritePolicyValueWrite || jf.Policies.Authors != audio.WritePolicyValueWrite {
+		t.Fatalf("chapters-only job scalar policies deviated from the all-supported default: %+v", jf.Policies)
+	}
+	if string(jf.Cover) != `"clear"` {
+		t.Fatalf("chapters-only job cover = %s, want \"clear\" (default write, no staged cover)", jf.Cover)
+	}
+}
+
 // seedTestBook inserts a minimal books row so the queue path's hard
 // prerequisite (a book row) is met. The title is the snapshot's title.
 func seedTestBook(t *testing.T, db *sql.DB, id int64, title string) int64 {

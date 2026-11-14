@@ -482,6 +482,20 @@ func (s *ProcessingService) loadSnapshotForQueue(bookID int64) (*snapshotJSON, e
 			Cover:    cover,
 			Chapters: jobChapters,
 		}
+	} else if chapters != audio.ChaptersPolicyValueWrite {
+		// The chapter policy is an independent setting (#518): a non-
+		// default chapter policy must freeze into the job even when the
+		// scalar fields use the default (nil) selection. Fields stays nil
+		// (the all-supported-available scalar baseline) and the cover
+		// keeps its default write policy; only the chapter policy is
+		// pinned to the saved preference. A default-chapters nil selection
+		// stays omitted so legacy and default jobs keep their pre-
+		// selection shape.
+		out.Selection = &WriteSelection{
+			Fields:   nil,
+			Cover:    audio.WritePolicyValueWrite,
+			Chapters: chapters,
+		}
 	}
 	return out, nil
 }

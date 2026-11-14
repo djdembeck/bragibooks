@@ -354,3 +354,65 @@ func TestPruneSupersededCoversPrunesOrphanDespiteActiveJob(t *testing.T) {
 		t.Fatalf("legacy orphan cover must be pruned even while an active job exists (guard is per-file)")
 	}
 }
+
+// TestCaptureSnapshotRetainsReleaseSubtitleOnReleaseFailure pins the
+// degraded-capture contract for the subtitle: with an unchanged selection,
+// the previously captured RELEASE subtitle is restored up front, so a
+// GetBook-success/GetRelease-failure refresh must KEEP it — the book
+// fallback only applies when no retained value belongs to that selection.
+func TestCaptureSnapshotRetainsReleaseSubtitleOnReleaseFailure(t *testing.T) {
+	h := newTestHandler(t)
+
+	// Catalog: /books/42 succeeds with a book-level subtitle; /releases/5
+	// FAILS, so the release-specific subtitle cannot be re-established.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/books/42":
+			fmt.Fprint(w, `{"id":"42","title":"Seed Book","subtitle":"Book Sub"}`)
+		case "/releases/5":
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error":"release detail exploded"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	av := &atomic.Value{}
+	av.Store(audiobookdb.NewClient("k", srv.URL))
+	h.svc.AudiobookDB = av
+
+	// Seed the catalog-linked book and a capture that already holds the
+	// release-specific subtitle ("Release Sub") for the SAME selection
+	// (book 42, release 5).
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status, audiobookdb_book_id, audiobookdb_release_id) VALUES (1, 'Seed Book', 'matched', '42', '5')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO book_snapshots (book_id, audiobookdb_book_id, audiobookdb_release_id, title,
+			authors, narrators, subtitle, genres, cover_file, chapters, captured_at)
+		 VALUES (1, '42', '5', 'Seed Book', '[]', '[]', 'Release Sub', '[]', '', '[]', datetime("now"))`,
+	); err != nil {
+		t.Fatalf("seed snapshot row: %v", err)
+	}
+
+	// Unchanged selection: the release id stays '5', so the retained
+	// release subtitle belongs to this selection.
+	w := doUpdateBook(t, h, 1, UpdateBookRequest{Title: ptrStr("Edited Title")})
+	if w.Code != http.StatusOK {
+		t.Fatalf("save = %d; want 200", w.Code)
+	}
+
+	s, err := h.loadSnapshot(1)
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	if s.Subtitle != "Release Sub" {
+		t.Fatalf("subtitle = %q; want the retained release subtitle \"Release Sub\" (a release-detail failure must not replace it with the book fallback)", s.Subtitle)
+	}
+	if s.Title != "Edited Title" {
+		t.Errorf("title = %q; want the refreshed local field", s.Title)
+	}
+}

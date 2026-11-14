@@ -417,6 +417,8 @@ func TestMetadataFieldsNonEmptyListSurvivesFileReload(t *testing.T) {
 // malformed distinction, which the settings save's pin freeze relies on:
 // nil pointer = unset (default all), present empty list = none-selected,
 // non-list = malformed (fieldsOK false, so a freeze must skip the key).
+// An ABSENT key is a valid default for BOTH keys (chaptersOK stays true);
+// only a present non-string chapters value is unreadable.
 func TestStoredMetadataSelectionShapes(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -427,12 +429,12 @@ func TestStoredMetadataSelectionShapes(t *testing.T) {
 		wantChap   string
 		wantChapOK bool
 	}{
-		{"missing file", "", true, nil, true, "write", false},
-		{"absent keys", "processing:\n  num_cpus: 1\n", true, nil, true, "write", false},
-		{"explicit empty list", "processing:\n  metadata_fields: []\n", true, []string{}, true, "write", false},
+		{"missing file", "", true, nil, true, "write", true},
+		{"absent keys", "processing:\n  num_cpus: 1\n", true, nil, true, "write", true},
+		{"explicit empty list", "processing:\n  metadata_fields: []\n", true, []string{}, true, "write", true},
 		{"saved selection", "processing:\n  metadata_fields:\n    - title\n    - cover\n  metadata_chapters: preserve\n", true, []string{"title", "cover"}, true, "preserve", true},
-		{"malformed non-list", "processing:\n  metadata_fields: title,cover\n", false, nil, false, "write", false},
-		{"malformed string", "processing:\n  metadata_fields: \"title\"\n", false, nil, false, "write", false},
+		{"malformed non-list", "processing:\n  metadata_fields: title,cover\n", false, nil, false, "write", true},
+		{"malformed string", "processing:\n  metadata_fields: \"title\"\n", false, nil, false, "write", true},
 		{"malformed chapters", "processing:\n  metadata_fields:\n    - title\n  metadata_chapters: [write]\n", false, []string{"title"}, true, "write", false},
 	}
 	for _, tc := range cases {

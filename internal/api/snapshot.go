@@ -265,24 +265,34 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 	if changed && snap.ADBBookID != "" {
 		if book, err := h.getAudiobookDB().GetBook(ctx, snap.ADBBookID, "genres,images"); err == nil && book != nil {
 			snap.Genres = genreTitles(book.Genres)
-			// Subtitle precedence mirrors the engine's documented resolution:
-			// the selected release's own subtitle when present, then the
-			// book's, then the book's disambiguation.
-			snap.Subtitle = subtitleFromCatalog(book, nil)
 			if h.svc.CoversDir != "" {
 				if file, ok := h.storeCoverForBook(ctx, bookID, snap, book); ok {
 					snap.CoverFile = file
 				}
 			}
+			// Subtitle precedence mirrors the engine's documented
+			// resolution: the selected release's own subtitle when present,
+			// then the book's, then the book's disambiguation. The PREVIOUS
+			// release subtitle (retained above for an unchanged selection)
+			// yields only to a release response that establishes a value:
+			// a GetRelease failure — or a successful response that
+			// establishes nothing — keeps the retained release-specific
+			// subtitle instead of replacing it with the book fallback.
+			bookSubtitle := subtitleFromCatalog(book, nil)
 			if snap.ADBReleaseID != "" {
 				if rel, err := h.getAudiobookDB().GetRelease(ctx, snap.ADBReleaseID, "chapterDetail"); err == nil && rel != nil {
 					if rel.ChapterDetail != nil {
 						snap.Chapters = chaptersFromADB(rel.ChapterDetail.Chapters)
 					}
-					snap.Subtitle = subtitleFromCatalog(book, rel)
+					if established := subtitleFromCatalog(book, rel); established != "" || snap.Subtitle == "" {
+						snap.Subtitle = established
+					}
 				} else if err != nil {
 					log.Printf("snapshot %d: release details unavailable: %v", bookID, err)
 				}
+			}
+			if snap.Subtitle == "" {
+				snap.Subtitle = bookSubtitle
 			}
 		} else {
 			log.Printf("snapshot %d: catalog unavailable, keeping previously captured catalog content: %v", bookID, err)
@@ -541,7 +551,10 @@ func buildEngineJob(args jobArgs, jobID string, snap BookSnapshot, outputRoot, p
 		PathFormat:    audio.NormalizeEnginePathFormat(pathFormat),
 	}
 	// The frozen selection owns the per-field policy: nil (no explicit
-	// selection saved) derives the all-supported-available default.
+	// selection saved) derives the all-supported-available default. A
+	// selection with nil Fields (a non-default chapter policy saved
+	// alongside the default scalar selection) keeps the scalar default and
+	// applies only its non-scalar policies below.
 	jf.Policies = audio.AllSupportedWritePolicyFor(supplied)
 	if sel != nil && sel.Fields != nil {
 		jf.Policies = audio.WritePolicyFor(sel.Fields, supplied)
@@ -552,6 +565,8 @@ func buildEngineJob(args jobArgs, jobID string, snap BookSnapshot, outputRoot, p
 	// degrading to clear when it does not; preserve skips all cover mutation
 	// (single natively-copyable input only — the engine rejects it with an
 	// explicit diagnosed error on a merge, which surfaces as the job error).
+	// The cover policy is only pinned by an explicit FIELD selection: the
+	// chapter-policy-only shape (nil Fields) keeps the default write.
 	var stagedCover string
 	coverPolicy := audio.WritePolicyValueWrite
 	if sel != nil && sel.Fields != nil {
@@ -586,8 +601,11 @@ func buildEngineJob(args jobArgs, jobID string, snap BookSnapshot, outputRoot, p
 	// list is an explicit clear. preserve skips all chapter mutation — no
 	// embedding, no sidecar (single natively-copyable input only, enforced
 	// by the engine with a diagnosed error otherwise).
+	// Chapters honor the frozen policy whenever a selection is present —
+	// including the chapter-policy-only shape (nil Fields, non-default
+	// chapters), which is exactly the independent-setting case.
 	chapterPolicy := audio.ChaptersPolicyValueWrite
-	if sel != nil && sel.Fields != nil {
+	if sel != nil {
 		chapterPolicy = sel.Chapters
 	}
 	switch {

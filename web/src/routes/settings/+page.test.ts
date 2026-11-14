@@ -1,7 +1,6 @@
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IndexState, IndexStatus, Settings } from '#lib/types.js';
-import { loadEngineCapabilities } from '#lib/engineCapabilities.js';
 // vi.mock hoists above these, so the factory can name them directly.
 import RefreshButtonStub from './RefreshButtonStub.svelte';
 
@@ -32,6 +31,27 @@ vi.mock('#lib/components/index.js', () => ({
 	DirPicker: () => null,
 	Modal: () => null,
 	PathFormatBuilder: () => null
+}));
+
+// The real capabilities module caches app-wide (one load per app). The
+// tests need a KNOWN, resettable state — including the failure shape the
+// real module produces when the fetch fails (null) — so stub it with a
+// settable holder.
+const engineCaps = vi.hoisted(() => {
+	const holder: { value: unknown } = { value: null };
+	return {
+		holder,
+		set: (c: unknown) => {
+			holder.value = c;
+		},
+		reset: () => {
+			holder.value = null;
+		}
+	};
+});
+vi.mock('#lib/engineCapabilities.js', () => ({
+	getEngineCapabilities: () => engineCaps.holder.value,
+	loadEngineCapabilities: async () => {}
 }));
 
 import SettingsPage from './+page.svelte';
@@ -249,22 +269,20 @@ describe('settings metadata write selection rendering', () => {
 		getMock.mockReset();
 		target = document.createElement('div');
 		document.body.appendChild(target);
-		// The app-level capabilities module caches after its first load, so
-		// the capabilities mock must be identical across every test; the
-		// settings mock is re-applied per test in mountWith.
+		// The capabilities stub is reset per test: a stock install
+		// reports every scalar field the app knows about (cover is
+		// policy-only, not a scalar field).
+		engineCaps.set({
+			field_policies: { scalar_fields: ALL_FIELDS.filter((f) => f !== 'cover') },
+			path_tokens: [{ name: 'title', value: 'title', example: 'The Book' }]
+		});
 		getMock.mockImplementation(async (path: string) => {
-			if (path === '/engine/capabilities')
-				return {
-					field_policies: { scalar_fields: ALL_FIELDS.filter((f) => f !== 'cover') },
-					path_tokens: [{ name: 'title', value: 'title', example: 'The Book' }]
-				};
 			if (path === '/index')
 				return indexState('never', 0);
 			if (path === '/output-profiles')
 				return { profiles: [] };
 			return settingsFixture();
 		});
-		await loadEngineCapabilities();
 	});
 
 	afterEach(() => {
@@ -274,15 +292,11 @@ describe('settings metadata write selection rendering', () => {
 	});
 
 	async function mountWith(fields: unknown, overrides: Record<string, unknown> = {}) {
-		// Re-aim the /settings response at the selection under test.
+		// Re-aim the /settings response at the selection under test
+		// (the capabilities stub from beforeEach stays in effect).
 		getMock.mockImplementation(async (path: string) => {
 			if (path === '/settings')
 				return { ...settingsFixture(), metadata_fields: fields, metadata_chapters: 'write', ...overrides };
-			if (path === '/engine/capabilities')
-				return {
-					field_policies: { scalar_fields: ALL_FIELDS.filter((f) => f !== 'cover') },
-					path_tokens: [{ name: 'title', value: 'title', example: 'The Book' }]
-				};
 			if (path === '/index')
 				return indexState('never', 0);
 			if (path === '/output-profiles')
@@ -331,6 +345,46 @@ describe('settings metadata write selection rendering', () => {
 		await mountWith([]);
 		expect(checkedIds().size).toBe(0);
 		expect(target.textContent).toContain('Nothing is selected');
+	});
+
+	it('materializes the full default on the first checkbox edit from null', async () => {
+		await mountWith(null);
+		// Unchecking ONE field from the default must leave every OTHER
+		// field checked — not the empty selection (which would disable
+		// all metadata writes on save).
+		const title = target.querySelector<HTMLInputElement>('#meta_field_title');
+		expect(title).not.toBeNull();
+		title!.checked = false;
+		title!.dispatchEvent(new Event('change', { bubbles: true }));
+		flushSync();
+		const ids = checkedIds();
+		expect(ids.size).toBe(ALL_FIELDS.length - 1);
+		expect(ids.has('title')).toBe(false);
+		for (const f of ALL_FIELDS)
+			if (f !== 'title')
+				expect(ids.has(f), `${f} must stay checked`).toBe(true);
+	});
+
+	it('unchecking every field from the default yields the empty (none-selected) selection', async () => {
+		await mountWith(null);
+		for (const f of ALL_FIELDS) {
+			const input = target.querySelector<HTMLInputElement>(`#meta_field_${f}`);
+			expect(input, f).not.toBeNull();
+			input!.checked = false;
+			input!.dispatchEvent(new Event('change', { bubbles: true }));
+		}
+		flushSync();
+		expect(checkedIds().size).toBe(0);
+		expect(target.textContent).toContain('Nothing is selected');
+	});
+
+	it('shows the capability-missing notice (not a Cover-only grid) when the engine reports no scalar fields', async () => {
+		// The failure shape the real module produces when the fetch
+		// fails: getEngineCapabilities() is null for the session.
+		engineCaps.reset();
+		await mountWith(null);
+		expect(target.textContent).toContain('does not report per-field write support');
+		expect(target.querySelectorAll('.metadata-field-grid input[type=checkbox]').length).toBe(0);
 	});
 
 	it('renders the pinned controls read-only with a deployment hint', async () => {

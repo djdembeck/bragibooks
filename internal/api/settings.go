@@ -384,16 +384,29 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// never reach the file save.
 	if f, c := h.svc.Config.MetadataEnvManaged(); f || c {
 		storedFields, storedChapters, fieldsOK, chaptersOK := h.svc.Config.StoredMetadataSelection()
-		// A malformed (non-list) file value for the pinned fields key is
-		// discarded by the typed loader, so the durable file carries no
-		// trustworthy field selection: the settings row is the truth the
-		// pin must not clobber, frozen back from the row (UNSET INCLUDED).
-		// A silently converted file value would wipe a saved selection
-		// into the default on the next unrelated save. A valid file
-		// value for the chapters key stays authoritative on its own —
-		// only an unreadable chapters value falls back to the row.
-		if f && !fieldsOK {
-			rowFields, rowChapters, rowOK := h.storedMetadataRow()
+		_, fileFieldsPresent := h.svc.Config.StoredMetadataKeyPresent()
+		// The freeze, per pinned key, reads the durable file's value as
+		// authoritative only when the file carries a VALID value for
+		// that key. An ABSENT key is the documented default — a valid
+		// value, not an unreadable one (chaptersOK is true for an absent
+		// key) — and wins over a stale row selection. A present
+		// MALFORMED value is unreadable: the typed loader discarded the
+		// file wholesale, so the settings row (which startup loaded the
+		// preference from — the documented DB fallback) is the truth the
+		// pin must not clobber, frozen back explicitly (UNSET INCLUDED)
+		// so the pin does not ride into a freshly written row. When the
+		// file carries NO fields key at all (fieldsOK true, value nil),
+		// the file is silent on the selection: the row IS the durable
+		// selection, and it wins over the file's default for BOTH keys,
+		// or a DB-only selection would be wiped on the next unrelated
+		// save. A row the freeze falls back to must be readable before
+		// any write, or the save aborts.
+		needRow := (f && (!fieldsOK || !fileFieldsPresent)) || (c && !chaptersOK)
+		var rowFields *[]string
+		rowChapters := ""
+		rowOK := true
+		if needRow {
+			rowFields, rowChapters, rowOK = h.storedMetadataRow()
 			if !rowOK {
 				// The row cannot be read: the live config carries the
 				// pin, so proceeding would persist the pin into the
@@ -402,17 +415,22 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 					"cannot save while a metadata write pin is set: the stored selection is unreadable (corrupt settings row or malformed config value); resolve the corruption, then retry")
 				return
 			}
-			snap.Processing.MetadataFields = rowFields
-			if !chaptersOK {
-				snap.Processing.MetadataChapters = rowChapters
-			} else {
-				snap.Processing.MetadataChapters = storedChapters
-			}
-		} else {
-			if f {
+		}
+		if f {
+			switch {
+			case !fieldsOK || !fileFieldsPresent:
+				snap.Processing.MetadataFields = rowFields
+			default:
 				snap.Processing.MetadataFields = storedFields
 			}
-			if c {
+		}
+		if c {
+			switch {
+			case !chaptersOK:
+				snap.Processing.MetadataChapters = rowChapters
+			case !fileFieldsPresent:
+				snap.Processing.MetadataChapters = rowChapters
+			default:
 				snap.Processing.MetadataChapters = storedChapters
 			}
 		}

@@ -341,15 +341,16 @@ func ReassertMetadataPins(cfg *Config) {
 // and a non-empty list is the saved selection. A missing file returns the
 // defaults, matching the empty-row baseline. fieldsOK and chaptersOK
 // report that the file's value for each key is a valid list / a valid
-// string (absent counts as OK); a present malformed value leaves the
-// key's value at its default AND its OK flag false, so a caller that
-// freezes a pinned key can preserve the durable row's current value
-// instead of writing a silently converted one.
+// string (ABSENT counts as OK for both keys: an absent key is the
+// documented default, not an unreadable value); a present malformed
+// value leaves the key's value at its default AND its OK flag false, so
+// a caller that freezes a pinned key can preserve the durable row's
+// current value instead of writing a silently converted one.
 func (cm *ConfigManager) StoredMetadataSelection() (fields *[]string, chapters string, fieldsOK, chaptersOK bool) {
 	fields = nil
 	chapters = "write"
 	fieldsOK = true
-	chaptersOK = false
+	chaptersOK = true
 	path := cm.configPath
 	if path == "" {
 		return
@@ -369,11 +370,35 @@ func (cm *ConfigManager) StoredMetadataSelection() (fields *[]string, chapters s
 		if v, present := proc["metadata_chapters"]; present {
 			if s, ok := v.(string); ok {
 				chapters = s
-				chaptersOK = true
+			} else {
+				chaptersOK = false
 			}
 		}
 	}
 	return
+}
+
+// StoredMetadataKeyPresent reports whether the durable config file
+// carries a value for each metadata key at all (a present MALFORMED
+// value is "present": the typed loader discarded it, so the file has
+// said something it will not honor). StoredMetadataSelection's OK flags
+// alone cannot distinguish "the file says nothing about the selection"
+// (no fields key: the settings row is the durable selection) from "the
+// file actively manages the selection" (fields key present: its value,
+// default included, is authoritative over a stale row).
+func (cm *ConfigManager) StoredMetadataKeyPresent() (fields, chapters bool) {
+	path := cm.configPath
+	if path == "" {
+		return false, false
+	}
+	m := parseYAMLMap(mustReadFile(path))
+	if m == nil {
+		return false, false
+	}
+	proc, _ := m["processing"].(map[string]any)
+	_, f := proc["metadata_fields"]
+	_, c := proc["metadata_chapters"]
+	return f, c
 }
 
 // mustReadFile reads a file's raw bytes; missing files return nil. It is
