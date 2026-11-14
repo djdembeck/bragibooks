@@ -598,13 +598,15 @@ func TestUpdateSettingsPinnedChaptersPreservesDBOnlyChaptersWhenFileHasFieldsOnl
 	}
 }
 
-// TestUpdateSettingsPinnedAbortsOnNullStoredFieldsRow pins the corrupt-row
-// contract: a settings row whose metadata_fields value is the JSON literal
-// `null` is NOT a readable explicit-empty selection. `null` unmarshals into
-// a nil slice without error, so treating it as readable would (a) queue a
-// silent preserve-everything selection, and (b) let a pinned-key freeze ride
-// the nil into a save. Under an active fields pin the save must abort 500.
-func TestUpdateSettingsPinnedAbortsOnNullStoredFieldsRow(t *testing.T) {
+// TestUpdateSettingsPinnedRepairsNullStoredFieldsRow pins the corrupt-row
+// contract under a READABLE file: a settings row whose metadata_fields value
+// is the JSON literal `null` is NOT a readable explicit-empty selection
+// (`null` unmarshals into a nil slice without error). With a valid file, the
+// freeze has a trustworthy durable default to fall back to, so the save
+// proceeds and the row is REPAIRED to the documented default (nil fields) —
+// never the live pin. The pin must not ride into the store: the row must
+// hold the default, not the pin's [title,subtitle].
+func TestUpdateSettingsPinnedRepairsNullStoredFieldsRow(t *testing.T) {
 	h := newSettingsTestService(t, newSettingsTestDB(t))
 	r := buildSettingsRouter(h)
 
@@ -629,10 +631,73 @@ func TestUpdateSettingsPinnedAbortsOnNullStoredFieldsRow(t *testing.T) {
 
 	t.Setenv("PROCESSING_METADATA_FIELDS", "title,subtitle")
 	resp := put(`{"num_cpus":2}`)
-	if resp.code != 500 {
-		t.Fatalf("null stored row under pin: want 500 abort, got %d: %v", resp.code, resp.body)
+	if resp.code != 200 {
+		t.Fatalf("null row under pin with a readable file: want 200, got %d: %v", resp.code, resp.body)
 	}
-	if msg, _ := resp.body["error"].(string); !strings.Contains(msg, "cannot save") {
-		t.Errorf("abort message should name the pin and the stored selection: %q", msg)
+	var storedFields string
+	if err := h.svc.DB.QueryRow(
+		`SELECT metadata_fields FROM settings WHERE id = 1`,
+	).Scan(&storedFields); err != nil {
+		t.Fatalf("read settings row: %v", err)
+	}
+	// The row is repaired to the default (no selection), NOT the pin.
+	if storedFields != "" {
+		t.Fatalf("null row repaired to %q; want empty (the documented default, not the pin [title,subtitle])", storedFields)
+	}
+}
+
+// TestUpdateSettingsPinnedChaptersFirstSaveWithoutRow pins the ordinary
+// first save under a chapters pin: a valid YAML file that is silent on
+// metadata_chapters and no settings row yet. The missing row is not
+// corruption — nothing is stored, so the documented default (write) is the
+// durable value — and the save must proceed (200), creating the row with
+// the default, not the live pin's value (the pin must not ride in).
+func TestUpdateSettingsPinnedChaptersFirstSaveWithoutRow(t *testing.T) {
+	h := newSettingsTestService(t, newSettingsTestDB(t))
+	r := buildSettingsRouter(h)
+
+	put := func(body string) *httptestResponse {
+		req := httptest.NewRequest("PUT", "/api/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		var out map[string]any
+		if data, _ := io.ReadAll(rec.Result().Body); len(data) > 0 {
+			json.Unmarshal(data, &out)
+		}
+		return &httptestResponse{code: rec.Code, body: out}
+	}
+
+	// A valid file silent on metadata_chapters (and metadata_fields).
+	if err := os.WriteFile(h.svc.Config.ConfigPath(),
+		[]byte("processing:\n    num_cpus: 2\n"), 0o600); err != nil {
+		t.Fatalf("seed config file: %v", err)
+	}
+	var id int
+	if err := h.svc.DB.QueryRow(`SELECT id FROM settings WHERE id = 1`).Scan(&id); err == nil {
+		t.Fatalf("test setup: no settings row expected")
+	}
+
+	// Pin ONLY the chapters key; the first save of an unrelated key.
+	t.Setenv("PROCESSING_METADATA_CHAPTERS", "write")
+	resp := put(`{"num_cpus":3}`)
+	if resp.code != 200 {
+		t.Fatalf("first save under a chapters pin with no row: want 200, got %d: %v", resp.code, resp.body)
+	}
+	var storedFields, storedChapters string
+	if err := h.svc.DB.QueryRow(
+		`SELECT metadata_fields, metadata_chapters FROM settings WHERE id = 1`,
+	).Scan(&storedFields, &storedChapters); err != nil {
+		t.Fatalf("read settings row: %v", err)
+	}
+	// The row is created with the documented default for the pinned key,
+	// not the pin riding in from the live config (here both are "write",
+	// so the contract the pin must NOT break is the save succeeding and
+	// the row existing with the durable default).
+	if storedChapters != "write" {
+		t.Fatalf("first-save row chapters = %q, want the documented default write", storedChapters)
+	}
+	if storedFields != "" {
+		t.Errorf("first-save row fields = %q, want empty (no selection saved)", storedFields)
 	}
 }

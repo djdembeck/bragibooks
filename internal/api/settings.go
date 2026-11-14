@@ -395,28 +395,43 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		//   * file is SILENT on the key (absent: not present, and absent
 		//     counts as OK so it is not treated as unreadable) -> the row is
 		//     where the effective value comes from; freeze the row, so a
-		//     DB-only selection survives an unrelated save.
+		//     DB-only selection survives an unrelated save. A MISSING row
+		//     is not corruption: with nothing stored, the documented
+		//     default (nil fields / "write" chapters) IS the durable value,
+		//     and the ordinary first save proceeds.
 		//   * file carries a MALFORMED value (present, not OK) -> the typed
 		//     loader discarded it, so the row (the documented DB fallback)
-		//     is the truth; freeze the row.
+		//     is the truth; freeze the row. A malformed file with no row at
+		//     all has nothing to fall back to: abort (a fresh INSERT would
+		//     persist the pin).
 		//
-		// Presence is tracked PER KEY: a file that sets only metadata_chapters
-		// is silent on metadata_fields and vice versa. A row the freeze falls
-		// back to must be readable before any write, or the save aborts.
+		// Presence is tracked PER KEY: a file that sets only
+		// metadata_chapters is silent on metadata_fields and vice versa.
+		// A row the freeze falls back to must be readable before any write,
+		// or the save aborts.
 		needRow := (f && (!fieldsOK || !fileFieldsPresent)) || (c && (!chaptersOK || !fileChaptersPresent))
 		var rowFields *[]string
 		rowChapters := ""
-		rowOK := true
+		rowMissing := false
 		if needRow {
-			rowFields, rowChapters, rowOK = h.storedMetadataRow()
-			if !rowOK {
-				// The row cannot be read: the live config carries the
-				// pin, so proceeding would persist the pin into the
-				// freshly written row. Abort instead of guessing.
-				writeError(w, http.StatusInternalServerError,
-					"cannot save while a metadata write pin is set: the stored selection is unreadable (corrupt settings row or malformed config value); resolve the corruption, then retry")
-				return
+			var ok bool
+			rowFields, rowChapters, ok = h.storedMetadataRow()
+			if !ok {
+				// No row (a corrupt row value is also !ok, handled by the
+				// abort below when the file is unreadable): the durable
+				// default is what nothing-stored means.
+				rowMissing = true
+				rowFields, rowChapters = nil, audio.ChaptersPolicyValueWrite
 			}
+		}
+		if rowMissing &&
+			((f && !fieldsOK) || (c && !chaptersOK)) {
+			// The durable file is unreadable and nothing is stored to
+			// fall back to: the live config carries the pin, so any store
+			// write would persist the pin. Abort instead of guessing.
+			writeError(w, http.StatusInternalServerError,
+				"cannot save while a metadata write pin is set: the stored selection is unreadable (corrupt settings row or malformed config value); resolve the corruption, then retry")
+			return
 		}
 		if f {
 			switch {
