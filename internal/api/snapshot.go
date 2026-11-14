@@ -929,7 +929,10 @@ type coverHop struct {
 // lookupCoverHost resolves host under the capture's context deadline, so a
 // stuck DNS resolution dies on the same clock as the HTTP fetch instead of
 // holding the metadata-save request past the intended cover timeout.
-func lookupCoverHost(ctx context.Context, host string) ([]string, error) {
+// Var-bound so tests may substitute a deterministic resolver (the override
+// save-time URL guard resolves the host too, and a test must not depend on
+// a live resolver answering for its fixture domain).
+var lookupCoverHost = func(ctx context.Context, host string) ([]string, error) {
 	return net.DefaultResolver.LookupHost(ctx, host)
 }
 

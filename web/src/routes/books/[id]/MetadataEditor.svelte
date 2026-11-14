@@ -108,41 +108,49 @@
 	// ── Effective draft → engine naming preview ──────────────────
 	// Mirrors the server's applyMetadataOverride for NAMING purposes:
 	// edited value wins, a cleared field blanks, nothing else changes.
-	function effectiveMetadata(): Record<string, unknown> {
-		if (!draft || !snapshot) return {};
+	// The payload is a $derived so it is recomputed synchronously from the
+	// CURRENT draft fields (the effect below reads only this derived, which
+	// is what tracks every nested edit — reading fields inside the delayed
+	// callback would not retrigger the preview after the first request).
+	// Every clear is applied, including the ordered people: a cleared
+	// authors/narrators shows as an empty list, matching the queued job's
+	// server-computed effective state (not the catalog people).
+	const previewMetadata = $derived.by((): Record<string, unknown> => {
+		const d = draft;
+		if (!d) return {};
 		const blank = (v: string, field: string) => (isCleared(field) ? '' : v);
+		const snapTitle = snapshot?.title ?? '';
 		const metaPayload: Record<string, unknown> = {
-			title: blank(draft.title || snapshot.title, 'title'),
-			authors: draft.authors ?? snapshot.authors,
-			narrators: draft.narrators ?? snapshot.narrators
+			title: blank(d.title || snapTitle, 'title'),
+			authors: isCleared('authors') ? [] : d.authors ?? (snapshot?.authors ?? []),
+			narrators: isCleared('narrators') ? [] : d.narrators ?? (snapshot?.narrators ?? [])
 		};
-		const subtitle = blank(draft.subtitle || snapshot.subtitle, 'subtitle');
+		const subtitle = blank(d.subtitle || (snapshot?.subtitle ?? ''), 'subtitle');
 		if (subtitle) metaPayload.subtitle = subtitle;
-		const seriesName = blank(draft.series_name || snapshot.series_name, 'series');
+		const seriesName = blank(d.series_name || (snapshot?.series_name ?? ''), 'series');
 		if (seriesName) metaPayload.series_name = seriesName;
-		const seriesPosition = blank(draft.series_position || snapshot.series_position, 'series');
+		const seriesPosition = blank(d.series_position || (snapshot?.series_position ?? ''), 'series');
 		if (seriesPosition) metaPayload.series_position = seriesPosition;
-		const description = blank(draft.description || snapshot.description, 'description');
+		const description = blank(d.description || (snapshot?.description ?? ''), 'description');
 		if (description) metaPayload.description = description;
-		const genres = draft.genres ?? snapshot.genres;
+		const genres = d.genres ?? (snapshot?.genres ?? []);
 		if (genres.length) metaPayload.genres = isCleared('genres') ? [] : genres;
-		const year = isCleared('year') ? null : draft.year ?? snapshot.year;
+		const year = isCleared('year') ? null : d.year ?? snapshot?.year ?? null;
 		if (year) metaPayload.year = year;
-		if (snapshot.audiobookdb_book_id) metaPayload.book_id = snapshot.audiobookdb_book_id;
+		if (snapshot?.audiobookdb_book_id) metaPayload.book_id = snapshot.audiobookdb_book_id;
 		return metaPayload;
-	}
+	});
 
 	$effect(() => {
-		const d = draft;
 		const fmt = pathFormat;
-		const snap = snapshot;
-		if (!d || !fmt || !snap) return;
+		const payload = previewMetadata;
+		if (!draft || !fmt) return;
 		const seq = ++previewSeq;
 		previewPath = '';
 		const timer = setTimeout(async () => {
 			try {
 				const resp = await post<EnginePreviewResponse>('/engine/preview', {
-					metadata: effectiveMetadata(),
+					metadata: payload,
 					path_format: fmt
 				});
 				if (seq === previewSeq) previewPath = resp.relative_path;
@@ -384,10 +392,29 @@
 {:else if !meta || !draft}
 	<p class="meditor__loading">Loading…</p>
 {:else}
-	<!-- The outer guard guarantees both are non-null here; the consts keep
-	     the template terse without per-use null checks. -->
+	<!-- The outer guard guarantees meta and draft are non-null here. The
+	     snapshot may legitimately be null for a HISTORICAL book (no capture
+	     row yet — the save that follows creates it); the empty fallback keeps
+	     the catalog columns and cover/genre/chapter reads from crashing
+	     before that save (finding: snapshot:null must render). -->
 	{@const d = draft as BookMetadataDraft}
-	{@const snap = snapshot as BookMetadataSnapshot}
+	{@const snap = (snapshot ?? ({
+		book_id: 0,
+		audiobookdb_book_id: '',
+		audiobookdb_release_id: '',
+		title: '',
+		subtitle: '',
+		authors: [],
+		narrators: [],
+		series_name: '',
+		series_position: '',
+		description: '',
+		genres: [],
+		year: null,
+		cover_file: '',
+		chapters: null,
+		captured_at: ''
+	}) as BookMetadataSnapshot)}
 	<!-- ── Naming preview (engine-backed, debounced) ────────────── -->
 	{#if pathFormat}
 		<div class="meditor__preview" role="status" aria-live="polite">
@@ -399,10 +426,18 @@
 			{/if}
 		</div>
 	{:else}
-		<div class="meditor__preview" role="status" aria-live="polite">
+		<div class="meditor__preview" role="status">
 			<span class="meditor__preview-label">Output name</span>
 			<span class="meditor__preview-muted">Set a path format in Settings to preview the output name.</span>
 		</div>
+	{/if}
+
+	{#if !snapshot}
+		<Alert variant="info">
+			This book has no captured catalog record yet, so the catalog columns are
+			empty. Saving your edits below captures the catalog release and makes
+			this book queueable.
+		</Alert>
 	{/if}
 
 	<!-- ── Title & subtitle ────────────────────────────────────── -->

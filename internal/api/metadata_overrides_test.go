@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -15,6 +16,8 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/bragibooks/bragibooks/internal/audio"
 )
 
 // newOverrideTestHandler builds the file-backed jobs handler (the queue
@@ -222,8 +225,13 @@ func TestMetadataOverrideQueuedJobImmutability(t *testing.T) {
 	if sel.ScalarPins["subtitle"] != "clear" {
 		t.Fatalf("scalar pins = %v, want subtitle=clear", sel.ScalarPins)
 	}
+	// The chapter policy is the saved per-field selection's value (the
+	// fixture's default "write"), NOT a forced pin from the edited list:
+	// an edited chapter list is effective metadata, and its write policy
+	// stays with the selection so a "preserve" choice is honored (finding:
+	// honor saved chapter-preserve policy for edited lists).
 	if sel.Chapters != "write" {
-		t.Fatalf("chapter policy = %q, want write (explicit list)", sel.Chapters)
+		t.Fatalf("chapter policy = %q, want write (saved selection baseline, not a forced pin)", sel.Chapters)
 	}
 
 	// A LATER override edit changes the row, not the stored job.
@@ -236,6 +244,64 @@ func TestMetadataOverrideQueuedJobImmutability(t *testing.T) {
 	}
 	if after != stored {
 		t.Fatalf("stored job args changed after a later edit:\nbefore: %s\nafter:  %s", stored, after)
+	}
+}
+
+// TestMetadataOverrideEditedChaptersHonorPreserve guards the B3 fix: an
+// EDITED (non-empty) chapter list is effective metadata, and the chapter
+// write POLICY stays with the saved per-field selection. A book whose
+// selection says "preserve" must keep its no-embed / no-sidecar behavior
+// even when the operator has edited the chapter list — the old code pinned
+// the policy to "write", which embedded + generated the sidecar against
+// the operator's preserve intent (plan: preserving chapter writes must not
+// trigger unwanted embed/sidecar mutation).
+func TestMetadataOverrideEditedChaptersHonorPreserve(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	db := h.svc.DB
+	if _, err := db.Exec(`INSERT INTO books (id, title, status) VALUES (1, 'T', 'matched')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO book_snapshots (book_id, title, authors, narrators)
+		VALUES (1, 'T', '["A"]', '["N"]')`); err != nil {
+		t.Fatal(err)
+	}
+	// The saved per-field selection says PRESERVE chapters.
+	svc.proc.ApplyWriteSelection(nil, audio.ChaptersPolicyValuePreserve)
+	if code := putOverride(t, h, 1, `{"chapters":[{"title":"My Chapter","start_millis":0,"duration_millis":3000}]}`); code != http.StatusOK {
+		t.Fatalf("PUT = %d", code)
+	}
+	in := filepath.Join(t.TempDir(), "in.m4a")
+	if err := os.WriteFile(in, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	id, err := svc.QueueJob(t.Context(), 1, []string{in}, queueDestination{})
+	if err != nil {
+		t.Fatalf("QueueJob: %v", err)
+	}
+	var stored string
+	if err := db.QueryRow("SELECT m4b_merge_args FROM processing_jobs WHERE id = ?", id).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	var args jobArgs
+	if err := json.Unmarshal([]byte(stored), &args); err != nil {
+		t.Fatal(err)
+	}
+	// The edited list IS the effective metadata the job carries...
+	if len(args.Snapshot.Snapshot.Chapters) != 1 || args.Snapshot.Snapshot.Chapters[0].Title != "My Chapter" {
+		t.Fatalf("frozen chapters = %+v, want the edited list", args.Snapshot.Snapshot.Chapters)
+	}
+	// ...but the chapter policy is the saved "preserve", not a forced "write".
+	sel := args.Snapshot.Selection
+	if sel == nil || sel.Chapters != audio.ChaptersPolicyValuePreserve {
+		t.Fatalf("chapter policy = %+v, want preserve (saved selection, not a forced pin)", sel)
+	}
+	// The engine job honors preserve: no chapter embed, no sidecar.
+	jf, _, err := buildEngineJob(args, id, args.Snapshot.Snapshot, t.TempDir(), args.OutputScheme)
+	if err != nil {
+		t.Fatalf("buildEngineJob: %v", err)
+	}
+	if string(jf.Chapters) != `"preserve"` {
+		t.Fatalf("engine job chapters = %s, want the bare preserve policy (no embed/sidecar)", jf.Chapters)
 	}
 }
 
@@ -300,6 +366,18 @@ func TestMetadataOverrideBuildEngineJobPolicies(t *testing.T) {
 // engine's URL-embed object form (the run embeds it; offline file covers do
 // not).
 func TestMetadataOverrideWriteURLCover(t *testing.T) {
+	// The save-time URL guard resolves the cover host; stub it to a public
+	// address so the fixture domain needs no live resolver and the guard's
+	// public-address check is exercised deterministically.
+	oldLookup := lookupCoverHost
+	lookupCoverHost = func(_ context.Context, host string) ([]string, error) {
+		if host == "covers.example" {
+			return []string{"203.0.113.10"}, nil
+		}
+		return nil, fmt.Errorf("no address for %s", host)
+	}
+	t.Cleanup(func() { lookupCoverHost = oldLookup })
+
 	h, svc := newTestJobsHandler(t)
 	db := h.svc.DB
 	if _, err := db.Exec(`INSERT INTO books (id, title, status) VALUES (1, 'T', 'matched')`); err != nil {
@@ -340,6 +418,17 @@ func TestMetadataOverrideWriteURLCover(t *testing.T) {
 	if strings.Contains(stored, "ovr-") {
 		t.Fatalf("url cover must not reference a local asset: %s", stored)
 	}
+	// The engine job itself must serialize the URL-cover object form: a
+	// regression that drops or mis-serializes the URL at the engine boundary
+	// (the frozen selection alone would not catch it) is a real loss of the
+	// operator's cover. buildEngineJob is the authoritative serializer.
+	jf, _, err := buildEngineJob(args, id, args.Snapshot.Snapshot, t.TempDir(), args.OutputScheme)
+	if err != nil {
+		t.Fatalf("buildEngineJob: %v", err)
+	}
+	if got := string(jf.Cover); got != `{"write_url":"https://covers.example/1.jpg"}` {
+		t.Fatalf("engine job cover = %s, want the write_url object form with the operator's URL", got)
+	}
 }
 
 // TestMetadataOverrideValidationRejects guards the operator-facing gate:
@@ -349,6 +438,18 @@ func TestMetadataOverrideWriteURLCover(t *testing.T) {
 // (the first chapter of every recording starts at 00:00:00.000); the
 // engine enforces start/duration against the real playlength at run time.
 func TestMetadataOverrideValidationRejects(t *testing.T) {
+	// The save-time URL guard resolves the cover host; stub it so the
+	// public/loopback URL cases are deterministic (loopback needs no lookup
+	// — the IP literal is classified directly — but covers.example does).
+	oldLookup := lookupCoverHost
+	lookupCoverHost = func(_ context.Context, host string) ([]string, error) {
+		if host == "covers.example" {
+			return []string{"203.0.113.10"}, nil
+		}
+		return nil, fmt.Errorf("no address for %s", host)
+	}
+	t.Cleanup(func() { lookupCoverHost = oldLookup })
+
 	h := newOverrideTestHandler(t)
 	cases := []struct {
 		name string
@@ -359,9 +460,13 @@ func TestMetadataOverrideValidationRejects(t *testing.T) {
 		{"year too high", `{"year":10000}`},
 		{"empty chapter title", `{"chapters":[{"title":"","start_millis":1,"duration_millis":1}]}`},
 		{"zero chapter duration", `{"chapters":[{"title":"C","start_millis":1,"duration_millis":0}]}`},
+		{"overlapping chapters", `{"chapters":[{"title":"A","start_millis":0,"duration_millis":1000},{"title":"B","start_millis":500,"duration_millis":1000}]}`},
+		{"out-of-order chapters", `{"chapters":[{"title":"A","start_millis":5000,"duration_millis":1000},{"title":"B","start_millis":0,"duration_millis":1000}]}`},
 		{"cover file not this book", `{"cover_source":"file","cover_file":"ovr-9-abc12345.jpg"}`},
 		{"cover url without source", `{"cover_url":"https://x.example/1.jpg"}`},
 		{"cleared cover with file", `{"cover_source":"clear","cover_file":"ovr-1-abc12345.jpg"}`},
+		{"loopback cover url", `{"cover_source":"url","cover_url":"http://127.0.0.1:8080/cover.jpg"}`},
+		{"private-range cover url", `{"cover_source":"url","cover_url":"http://10.0.0.5/cover.jpg"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -545,9 +650,12 @@ func mustMarshalJobArgs(t *testing.T, snapshotJSONBlob []byte) string {
 	return string(raw)
 }
 
-// TestLoadBookMetadataOverrideDecodesGuarded guards the decode fail-safe: a
-// corrupted array column must not invent content (it yields the empty,
-// non-cleared state), while a valid '[]' stays explicit-empty.
+// TestLoadBookMetadataOverrideDecodesGuarded guards the decode contract:
+// a CORRUPTED array column is a load error (it must never be folded into an
+// empty slice, because '[]' is the explicit-empty "clear the tags" state
+// and a corrupt value masquerading as it would silently blank captured
+// people/genres on the next save/job), while a valid '[]' stays
+// explicit-empty and ” stays no-override.
 func TestLoadBookMetadataOverrideDecodesGuarded(t *testing.T) {
 	db := newTestDB(t)
 	if _, err := db.Exec(`INSERT INTO books (id, title) VALUES (1, 'T')`); err != nil {
@@ -557,12 +665,20 @@ func TestLoadBookMetadataOverrideDecodesGuarded(t *testing.T) {
 		VALUES (1, 'T2', 'not-json', '[]', '[]', '', 1999)`); err != nil {
 		t.Fatal(err)
 	}
+	// The corrupt authors column surfaces as a load error, not an empty list.
+	if o, err := loadBookMetadataOverride(db, 1); err == nil {
+		t.Fatalf("corrupt authors loaded without error: %+v", o)
+	}
+	// A valid '[]' stays explicit-empty, '' stays no-override.
+	if _, err := db.Exec(`UPDATE book_metadata_overrides SET authors = '[]' WHERE book_id = 1`); err != nil {
+		t.Fatal(err)
+	}
 	o, err := loadBookMetadataOverride(db, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if o.Authors == nil || len(o.Authors) != 0 {
-		t.Fatalf("corrupted authors = %v, want empty (not invented, not nil)", o.Authors)
+		t.Fatalf("authors = %v, want explicit empty (non-nil, len 0)", o.Authors)
 	}
 	if o.Narrators == nil || len(o.Narrators) != 0 {
 		t.Fatalf("narrators = %v, want explicit empty", o.Narrators)

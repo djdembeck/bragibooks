@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -14,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -96,14 +98,51 @@ func validOverrideField(name string) bool {
 	return overrideFieldVocabulary[name]
 }
 
+// normalizeClearedFields canonicalizes the explicit-clear set before it is
+// stored or applied: it dedupes entries and folds an explicit EMPTY chapter
+// list into cleared:["chapters"]. The empty-list form and the cleared-form
+// are the same operator intent (the engine's explicit chapter clear), so a
+// request may express it either way; the stored row and the applied
+// effective state agree on one spelling. A non-empty list is never folded
+// in — it is an edited value, not a clear.
+func normalizeClearedFields(cleared []string, chapters []SnapshotChapter) []string {
+	out := make([]string, 0, len(cleared)+1)
+	seen := map[string]bool{}
+	for _, c := range cleared {
+		if !seen[c] {
+			seen[c] = true
+			out = append(out, c)
+		}
+	}
+	if chapters != nil && len(chapters) == 0 && !seen["chapters"] {
+		out = append(out, "chapters")
+	}
+	sort.Strings(out)
+	return out
+}
+
 // maxOverrideCoverUploadBytes caps a manual cover upload: a cover is a
 // thumbnail, not a book (same order as catalog cover fetches).
 const maxOverrideCoverUploadBytes = 8 << 20
+
+// maxOverrideUploadBodyBytes caps the WHOLE multipart request body (the
+// file limit plus headroom for the form framing and the non-file field cap)
+// BEFORE multipart parsing: ParseMultipartForm's memory cap does not limit
+// total size, so the transport cap is what bounds an oversized upload.
+const maxOverrideUploadBodyBytes = maxOverrideCoverUploadBytes + 256<<10
 
 // maxOverrideChapters caps a manual chapter list: a legitimate audiobook
 // has far fewer than this, and the cap bounds the JSON round trip and the
 // engine's chapter write.
 const maxOverrideChapters = 1000
+
+// maxMetadataRequestBodyBytes caps the WHOLE editor PUT body before it is
+// decoded: the per-field caps bound the content, but the transport is only
+// bounded here, so an authenticated caller cannot stream an unbounded JSON
+// body into the decoder. The ceiling is well above the largest legal draft
+// (1000 chapters × 500-char titles + a 20 KB description ≈ 0.6 MiB), so a
+// valid save is never rejected by the transport cap.
+const maxMetadataRequestBodyBytes = 2 << 20
 
 // randRead is crypto/rand.Read, var-bound so tests may substitute a
 // deterministic source.
@@ -155,41 +194,59 @@ func loadBookMetadataOverride(db *sql.DB, bookID int64) (*MetadataOverride, erro
 		o.Year = &v
 	}
 	// The array columns store JSON only when an override exists ('' = no
-	// override, '[]' = an explicit empty list).
-	o.Authors = jsonStringsOrEmpty(authorsJSON)
-	o.Narrators = jsonStringsOrEmpty(narratorsJSON)
-	o.Genres = jsonStringsOrEmpty(genresJSON)
-	o.Cleared = jsonStringsOrEmpty(clearedJSON)
-	o.Chapters = jsonChaptersOrEmpty(chaptersJSON)
+	// override, '[]' = an explicit empty list). A decode failure means the
+	// stored value is corrupt and must surface as a load error: folding it
+	// into an empty slice would turn it into an explicit clear and silently
+	// blank the captured values on the next save/job.
+	if o.Authors, err = jsonStrings(authorsJSON); err != nil {
+		return nil, fmt.Errorf("load metadata overrides: authors: %w", err)
+	}
+	if o.Narrators, err = jsonStrings(narratorsJSON); err != nil {
+		return nil, fmt.Errorf("load metadata overrides: narrators: %w", err)
+	}
+	if o.Genres, err = jsonStrings(genresJSON); err != nil {
+		return nil, fmt.Errorf("load metadata overrides: genres: %w", err)
+	}
+	if o.Cleared, err = jsonStrings(clearedJSON); err != nil {
+		return nil, fmt.Errorf("load metadata overrides: cleared: %w", err)
+	}
+	if o.Chapters, err = jsonChapters(chaptersJSON); err != nil {
+		return nil, fmt.Errorf("load metadata overrides: chapters: %w", err)
+	}
 	return o, nil
 }
 
-// jsonStringsOrEmpty decodes the stored array convention: ” (no override)
-// stays nil, any other content decodes to a slice ('[]' = explicit empty).
-// A decode failure yields an empty slice (the fail-safe state: no value,
-// no clear) — a corrupted row must not invent catalog content.
-func jsonStringsOrEmpty(raw string) []string {
+// jsonStrings decodes the stored array convention: "" is the no-override
+// state (nil), and any other content MUST decode to a slice ('[]' = an
+// explicit empty list). A decode failure is surfaced, NOT folded into an
+// empty slice: '[]' is the explicit-empty ("clear the tags") state, so a
+// corrupted column must never masquerade as an operator's explicit clear —
+// that would silently replace captured people/genres with nothing.
+func jsonStrings(raw string) ([]string, error) {
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
 	var out []string
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		return []string{}
+		return nil, fmt.Errorf("decode %q: %w", raw, err)
 	}
-	return out
+	return out, nil
 }
 
-// jsonChaptersOrEmpty decodes the stored chapters convention (” = no
-// override, any other content = the explicit list, '[]' = clear chapters).
-func jsonChaptersOrEmpty(raw string) []SnapshotChapter {
+// jsonChapters decodes the stored chapters convention ("" = no override,
+// any other content = the explicit list, '[]' = clear chapters). A decode
+// failure is surfaced for the same reason jsonStrings surfaces its own:
+// the no-override and explicit-empty states are distinct and must not be
+// conflated by a corrupt value.
+func jsonChapters(raw string) ([]SnapshotChapter, error) {
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
 	var out []SnapshotChapter
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		return nil
+		return nil, fmt.Errorf("decode %q: %w", raw, err)
 	}
-	return out
+	return out, nil
 }
 
 // saveMetadataOverride persists the row (insert-or-replace on book_id).
@@ -304,9 +361,13 @@ type overridePinnedPolicies struct {
 //     the captured cover reference with the operator's asset; 'url' pins
 //     the engine's write_url policy (embedded at run time, validated
 //     public-URL at save).
-//   - Chapters: a non-nil list replaces the captured chapters and pins
-//     the chapter policy to "write" — EXCEPT an empty list, which the
-//     engine's job contract treats as an explicit chapter CLEAR.
+//   - Chapters: an explicit clear (an empty list, or cleared:["chapters"])
+//     removes the chapters and pins the chapter policy to "clear" (the one
+//     unconditional chapter pin — it overrides a saved write policy). A
+//     non-empty edited list replaces the captured chapters for naming and
+//     run-time writes, but the chapter write POLICY stays with the saved
+//     per-field selection: a "preserve" choice keeps its no-embed /
+//     no-sidecar behavior even when the list has been edited.
 //
 // The returned BookSnapshot is a COPY: the queue path freezes it into
 // the job row, and caller mutations must not leak into the stored
@@ -415,16 +476,23 @@ func applyMetadataOverride(snap *BookSnapshot, o *MetadataOverride) (BookSnapsho
 		// covers use; validated public-URL at save time).
 		pinned.Cover = new("write_url")
 	}
-	if o.Chapters != nil {
-		if len(o.Chapters) == 0 {
-			// An explicit empty list is the engine's chapter CLEAR (its
-			// job contract: {"write":{"chapters":[]}} is an explicit
-			// clear), not a write of zero chapters.
-			eff.Chapters = nil
-			pinned.Chapters = new("clear")
-		} else {
-			pinned.Chapters = new("write")
-		}
+	if clearSet["chapters"] {
+		// An explicit chapters clear (cleared:["chapters"], or an empty
+		// list, which is the same intent): remove the embedded chapters.
+		// This is the ONE unconditional pin — it overrides a saved
+		// chapter-write policy, because removing the tags is an explicit
+		// operator operation, not a side effect of a settings checkbox.
+		eff.Chapters = nil
+		pinned.Chapters = new("clear")
+	} else if o.Chapters != nil && len(o.Chapters) > 0 {
+		// A non-empty edited list is effective METADATA (the engine names
+		// the output and, at run time, writes the chapters from it). It does
+		// NOT force the chapter write policy: that stays with the saved
+		// per-field selection, so a "preserve" choice keeps its no-embed /
+		// no-sidecar behavior even when the operator has edited the list.
+		// Forcing "write" here would embed + generate the sidecar despite
+		// the operator's preserve intent (plan: preserving chapter writes
+		// must not trigger unwanted embed/sidecar mutation).
 	}
 	if !anyScalarClear && pinned.Cover == nil && pinned.Chapters == nil {
 		return eff, nil
@@ -550,8 +618,18 @@ func (h *Handler) UpdateBookMetadata(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The draft is bounded BEFORE decoding: an authenticated caller must not
+	// be able to stream an unbounded JSON body into the decoder (memory) —
+	// the per-field caps below bound the CONTENT, not the transport.
+	r.Body = http.MaxBytesReader(w, r.Body, maxMetadataRequestBodyBytes)
 	var req bookMetadataRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var mbErr *http.MaxBytesError
+		if errors.As(err, &mbErr) {
+			writeError(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("metadata request exceeds the %d KB limit", maxMetadataRequestBodyBytes>>10))
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid metadata request: "+err.Error())
 		return
 	}
@@ -563,7 +641,8 @@ func (h *Handler) UpdateBookMetadata(w http.ResponseWriter, r *http.Request) {
 		Cleared: req.Cleared, CoverSource: req.CoverSource,
 		CoverFile: req.CoverFile, CoverURL: req.CoverURL, Chapters: req.Chapters,
 	}
-	if err := validateMetadataOverride(o); err != nil {
+	o.Cleared = normalizeClearedFields(o.Cleared, o.Chapters)
+	if err := validateMetadataOverride(r.Context(), o); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -581,15 +660,20 @@ func (h *Handler) UpdateBookMetadata(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The row mutation and the orphan-cover prune are ONE critical section
+	// under the per-book lock (the same lock capture and enqueue hold):
+	// the keep-set is read from the row AS JUST WRITTEN, so a concurrent
+	// save/reset cannot leave the row pointing at an asset a stale prune
+	// then deletes (finding: prune vs save). The lock is released before
+	// the audit insert and the response build, which do not touch covers.
+	unlock := h.svc.ProcessingSvc.lockBookCover(bookID)
 	if err := h.saveMetadataOverride(o); err != nil {
+		unlock()
 		writeError(w, http.StatusInternalServerError, "save metadata overrides: "+err.Error())
 		return
 	}
-	// When the cover reference changes, the previous override asset may
-	// become unreferenced: prune it under the same per-book lock +
-	// active-job check the capture prune uses, so a queued job's asset is
-	// never removed.
-	h.pruneOrphanedOverrideCovers(bookID, o)
+	h.pruneOrphanedOverrideCovers(bookID, h.persistedOverrideCoverFile(bookID))
+	unlock()
 	var title string
 	if err := h.svc.DB.QueryRow("SELECT title FROM books WHERE id = ?", bookID).Scan(&title); err != nil {
 		title = fmt.Sprintf("%d", bookID)
@@ -614,13 +698,22 @@ func (h *Handler) ResetBookMetadata(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The row deletion and the orphan-cover prune are ONE critical section
+	// under the per-book lock (the same lock capture and enqueue hold):
+	// after the delete the row references no asset, so the keep-set is
+	// empty apart from any active job's queued references, and a concurrent
+	// save cannot race the delete to leave a stale prune (finding: prune vs
+	// save). The lock is released before the capture and the audit insert.
+	unlock := h.svc.ProcessingSvc.lockBookCover(bookID)
 	if err := h.deleteMetadataOverride(bookID); err != nil {
+		unlock()
 		writeError(w, http.StatusInternalServerError, "reset metadata: "+err.Error())
 		return
 	}
+	h.pruneOrphanedOverrideCovers(bookID, "")
+	unlock()
 	// Guarantee the capture row's existence (the reset must not strand a
-	// historical book without one) and prune override cover assets no job
-	// references (the row's reference is gone).
+	// historical book without one).
 	if snap, err := h.loadSnapshot(bookID); err != nil {
 		writeError(w, http.StatusInternalServerError, "load snapshot: "+err.Error())
 		return
@@ -630,7 +723,6 @@ func (h *Handler) ResetBookMetadata(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	h.pruneOrphanedOverrideCovers(bookID, nil)
 	var title string
 	if err := h.svc.DB.QueryRow("SELECT title FROM books WHERE id = ?", bookID).Scan(&title); err != nil {
 		title = fmt.Sprintf("%d", bookID)
@@ -661,7 +753,18 @@ func (h *Handler) UploadBookMetadataCover(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "covers directory is not configured")
 		return
 	}
+	// Bound the WHOLE request before multipart parsing: ParseMultipartForm's
+	// memory cap limits in-memory storage only — an oversized file is spooled
+	// to disk first, so the transport must be capped here (file limit + a
+	// little headroom for the form framing) before the parser runs.
+	r.Body = http.MaxBytesReader(w, r.Body, maxOverrideUploadBodyBytes)
 	if err := r.ParseMultipartForm(maxOverrideCoverUploadBytes); err != nil {
+		var mbErr *http.MaxBytesError
+		if errors.As(err, &mbErr) {
+			writeError(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("cover upload exceeds the %d MB limit", maxOverrideCoverUploadBytes>>20))
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid upload: "+err.Error())
 		return
 	}
@@ -764,23 +867,39 @@ func overrideChangeSummary(o *MetadataOverride) string {
 	return strings.Join(parts, ", ")
 }
 
+// persistedOverrideCoverFile reads the CURRENT row's override cover file (the
+// asset the row references right now), or "" when the row is absent or does
+// not reference a local asset. Prune callers derive their keep-set from THIS,
+// read under the per-book lock, not from the caller's request draft: two
+// concurrent saves can otherwise leave the row pointing at a NEW asset while
+// a stale prune (built from an older draft) deletes it.
+func (h *Handler) persistedOverrideCoverFile(bookID int64) string {
+	var coverSource, coverFile string
+	if err := h.svc.DB.QueryRow(
+		"SELECT cover_source, cover_file FROM book_metadata_overrides WHERE book_id = ?", bookID,
+	).Scan(&coverSource, &coverFile); err != nil || coverSource != "file" {
+		return ""
+	}
+	return coverFile
+}
+
 // pruneOrphanedOverrideCovers removes this book's override cover assets
-// ("ovr-<bookID>-*.jpg") that neither the CURRENT override (newOv, nil
-// after a reset) nor any active job's queued snapshot references. It
-// mirrors pruneSupersededCovers' contract: an active job naming a file
-// keeps it (a queued job's asset must outlive a later editor save,
-// reset, or upload), and an unreadable reference scan aborts the sweep
-// entirely rather than delete against an incomplete keep-set.
-func (h *Handler) pruneOrphanedOverrideCovers(bookID int64, newOv *MetadataOverride) {
+// ("ovr-<bookID>-*.jpg") that neither the CURRENT override row (keepFile,
+// read under the per-book lock by the caller) nor any active job's queued
+// snapshot references. It mirrors pruneSupersededCovers' contract: an active
+// job naming a file keeps it (a queued job's asset must outlive a later
+// editor save, reset, or upload), and an unreadable reference scan aborts
+// the sweep entirely rather than delete against an incomplete keep-set.
+// The caller must hold the per-book lock for the WHOLE mutation+prune
+// sequence (the mutation and this call together are the critical section)
+// and pass the keep-set read from the persisted row under that same lock.
+func (h *Handler) pruneOrphanedOverrideCovers(bookID int64, keepFile string) {
 	if h.svc.CoversDir == "" {
 		return
 	}
-	if h.svc.ProcessingSvc != nil {
-		h.svc.ProcessingSvc.lockBookCover(bookID)()
-	}
 	keep := map[string]struct{}{}
-	if newOv != nil && newOv.CoverSource == "file" && newOv.CoverFile != "" {
-		keep[newOv.CoverFile] = struct{}{}
+	if keepFile != "" {
+		keep[keepFile] = struct{}{}
 	}
 	rows, err := h.svc.DB.Query(
 		`SELECT m4b_merge_args FROM processing_jobs WHERE book_id = ? AND status IN ('queued','running')`, bookID,
@@ -853,10 +972,12 @@ const (
 
 // validateMetadataOverride checks the editor draft BEFORE it is stored:
 // vocabulary, sizes, and shapes the engine would reject (blank chapter
-// titles, non-positive times, a cover_file that is not this book's
-// override asset, a non-public cover URL). This is the operator-facing,
-// actionable gate; the engine re-validates at run time.
-func validateMetadataOverride(o *MetadataOverride) error {
+// titles, non-positive times, out-of-order chapter ranges, a cover_file
+// that is not this book's override asset, a non-public cover URL). This is
+// the operator-facing, actionable gate; the engine re-validates at run time.
+// ctx bounds the cover-URL host resolution (a stuck DNS lookup dies on the
+// request clock, not the resolver's).
+func validateMetadataOverride(ctx context.Context, o *MetadataOverride) error {
 	if len(o.Title) > maxOverrideTitleChars {
 		return fmt.Errorf("title is too long (max %d characters)", maxOverrideTitleChars)
 	}
@@ -935,6 +1056,17 @@ func validateMetadataOverride(o *MetadataOverride) error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 			return fmt.Errorf("cover_url must be an absolute http(s) URL: %q", o.CoverURL)
 		}
+		// The URL is queued as a write_url cover the ENGINE fetches at run
+		// time, so it must pass the SAME public-destination guard the catalog
+		// cover path uses (assertPublicCoverURL): private, loopback,
+		// link-local, multicast, unspecified, and CGNAT addresses are
+		// refused, and every resolved address is checked. Without this, an
+		// operator could pin a URL like http://127.0.0.1/... and the engine
+		// would fetch it — an SSRF hole the catalog path does not have
+		// (plan: no SSRF exception for overrides).
+		if _, err := assertPublicCoverURL(ctx, u); err != nil {
+			return fmt.Errorf("cover_url: %w", err)
+		}
 		if o.CoverFile != "" {
 			return errors.New("a URL cover must not also reference a file")
 		}
@@ -945,6 +1077,14 @@ func validateMetadataOverride(o *MetadataOverride) error {
 		if len(o.Chapters) > maxOverrideChapters {
 			return fmt.Errorf("chapters: too many entries (max %d)", maxOverrideChapters)
 		}
+		// prevEnd is the previous chapter's end (start+duration, uint64, so
+		// no overflow at the per-chapter cap). A chapter that starts before
+		// the previous one ends is overlapping or out of order: the UI
+		// catches this too, but the server is the authoritative gate — a
+		// direct PUT must not defer a determinable ordering error to a
+		// processing run. The first chapter may start at 0 (a legal start;
+		// the engine checks it against real playlength at write time).
+		var prevEnd uint64
 		for i, c := range o.Chapters {
 			if strings.TrimSpace(c.Title) == "" {
 				return fmt.Errorf("chapter %d has no title", i+1)
@@ -958,6 +1098,10 @@ func validateMetadataOverride(o *MetadataOverride) error {
 			if c.StartMillis > maxOverrideChapterMillis || c.DurationMillis > maxOverrideChapterMillis {
 				return fmt.Errorf("chapter %d: start/duration are out of range", i+1)
 			}
+			if i > 0 && c.StartMillis < prevEnd {
+				return fmt.Errorf("chapter %d starts at %d ms before the previous chapter ends at %d ms (ranges must be ordered and non-overlapping)", i+1, c.StartMillis, prevEnd)
+			}
+			prevEnd = c.StartMillis + c.DurationMillis
 		}
 	}
 	return nil
