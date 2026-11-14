@@ -216,6 +216,16 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 		}
 	}
 
+	// The snapshot WRITE and the superseded-cover PRUNE are one critical
+	// section, held under the per-book lock (also held by QueueJob across its
+	// snapshot read→insert, so the two never interleave): without the lock a
+	// capture could upsert the new cover reference, prune the file the book's
+	// not-yet-inserted enqueue already read, and leave that job naming a file
+	// that is gone — its active-job count being zero in the gap (finding:
+	// prune vs enqueue).
+	if h.svc.ProcessingSvc != nil {
+		defer h.svc.ProcessingSvc.lockBookCover(bookID)()
+	}
 	if err := h.upsertSnapshot(snap); err != nil {
 		return false, err
 	}
@@ -223,27 +233,61 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 	return catalogDegraded, nil
 }
 
-// pruneSupersededCovers deletes this book's old cover files that are no
-// longer referenced by its snapshot. It skips the book entirely while it
-// has an active (queued/running) job: that job's queued snapshot still
-// references the file its capture wrote, and capture-specific immutable
-// names mean a failed later capture never touches it anyway. Pruning is
-// opportunistic housekeeping, not correctness.
+// pruneSupersededCovers deletes this book's cover files that are no longer
+// referenced by its current snapshot NOR by any of its active (queued/running)
+// jobs' queued snapshots. The active-job check is PER FILE, not a skip: a
+// file some active job's snapshot names is kept; a file NO active job names
+// (the pre-capture-specific legacy shared name, and older capture-specific
+// images) is removed, so repeated captures do not accumulate orphan files.
+//
+// It must run under the per-book lock (acquired by captureSnapshot) so the
+// reference read and the delete are atomic with the enqueue's snapshot
+// read→insert: a job that already named a cover file can never see that file
+// pruned, because by the time its row exists (status queued/running) the
+// query above includes it.
 func (h *Handler) pruneSupersededCovers(bookID int64, s *BookSnapshot) {
 	if s.CoverFile == "" {
 		return
 	}
-	var n int
-	if err := h.svc.DB.QueryRow(
-		"SELECT COUNT(*) FROM processing_jobs WHERE book_id = ? AND status IN ('queued','running')", bookID,
-	).Scan(&n); err != nil || n > 0 {
+	// The set of cover filenames that must survive: the current snapshot's
+	// reference plus every active job's queued snapshot reference.
+	keep := map[string]struct{}{s.CoverFile: {}}
+	rows, err := h.svc.DB.Query(
+		`SELECT m4b_merge_args FROM processing_jobs WHERE book_id = ? AND status IN ('queued','running')`, bookID,
+	)
+	if err == nil {
+		for rows.Next() {
+			var raw string
+			if err := rows.Scan(&raw); err != nil {
+				continue
+			}
+			var args struct {
+				Snapshot *snapshotJSON `json:"snapshot"`
+			}
+			if json.Unmarshal([]byte(raw), &args) == nil && args.Snapshot != nil {
+				if cf := args.Snapshot.Snapshot.CoverFile; cf != "" {
+					keep[cf] = struct{}{}
+				}
+			}
+		}
+		rows.Close()
+	}
+	// Housekeeping only: a covers-dir read failure leaves the files in place.
+	dirEntries, err := os.ReadDir(h.svc.CoversDir)
+	if err != nil {
 		return
 	}
-	// The pre-capture-specific shared name is the only legacy form to
-	// retire; the active (capture-specific) file is never removed.
-	legacy := fmt.Sprintf("%d-snapshot.jpg", bookID)
-	if legacy != s.CoverFile {
-		os.Remove(filepath.Join(h.svc.CoversDir, legacy))
+	for _, e := range dirEntries {
+		if e.IsDir() {
+			continue
+		}
+		if !strings.HasSuffix(e.Name(), ".jpg") {
+			continue
+		}
+		if _, ok := keep[e.Name()]; ok {
+			continue
+		}
+		os.Remove(filepath.Join(h.svc.CoversDir, e.Name()))
 	}
 }
 
@@ -596,6 +640,13 @@ type coverHop struct {
 	port string
 }
 
+// lookupCoverHost resolves host under the capture's context deadline, so a
+// stuck DNS resolution dies on the same clock as the HTTP fetch instead of
+// holding the metadata-save request past the intended cover timeout.
+func lookupCoverHost(ctx context.Context, host string) ([]string, error) {
+	return net.DefaultResolver.LookupHost(ctx, host)
+}
+
 // assertPublicCoverURL refuses a cover destination that is not a public
 // http(s) URL: private, loopback, link-local, multicast, unspecified, and
 // carrier-grade NAT ranges are not public destinations, and a
@@ -603,7 +654,7 @@ type coverHop struct {
 // one. The host is resolved and EVERY address checked, because a name
 // resolving to mixed records must not pass on the public one. Returns the
 // pinned hop (first validated address) the fetch must connect to.
-func assertPublicCoverURL(u *url.URL) (coverHop, error) {
+func assertPublicCoverURL(ctx context.Context, u *url.URL) (coverHop, error) {
 	if u == nil {
 		return coverHop{}, errors.New("empty cover URL")
 	}
@@ -614,7 +665,10 @@ func assertPublicCoverURL(u *url.URL) (coverHop, error) {
 	if host == "" {
 		return coverHop{}, errors.New("cover URL has no host")
 	}
-	addrs, err := net.LookupHost(host)
+	// Bound the lookup to the capture deadline: a stuck DNS resolution must
+	// die on the same clock as the HTTP fetch, not hold the metadata-save
+	// request past the intended cover timeout (finding: DNS not on deadline).
+	addrs, err := lookupCoverHost(ctx, host)
 	if err != nil {
 		return coverHop{}, fmt.Errorf("resolve cover host: %w", err)
 	}
@@ -671,12 +725,12 @@ func downloadCoverFile(ctx context.Context, coverURL string, dest string) error 
 	if err != nil {
 		return fmt.Errorf("parse cover URL: %w", err)
 	}
-	if _, err := assertPublicCoverURL(parsed); err != nil {
+	if _, err := assertPublicCoverURL(ctx, parsed); err != nil {
 		return err
 	}
 	current := parsed
 	for hop := 0; hop < 4; hop++ {
-		hp, err := assertPublicCoverURL(current)
+		hp, err := assertPublicCoverURL(ctx, current)
 		if err != nil {
 			return err
 		}

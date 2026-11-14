@@ -258,7 +258,10 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.OutputScheme != nil {
-		if verr := audio.ValidatePathFormat(*req.OutputScheme); verr != nil {
+		// The same relative-path rules the boot check and enqueue apply:
+		// a value the engine cannot resolve inside the output root must
+		// fail HERE (400), not make the next startup fatal.
+		if verr := audio.ValidateRelativePathFormat(*req.OutputScheme); verr != nil {
 			writeError(w, http.StatusBadRequest, "output scheme: "+verr.Error())
 			return
 		}

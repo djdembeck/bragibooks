@@ -678,6 +678,11 @@ func TestUpdateSettingsOutputSchemeValidation(t *testing.T) {
 		{name: "reserved device name rejected", scheme: `{con}`, want: http.StatusBadRequest, wantBody: "output scheme:"},
 		{name: "year scheme accepted (warnings do not gate)", scheme: `{author}/{year}`, want: http.StatusOK, wantBody: `"output_scheme":"{author}/{year}"`},
 		{name: "asin alone rejected", scheme: `{asin}`, want: http.StatusBadRequest, wantBody: "output scheme:"},
+		// Relative-path rules (matching the boot check): an absolute scheme or
+		// a ".." traversal must be refused at save time, not make the next
+		// startup fatal.
+		{name: "absolute scheme rejected", scheme: `/abs/{title}`, want: http.StatusBadRequest, wantBody: "output scheme:"},
+		{name: "dotdot traversal rejected", scheme: `../{title}`, want: http.StatusBadRequest, wantBody: "output scheme:"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

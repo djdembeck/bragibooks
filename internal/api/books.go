@@ -461,9 +461,20 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 	// with the new local fields while retaining the previously captured
 	// catalog content (genres/chapters/cover), and the save succeeds.
 	if _, cerr := h.captureSnapshot(r.Context(), bookID, snapshotRelevantChanged(&req)); cerr != nil {
-		log.Printf("capture snapshot for book %d: %v — invalidating snapshot row", bookID, cerr)
-		h.svc.DB.Exec("DELETE FROM book_snapshots WHERE book_id = ?", bookID)
-		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf(
+		// Fail closed: the stale row MUST be invalidated so the book can never
+		// later run on it. If the invalidation itself fails, do NOT report a
+		// clean 503 — the book's state is now unknown (a row that may be
+		// stale and loadable), so report 500 and say the snapshot is in an
+		// unknown state, never "re-preview to restore it" (finding: ignored
+		// invalidation DELETE).
+		if _, derr := h.svc.DB.Exec("DELETE FROM book_snapshots WHERE book_id = ?", bookID); derr != nil {
+			log.Printf("capture snapshot for book %d: %v — AND invalidation failed: %v", bookID, cerr, derr)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+				"book saved, but its processing snapshot capture failed (%v) and the old snapshot could not be invalidated (%v): the book's metadata is in an unknown state — do not process it until a fresh save/re-preview succeeds", cerr, derr))
+			return
+		}
+		log.Printf("capture snapshot for book %d: %v — invalidated snapshot row", bookID, cerr)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf(
 			"book saved, but its processing snapshot capture failed: %v — re-preview the book to restore it", cerr))
 		return
 	}

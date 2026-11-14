@@ -198,6 +198,47 @@ func TestReprocessResolvesCompletedFirst(t *testing.T) {
 	}
 }
 
+// TestReprocessUsesFrozenCompletedDir pins that reprocess locates a run's
+// inputs against the FROZEN completed directory recorded on that run, not the
+// live global: the run's sources moved into frozenCompleted, the operator then
+// re-pointed the global completed dir elsewhere, and reprocess must still find
+// the inputs in the recorded job's directory (not report them missing).
+func TestReprocessUsesFrozenCompletedDir(t *testing.T) {
+	frozenCompleted, liveCompleted := t.TempDir(), t.TempDir()
+	h := newReprocessHandler(t, t.TempDir(), liveCompleted, "{author}/{title}", "")
+	src := filepath.Join(frozenCompleted, "a.m4b")
+	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	seedReprocessBook(t, h, 1, "done", frozenCompleted)
+	// A post-cutover row: it carries the frozen completed_dir. The input lives
+	// ONLY in frozenCompleted; liveCompleted is empty.
+	seedMergeRow(t, h, "seeded-frozen", 1,
+		fmt.Sprintf(`{"src_paths":[%q],"completed_dir":%q}`, src, frozenCompleted), "2026-07-03 10:00:00")
+
+	w := postReprocess(t, h, StartReprocessRequest{BookID: 1})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+	}
+	got := newestJobArgs(t, h.svc.DB, 1).SrcPaths
+	if len(got) != 1 || got[0] != src {
+		t.Fatalf("resolved src_paths = %v; want the frozen-completed-dir input %v", got, src)
+	}
+
+	// The preview reports the input found (not missing) against the frozen dir.
+	pw := getReprocess(t, h, 1)
+	if pw.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, want 200 (body %s)", pw.Code, pw.Body.String())
+	}
+	var preview reprocessPreviewWire
+	if err := json.Unmarshal(pw.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("preview decode: %v", err)
+	}
+	if preview.Inputs == nil || preview.Inputs.Found != 1 || len(preview.Inputs.Missing) != 0 {
+		t.Fatalf("preview inputs = %+v; want 1 found, none missing (via the frozen completed dir)", preview.Inputs)
+	}
+}
+
 // TestReprocessMixedLocations covers one input in the completed dir and one
 // only at its recorded original path: order is preserved and the detail
 // counts the completed share.

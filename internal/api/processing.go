@@ -43,6 +43,24 @@ type ProcessingService struct {
 	// dequeues its first job and before processing, pinning the
 	// enqueue-then-reconfigure window for snapshot tests.
 	workerStartHook func(jobID string)
+	// bookCoversMu serializes, PER BOOK, the enqueue's snapshot read against
+	// a capture's snapshot write + superseded-cover prune: without it a
+	// capture could prune the cover file in the gap between the enqueue's
+	// loadSnapshotForQueue and its job-row insert, and the job would then
+	// name a file that is gone.
+	bookCoversMu sync.Map // bookID (int64) -> *sync.Mutex
+}
+
+// lockBookCover returns unlock, the per-book lock that pairs a capture's
+// write+prune with the enqueue's snapshot read (finding: prune-vs-enqueue
+// gap). The mutex is held for the whole critical section and is never
+// reused after the first unlock, so a second call for the same book
+// re-locks the same mutex instance.
+func (s *ProcessingService) lockBookCover(bookID int64) (unlock func()) {
+	v, _ := s.bookCoversMu.LoadOrStore(bookID, &sync.Mutex{})
+	m := v.(*sync.Mutex)
+	m.Lock()
+	return m.Unlock
 }
 
 type jobState struct {
@@ -446,6 +464,12 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	// path — never guessed, never silently run under a guessed schema.
 	var snap *snapshotJSON
 	if bookID > 0 {
+		// Per-book lock held across the read→insert critical section (defer
+		// runs at function end, past the atomic INSERT below): a capture's
+		// snapshot write + superseded-cover prune must not interleave here,
+		// or it could delete the cover file this job is about to name while
+		// the active-job count is still zero (finding: prune vs enqueue).
+		defer s.lockBookCover(bookID)()
 		captured, err := s.loadSnapshotForQueue(bookID)
 		if err != nil {
 			return "", fmt.Errorf("load snapshot for queue: %w", err)
@@ -1651,7 +1675,16 @@ func (h *Handler) GetBookReprocess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	completedDir, _ := resp["completed_dir"].(string)
+	// Locate the run's inputs against the FROZEN completed directory recorded
+	// on that job (finding: reprocess used only the live global, so a run whose
+	// sources moved to its own completed dir — later cleared or re-pointed in
+	// Settings — would report the inputs missing even though they remain in the
+	// recorded job's directory). A pre-cutover legacy row carries no frozen
+	// value (""), so fall back to the live global only for those.
+	completedDir := args.CompletedDir
+	if completedDir == "" {
+		completedDir, _ = resp["completed_dir"].(string)
+	}
 	resolved, foundCompleted, foundOriginal, missing := locateInputs(args.SrcPaths, completedDir)
 	found := len(resolved)
 	// The wire contract is an array (possibly empty), never null: the dialog
@@ -1736,8 +1769,12 @@ func (h *Handler) StartReprocess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	completedDir := ""
-	if h.svc.Config != nil {
+	// Locate inputs against the FROZEN completed directory recorded on the run
+	// (finding: the live global alone misses a run whose sources moved to its
+	// own completed dir after the setting was cleared/re-pointed); a legacy row
+	// with no frozen value falls back to the live global.
+	completedDir := args.CompletedDir
+	if completedDir == "" && h.svc.Config != nil {
 		completedDir = strings.TrimSpace(h.svc.Config.Config().Directories.CompletedDir)
 	}
 	resolved, foundCompleted, _, missing := locateInputs(args.SrcPaths, completedDir)

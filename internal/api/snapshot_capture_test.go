@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -168,28 +169,70 @@ func TestCaptureSnapshotCaptureSpecificCoverName(t *testing.T) {
 	}
 }
 
-// TestPruneSupersededCoversSkipsActiveJob pins the pruning guard: while the
-// book has a queued/running job, no cover file is removed (that job's queued
-// snapshot may reference it).
-func TestPruneSupersededCoversSkipsActiveJob(t *testing.T) {
+// TestPruneSupersededCoversKeepsActiveJobReference pins the per-file pruning
+// guard: a cover file that an ACTIVE (queued/running) job's queued snapshot
+// names is kept even when the current snapshot has moved on to a new file,
+// while an orphan file referenced by no live snapshot is pruned. This is
+// what makes capture-vs-enqueue race-safe: by the time a job's row exists it
+// is counted, so its named file can never be pruned out from under it.
+func TestPruneSupersededCoversKeepsActiveJobReference(t *testing.T) {
 	h := newTestHandler(t)
 	covers := t.TempDir()
 	h.svc.CoversDir = covers
-	if err := os.WriteFile(filepath.Join(covers, "1-old.jpg"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("seed legacy cover: %v", err)
+	// The active job references 1-500.jpg; an orphan 1-200.jpg is left over
+	// from an earlier capture and is referenced by nothing.
+	for _, name := range []string{"1-500.jpg", "1-200.jpg"} {
+		if err := os.WriteFile(filepath.Join(covers, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("seed cover %s: %v", name, err)
+		}
 	}
 	if _, err := h.svc.DB.Exec(
 		"INSERT INTO books (id, title, status) VALUES (1, 'B', 'matched')",
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	// A queued job whose snapshot names 1-500.jpg (jobArgs → snapshotJSON →
+	// BookSnapshot.cover_file shape).
+	jobArgs := `{"snapshot":{"snapshot":{"cover_file":"1-500.jpg"}}}`
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status) VALUES ('j1', 1, ?, 'queued')", jobArgs,
+	); err != nil {
+		t.Fatalf("seed active job: %v", err)
+	}
+	// Current snapshot has moved on to 1-999.jpg.
+	h.pruneSupersededCovers(1, &BookSnapshot{BookID: 1, CoverFile: "1-999.jpg"})
+	if ok, _ := mustFile(filepath.Join(covers, "1-500.jpg")); !ok {
+		t.Fatalf("cover file referenced by an active job's snapshot was pruned")
+	}
+	if ok, _ := mustFile(filepath.Join(covers, "1-200.jpg")); ok {
+		t.Fatalf("orphan cover file (no live reference) must be pruned")
+	}
+}
+
+// TestPruneSupersededCoversPrunesOrphanDespiteActiveJob pins that the active-
+// job guard is per FILE, not a book-wide skip: a legacy orphan the active job's
+// snapshot does not name is still pruned (the old "skip the whole book" guard
+// would have left it forever).
+func TestPruneSupersededCoversPrunesOrphanDespiteActiveJob(t *testing.T) {
+	h := newTestHandler(t)
+	covers := t.TempDir()
+	h.svc.CoversDir = covers
+	legacy := fmt.Sprintf("%d-snapshot.jpg", 1)
+	if err := os.WriteFile(filepath.Join(covers, legacy), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed legacy cover: %v", err)
+	}
+	if _, err := h.svc.DB.Exec("INSERT INTO books (id, title, status) VALUES (1, 'B', 'matched')"); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	// A queued job whose stored args carry NO snapshot (legacy shape, no cover
+	// reference).
 	if _, err := h.svc.DB.Exec(
 		"INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status) VALUES ('j1', 1, '{}', 'queued')",
 	); err != nil {
 		t.Fatalf("seed active job: %v", err)
 	}
 	h.pruneSupersededCovers(1, &BookSnapshot{BookID: 1, CoverFile: "1-999.jpg"})
-	if ok, _ := mustFile(filepath.Join(covers, "1-old.jpg")); !ok {
-		t.Errorf("legacy cover removed while the book has an active job")
+	if ok, _ := mustFile(filepath.Join(covers, legacy)); ok {
+		t.Fatalf("legacy orphan cover must be pruned even while an active job exists (guard is per-file)")
 	}
 }
