@@ -338,3 +338,77 @@ func TestLoadYAMLIndexingEnabledPrecedence(t *testing.T) {
 		})
 	}
 }
+
+// TestMetadataFieldsEmptyListSurvivesFileReload pins the #518 none-selected
+// distinction across the YAML round trip: an explicit empty list in the file
+// (the operator's "write nothing" selection) must reload as a non-nil empty
+// slice, not collapse to nil (the default all-supported-available baseline).
+// yaml.Unmarshal decodes an empty list to a nil slice, so the load path must
+// restore it from the parsed map.
+func TestMetadataFieldsEmptyListSurvivesFileReload(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	cm := NewConfigManager()
+	cm.SetConfigPath(p)
+	cfg := cm.Config()
+	empty := []string{}
+	cfg.Processing.MetadataFields = &empty
+	cm.Store(cfg)
+	if err := cm.SaveKeys(map[string]any{"processing": map[string]any{"metadata_fields": []string{}}}); err != nil {
+		t.Fatalf("SaveKeys: %v", err)
+	}
+	cm2 := NewConfigManager()
+	if _, err := cm2.LoadFrom(p); err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	got := cm2.Config().Processing.MetadataFields
+	if got == nil {
+		t.Fatal("metadata_fields collapsed to nil after save+reload; want non-nil empty")
+	}
+	if len(*got) != 0 {
+		t.Fatalf("empty selection reloaded with %d fields: %v", len(*got), *got)
+	}
+}
+
+// TestMetadataFieldsAbsentFromFileStaysNil pins the other side of the
+// distinction: a config file with NO metadata_fields key must leave the
+// default nil baseline intact, not invent an explicit empty selection.
+func TestMetadataFieldsAbsentFromFileStaysNil(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	body := "processing:\n    path_format: '{author}/{title}'\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cm := NewConfigManager()
+	if _, err := cm.LoadFrom(p); err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if got := cm.Config().Processing.MetadataFields; got != nil {
+		t.Fatalf("absent metadata_fields must stay nil (default), got %v", *got)
+	}
+}
+
+// TestMetadataFieldsNonEmptyListSurvivesFileReload pins that a saved
+// non-empty selection survives the YAML round trip unchanged.
+func TestMetadataFieldsNonEmptyListSurvivesFileReload(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	cm := NewConfigManager()
+	cm.SetConfigPath(p)
+	cfg := cm.Config()
+	want := []string{"title", "subtitle"}
+	cfg.Processing.MetadataFields = &want
+	cm.Store(cfg)
+	if err := cm.SaveKeys(map[string]any{"processing": map[string]any{"metadata_fields": []string{"title", "subtitle"}}}); err != nil {
+		t.Fatalf("SaveKeys: %v", err)
+	}
+	cm2 := NewConfigManager()
+	if _, err := cm2.LoadFrom(p); err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	got := cm2.Config().Processing.MetadataFields
+	if got == nil || len(*got) != 2 || (*got)[0] != "title" || (*got)[1] != "subtitle" {
+		t.Fatalf("non-empty selection not preserved: %v", got)
+	}
+}

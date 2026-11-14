@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS book_snapshots (
     audiobookdb_book_id TEXT NOT NULL DEFAULT '',
     audiobookdb_release_id TEXT NOT NULL DEFAULT '',
     title TEXT NOT NULL DEFAULT '',
+    subtitle TEXT NOT NULL DEFAULT '',
     authors TEXT NOT NULL DEFAULT '[]',
     narrators TEXT NOT NULL DEFAULT '[]',
     series_name TEXT NOT NULL DEFAULT '',

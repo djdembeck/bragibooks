@@ -72,10 +72,26 @@ type DirectoriesConfig struct {
 
 // ProcessingConfig holds audiobook processing configuration.
 type ProcessingConfig struct {
-	NumCPUs    int    `mapstructure:"num_cpus" yaml:"num_cpus" json:"num_cpus"`
+	NumCPUs int `mapstructure:"num_cpus" yaml:"num_cpus" json:"num_cpus"`
+	// PathFormat is the global output path template.
 	PathFormat string `mapstructure:"path_format" yaml:"path_format" json:"path_format"`
 	Region     string `mapstructure:"region" yaml:"region" json:"region"`
 	LogLevel   string `mapstructure:"log_level" yaml:"log_level" json:"log_level"`
+	// MetadataFields is the per-field embedded-metadata write selection
+	// (#518): which supported logical fields processing may write into the
+	// output file. Nil means the DEFAULT behavior — write every supported
+	// field that has an available value (all-supported-available). An
+	// explicit list (possibly EMPTY, meaning write nothing) writes exactly
+	// the selected fields and preserves the rest. The selection is a WRITE
+	// permission, not a value source: output naming always uses the full
+	// effective metadata, and an unselected field is preserved, never
+	// cleared.
+	MetadataFields *[]string `mapstructure:"metadata_fields" yaml:"metadata_fields" json:"metadata_fields"`
+	// MetadataChapters is the chapter write policy (#518): "write" (the
+	// default; embed the release's chapters + the chapter sidecar) or
+	// "preserve" (no chapter mutation; the engine enforces the single
+	// natively-copyable input requirement with a diagnosed error).
+	MetadataChapters string `mapstructure:"metadata_chapters" yaml:"metadata_chapters" json:"metadata_chapters"`
 }
 
 // ConfigManager manages thread-safe config updates and persistence.
@@ -212,7 +228,18 @@ func loadWith(explicitPath string) (Config, string, error) {
 			setLoadError(fmt.Errorf("failed to parse config file for overrides: %w", err))
 			return Config{}, "", fmt.Errorf("failed to parse config file for overrides: %w", err)
 		}
-		for _, key := range flattenYAMLKeys(parseYAMLMap(raw), "") {
+		rawMap := parseYAMLMap(raw)
+		// yaml.Unmarshal decodes an empty list to a nil slice, so it cannot
+		// distinguish "explicit empty" from "absent". metadata_fields makes
+		// that distinction load-bearing (nil = default all-supported, [] =
+		// the explicit "write nothing" selection, #518), so an empty list
+		// PRESENT in the file is restored to a non-nil empty slice here.
+		if proc, ok := rawMap["processing"].(map[string]any); ok {
+			if v, present := proc["metadata_fields"]; present && isEmptyListValue(v) {
+				yamlOnly.Processing.MetadataFields = &[]string{}
+			}
+		}
+		for _, key := range flattenYAMLKeys(rawMap, "") {
 			overrideKey(&cfg, &yamlOnly, key)
 		}
 	}
@@ -521,6 +548,25 @@ func applyEnvPriority(cfg *Config) {
 	if v := envVal("processing.region"); v != "" {
 		cfg.Processing.Region = v
 	}
+	// PROCESSING_METADATA_FIELDS pins the per-field write selection as a
+	// comma-separated list (an empty list is the explicit "write nothing").
+	// The values are NOT validated here: the boot validation in main.go is
+	// the single nameable gate (same as the path-format boot check), so a
+	// bad pin fails startup with a clear diagnosis, not a silently dropped
+	// deployment value.
+	if v := envVal("processing.metadata_fields"); v != "" {
+		parts := strings.Split(v, ",")
+		list := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if p = strings.TrimSpace(p); p != "" {
+				list = append(list, p)
+			}
+		}
+		cfg.Processing.MetadataFields = &list
+	}
+	if v := envVal("processing.metadata_chapters"); v != "" {
+		cfg.Processing.MetadataChapters = strings.TrimSpace(v)
+	}
 }
 
 // parseYAMLMap unmarshals raw YAML bytes into a generic map (nil on error).
@@ -548,6 +594,17 @@ func flattenYAMLKeys(m map[string]any, prefix string) []string {
 		}
 	}
 	return keys
+}
+
+// isEmptyListValue reports whether a parsed-YAML value is a present empty
+// list (a `key: []` in the file), as opposed to nil (absent) or a non-empty
+// list. A `key: []` decodes to an empty []interface{}; a `key:` with no
+// value decodes to nil.
+func isEmptyListValue(v any) bool {
+	if l, ok := v.([]any); ok {
+		return len(l) == 0
+	}
+	return false
 }
 
 // overrideKey copies a single dotted key from yamlOnly into target — but
@@ -604,6 +661,12 @@ func overrideKey(target, yamlOnly *Config, key string) {
 		target.Processing.Region = yamlOnly.Processing.Region
 	case "processing.log_level":
 		target.Processing.LogLevel = yamlOnly.Processing.LogLevel
+	case "processing.metadata_fields":
+		// The nil (default all) vs explicit-list distinction must survive the
+		// YAML pass: an empty YAML list is an explicit "write nothing".
+		target.Processing.MetadataFields = yamlOnly.Processing.MetadataFields
+	case "processing.metadata_chapters":
+		target.Processing.MetadataChapters = yamlOnly.Processing.MetadataChapters
 	}
 }
 
@@ -637,6 +700,16 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("processing.path_format", "{author}/{title}")
 	v.SetDefault("processing.region", "us")
 	v.SetDefault("processing.log_level", "info")
+	// processing.metadata_fields is intentionally NOT defaulted: nil (absent)
+	// is the documented all-supported-available behavior for existing installs,
+	// distinct from an explicit empty list (write nothing). Setting a default
+	// here would collapse that distinction. processing.metadata_chapters is
+	// not defaulted here either: viper folds SetDefault values into EVERY
+	// unmarshal, so a default would make the YAML pass (overrideKey) see a
+	// "write" that the YAML never set and clobber a DB-saved "preserve".
+	// The blank value is the documented default (write) at every consumer:
+	// the DB column carries DEFAULT 'write', the load COALESCEs a missing
+	// column to 'write', and buildEngineJob treats a blank policy as write.
 }
 
 // setDefaultsOnConfig sets default values directly on a Config struct.

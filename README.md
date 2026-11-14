@@ -175,6 +175,8 @@ The key environment variables are:
 | `DIRECTORIES_INDEXING_ENABLED` | Force the input directory pre-index on at boot (exact `"true"` value only — unlike `SERVER_API_ENDPOINT_ENABLED`, any other value such as `false`, `1`, `yes`, or `TRUE` is ignored and the saved/YAML preference stays in effect; disabling stays to the Settings toggle) | `false` |
 | `PROCESSING_NUM_CPUS` | Number of processing workers | `1` |
 | `PROCESSING_PATH_FORMAT` | Output path format | `{author}/{title}` |
+| `PROCESSING_METADATA_FIELDS` | Comma-separated embedded-metadata fields processing may write (`title`, `subtitle`, `authors`, `narrators`, `series`, `description`, `genres`, `year`, `cover`); the Settings UI edits this | empty (all supported fields) |
+| `PROCESSING_METADATA_CHAPTERS` | Chapter write policy: `write` or `preserve` | `write` |
 | `PROCESSING_REGION` | Accepted for compatibility with older setups; no effect | `us` |
 | `PROCESSING_LOG_LEVEL` | Processing log level | `info` |
 
@@ -194,6 +196,8 @@ processing:
   num_cpus: 1
   path_format: "{author}/{title}"
   region: us
+  # metadata_fields: [title, authors, cover]  # omit for all supported fields
+  # metadata_chapters: write                  # or: preserve
 ```
 
 <details>

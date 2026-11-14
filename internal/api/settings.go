@@ -43,6 +43,11 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 		"api_endpoint_env_managed": h.svc.Config.APIEndpointEnvManaged(),
 		"bragibooks_version":       version.Version,
 		"m4b_merge_version":        h.svc.Processor.ReadVersion(),
+		// The nil (default all) vs explicit-list distinction must reach the
+		// UI: null renders every checkbox checked (the default), [] renders
+		// none checked (write nothing).
+		"metadata_fields":   cfg.Processing.MetadataFields,
+		"metadata_chapters": cfg.Processing.MetadataChapters,
 	}
 
 	writeJSON(w, http.StatusOK, settings)
@@ -223,6 +228,18 @@ type UpdateSettingsRequest struct {
 	OutputScheme       *string `json:"output_scheme"`
 	Region             *string `json:"region"`
 	IndexingEnabled    *bool   `json:"indexing_enabled"`
+	// MetadataFields is the per-field embedded-metadata write selection
+	// (#518): a present array (possibly empty = write nothing) is the
+	// explicit selection; an ABSENT field leaves the saved selection
+	// untouched (standard partial-update semantics — the default
+	// all-supported-available behavior is the stored zero value, not a
+	// request-time reset). The values must name supported fields
+	// (validated below).
+	MetadataFields *[]string `json:"metadata_fields"`
+	// MetadataChapters is the chapter write policy: "write" (default;
+	// embed the release's chapters + sidecar) or "preserve" (no chapter
+	// mutation; single natively-copyable input only).
+	MetadataChapters *string `json:"metadata_chapters"`
 }
 
 // UpdateSettings handles PUT /api/settings.
@@ -271,6 +288,25 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.AudiobookdbBaseURL != nil && *req.AudiobookdbBaseURL != "" {
 		if err := validateAudiobookdbBaseURL(*req.AudiobookdbBaseURL); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	// Per-field write selection (#518): a PRESENT value is validated (an
+	// unknown field name is a 400 naming it — the UI derives its checkbox
+	// list from the verified engine capabilities, so a stale client that
+	// sends a dropped field must fail loudly); an ABSENT value leaves the
+	// saved selection untouched (partial-update semantics). The chapter
+	// policy accepts only the two Bragi-derived values (write/preserve).
+	if req.MetadataFields != nil {
+		if _, err := audio.NormalizeSelectableFields(*req.MetadataFields); err != nil {
+			writeError(w, http.StatusBadRequest, "metadata fields: "+err.Error())
+			return
+		}
+	}
+	if req.MetadataChapters != nil {
+		c := strings.TrimSpace(*req.MetadataChapters)
+		if c != audio.ChaptersPolicyValueWrite && c != audio.ChaptersPolicyValuePreserve {
+			writeError(w, http.StatusBadRequest, "chapter write policy must be \"write\" or \"preserve\"")
 			return
 		}
 	}
@@ -375,6 +411,18 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		snap.Directories.IndexingEnabled = *req.IndexingEnabled
 		changed["directories"] = mergeChangedMap(changed, "directories", "indexing_enabled", *req.IndexingEnabled)
 	}
+	if req.MetadataFields != nil {
+		// Store the normalized (trimmed, de-duplicated) list; nil would
+		// mean "reset to default" but a present array always yields a
+		// non-nil normalized value (possibly empty = write nothing).
+		norm, _ := audio.NormalizeSelectableFields(*req.MetadataFields)
+		snap.Processing.MetadataFields = &norm
+		changed["processing"] = mergeChangedMap(changed, "processing", "metadata_fields", norm)
+	}
+	if req.MetadataChapters != nil {
+		snap.Processing.MetadataChapters = strings.TrimSpace(*req.MetadataChapters)
+		changed["processing"] = mergeChangedMap(changed, "processing", "metadata_chapters", snap.Processing.MetadataChapters)
+	}
 
 	// 1. DB first.
 	if err := h.saveSettingsToDB(&snap); err != nil {
@@ -439,6 +487,10 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		audio.SetPathFormatTokens(tokenNames)
 	}
 	h.svc.Processor.ApplyConfig(h.svc.Config.Config())
+	// The per-field write selection feeds queue-time job snapshots, so it
+	// refreshes with the live config exactly like the CLI settings: queued
+	// jobs keep their frozen policy, new jobs pick up the saved selection.
+	h.svc.Processor.ApplyWriteSelection(live.Processing.MetadataFields, live.Processing.MetadataChapters)
 	h.svc.AudiobookDB.Store(audiobookdb.NewClient(live.APIKey.APIKey, live.APIKey.BaseURL))
 
 	// Scan trigger: turning the index on, or re-pointing the input root
@@ -476,6 +528,8 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		"audiobookdb_base_url": live.APIKey.BaseURL,
 		"bragibooks_version":   version.Version,
 		"m4b_merge_version":    m4bMergeVersion,
+		"metadata_fields":      live.Processing.MetadataFields,
+		"metadata_chapters":    live.Processing.MetadataChapters,
 	}
 
 	writeJSON(w, http.StatusOK, settings)
@@ -537,6 +591,20 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 	// legacy token cutover) — and indexing_enabled, whose DEFAULT 0
 	// would silently disable the index on the next settings save
 	// (finding: settings writers reset indexing_enabled).
+	// The write selection (#518) round-trips as a JSON array; the EMPTY
+	// string means "not set" (default all-supported-available) — the same
+	// nil-vs-explicit distinction the Go config uses, so the column's
+	// NOT NULL DEFAULT '' matches the zero config value.
+	metadataFieldsCol := ""
+	if cfg.Processing.MetadataFields != nil {
+		if b, err := json.Marshal(*cfg.Processing.MetadataFields); err == nil {
+			metadataFieldsCol = string(b)
+		}
+	}
+	metadataChaptersCol := cfg.Processing.MetadataChapters
+	if metadataChaptersCol == "" {
+		metadataChaptersCol = "write"
+	}
 	var legacyMigrated int
 	if err := h.svc.DB.QueryRow(
 		`SELECT COALESCE(legacy_token_migrated, 0) FROM settings WHERE id = 1`,
@@ -544,8 +612,8 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 		return err
 	}
 	_, err := h.svc.DB.Exec(`
-		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, indexing_enabled, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, indexing_enabled, metadata_fields, metadata_chapters, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 	`,
 		cfg.APIKey.APIKey,
 		cfg.APIKey.BaseURL,
@@ -560,6 +628,8 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 		cfg.Server.APIEndpoint.KeyDigest,
 		legacyMigrated,
 		indexingEnabled,
+		metadataFieldsCol,
+		metadataChaptersCol,
 	)
 	return err
 }

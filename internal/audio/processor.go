@@ -35,6 +35,15 @@ type Processor struct {
 	// Settings picker, save-time format checks) derives from this — Bragi owns
 	// no token registry of its own.
 	capabilities *Capabilities
+	// metadataFields is the saved per-field metadata write selection (#518),
+	// refreshed by ApplyConfig after a settings update and snapshotted under
+	// the same lock so every run observes one consistent value. Nil is the
+	// default all-supported-available behavior; a non-nil (possibly empty)
+	// slice is the explicit selection.
+	metadataFields *[]string
+	// metadataChapters is the saved chapter write policy ("write" default,
+	// "preserve").
+	metadataChapters string
 }
 
 // Capabilities returns the verified engine capabilities, or nil before the
@@ -59,6 +68,25 @@ func (p *Processor) snapshot() (binary, outputDir, completedDir, pathFormat, log
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.Binary, p.OutputDir, p.CompletedDir, p.PathFormat, p.LogLevel, p.NumCPUs
+}
+
+// WriteSelectionSnapshot returns a consistent copy of the saved per-field
+// metadata write selection (nil = default all-supported-available; non-nil
+// = the explicit selection, possibly empty) and the chapter write policy.
+func (p *Processor) WriteSelectionSnapshot() (fields *[]string, chapters string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	f := p.metadataFields
+	if f != nil {
+		cp := make([]string, len(*f))
+		copy(cp, *f)
+		f = &cp
+	}
+	c := p.metadataChapters
+	if c == "" {
+		c = ChaptersPolicyValueWrite // blank is the documented default
+	}
+	return f, c
 }
 
 // SettingsSnapshot returns a consistent copy of the effective destination
@@ -96,6 +124,18 @@ func NewProcessor(binary, outputDir, completedDir string, numCPUs int, pathForma
 		PathFormat:   pathFormat,
 		LogLevel:     logLevel,
 	}
+}
+
+// ApplyWriteSelection refreshes the saved per-field metadata write selection
+// (nil = default all-supported-available) and chapter write policy from the
+// loaded config. Like ApplyConfig it runs under the write lock; main calls it
+// after the database settings load, and the settings handler calls it after
+// each successful save.
+func (p *Processor) ApplyWriteSelection(fields *[]string, chapters string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.metadataFields = fields
+	p.metadataChapters = chapters
 }
 
 // stripEscapeSequences removes ANSI/VT100 escape sequences from s so the

@@ -186,6 +186,10 @@ export interface Settings {
 	api_endpoint_env_managed?: boolean;
 	/** Opt-in input-directory index (pre-extracted ASIN/title evidence). */
 	indexing_enabled?: boolean;
+	/** Per-field embedded-metadata write selection (#518); absent = all supported. */
+	metadata_fields?: string[];
+	/** Chapter write policy for the engine's chapter path (#518): write | preserve. */
+	metadata_chapters?: string;
 	created_at?: string;
 	updated_at?: string;
 	bragibooks_version?: string;

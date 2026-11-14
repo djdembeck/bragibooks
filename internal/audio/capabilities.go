@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -168,8 +169,29 @@ func (p *Processor) validateCapabilities(caps *Capabilities) (*Capabilities, err
 	if !tokens["authors"] || !tokens["narrators"] {
 		return nil, fmt.Errorf("engine capabilities lack plural people tokens; an m4b-merge >= 2.1.1 is required")
 	}
+	// The per-field write selection (#518) renders its checkbox list from
+	// this vocabulary: a supported field the engine dropped from
+	// scalar_fields would be saved into the settings and silently ignored
+	// by every job, so the boot gate asserts every Bragi-supported field
+	// is a capability. An engine without the scalar policy document at all
+	// is the same regression: a selection could not be honored.
+	if len(caps.FieldPolicies.ScalarFields) == 0 {
+		return nil, fmt.Errorf("engine capabilities carry no scalar_fields; an m4b-merge >= 2.2.0 is required for the per-field metadata write selection")
+	}
+	for _, f := range SupportedWriteFields {
+		found := false
+		for _, sf := range caps.FieldPolicies.ScalarFields {
+			if sf == f {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("engine capabilities lack scalar field %q; the per-field metadata write selection cannot be honored (engine scalar fields: %s)", f, strings.Join(caps.FieldPolicies.ScalarFields, ", "))
+		}
+	}
 	// A missing probe must never be silently swallowed into a start: log so
 	// an operator sees a capability that regressed at boot.
-	log.Printf("engine capabilities verified: schema %d, resolver %s, %d tokens", caps.SchemaVersion, caps.ResolverVersion, len(caps.PathTokens))
+	log.Printf("engine capabilities verified: schema %d, resolver %s, %d tokens, %d scalar fields", caps.SchemaVersion, caps.ResolverVersion, len(caps.PathTokens), len(caps.FieldPolicies.ScalarFields))
 	return caps, nil
 }

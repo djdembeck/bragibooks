@@ -438,11 +438,61 @@ func (s *ProcessingService) loadSnapshotForQueue(bookID int64) (*snapshotJSON, e
 	if snap == nil {
 		return nil, nil
 	}
-	return &snapshotJSON{
+	// The per-field write selection is FROZEN AT QUEUE TIME (#518): the
+	// saved operator preference at this instant becomes part of the job's
+	// immutable snapshot, exactly like the output destination. A settings
+	// change after enqueue cannot alter this job's writes; the next job
+	// picks up the new selection. A nil (default) selection is omitted so
+	// legacy and default jobs stay byte-identical to the pre-selection
+	// shape, and the worker derives the all-supported-available baseline.
+	fields, chapters := s.proc.WriteSelectionSnapshot()
+	out := &snapshotJSON{
 		Version:  snapshotVersionCurrent,
 		Engine:   audio.EngineIdentity{SchemaVersion: caps.SchemaVersion, ResolverVersion: caps.ResolverVersion},
 		Snapshot: *snap,
-	}, nil
+	}
+	if fields != nil {
+		// Cover and chapters follow the frozen selection: an explicit
+		// selection is the operator's per-field decision, and a none
+		// selection (empty list) means NO embedded tag/cover/chapter
+		// mutation — preserve on both non-scalar paths, no generated
+		// chapter sidecar. Naming is unaffected: the engine always
+		// resolves the effective metadata for the path.
+		noneSelected := len(*fields) == 0
+		cover := audio.WritePolicyValueWrite
+		if noneSelected || !slicesContains(*fields, audio.FieldCover) {
+			cover = audio.WritePolicyValuePreserve
+		}
+		jobChapters := chapters
+		if noneSelected {
+			jobChapters = audio.ChaptersPolicyValuePreserve
+		}
+		// Fields is a COPY so a later mutation of the live selection cannot
+		// reach the frozen job, and it must stay NON-NIL for the none-selected
+		// case: the empty selection ("write nothing") is load-bearing, and
+		// append([]string(nil)) of an empty source yields a nil slice that
+		// marshals to JSON null — which the worker then reads back as the
+		// default all-supported-available baseline, silently writing every
+		// field. A fresh empty slice marshals to [] and round-trips as the
+		// explicit none-selected policy.
+		frozen := make([]string, 0, len(*fields))
+		frozen = append(frozen, *fields...)
+		out.Selection = &WriteSelection{
+			Fields:   frozen,
+			Cover:    cover,
+			Chapters: jobChapters,
+		}
+	}
+	return out, nil
+}
+
+func slicesContains(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // QueueJob creates a processing job, persists it to the DB, and enqueues it.
@@ -1177,6 +1227,14 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		return
 	}
 	completedDir := strings.TrimSpace(args.CompletedDir)
+
+	// A frozen write selection that names an unknown field or an out-of
+	// vocabulary cover/chapter policy is a corrupted stored row: fail with a
+	// clear re-queue instruction rather than run under a guessed policy.
+	if err := validateWriteSelection(args.Snapshot.Selection); err != nil {
+		failInvalidStored(err)
+		return
+	}
 
 	jf, stagedCover, err := buildEngineJob(args, job.ID, args.Snapshot.Snapshot, effRoot, effFormat)
 	// The staged cover is Bragi's own input staging: the engine copies its
