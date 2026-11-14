@@ -271,7 +271,12 @@ func (h *Handler) pruneSupersededCovers(bookID int64, s *BookSnapshot) {
 	for rows.Next() {
 		var raw string
 		if err := rows.Scan(&raw); err != nil {
-			continue
+			// A row we cannot read may be an active job whose reference we
+			// would miss from the keep-set: pruning against an incomplete
+			// set can delete a file that job names, so abort (same as a
+			// query error) rather than continue.
+			rows.Close()
+			return
 		}
 		var args struct {
 			Snapshot *snapshotJSON `json:"snapshot"`
