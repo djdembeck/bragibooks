@@ -1,9 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { parseParts, setEngineTokens, trimSegment, validateScheme } from '../scheme';
+import { buildSuppliedMetadata, parseParts, setEngineTokens, trimSegment, validateScheme } from '../scheme';
 
 const tokens = [
 	{ name: 'author', value: 'author', example: 'A. Author' },
 	{ name: 'title', value: 'title', example: 'The Book' },
+	{ name: 'book_id', value: 'book_id', example: '12345' }
+];
+
+// The v2.2.0 capability vocabulary: plural people tokens, canonical book_id.
+const pluralTokens = [
+	{ name: 'title', value: 'title', example: 'The Great Gatsby' },
+	{ name: 'authors', value: 'authors', example: 'F. Scott Fitzgerald' },
+	{ name: 'narrators', value: 'narrators', example: 'N. Narrator' },
+	{ name: 'series_name', value: 'series_name', example: 'A Series' },
+	{ name: 'series_position', value: 'series_position', example: '2' },
+	{ name: 'year', value: 'year', example: '1925' },
+	{ name: 'genre', value: 'genre', example: 'Fiction' },
 	{ name: 'book_id', value: 'book_id', example: '12345' }
 ];
 
@@ -49,5 +61,34 @@ describe('trimSegment', () => {
 		const s = 'A\u0085';
 		expect(s.trim()).toBe(s); // JS keeps it
 		expect(trimSegment(s)).toBe('A'); // Go strings.TrimSpace trims it
+	});
+});
+
+describe('buildSuppliedMetadata', () => {
+	it('sends the SuppliedMetadata shape: people/genres arrays, numeric year, no metadata_id', () => {
+		const meta = buildSuppliedMetadata(pluralTokens);
+		expect(meta).toEqual({
+			title: 'The Great Gatsby',
+			authors: ['F. Scott Fitzgerald'],
+			narrators: ['N. Narrator'],
+			series_name: 'A Series',
+			series_position: '2',
+			year: 1925,
+			book_id: '12345',
+			genres: ['Fiction']
+		});
+		expect('metadata_id' in meta).toBe(false);
+	});
+
+	it('selects plural people tokens when the capability vocabulary has them', () => {
+		const meta = buildSuppliedMetadata(pluralTokens);
+		expect(meta.authors).toEqual(['F. Scott Fitzgerald']);
+		expect(meta.narrators).toEqual(['N. Narrator']);
+	});
+
+	it('falls back to singular people tokens only when no plural token exists, and keeps arrays present even when empty', () => {
+		const meta = buildSuppliedMetadata(tokens); // only `author`, no `authors`/`narrator`
+		expect(meta.authors).toEqual(['A. Author']);
+		expect(meta.narrators).toEqual([]); // key present, empty: the Go field is not omitempty
 	});
 });

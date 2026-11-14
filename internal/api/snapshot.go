@@ -182,11 +182,23 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 	if err != nil {
 		return false, fmt.Errorf("load existing snapshot: %w", err)
 	}
-	// The row's catalog-derived content survives a degraded capture: it is
-	// only replaced by fresh catalog values when the catalog is reachable.
+	// The row's catalog-derived content survives a degraded capture, but ONLY
+	// when it belongs to the SAME catalog selection the new row names:
+	//   - genres and cover are BOOK-level content: retain only when the ADB
+	//     book id is unchanged (a re-match to a different book, or an unlink,
+	//     must start with empty genres/cover, not the previous book's);
+	//   - chapters are RELEASE-level content: retain only when BOTH the book
+	//     id and the release id are unchanged (a changed release with an
+	//     unavailable chapter detail must start empty, not the old release's).
 	// existing is nil for a first-time capture (nothing to retain).
 	if existing != nil {
-		snap.Genres, snap.Chapters, snap.CoverFile = existing.Genres, existing.Chapters, existing.CoverFile
+		sameBook := existing.ADBBookID != "" && existing.ADBBookID == snap.ADBBookID
+		if sameBook {
+			snap.Genres, snap.CoverFile = existing.Genres, existing.CoverFile
+		}
+		if sameBook && existing.ADBReleaseID != "" && existing.ADBReleaseID == snap.ADBReleaseID {
+			snap.Chapters = existing.Chapters
+		}
 	}
 
 	// The per-book lock spans the whole capture critical section: the cover

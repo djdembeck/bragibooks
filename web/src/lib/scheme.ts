@@ -23,6 +23,34 @@ export interface EngineToken {
 }
 
 /**
+ * Build the example metadata the engine's non-mutating preview endpoint
+ * decodes (audio.SuppliedMetadata): arrays for people and genres, a numeric
+ * year, and NO `metadata_id` (the Go struct has no such field, so it would
+ * be silently dropped and the example would lie). People tokens are selected
+ * from the capability vocabulary — plural preferred, singular only if the
+ * engine reports no plural token — so the example matches what a real job
+ * sends (#479 ordered people; #480 canonical {book_id}).
+ */
+export function buildSuppliedMetadata(tokens: EngineToken[]): Record<string, unknown> {
+	const value = (name: string) => tokens.find((t) => t.name === name)?.example ?? '';
+	const has = (name: string) => tokens.some((t) => t.name === name);
+	const people = (plural: string, singular: string) =>
+		[has(plural) ? value(plural) : value(singular)].filter(Boolean);
+	const meta: Record<string, unknown> = {
+		title: value('title'),
+		authors: people('authors', 'author'),
+		narrators: people('narrators', 'narrator')
+	};
+	for (const key of ['subtitle', 'series_name', 'series_position', 'year', 'book_id']) {
+		const v = value(key);
+		if (v) meta[key] = key === 'year' ? Number(v) : v;
+	}
+	const genre = value('genre');
+	if (genre) meta['genres'] = [genre];
+	return meta;
+}
+
+/**
  * Reactive store of the engine's verified path tokens, in the engine's
  * declared order (the Settings palette renders it as-is). Empty until
  * /api/engine/capabilities loads; components must handle the empty state

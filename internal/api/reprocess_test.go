@@ -247,6 +247,55 @@ func TestReprocessUsesFrozenCompletedDir(t *testing.T) {
 	}
 }
 
+// TestReprocessDisabledCompletionKeepsFrozenEmptyDir pins the legacy gate on
+// the live-global fallback: a POST-CUTOVER row (it carries a snapshot) with
+// completion deliberately DISABLED freezes an empty completed_dir. Re-
+// processing must keep that empty directory — it must NOT fall back to the
+// live global completed dir and locate an unrelated same-basename file in a
+// directory the run never used. Inputs resolve only from the recorded source
+// paths.
+func TestReprocessDisabledCompletionKeepsFrozenEmptyDir(t *testing.T) {
+	liveCompleted := t.TempDir()
+	h := newReprocessHandler(t, t.TempDir(), liveCompleted, "{author}/{title}", "")
+	origDir := t.TempDir()
+	recorded := filepath.Join(origDir, "a.m4b")
+	if err := os.WriteFile(recorded, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write recorded source: %v", err)
+	}
+	// The decoy: the same basename in the LIVE completed dir, a directory
+	// this run never used (completion was disabled at enqueue).
+	if err := os.WriteFile(filepath.Join(liveCompleted, "a.m4b"), []byte("decoy"), 0o644); err != nil {
+		t.Fatalf("write decoy: %v", err)
+	}
+	seedReprocessBook(t, h, 1, "done", origDir)
+	// A post-cutover row: snapshot present, completed_dir explicitly empty.
+	seedMergeRow(t, h, "seeded-disabled", 1,
+		`{"src_paths":["`+recorded+`"],"completed_dir":"","snapshot":{"snapshot_version":1,"snapshot":{"book_id":1}}}`,
+		"2026-07-03 10:00:00")
+
+	w := postReprocess(t, h, StartReprocessRequest{BookID: 1})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+	}
+	got := newestJobArgs(t, h.svc.DB, 1).SrcPaths
+	if len(got) != 1 || got[0] != recorded {
+		t.Fatalf("resolved src_paths = %v; want the recorded source path %v (never the live-completed-dir decoy)", got, recorded)
+	}
+
+	// The preview agrees: found via the recorded path, found_in_completed 0.
+	pw := getReprocess(t, h, 1)
+	if pw.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, want 200 (body %s)", pw.Code, pw.Body.String())
+	}
+	var preview reprocessPreviewWire
+	if err := json.Unmarshal(pw.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("preview decode: %v", err)
+	}
+	if preview.Inputs == nil || preview.Inputs.Found != 1 || preview.Inputs.FoundInCompleted != 0 || len(preview.Inputs.Missing) != 0 {
+		t.Fatalf("preview inputs = %+v; want 1 found in the original path, 0 in completed, none missing", preview.Inputs)
+	}
+}
+
 // TestReprocessMixedLocations covers one input in the completed dir and one
 // only at its recorded original path: order is preserved and the detail
 // counts the completed share.

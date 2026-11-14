@@ -169,6 +169,94 @@ func TestCaptureSnapshotCaptureSpecificCoverName(t *testing.T) {
 	}
 }
 
+// TestCaptureSnapshotDegradedRetentionChangesRelease pins identity-scoped
+// degraded retention: when the saved selection changes the RELEASE (same
+// book) and the catalog is down, the old release's chapters must NOT survive
+// (a re-match to a new release starts chapter-empty); the book-level genres
+// and cover DO survive (same book).
+func TestCaptureSnapshotDegradedRetentionChangesRelease(t *testing.T) {
+	h := newTestHandler(t)
+	av := &atomic.Value{}
+	av.Store(audiobookdb.NewClient("k", "http://127.0.0.1:1")) // catalog down
+	h.svc.AudiobookDB = av
+	h.svc.CoversDir = t.TempDir()
+
+	seedSnapshotBook(t, h, 1, "42", "1-old.jpg") // existing row: release '5'
+
+	w := doUpdateBook(t, h, 1, UpdateBookRequest{AudiobookdbReleaseID: ptrStr("9")})
+	if w.Code != http.StatusOK {
+		t.Fatalf("catalog-down release re-match = %d; want 200 (degradation is not a failure)", w.Code)
+	}
+	s, err := h.loadSnapshot(1)
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	if s.ADBReleaseID != "9" {
+		t.Fatalf("release = %q; want 9", s.ADBReleaseID)
+	}
+	if len(s.Chapters) != 0 {
+		t.Errorf("chapters = %+v; want EMPTY (release changed, chapter details unavailable)", s.Chapters)
+	}
+	if len(s.Genres) != 2 || s.Genres[0] != "Mystery" {
+		t.Errorf("genres = %v; want the book-level genres retained (same book)", s.Genres)
+	}
+	if s.CoverFile != "1-old.jpg" {
+		t.Errorf("cover = %q; want the book-level cover retained (same book)", s.CoverFile)
+	}
+}
+
+// TestCaptureSnapshotDegradedRetentionChangesBook pins the book-level scope:
+// when the saved selection re-matches to a DIFFERENT AudiobookDB book (or
+// unlinks) and the catalog is down, the previous book's genres, cover, and
+// chapters must all start empty — none of it belongs to the new selection.
+func TestCaptureSnapshotDegradedRetentionChangesBook(t *testing.T) {
+	h := newTestHandler(t)
+	av := &atomic.Value{}
+	av.Store(audiobookdb.NewClient("k", "http://127.0.0.1:1")) // catalog down
+	h.svc.AudiobookDB = av
+	h.svc.CoversDir = t.TempDir()
+
+	seedSnapshotBook(t, h, 1, "42", "1-old.jpg")
+
+	// Re-match to a different book.
+	w := doUpdateBook(t, h, 1, UpdateBookRequest{AudiobookdbBookID: ptrStr("43")})
+	if w.Code != http.StatusOK {
+		t.Fatalf("catalog-down book re-match = %d; want 200", w.Code)
+	}
+	s, err := h.loadSnapshot(1)
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	if s.ADBBookID != "43" {
+		t.Fatalf("book id = %q; want 43", s.ADBBookID)
+	}
+	if len(s.Genres) != 0 {
+		t.Errorf("genres = %v; want EMPTY (previous book's content must not leak into the new selection)", s.Genres)
+	}
+	if s.CoverFile != "" {
+		t.Errorf("cover = %q; want EMPTY (previous book's artwork)", s.CoverFile)
+	}
+	if len(s.Chapters) != 0 {
+		t.Errorf("chapters = %+v; want EMPTY (previous selection's chapters)", s.Chapters)
+	}
+
+	// Unlink to no catalog link: same rules, empty book id.
+	w = doUpdateBook(t, h, 1, UpdateBookRequest{AudiobookdbBookID: ptrStr(""), AudiobookdbReleaseID: ptrStr("")})
+	if w.Code != http.StatusOK {
+		t.Fatalf("catalog-down unlink = %d; want 200", w.Code)
+	}
+	s, err = h.loadSnapshot(1)
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	if s.ADBBookID != "" {
+		t.Errorf("book id = %q; want empty after unlink", s.ADBBookID)
+	}
+	if len(s.Genres) != 0 || s.CoverFile != "" || len(s.Chapters) != 0 {
+		t.Errorf("genres/cover/chapters = %v/%q/%+v; want all empty after unlink with catalog down", s.Genres, s.CoverFile, s.Chapters)
+	}
+}
+
 // TestPruneSupersededCoversKeepsActiveJobReference pins the per-file pruning
 // guard: a cover file that an ACTIVE (queued/running) job's queued snapshot
 // names is kept even when the current snapshot has moved on to a new file,

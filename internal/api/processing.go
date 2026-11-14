@@ -1679,10 +1679,13 @@ func (h *Handler) GetBookReprocess(w http.ResponseWriter, r *http.Request) {
 	// on that job (finding: reprocess used only the live global, so a run whose
 	// sources moved to its own completed dir — later cleared or re-pointed in
 	// Settings — would report the inputs missing even though they remain in the
-	// recorded job's directory). A pre-cutover legacy row carries no frozen
-	// value (""), so fall back to the live global only for those.
+	// recorded job's directory). The live-global fallback is LEGACY-ROW ONLY
+	// (args.Snapshot == nil): a post-cutover row with completion deliberately
+	// disabled carries a frozen empty CompletedDir and must keep it — falling
+	// back to the live global would locate an unrelated same-basename file in
+	// a directory the run never used.
 	completedDir := args.CompletedDir
-	if completedDir == "" {
+	if args.Snapshot == nil && completedDir == "" {
 		completedDir, _ = resp["completed_dir"].(string)
 	}
 	resolved, foundCompleted, foundOriginal, missing := locateInputs(args.SrcPaths, completedDir)
@@ -1772,9 +1775,12 @@ func (h *Handler) StartReprocess(w http.ResponseWriter, r *http.Request) {
 	// Locate inputs against the FROZEN completed directory recorded on the run
 	// (finding: the live global alone misses a run whose sources moved to its
 	// own completed dir after the setting was cleared/re-pointed); a legacy row
-	// with no frozen value falls back to the live global.
+	// (args.Snapshot == nil) with no frozen value falls back to the live
+	// global. A post-cutover row with completion deliberately disabled carries
+	// a frozen empty CompletedDir and must keep it — the live global would
+	// locate an unrelated same-basename file in a directory the run never used.
 	completedDir := args.CompletedDir
-	if completedDir == "" && h.svc.Config != nil {
+	if args.Snapshot == nil && completedDir == "" && h.svc.Config != nil {
 		completedDir = strings.TrimSpace(h.svc.Config.Config().Directories.CompletedDir)
 	}
 	resolved, foundCompleted, _, missing := locateInputs(args.SrcPaths, completedDir)

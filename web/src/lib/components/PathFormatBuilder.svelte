@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick } from 'svelte';
-	import { engineTokens, parseParts, serializeParts, validateScheme, type Part, type TokenKey } from '#lib/scheme.js';
+	import { buildSuppliedMetadata, engineTokens, parseParts, serializeParts, validateScheme, type Part, type TokenKey } from '#lib/scheme.js';
 	import { post } from '#lib/api.js';
 	import { toCleanedError } from '#lib/adbError.js';
 
@@ -64,20 +64,12 @@
 	});
 
 	/** The engine's own example values for each token, in the effective
-	 *  snapshot shape the preview endpoint expects (arrays, not strings). */
+	 *  snapshot shape the preview endpoint decodes (SuppliedMetadata: arrays
+	 *  for people/genres, no metadata_id). People tokens are selected from
+	 *  the capability vocabulary (plural preferred) so the example matches
+	 *  what a real job sends. Shared with scheme.test.ts for parity. */
 	function previewMetadata(): Record<string, unknown> {
-		const tokens = $engineTokens;
-		const value = (name: string) => tokens.find((t) => t.name === name)?.example ?? '';
-		const meta: Record<string, unknown> = {
-			title: value('title'),
-			authors: [value('author')].filter(Boolean),
-			narrators: [value('narrator')].filter(Boolean)
-		};
-		for (const key of ['subtitle', 'series_name', 'series_position', 'year', 'genre', 'metadata_id', 'book_id']) {
-			const v = value(key);
-			if (v) meta[key] = key === 'year' ? Number(v) : v;
-		}
-		return meta;
+		return buildSuppliedMetadata($engineTokens);
 	}
 
 	// Single sync point: external writes to `value` (page load, other
