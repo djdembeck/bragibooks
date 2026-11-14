@@ -411,24 +411,28 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		// or the save aborts.
 		needRow := (f && (!fieldsOK || !fileFieldsPresent)) || (c && (!chaptersOK || !fileChaptersPresent))
 		var rowFields *[]string
-		rowChapters := ""
-		rowMissing := false
+		rowChapters := ""   // '' = the documented default (write)
+		rowCorrupt := false // a stored value exists but cannot be trusted
 		if needRow {
-			var ok bool
-			rowFields, rowChapters, ok = h.storedMetadataRow()
-			if !ok {
-				// No row (a corrupt row value is also !ok, handled by the
-				// abort below when the file is unreadable): the durable
-				// default is what nothing-stored means.
-				rowMissing = true
-				rowFields, rowChapters = nil, audio.ChaptersPolicyValueWrite
+			var fieldsValid, chaptersValid, queryOK bool
+			rowFields, rowChapters, fieldsValid, chaptersValid, queryOK = h.storedMetadataRow()
+			// The reader returns the VALID sibling column and drops only
+			// the corrupt one, so a corrupt fields column keeps a good
+			// chapters value (and vice versa). Corruption is: a real query
+			// failure, or a row in which at least one column failed to
+			// parse. A missing row is the valid empty state (both columns
+			// empty, the documented defaults).
+			if !queryOK || !fieldsValid || !chaptersValid {
+				rowCorrupt = true
 			}
 		}
-		if rowMissing &&
-			((f && !fieldsOK) || (c && !chaptersOK)) {
-			// The durable file is unreadable and nothing is stored to
-			// fall back to: the live config carries the pin, so any store
-			// write would persist the pin. Abort instead of guessing.
+		if rowCorrupt && ((f && !fieldsOK) || (c && !chaptersOK)) {
+			// A pinned key's durable file value is unreadable AND the row
+			// that is supposed to be the fallback is corrupt: there is no
+			// trustworthy durable value to write back. The live config
+			// carries the pin, so any store write would persist the pin.
+			// Abort instead of guessing. (A missing row is NOT corruption —
+			// the documented default is the durable value there.)
 			writeError(w, http.StatusInternalServerError,
 				"cannot save while a metadata write pin is set: the stored selection is unreadable (corrupt settings row or malformed config value); resolve the corruption, then retry")
 			return
@@ -683,36 +687,44 @@ func validateAudiobookdbBaseURL(raw string) error {
 }
 
 // storedMetadataRow reads the settings row's metadata selection columns
-// and decodes them the way saveSettingsToDB writes them (fields: JSON
-// array text, ” = unset default; chapters: policy string, ” = default
-// write). ok=false means the row could not be read (no row, decode
-// failure): the caller must not proceed with a guessed value. ok=true
-// with a nil fields pointer is a successful read of the UNSET default;
-// a present empty list is the none-selected save.
-func (h *Handler) storedMetadataRow() (fields *[]string, chapters string, ok bool) {
+// with PER-COLUMN validity, decoding them the way saveSettingsToDB writes
+// them (fields: JSON array text, ” = unset default; chapters: policy
+// string, ” = default write). fieldsValid/chaptersValid report that each
+// column parsed, so a corrupt value in one column does not discard a valid
+// value in the other (fields must be a JSON ARRAY — `null` unmarshals to a
+// nil slice without error and is corrupt; chapters must be non-empty).
+// queryOK is false only on a real query failure (it is true for a missing
+// row and for a read row); a missing row is a valid empty state — with
+// nothing stored the documented default is the durable value, while a
+// query failure is corruption and the caller must abort. With a read row,
+// a nil fields pointer is the UNSET default; a present empty list is the
+// none-selected save.
+func (h *Handler) storedMetadataRow() (fields *[]string, chapters string, fieldsValid, chaptersValid bool, queryOK bool) {
 	var fieldsCol, chaptersCol string
-	if err := h.svc.DB.QueryRow(
+	err := h.svc.DB.QueryRow(
 		`SELECT COALESCE(metadata_fields, ''), COALESCE(metadata_chapters, '') FROM settings WHERE id = 1`,
-	).Scan(&fieldsCol, &chaptersCol); err != nil {
-		return nil, "", false
+	).Scan(&fieldsCol, &chaptersCol)
+	if err != nil {
+		if err != sql.ErrNoRows {
+			// A real query failure: not trustworthy, and distinct from a
+			// missing row (queryOK true) so the caller can treat it as
+			// corruption, not "nothing stored".
+			return nil, "", false, false, false
+		}
+		return nil, "", false, false, true // no row: a valid empty state
 	}
 	if fieldsCol != "" {
-		// A stored row must carry a JSON ARRAY. `null` unmarshals into a
-		// nil slice WITHOUT error, which this reader would then return as
-		// a readable "explicit empty selection" — turning a corrupt row
-		// into a silent preserve-everything selection at queue time, and
-		// letting a pinned-key freeze ride it into a save instead of
-		// aborting. Treat it as unreadable, like any non-array value.
 		var f []string
-		if err := json.Unmarshal([]byte(fieldsCol), &f); err != nil || f == nil {
-			return nil, "", false
+		if jerr := json.Unmarshal([]byte(fieldsCol), &f); jerr == nil && f != nil {
+			fields = &f
+			fieldsValid = true
 		}
-		fields = &f
 	}
 	if chaptersCol != "" {
 		chapters = chaptersCol
+		chaptersValid = true
 	}
-	return fields, chapters, true
+	return fields, chapters, fieldsValid, chaptersValid, true
 }
 
 // saveSettingsToDB persists the config to the settings table in the database.

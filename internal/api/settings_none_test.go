@@ -747,3 +747,54 @@ func TestUpdateSettingsPinnedChaptersFirstSaveWithoutRow(t *testing.T) {
 		t.Errorf("first-save row fields = %q, want empty (no selection saved)", storedFields)
 	}
 }
+
+// TestUpdateSettingsPinnedRepairsCorruptFieldsKeepsValidChapters pins the
+// mixed-corruption case: the row's metadata_fields column is corrupt (JSON
+// null) while metadata_chapters holds a valid, non-default value (preserve),
+// and a chapters pin is active with the file silent on both keys. The save
+// must proceed (200), REPAIR the corrupt fields column to the default, and
+// RETAIN the valid chapters value — a corrupt sibling must not drag the good
+// value down to the default (writing write over preserve would destroy the
+// user's chapter-preservation policy).
+func TestUpdateSettingsPinnedRepairsCorruptFieldsKeepsValidChapters(t *testing.T) {
+	h := newSettingsTestService(t, newSettingsTestDB(t))
+	r := buildSettingsRouter(h)
+
+	put := func(body string) *httptestResponse {
+		req := httptest.NewRequest("PUT", "/api/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		var out map[string]any
+		if data, _ := io.ReadAll(rec.Result().Body); len(data) > 0 {
+			json.Unmarshal(data, &out)
+		}
+		return &httptestResponse{code: rec.Code, body: out}
+	}
+
+	// A row with corrupt fields (null) and a valid non-default chapters.
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO settings (id, metadata_fields, metadata_chapters) VALUES (1, 'null', 'preserve')`,
+	); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	// Pin ONLY the chapters key; the file is silent on both metadata keys.
+	t.Setenv("PROCESSING_METADATA_CHAPTERS", "preserve")
+	resp := put(`{"num_cpus":2}`)
+	if resp.code != 200 {
+		t.Fatalf("corrupt-fields row with valid chapters under pin: want 200, got %d: %v", resp.code, resp.body)
+	}
+	var storedFields, storedChapters string
+	if err := h.svc.DB.QueryRow(
+		`SELECT metadata_fields, metadata_chapters FROM settings WHERE id = 1`,
+	).Scan(&storedFields, &storedChapters); err != nil {
+		t.Fatalf("read settings row: %v", err)
+	}
+	if storedChapters != "preserve" {
+		t.Fatalf("valid chapters value destroyed by a corrupt sibling: got %q, want the retained preserve", storedChapters)
+	}
+	if storedFields != "" {
+		t.Errorf("corrupt fields column repaired to %q; want empty (the documented default)", storedFields)
+	}
+}
