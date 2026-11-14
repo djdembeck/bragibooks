@@ -682,8 +682,14 @@ func (h *Handler) storedMetadataRow() (fields *[]string, chapters string, ok boo
 		return nil, "", false
 	}
 	if fieldsCol != "" {
+		// A stored row must carry a JSON ARRAY. `null` unmarshals into a
+		// nil slice WITHOUT error, which this reader would then return as
+		// a readable "explicit empty selection" — turning a corrupt row
+		// into a silent preserve-everything selection at queue time, and
+		// letting a pinned-key freeze ride it into a save instead of
+		// aborting. Treat it as unreadable, like any non-array value.
 		var f []string
-		if err := json.Unmarshal([]byte(fieldsCol), &f); err != nil {
+		if err := json.Unmarshal([]byte(fieldsCol), &f); err != nil || f == nil {
 			return nil, "", false
 		}
 		fields = &f

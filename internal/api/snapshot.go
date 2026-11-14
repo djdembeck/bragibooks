@@ -274,25 +274,25 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 			// resolution: the selected release's own subtitle when present,
 			// then the book's, then the book's disambiguation. The PREVIOUS
 			// release subtitle (retained above for an unchanged selection)
-			// yields only to a release response that establishes a value:
-			// a GetRelease failure — or a successful response that
-			// establishes nothing — keeps the retained release-specific
-			// subtitle instead of replacing it with the book fallback.
-			bookSubtitle := subtitleFromCatalog(book, nil)
+			// yields only to the RELEASE's OWN subtitle: a GetRelease
+			// failure — or a successful release that carries none — keeps
+			// the retained release-specific subtitle. Only a release without
+			// its own subtitle AND nothing retained falls through to the
+			// book-level fallbacks.
 			if snap.ADBReleaseID != "" {
 				if rel, err := h.getAudiobookDB().GetRelease(ctx, snap.ADBReleaseID, "chapterDetail"); err == nil && rel != nil {
 					if rel.ChapterDetail != nil {
 						snap.Chapters = chaptersFromADB(rel.ChapterDetail.Chapters)
 					}
-					if established := subtitleFromCatalog(book, rel); established != "" || snap.Subtitle == "" {
-						snap.Subtitle = established
+					if own := strings.TrimSpace(rel.Subtitle); own != "" {
+						snap.Subtitle = own
 					}
 				} else if err != nil {
 					log.Printf("snapshot %d: release details unavailable: %v", bookID, err)
 				}
 			}
 			if snap.Subtitle == "" {
-				snap.Subtitle = bookSubtitle
+				snap.Subtitle = subtitleFromCatalog(book, nil)
 			}
 		} else {
 			log.Printf("snapshot %d: catalog unavailable, keeping previously captured catalog content: %v", bookID, err)
@@ -538,10 +538,18 @@ func buildEngineJob(args jobArgs, jobID string, snap BookSnapshot, outputRoot, p
 	if args.Snapshot != nil {
 		sel = args.Snapshot.Selection
 	}
+	// Normalize ONCE and derive the policies from the normalized list:
+	// startup validation (ValidateWriteSelectionForEngine) trims field
+	// names, so a stored value like ` title ` reaches here with padding.
+	// WritePolicyFor compares literal names; feeding it the raw strings
+	// would silently skip the recognized field's write.
+	var normalizedFields []string
 	if sel != nil && sel.Fields != nil {
-		if _, err := audio.NormalizeSelectableFields(sel.Fields); err != nil {
+		norm, err := audio.NormalizeSelectableFields(sel.Fields)
+		if err != nil {
 			return audio.JobFile{}, "", err
 		}
+		normalizedFields = norm
 	}
 	jf := audio.JobFile{
 		SchemaVersion: audio.JobSchemaVersion,
@@ -556,8 +564,8 @@ func buildEngineJob(args jobArgs, jobID string, snap BookSnapshot, outputRoot, p
 	// alongside the default scalar selection) keeps the scalar default and
 	// applies only its non-scalar policies below.
 	jf.Policies = audio.AllSupportedWritePolicyFor(supplied)
-	if sel != nil && sel.Fields != nil {
-		jf.Policies = audio.WritePolicyFor(sel.Fields, supplied)
+	if normalizedFields != nil {
+		jf.Policies = audio.WritePolicyFor(normalizedFields, supplied)
 	}
 
 	// Cover: the frozen selection's cover policy picks the engine policy.

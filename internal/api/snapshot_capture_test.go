@@ -416,3 +416,54 @@ func TestCaptureSnapshotRetainsReleaseSubtitleOnReleaseFailure(t *testing.T) {
 		t.Errorf("title = %q; want the refreshed local field", s.Title)
 	}
 }
+
+// TestCaptureSnapshotRetainsReleaseSubtitleOnEmptyRelease pins the companion
+// case: the release fetch SUCCEEDS but the release carries no subtitle of
+// its own. The book-level subtitle must not then overwrite the retained
+// release-specific subtitle — only the release's OWN subtitle (or nothing
+// retained) reaches the book fallback.
+func TestCaptureSnapshotRetainsReleaseSubtitleOnEmptyRelease(t *testing.T) {
+	h := newTestHandler(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/books/42":
+			fmt.Fprint(w, `{"id":"42","title":"Seed Book","subtitle":"Book Sub"}`)
+		case "/releases/5":
+			fmt.Fprint(w, `{"id":"5","title":"Seed Book"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	av := &atomic.Value{}
+	av.Store(audiobookdb.NewClient("k", srv.URL))
+	h.svc.AudiobookDB = av
+
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status, audiobookdb_book_id, audiobookdb_release_id) VALUES (1, 'Seed Book', 'matched', '42', '5')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO book_snapshots (book_id, audiobookdb_book_id, audiobookdb_release_id, title,
+			authors, narrators, subtitle, genres, cover_file, chapters, captured_at)
+		 VALUES (1, '42', '5', 'Seed Book', '[]', '[]', 'Release Sub', '[]', '', '[]', datetime("now"))`,
+	); err != nil {
+		t.Fatalf("seed snapshot row: %v", err)
+	}
+
+	w := doUpdateBook(t, h, 1, UpdateBookRequest{Title: ptrStr("Edited Title")})
+	if w.Code != http.StatusOK {
+		t.Fatalf("save = %d; want 200", w.Code)
+	}
+
+	s, err := h.loadSnapshot(1)
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	if s.Subtitle != "Release Sub" {
+		t.Fatalf("subtitle = %q; want the retained release subtitle \"Release Sub\" (a release that carries no subtitle of its own must not trigger the book fallback over a retained value)", s.Subtitle)
+	}
+}

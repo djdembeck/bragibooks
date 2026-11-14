@@ -360,9 +360,10 @@ func TestUpdateSettingsPinnedAbortWhenStoredSelectionUnreadable(t *testing.T) {
 	).Scan(&storedFields, &storedChapters); err != nil {
 		t.Fatal(err)
 	}
-	// The malformed fields value freezes from the row; the ABSENT
-	// chapters key is a VALID file default (T8), so the file's default
-	// (write) stays authoritative over the row's older preserve.
+	// The malformed fields value freezes from the row. Chapters is NOT
+	// pinned in this case, so the pinned-key freeze does not touch it:
+	// the value lands from the live config (write) directly, not via the
+	// per-key file-presence fallback.
 	if string(storedFields) != `["title"]` || storedChapters != "write" {
 		t.Errorf("row not frozen correctly under pin: got %s/%s, want [\"title\"]/write (fields from row, chapters file default)", storedFields, storedChapters)
 	}
@@ -390,11 +391,10 @@ func TestUpdateSettingsPinnedAbortWhenStoredSelectionUnreadable(t *testing.T) {
 		t.Errorf("file chapters not kept under malformed fields pin: got %s/%s, want [\"title\"]/write (file value)", storedFields, storedChapters)
 	}
 
-	// An ABSENT chapters key is a VALID default for that key, not an
-	// unreadable value (T8): the file actively manages the selection
-	// (its fields key is present), so the file's default chapters value
-	// (write) stays authoritative over the row's older preserve — the
-	// stale row selection must not win.
+	// Chapters is not pinned in this case, so the pinned-key freeze does
+	// not touch it: the value lands from the live config (write) directly.
+	// (The absent-chapters-key file-presence branch is exercised by
+	// TestUpdateSettingsPinnedChaptersPreservesDBOnlyChaptersWhenFileHasFieldsOnly.)
 	if err := os.WriteFile(h.svc.Config.ConfigPath(),
 		[]byte("processing:\n  metadata_fields: title,subtitle\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -594,5 +594,44 @@ func TestUpdateSettingsPinnedChaptersPreservesDBOnlyChaptersWhenFileHasFieldsOnl
 	}
 	if storedChapters != "preserve" {
 		t.Fatalf("DB-only chapters selection wiped under a chapters pin with a fields-only file: got %q, want preserve", storedChapters)
+	}
+}
+
+// TestUpdateSettingsPinnedAbortsOnNullStoredFieldsRow pins the corrupt-row
+// contract: a settings row whose metadata_fields value is the JSON literal
+// `null` is NOT a readable explicit-empty selection. `null` unmarshals into
+// a nil slice without error, so treating it as readable would (a) queue a
+// silent preserve-everything selection, and (b) let a pinned-key freeze ride
+// the nil into a save. Under an active fields pin the save must abort 500.
+func TestUpdateSettingsPinnedAbortsOnNullStoredFieldsRow(t *testing.T) {
+	h := newSettingsTestService(t, newSettingsTestDB(t))
+	r := buildSettingsRouter(h)
+
+	put := func(body string) *httptestResponse {
+		req := httptest.NewRequest("PUT", "/api/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		var out map[string]any
+		if data, _ := io.ReadAll(rec.Result().Body); len(data) > 0 {
+			json.Unmarshal(data, &out)
+		}
+		return &httptestResponse{code: rec.Code, body: out}
+	}
+
+	// A row carrying the JSON literal null for metadata_fields.
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO settings (id, metadata_fields, metadata_chapters) VALUES (1, 'null', 'write')`,
+	); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	t.Setenv("PROCESSING_METADATA_FIELDS", "title,subtitle")
+	resp := put(`{"num_cpus":2}`)
+	if resp.code != 500 {
+		t.Fatalf("null stored row under pin: want 500 abort, got %d: %v", resp.code, resp.body)
+	}
+	if msg, _ := resp.body["error"].(string); !strings.Contains(msg, "cannot save") {
+		t.Errorf("abort message should name the pin and the stored selection: %q", msg)
 	}
 }

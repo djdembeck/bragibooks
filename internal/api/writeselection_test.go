@@ -54,6 +54,29 @@ func TestBuildEngineJobSelectionTitleOnly(t *testing.T) {
 	}
 }
 
+// TestBuildEngineJobSelectionTrimsStoredFieldNames pins the normalization
+// contract: a stored selection whose field names carry padding (startup
+// validation trims, so a legacy/hand-edited value can) must be applied via
+// the NORMALIZED list. Writing policies from the raw strings would silently
+// skip the recognized field's write.
+func TestBuildEngineJobSelectionTrimsStoredFieldNames(t *testing.T) {
+	snap := BookSnapshot{BookID: 7, Title: "T", Authors: []string{"A"}}
+	sel := &WriteSelection{Fields: []string{" title ", "authors"}, Cover: audio.WritePolicyValuePreserve, Chapters: audio.ChaptersPolicyValuePreserve}
+	jf, _, err := buildEngineJob(jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{Selection: sel}}, "job-7", snap, t.TempDir(), "{title}")
+	if err != nil {
+		t.Fatalf("buildEngineJob: %v", err)
+	}
+	if jf.Policies.Title != audio.WritePolicyValueWrite {
+		t.Fatalf("title policy = %q, want write (a padded stored name must still select the field)", jf.Policies.Title)
+	}
+	if jf.Policies.Authors != audio.WritePolicyValueWrite {
+		t.Fatalf("authors policy = %q, want write", jf.Policies.Authors)
+	}
+	if jf.Policies.Subtitle != audio.WritePolicyValuePreserve {
+		t.Fatalf("subtitle policy = %q, want preserve (unselected)", jf.Policies.Subtitle)
+	}
+}
+
 // TestBuildEngineJobSelectionNoneSelected guards the none-selected contract:
 // an EXPLICIT empty selection writes no embedded tag, cover, or chapter,
 // and generates no chapter sidecar, while the effective metadata (the
