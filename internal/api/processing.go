@@ -355,6 +355,16 @@ func (s *ProcessingService) markUndispatched(id string) {
 // running job, so the client gets a 409 instead of a duplicate process.
 var errActiveJobForBook = errors.New("book already has an active job")
 
+// queueDestination carries a request's resolved per-queue destination
+// overrides into QueueJob. Both fields are the EFFECTIVE value for this
+// request (a profile already resolved against the globals, or an explicit
+// override): blank means "inherit the live global at enqueue time", and
+// QueueJob freezes the final triple into the job args.
+type queueDestination struct {
+	OutputDirOverride  string
+	PathFormatOverride string
+}
+
 // jobArgs is the typed payload stored in a job's m4b_merge_args. The
 // optional destination fields are a fully-resolved queue-time snapshot of
 // the selected output profile (effective directory + format, blank fields
@@ -362,11 +372,19 @@ var errActiveJobForBook = errors.New("book already has an active job")
 // jobs that run with the worker-time global settings.
 type jobArgs struct {
 	SrcPaths []string `json:"src_paths"`
-	// OutputDir is the effective absolute output root ("" = inherit the
-	// processor's live value at run time).
-	OutputDir string `json:"output_dir,omitempty"`
-	// OutputScheme is the effective relative path format ("" = inherit).
-	OutputScheme string `json:"output_scheme,omitempty"`
+	// OutputDir is the effective absolute output root FROZEN AT ENQUEUE
+	// TIME: the global value is resolved and serialized here for every
+	// job, so a settings change after enqueue cannot redirect a queued
+	// job. No omitempty: a post-cutover row always carries the resolved
+	// value ("" only ever means a pre-cutover legacy row, which the
+	// worker refuses before running).
+	OutputDir string `json:"output_dir"`
+	// OutputScheme is the effective relative path format frozen at
+	// enqueue time ("" = pre-cutover legacy row only).
+	OutputScheme string `json:"output_scheme"`
+	// CompletedDir is the engine's move-on-success source directory,
+	// frozen at enqueue time ("" = disabled).
+	CompletedDir string `json:"completed_dir,omitempty"`
 	// Snapshot is the authoritative capture the job runs on: the effective
 	// metadata, the engine identity it was captured under, and the immutable
 	// chapter/artwork references. Non-nil for jobs queued after the
@@ -412,7 +430,7 @@ func (s *ProcessingService) loadSnapshotForQueue(bookID int64) (*snapshotJSON, e
 // QueueJob creates a processing job, persists it to the DB, and enqueues it.
 // opts carries the resolved destination snapshot for profile-backed
 // requests; the zero value preserves the global-settings behavior.
-func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths []string, opts audio.RunOptions) (string, error) {
+func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths []string, opts queueDestination) (string, error) {
 	// Queue-time validation: m4b-merge only accepts .mp3/.m4a/.m4b. The
 	// broader IsAudioFile set (covers, discovery, browsing) must not feed a
 	// job the engine would reject mid-run, so unsupported containers are
@@ -456,17 +474,44 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 
 	id := uuid.New().String()
 
-	// Serialize the typed args for storage; when no profile is selected the
-	// destination fields are omitted entirely. The snapshot is embedded by
-	// value so a captured job is IMMUTABLE: settings, profile edits, and
-	// re-matches after enqueue change future jobs, never this one.
+	// Freeze the COMPLETE destination at enqueue time for every job —
+	// profile-backed, explicitly overridden, AND plain global jobs: the
+	// effective output root, relative path format, and completed directory
+	// are resolved NOW (override/profile wins, blank inherits the live
+	// global) and serialized into the job args. processJob consumes only
+	// these queued values, never the live SettingsSnapshot, so a settings
+	// change after enqueue cannot redirect, reformat, or re-complete a job
+	// that is already in the queue. An empty effective destination is a
+	// misconfiguration the operator must fix, so it is refused here with a
+	// clear message instead of surfacing deep in a worker.
+	liveOut, liveCompleted, liveFormat := s.proc.SettingsSnapshot()
 	args := jobArgs{SrcPaths: srcPaths, Snapshot: snap}
-	if d := strings.TrimSpace(opts.OutputDirOverride); d != "" {
-		args.OutputDir = d
+	effRoot := strings.TrimSpace(opts.OutputDirOverride)
+	if effRoot == "" {
+		effRoot = strings.TrimSpace(liveOut)
 	}
-	if f := strings.TrimSpace(opts.PathFormatOverride); f != "" {
-		args.OutputScheme = f
+	if effRoot == "" {
+		return "", errors.New("output directory is not set (set the global output directory)")
 	}
+	if abs, aerr := filepath.Abs(effRoot); aerr == nil {
+		effRoot = abs
+	}
+	effFormat := strings.TrimSpace(opts.PathFormatOverride)
+	if effFormat == "" {
+		effFormat = strings.TrimSpace(liveFormat)
+	}
+	if effFormat == "" {
+		return "", errors.New("output path format is not set (set the global path format)")
+	}
+	// The INHERITED global format is validated here too, not only an
+	// explicit override: a stored {asin} (global or inherited) must fail
+	// at enqueue with a clear diagnosis, never only deep in a job run.
+	if err := audio.ValidateRelativePathFormat(effFormat); err != nil {
+		return "", fmt.Errorf("output path format: %w", err)
+	}
+	args.OutputDir = effRoot
+	args.OutputScheme = effFormat
+	args.CompletedDir = strings.TrimSpace(liveCompleted)
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
 		return "", fmt.Errorf("serialize job args: %w", err)
@@ -1070,38 +1115,44 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 	}
 
 	// Build the structured engine job from the authoritative snapshot. The
-	// destination is the resolved queue-time pair (override wins; blank
-	// inherits the processor's live value). Re-validate the relative format
-	// as worker-side defense before authored data can steer file writes.
-	outputRoot, completedDir, globalFormat := s.proc.SettingsSnapshot()
-	effRoot := outputRoot
-	if d := strings.TrimSpace(args.OutputDir); d != "" {
-		if abs, aerr := filepath.Abs(d); aerr == nil {
-			effRoot = abs
-		}
-	}
-	effFormat := globalFormat
-	if f := strings.TrimSpace(args.OutputScheme); f != "" {
-		effFormat = f
-		if err := audio.ValidateRelativePathFormat(effFormat); err != nil {
-			invalidSnapshotErr := fmt.Errorf("invalid stored output snapshot: %v", err)
-			if job.BookID.Valid {
-				s.db.Exec(
-					"UPDATE books SET status = 'error', status_message = ? WHERE id = ?",
-					invalidSnapshotErr.Error(), job.BookID.Int64,
-				)
-			}
+	// destination is the COMPLETE frozen queue-time triple (output root,
+	// relative path format, completed directory) persisted in the job args
+	// — it is NOT re-read from any persisted setting, so a settings change
+	// after enqueue cannot redirect, reformat, or re-complete a queued job.
+	// Re-validate the stored format as worker-side defense before authored
+	// data can steer file writes.
+	failInvalidStored := func(err error) {
+		invalidErr := fmt.Errorf("invalid stored output snapshot: %v", err)
+		if job.BookID.Valid {
 			s.db.Exec(
-				"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE id = ?",
-				jobStatusError, invalidSnapshotErr.Error(), job.ID,
+				"UPDATE books SET status = 'error', status_message = ? WHERE id = ?",
+				invalidErr.Error(), job.BookID.Int64,
 			)
-			if state != nil {
-				state.finalize(`{"status":"error","message":"`+escapeJSON(invalidSnapshotErr.Error())+`"}`, invalidSnapshotErr)
-			}
-			s.forgetJob(job.ID)
-			return
 		}
+		s.db.Exec(
+			"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE id = ?",
+			jobStatusError, invalidErr.Error(), job.ID,
+		)
+		if state != nil {
+			state.finalize(`{"status":"error","message":"`+escapeJSON(invalidErr.Error())+`"}`, invalidErr)
+		}
+		s.forgetJob(job.ID)
 	}
+	effRoot := strings.TrimSpace(args.OutputDir)
+	if effRoot == "" {
+		failInvalidStored(errors.New("job carries no frozen output directory (row predates the frozen-destination schema); requeue the book"))
+		return
+	}
+	effFormat := strings.TrimSpace(args.OutputScheme)
+	if effFormat == "" {
+		failInvalidStored(errors.New("job carries no frozen path format (row predates the frozen-destination schema); requeue the book"))
+		return
+	}
+	if err := audio.ValidateRelativePathFormat(effFormat); err != nil {
+		failInvalidStored(err)
+		return
+	}
+	completedDir := strings.TrimSpace(args.CompletedDir)
 
 	jf, stagedCover, err := buildEngineJob(args, job.ID, args.Snapshot.Snapshot, effRoot, effFormat)
 	// The staged cover is Bragi's own input staging: the engine copies its
@@ -1355,12 +1406,12 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 
 // resolveDestination validates profileID and the explicit overrides (exactly
 // one of the two inputs may be present) and returns the resolved
-// audio.RunOptions: a profile resolves against one config snapshot with blank
+// queueDestination: a profile resolves against one config snapshot with blank
 // fields inheriting the globals independently; explicit overrides are
 // validated field-by-field (a blank field omits that override, so each side
 // may inherit independently). Writes the response on failure and returns ok
 // false; runOpts is valid (zero = full globals) when ok is true.
-func (h *Handler) resolveDestination(w http.ResponseWriter, profileID *int64, overrideDir, overrideFormat string) (runOpts audio.RunOptions, ok bool) {
+func (h *Handler) resolveDestination(w http.ResponseWriter, profileID *int64, overrideDir, overrideFormat string) (runOpts queueDestination, ok bool) {
 	// A field the client sent with ANY characters is an override, even
 	// whitespace-only (which the empty-inherit branches below reject
 	// explicitly): counting trimmed emptiness as "set" would let a sent
@@ -1368,12 +1419,12 @@ func (h *Handler) resolveDestination(w http.ResponseWriter, profileID *int64, ov
 	overridesSet := overrideDir != "" || overrideFormat != ""
 	if profileID != nil && overridesSet {
 		writeError(w, http.StatusBadRequest, "Choose either an output profile or explicit output overrides, not both.")
-		return audio.RunOptions{}, false
+		return queueDestination{}, false
 	}
 	if profileID != nil {
 		if *profileID <= 0 {
 			writeError(w, http.StatusBadRequest, "invalid output profile id")
-			return audio.RunOptions{}, false
+			return queueDestination{}, false
 		}
 		profile, err := h.getOutputProfile(*profileID)
 		if err != nil {
@@ -1382,12 +1433,12 @@ func (h *Handler) resolveDestination(w http.ResponseWriter, profileID *int64, ov
 			} else {
 				writeError(w, http.StatusInternalServerError, "load output profile: "+err.Error())
 			}
-			return audio.RunOptions{}, false
+			return queueDestination{}, false
 		}
 		cm := h.svc.Config
 		if cm == nil {
 			writeError(w, http.StatusInternalServerError, "settings manager unavailable")
-			return audio.RunOptions{}, false
+			return queueDestination{}, false
 		}
 		cfg := cm.Config()
 		effDir := strings.TrimSpace(profile.OutputDir)
@@ -1403,25 +1454,25 @@ func (h *Handler) resolveDestination(w http.ResponseWriter, profileID *int64, ov
 		// (it would silently substitute the process working directory).
 		if effDir == "" {
 			writeError(w, http.StatusBadRequest, "output directory is not set (set the profile override or the global output directory)")
-			return audio.RunOptions{}, false
+			return queueDestination{}, false
 		}
 		if effFormat == "" {
 			writeError(w, http.StatusBadRequest, "output path format is not set (set the profile format or the global path format)")
-			return audio.RunOptions{}, false
+			return queueDestination{}, false
 		}
 		absDir, err := filepath.Abs(effDir)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot resolve output directory %s: %v", effDir, err))
-			return audio.RunOptions{}, false
+			return queueDestination{}, false
 		}
 		// The relative-format validator is deliberately applied to the
 		// effective format even when it was inherited from the global
 		// setting: a profile-started job must land inside its root.
 		if err := audio.ValidateRelativePathFormat(effFormat); err != nil {
 			writeError(w, http.StatusBadRequest, "output path format: "+err.Error())
-			return audio.RunOptions{}, false
+			return queueDestination{}, false
 		}
-		return audio.RunOptions{OutputDirOverride: absDir, PathFormatOverride: effFormat}, true
+		return queueDestination{OutputDirOverride: absDir, PathFormatOverride: effFormat}, true
 	}
 	if overridesSet {
 		if dir := strings.TrimSpace(overrideDir); dir != "" {
@@ -1431,12 +1482,12 @@ func (h *Handler) resolveDestination(w http.ResponseWriter, profileID *int64, ov
 			// global", not an override.
 			if !strings.HasPrefix(dir, "/") {
 				writeError(w, http.StatusBadRequest, "output directory must be an absolute path")
-				return audio.RunOptions{}, false
+				return queueDestination{}, false
 			}
 			absDir, err := filepath.Abs(dir)
 			if err != nil {
 				writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot resolve output directory %s: %v", dir, err))
-				return audio.RunOptions{}, false
+				return queueDestination{}, false
 			}
 			runOpts.OutputDirOverride = absDir
 		}
@@ -1447,17 +1498,17 @@ func (h *Handler) resolveDestination(w http.ResponseWriter, profileID *int64, ov
 			format := strings.TrimSpace(overrideFormat)
 			if format == "" {
 				writeError(w, http.StatusBadRequest, "output path format is empty")
-				return audio.RunOptions{}, false
+				return queueDestination{}, false
 			}
 			if err := audio.ValidateRelativePathFormat(format); err != nil {
 				writeError(w, http.StatusBadRequest, "output path format: "+err.Error())
-				return audio.RunOptions{}, false
+				return queueDestination{}, false
 			}
 			runOpts.PathFormatOverride = format
 		}
 		return runOpts, true
 	}
-	return audio.RunOptions{}, true
+	return queueDestination{}, true
 }
 
 // probeDestinations probes every directory this request's jobs will write to
@@ -1466,7 +1517,7 @@ func (h *Handler) resolveDestination(w http.ResponseWriter, profileID *int64, ov
 // with zero jobs instead of queueing one that dies at run time. Save-time
 // probing cannot cover a later remount, uid change, or env-var override, so
 // this is the second, request-level gate.
-func (h *Handler) probeDestinations(w http.ResponseWriter, runOpts audio.RunOptions) (ok bool) {
+func (h *Handler) probeDestinations(w http.ResponseWriter, runOpts queueDestination) (ok bool) {
 	cm := h.svc.Config
 	if cm == nil {
 		return true
@@ -2092,9 +2143,9 @@ loop:
 }
 
 // outputFormat returns the container format of a produced output file, e.g.
-// "m4b", for the book's FILE PATHS card. Output discovery only publishes
-// .m4b files (findNewestM4B), so the extension is the real format rather
-// than a guess from arbitrary user input.
+// "m4b", for the book's FILE PATHS card. The engine publishes .m4b audio,
+// so the extension is the real format rather than a guess from arbitrary
+// user input.
 func outputFormat(path string) string {
 	if path == "" {
 		return ""

@@ -113,27 +113,47 @@ type snapshotJSON struct {
 	Snapshot BookSnapshot         `json:"snapshot"`
 }
 
+// snapshotRelevantChanged reports whether the update touched any field the
+// snapshot persists: the catalog round trip (one GetBook + the release
+// chapters + the cover) is then worth it. Pipeline-only PUTs (status,
+// dest path, format, ...) do not change the snapshot's catalog content, so
+// they skip the catalog hit entirely and upsert the row with the unchanged
+// cover_file.
+func snapshotRelevantChanged(req *UpdateBookRequest) bool {
+	return req.Title != nil || req.ASIN != nil || req.Description != nil ||
+		req.ReleaseDate != nil || req.Series != nil ||
+		req.AudiobookdbBookID != nil || req.AudiobookdbReleaseID != nil ||
+		req.Authors != nil || req.Narrators != nil || req.CoverImageURL != nil
+}
+
 // captureSnapshot re-captures the book's authoritative snapshot from the
-// stored book row, its ordered people, and (when the book is catalog-linked)
-// the selected release's details and cover. It is called after a Match save
-// or a metadata edit. ADB detail/cover failures degrade gracefully: the row
-// is still written with the local fields, and a cover that cannot be
-// downloaded leaves CoverFile empty (the engine then writes no cover) rather
-// than failing the save. Only a missing book row is a hard error.
-func (h *Handler) captureSnapshot(ctx context.Context, bookID int64) error {
+// stored book row, its ordered people, and (when the book is catalog-linked
+// and the update touched snapshot-relevant fields) the selected release's
+// details and cover, reusing ONE GetBook for genres and images. It is called
+// after a Match save or a metadata edit.
+//
+// Failure classes (the documented degradation):
+//   - Catalog unavailable (GetBook/GetRelease/download): catalog-derived
+//     fields RETAIN the previously captured values from the existing row,
+//     local fields are refreshed, the save succeeds. A catalog that is down
+//     must not block a metadata save, and a degraded row must not silently
+//     lose previously captured chapters/genres/cover.
+//   - DB read/write failure: the capture hard-fails. The caller then
+//     INVALIDATES the row (deletes it) and reports 500: a book with no
+//     snapshot row is refused at queue time with an explicit re-match and
+//     re-preview message, never run on stale data.
+func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed bool) (catalogDegraded bool, err error) {
 	var (
 		title, description, series, releaseDate string
 		adbBook, adbRelease                     sql.NullString
 	)
-	err := h.svc.DB.QueryRow(
+	if err := h.svc.DB.QueryRow(
 		"SELECT title, description, series, release_date, audiobookdb_book_id, audiobookdb_release_id FROM books WHERE id = ?",
 		bookID,
-	).Scan(&title, &description, &series, &releaseDate, &adbBook, &adbRelease)
-	if err == sql.ErrNoRows {
-		return fmt.Errorf("book %d not found", bookID)
-	}
-	if err != nil {
-		return fmt.Errorf("load book for snapshot: %w", err)
+	).Scan(&title, &description, &series, &releaseDate, &adbBook, &adbRelease); err == sql.ErrNoRows {
+		return false, fmt.Errorf("book %d not found", bookID)
+	} else if err != nil {
+		return false, fmt.Errorf("load book for snapshot: %w", err)
 	}
 
 	// Ordered by id (= insert/rowid order), which is the operator's
@@ -141,7 +161,7 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64) error {
 	// ordering (#479), so the read MUST be ordered, not rely on scan order.
 	people, err := h.getOrderedPeopleByBookID(bookID)
 	if err != nil {
-		return fmt.Errorf("load people for snapshot: %w", err)
+		return false, fmt.Errorf("load people for snapshot: %w", err)
 	}
 	authors := orderedNames(filterPeople(people, "author"))
 	narrators := orderedNames(filterPeople(people, "narrator"))
@@ -158,35 +178,73 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64) error {
 	}
 	snap.SeriesName, snap.SeriesPosition = splitSeries(series)
 
+	existing, err := h.loadSnapshot(bookID)
+	if err != nil {
+		return false, fmt.Errorf("load existing snapshot: %w", err)
+	}
+	// The row's catalog-derived content survives a degraded capture: it is
+	// only replaced by fresh catalog values when the catalog is reachable.
+	// existing is nil for a first-time capture (nothing to retain).
+	if existing != nil {
+		snap.Genres, snap.Chapters, snap.CoverFile = existing.Genres, existing.Chapters, existing.CoverFile
+	}
+
 	// Catalog enrichment for the SELECTED release: genres, chapters, and a
-	// locally stored cover. This is the "capture selected catalog content at
-	// match/save" step. It is best-effort: a catalog that is down must not
-	// block a metadata save the operator is making, so failures here leave
-	// the corresponding snapshot fields empty and log the reason.
-	if snap.ADBBookID != "" {
-		if book, err := h.getAudiobookDB().GetBook(ctx, snap.ADBBookID, "genres,series"); err == nil && book != nil {
+	// locally stored cover — one GetBook feeds genres AND the cover. It is
+	// best-effort: a catalog that is down must not block a metadata save,
+	// so on failure the row is refreshed with the new LOCAL fields while
+	// retaining the previously captured catalog content (the values
+	// pre-loaded above), and the degradation is reported to the caller.
+	if changed && snap.ADBBookID != "" {
+		if book, err := h.getAudiobookDB().GetBook(ctx, snap.ADBBookID, "genres,images"); err == nil && book != nil {
 			snap.Genres = genreTitles(book.Genres)
-		} else if err != nil {
-			log.Printf("snapshot %d: book genres unavailable: %v", bookID, err)
-		}
-		if snap.ADBReleaseID != "" {
-			if rel, err := h.getAudiobookDB().GetRelease(ctx, snap.ADBReleaseID, "chapterDetail"); err == nil && rel != nil && rel.ChapterDetail != nil {
-				snap.Chapters = chaptersFromADB(rel.ChapterDetail.Chapters)
-			} else if err != nil {
-				log.Printf("snapshot %d: release chapters unavailable: %v", bookID, err)
+			if h.svc.CoversDir != "" {
+				if file, ok := h.storeCoverForBook(ctx, bookID, snap, book); ok {
+					snap.CoverFile = file
+				}
 			}
-		}
-		if h.svc.CoversDir != "" {
-			if file, ok := h.storeCoverForBook(ctx, bookID, snap); ok {
-				snap.CoverFile = file
+			if snap.ADBReleaseID != "" {
+				if rel, err := h.getAudiobookDB().GetRelease(ctx, snap.ADBReleaseID, "chapterDetail"); err == nil && rel != nil && rel.ChapterDetail != nil {
+					snap.Chapters = chaptersFromADB(rel.ChapterDetail.Chapters)
+				} else if err != nil {
+					log.Printf("snapshot %d: release chapters unavailable: %v", bookID, err)
+				}
 			}
+		} else {
+			log.Printf("snapshot %d: catalog unavailable, keeping previously captured catalog content: %v", bookID, err)
+			catalogDegraded = true
 		}
 	}
 
 	if err := h.upsertSnapshot(snap); err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	h.pruneSupersededCovers(bookID, snap)
+	return catalogDegraded, nil
+}
+
+// pruneSupersededCovers deletes this book's old cover files that are no
+// longer referenced by its snapshot. It skips the book entirely while it
+// has an active (queued/running) job: that job's queued snapshot still
+// references the file its capture wrote, and capture-specific immutable
+// names mean a failed later capture never touches it anyway. Pruning is
+// opportunistic housekeeping, not correctness.
+func (h *Handler) pruneSupersededCovers(bookID int64, s *BookSnapshot) {
+	if s.CoverFile == "" {
+		return
+	}
+	var n int
+	if err := h.svc.DB.QueryRow(
+		"SELECT COUNT(*) FROM processing_jobs WHERE book_id = ? AND status IN ('queued','running')", bookID,
+	).Scan(&n); err != nil || n > 0 {
+		return
+	}
+	// The pre-capture-specific shared name is the only legacy form to
+	// retire; the active (capture-specific) file is never removed.
+	legacy := fmt.Sprintf("%d-snapshot.jpg", bookID)
+	if legacy != s.CoverFile {
+		os.Remove(filepath.Join(h.svc.CoversDir, legacy))
+	}
 }
 
 // upsertSnapshot persists the capture row (insert-or-replace on book_id).
@@ -488,22 +546,31 @@ func chaptersFromADB(chs []audiobookdb.Chapter) []SnapshotChapter {
 	return out
 }
 
-// storeCoverForBook downloads the selected book's primary cover into the
-// covers directory under a stable, snapshot-owned filename and returns it.
-// It returns false (and logs) when there is no cover or the download fails;
-// a capture must never hard-fail on artwork.
-func (h *Handler) storeCoverForBook(ctx context.Context, bookID int64, s *BookSnapshot) (string, bool) {
-	book, err := h.getAudiobookDB().GetBook(ctx, s.ADBBookID, "images")
-	if err != nil || book == nil || len(book.Images) == 0 || book.Images[0].URL == "" {
+// storeCoverForBook downloads the selected book's primary cover (already
+// fetched by the caller, reusing one GetBook) into the covers directory
+// under a CAPTURE-SPECIFIC immutable filename and returns it. It returns
+// false (and logs) when there is no cover or the download fails; a capture
+// must never hard-fail on artwork.
+//
+// The name is unique per capture (<bookID>-<unixnano>.jpg): a later capture
+// — success or failure — can never overwrite or delete the file the book's
+// active (queued/running) job's snapshot references, which a shared
+// "<bookID>-snapshot.jpg" name did (finding: a failed later download
+// removed the file an earlier queued job's snapshot named). Failed
+// captures only ever remove their own new, not-yet-referenced file.
+// Covers superseded by a new capture are pruned opportunistically in
+// upsertSnapshot (only files no queued/running job references).
+func (h *Handler) storeCoverForBook(ctx context.Context, bookID int64, s *BookSnapshot, book *audiobookdb.Book) (string, bool) {
+	if book == nil || len(book.Images) == 0 || book.Images[0].URL == "" {
 		return "", false
 	}
-	name := fmt.Sprintf("%d-snapshot.jpg", bookID)
+	name := fmt.Sprintf("%d-%d.jpg", bookID, time.Now().UnixNano())
 	dest := filepath.Join(h.svc.CoversDir, name)
 	dlCtx, cancel := context.WithTimeout(ctx, coverDownloadTimeout)
 	defer cancel()
 	if err := downloadCoverFile(dlCtx, book.Images[0].URL, dest); err != nil {
 		log.Printf("snapshot %d: cover download: %v", bookID, err)
-		os.Remove(dest)
+		os.Remove(dest) // only our own new file, never one a snapshot references
 		return "", false
 	}
 	return name, true

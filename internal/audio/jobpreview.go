@@ -59,7 +59,9 @@ func (p *Processor) Preview(ctx context.Context, meta SuppliedMetadata, pathForm
 		return s
 	}
 
-	cmd := newEngineCommand(ctx, binary, probeFile, logLevel, true)
+	// The preview is non-mutating, so the CPU limit is irrelevant here: 0
+	// lets the engine apply its own default.
+	cmd := newEngineCommand(ctx, binary, probeFile, logLevel, 0, true)
 	tree := newProcessTree(cmd)
 	cmd.Cancel = func() error {
 		if err := tree.start(cmd); err != nil {

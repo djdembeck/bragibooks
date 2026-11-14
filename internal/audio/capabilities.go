@@ -84,6 +84,12 @@ func (p *Processor) ProbeCapabilitiesFor(ctx context.Context, binary string) (*C
 		return nil, fmt.Errorf("m4b-merge binary is not set")
 	}
 
+	// A documented probe timeout is only real if it is applied here: a
+	// hanging --capabilities must die on its own clock, not keep the caller
+	// (settings save, pre-launch gate) blocked for the caller's whole context.
+	ctx, cancel := context.WithTimeout(ctx, capabilitiesProbeTimeout)
+	defer cancel()
+
 	cmd := exec.CommandContext(ctx, binary, "--capabilities")
 	tree := newProcessTree(cmd)
 	cmd.Cancel = func() error {

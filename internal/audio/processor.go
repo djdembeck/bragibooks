@@ -5,12 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"log"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -102,14 +98,6 @@ func NewProcessor(binary, outputDir, completedDir string, numCPUs int, pathForma
 	}
 }
 
-// ProcessResult holds the output of a single m4b-merge run.
-type ProcessResult struct {
-	OutputFile    string
-	Stdout        string
-	Stderr        string
-	OutputWarning string
-}
-
 // stripEscapeSequences removes ANSI/VT100 escape sequences from s so the
 // captured m4b-merge output persists and renders as plain text. Only escape
 // sequences are removed: newlines, tabs, and all ordinary text — including a
@@ -169,19 +157,6 @@ func escapeSequenceEnd(s string, i int) int {
 	}
 }
 
-// RunOptions carries per-run destination overrides. A non-empty (after
-// trimming) value takes precedence over the live Processor settings;
-// empty inherits the snapshot value.
-type RunOptions struct {
-	OutputDirOverride  string
-	PathFormatOverride string
-	// OnOutput receives complete stdout lines as m4b-merge writes them,
-	// with ANSI/VT100 sequences stripped. It runs on the goroutine draining
-	// the child's stdout, so it must not block for long; nil disables live
-	// streaming while leaving the captured result intact.
-	OnOutput func(line string)
-}
-
 // lineStreamWriter buffers stdout until a complete line is available, strips
 // escape sequences, and hands each line to onLine. Buffering by line is safe
 // for escape sequences: none contain a newline, so a sequence split across
@@ -218,234 +193,6 @@ func (w *lineStreamWriter) emit(line []byte) {
 	if text != "" {
 		w.onLine(text)
 	}
-}
-
-// Run executes m4b-merge with the given input file paths.
-// Returns the output .m4b file path, or an error.
-//
-// jobID scopes output discovery to this run: m4b-merge writes its result
-// under -o using a -p path scheme (no per-run output dir flag, and the
-// scheme tree is shared across concurrent workers), so discovering "the
-// newest .m4b in OutputDir" misattributes other workers' outputs. We
-// therefore write each job into its own subtree, OutputDir/<jobID>.tmp/
-// (reusing the -p scheme tree inside it), and only on success move the
-// discovered file to its final location under OutputDir. This uses the
-// existing m4b-merge flags only; no CLI surface is changed.
-func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, asin string, opts RunOptions) (*ProcessResult, error) {
-	binary, outputRoot, completedDir, pathFormat, logLevel, numCPUs := p.snapshot()
-
-	// A relative output root (a valid dev configuration) must be
-	// absolutized before discovery and the final move: findNewestM4B
-	// returns absolute paths, so with a relative root filepath.Rel fails,
-	// OutputFile stays empty, and the per-job cleanup below deletes the
-	// produced .m4b. Empty stays empty.
-	if outputRoot != "" {
-		outputRoot, _ = filepath.Abs(outputRoot)
-	}
-
-	// Per-run destination overrides win over the snapshot values. The
-	// directory override is validated absolute at write time, so it joins
-	// byte-identically with the Match preview's effective-dir join.
-	if od := strings.TrimSpace(opts.OutputDirOverride); od != "" {
-		if abs, err := filepath.Abs(od); err == nil {
-			outputRoot = abs
-		}
-	}
-	effFormat := pathFormat
-	if f := strings.TrimSpace(opts.PathFormatOverride); f != "" {
-		effFormat = f
-	}
-
-	// Probe the completed directory before touching the filesystem or
-	// spawning the child. m4b-merge runs its own create_dir_all on
-	// --completed-directory at startup and only reports
-	// "Completed directory is not writable: <io error>" — no path — which
-	// the web then could only render as a generic permission sentence.
-	// Failing here names the setting before the per-job subtree exists.
-	if completedDir != "" {
-		if err := CheckDirWritable(completedDir); err != nil {
-			return nil, fmt.Errorf("completed directory %w", err)
-		}
-	}
-
-	outputDir := outputRoot
-	workDir := ""
-	// An empty output root (misconfiguration or a test processor) would put
-	// the per-job subtree in cwd; in that case fall back to unscoped
-	// discovery as before.
-	if jobID != "" && outputRoot != "" {
-		workDir = filepath.Join(outputRoot, jobID+".tmp")
-		if err := os.MkdirAll(workDir, 0o755); err != nil {
-			return nil, fmt.Errorf("create job output dir %s: %w", workDir, err)
-		}
-		outputDir = workDir
-	}
-
-	args := []string{
-		"-o", outputDir,
-		"-p", effFormat,
-		"--num-cpus", strconv.Itoa(numCPUs),
-		"--log-level", logLevel,
-	}
-	if completedDir != "" {
-		args = append(args, "--completed-directory", completedDir)
-	}
-	if asin != "" {
-		args = append(args, "-a", asin)
-	}
-	// m4b-merge (clap) requires one -i per input; a single -i with multiple
-	// values errors with "unexpected argument".
-	for _, in := range inputPaths {
-		args = append(args, "-i", in)
-	}
-
-	cmd := exec.CommandContext(ctx, binary, args...)
-	// The whole tree: ctx cancellation must kill the spawned process and
-	// everything it spawned (see processTree), not just the direct child.
-	tree := newProcessTree(cmd)
-	cmd.Cancel = func() error {
-		if err := tree.start(cmd); err != nil {
-			return err
-		}
-		return tree.kill()
-	}
-	// Guard against any writer we could not kill: force Wait to return
-	// shortly after cancel instead of blocking on inherited pipes.
-	cmd.WaitDelay = 5 * time.Second
-
-	// os/exec owns the drain: with buffers wired directly as the child's
-	// stdout/stderr, exec internally reads both streams concurrently and
-	// guarantees they are fully drained (and the buffers valid) once
-	// Wait returns. Manual StdoutPipe/StderrPipe + io.Copy goroutines
-	// raced with Wait closing the read ends and lost large stderr output.
-	var stdoutBuf, stderrBuf bytes.Buffer
-	var stream *lineStreamWriter
-	if opts.OnOutput != nil {
-		stream = &lineStreamWriter{onLine: opts.OnOutput}
-		cmd.Stdout = io.MultiWriter(&stdoutBuf, stream)
-	} else {
-		cmd.Stdout = &stdoutBuf
-	}
-	cmd.Stderr = &stderrBuf
-
-	start := time.Now()
-	if err := cmd.Start(); err != nil {
-		if workDir != "" {
-			_ = os.RemoveAll(workDir)
-		}
-		return nil, fmt.Errorf("m4b-merge start: %w", err)
-	}
-
-	waitErr := cmd.Wait()
-	tree.finish()
-	if stream != nil {
-		stream.Flush()
-	}
-
-	// m4b-merge colorizes its tracing output unconditionally (no TTY check,
-	// no --no-color flag), so the pipes receive ANSI SGR sequences. Strip
-	// them here, at the single point both streams enter the app: processJob
-	// persists Stdout as processing_jobs.output (rendered verbatim in the
-	// job-log <pre>) and embeds Stderr in the persisted error message.
-	result := &ProcessResult{
-		Stdout: stripEscapeSequences(stdoutBuf.String()),
-		Stderr: stripEscapeSequences(stderrBuf.String()),
-	}
-
-	if waitErr != nil {
-		// No output was produced: the per-job subtree is garbage and safe
-		// to drop. (A relocation failure, by contrast, keeps the subtree —
-		// there the .m4b is the only completed artifact; see below.)
-		if workDir != "" {
-			_ = os.RemoveAll(workDir)
-		}
-		return result, fmt.Errorf("m4b-merge: %w: %s", waitErr, result.Stderr)
-	}
-
-	// m4b-merge writes its output under -o using a path scheme; discovery is
-	// scoped to this job's subtree. The 1s margin absorbs clock granularity
-	// between start and mtime.
-	if out, err := findNewestM4B(outputDir, start.Add(-time.Second)); err != nil {
-		result.OutputWarning = "output file discovery failed: " + err.Error()
-	} else if out == "" {
-		result.OutputWarning = "no output .m4b found in output directory"
-	} else if workDir != "" {
-		// Relocate into the shared output tree, keeping the scheme-relative
-		// path (e.g. Author/Title.m4b under {author}/{title}). The .m4b was
-		// found only inside the per-job subtree: on relocation failure the
-		// subtree is kept (recovery possible) and the run reports a real
-		// failure instead of succeeding with no output file.
-		rel, err := filepath.Rel(workDir, out)
-		if err != nil {
-			return result, fmt.Errorf("resolve output file %s relative to job dir %s: %w", out, workDir, err)
-		}
-		finalPath := filepath.Join(outputRoot, rel)
-		if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
-			return result, fmt.Errorf("create output path for %s: %w", finalPath, err)
-		}
-		if err := os.Rename(out, finalPath); err != nil {
-			if err2 := os.MkdirAll(filepath.Dir(finalPath), 0o755); err2 == nil {
-				// Cross-device rename: copy then delete.
-				if data, rdErr := os.ReadFile(out); rdErr == nil {
-					err = os.WriteFile(finalPath, data, 0o644)
-					if err == nil {
-						os.Remove(out)
-					}
-				} else {
-					err = rdErr
-				}
-			}
-			if err != nil {
-				return result, fmt.Errorf("move output to final location %s: %w (job output kept at %s)", finalPath, err, workDir)
-			}
-		}
-		result.OutputFile, _ = filepath.Abs(finalPath)
-	} else {
-		result.OutputFile = out
-	}
-
-	// Publication succeeded: the .m4b is at its final location, so the
-	// per-job subtree is garbage to clean up.
-	if workDir != "" {
-		_ = os.RemoveAll(workDir)
-	}
-
-	return result, nil
-}
-
-// findNewestM4B walks dir recursively for *.m4b files and returns the absolute
-// path of the newest one by mtime, ignoring files older than since. Returns
-// "" (no error) when no qualifying file exists.
-func findNewestM4B(dir string, since time.Time) (string, error) {
-	var newest string
-	var newestMtime time.Time
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".m4b") {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if info.ModTime().Before(since) {
-			return nil
-		}
-		if newest == "" || info.ModTime().After(newestMtime) {
-			newest = path
-			newestMtime = info.ModTime()
-		}
-		return nil
-	})
-	if err != nil {
-		return "", fmt.Errorf("walk %s: %w", dir, err)
-	}
-	if newest == "" {
-		return "", nil
-	}
-	return filepath.Abs(newest)
 }
 
 // MinimumM4bMergeVersion is the minimum required m4b-merge version. 2.2.0 is

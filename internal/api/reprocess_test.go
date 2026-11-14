@@ -502,7 +502,8 @@ func TestReprocessOverrideValidation(t *testing.T) {
 		t.Errorf("stored snapshot = %q / %q; want %q / %q", args.OutputDir, args.OutputScheme, absAlt, "{title}")
 	}
 
-	// Blank overrides + no profile => destination fields omitted entirely.
+	// Blank overrides + no profile => the globals are FROZEN into the job
+	// args at queue time: the effective root + format must be present.
 	clearQueuedJobs(t, h.svc.DB, 1)
 	w = postReprocess(t, h, StartReprocessRequest{BookID: 1})
 	if w.Code != http.StatusOK {
@@ -510,8 +511,16 @@ func TestReprocessOverrideValidation(t *testing.T) {
 	}
 	var raw string
 	h.svc.DB.QueryRow("SELECT m4b_merge_args FROM processing_jobs WHERE book_id = 1 ORDER BY rowid DESC LIMIT 1").Scan(&raw)
-	if strings.Contains(raw, "output_dir") || strings.Contains(raw, "output_scheme") {
-		t.Errorf("global-settings args = %q; want no destination fields", raw)
+	// The globals must be frozen into the args (both fields present), not
+	// omitted. The exact values are the processor's live globals, asserted
+	// field-by-field here (not the Config string, which the reprocess
+	// harness does not re-apply to the processor).
+	var f jobArgs
+	if err := json.Unmarshal([]byte(raw), &f); err != nil {
+		t.Fatalf("parse stored args: %v", err)
+	}
+	if f.OutputDir == "" || f.OutputScheme == "" {
+		t.Errorf("global-settings args = %q; want the frozen global destination fields (dir + scheme present)", raw)
 	}
 }
 

@@ -161,6 +161,42 @@ func main() {
 		tokenNames = append(tokenNames, t.Name)
 	}
 	audio.SetPathFormatTokens(tokenNames)
+
+	// Validate the STORED global path format against the engine's token
+	// vocabulary at boot: the engine no longer accepts the legacy {asin}
+	// token (it resolves {book_id} and the people tokens), and a stored
+	// format containing a token the engine does not know must fail with a
+	// clear diagnosis here — at upgrade time — not only deep in the first
+	// job run. Profile formats are validated at save time; the inherited
+	// global is validated at enqueue, so this boot check is what catches a
+	// pre-existing stored value on upgrade.
+	if verr := audio.ValidateRelativePathFormat(cfg.Processing.PathFormat); verr != nil {
+		log.Fatalf("stored global output format %q is not valid for this engine: %v — fix the path format in settings (the legacy {asin} token is no longer supported)", cfg.Processing.PathFormat, verr)
+	}
+	// Stored output-profile formats inherit the same token vocabulary. A
+	// profile the engine cannot resolve cannot produce a valid path, so
+	// each stored value is validated at boot too: fatal with a clear,
+	// nameable diagnosis, consistent with the global check above (fixing
+	// the global alone would leave the profile job refusing at enqueue
+	// with a message that does not name the profile).
+	profileRows, perr := database.Query("SELECT id, name, output_scheme FROM output_profiles WHERE output_scheme <> ''")
+	if perr != nil {
+		log.Fatalf("list output profiles for boot validation: %v", perr)
+	}
+	for profileRows.Next() {
+		var pid int64
+		var pname, scheme string
+		if err := profileRows.Scan(&pid, &pname, &scheme); err != nil {
+			log.Fatalf("read output profile for boot validation: %v", err)
+		}
+		if verr := audio.ValidateRelativePathFormat(scheme); verr != nil {
+			log.Fatalf("stored output profile %q (id %d) format %q is not valid for this engine: %v — fix the profile (the legacy {asin} token is no longer supported)", pname, pid, scheme, verr)
+		}
+	}
+	if err := profileRows.Err(); err != nil {
+		log.Fatalf("iterate output profiles for boot validation: %v", err)
+	}
+	profileRows.Close()
 	api.SetCoversDir(coversDir)
 
 	audiobookDBClient := audiobookdb.NewClient(cfg.APIKey.APIKey, cfg.APIKey.BaseURL)

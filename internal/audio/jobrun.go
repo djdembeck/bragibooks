@@ -18,13 +18,19 @@ import (
 // newEngineCommand builds the m4b-merge child for a structured job file.
 // preview selects --job-preview (non-mutating) vs. execution. ctx must come
 // from the run's request context: cmd.Cancel (the process-group kill) is
-// only legal on a CommandContext child.
-func newEngineCommand(ctx context.Context, binary, jobFile, logLevel string, preview bool) *exec.Cmd {
+// only legal on a CommandContext child. numCPUs is the configured engine CPU
+// limit, forwarded as a standalone flag (the engine's Job struct is
+// deny_unknown_fields, so it has no in-file field); 0 is not forwarded, in
+// which case the engine applies its own available-parallelism default.
+func newEngineCommand(ctx context.Context, binary, jobFile, logLevel string, numCPUs int, preview bool) *exec.Cmd {
 	verb := "--machine"
 	if preview {
 		verb = "--job-preview"
 	}
 	args := []string{"--job", jobFile, verb, "--log-level", logLevel}
+	if numCPUs > 0 {
+		args = append(args, "--num-cpus", strconv.Itoa(numCPUs))
+	}
 	return exec.CommandContext(ctx, binary, args...)
 }
 
@@ -94,19 +100,34 @@ type JobRunOptions struct {
 }
 
 func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts JobRunOptions) (*JobRunResult, error) {
-	binary, _, _, _, logLevel, _ := p.snapshot()
+	binary, _, _, _, logLevel, numCPUs := p.snapshot()
 
 	if opts.OutputRoot == "" {
 		return nil, errors.New("RunJob: output root is empty")
 	}
-	// Fail-closed version gate on the EXACT executable this run will launch.
-	// The startup gate covers first boot; this one catches a binary that was
-	// swapped, removed, or re-pointed to a too-old build by a settings update
-	// after startup. The same snapshot call that produced `binary` above is
-	// used throughout, so a single job observes one consistent executable,
+	// Fail-closed gates on the EXACT executable this run will launch, BEFORE
+	// the mutating command starts: the startup gate covers first boot; these
+	// catch a binary that was swapped, removed, re-pointed, or re-built after
+	// startup. The same snapshot call that produced `binary` above is used
+	// throughout, so a single job observes one consistent executable,
 	// destination, and format (AGENTS: one settings snapshot per run).
+	//
+	// 1. Version floor: the binary is at least the minimum protocol build.
 	if _, err := p.CheckVersionFor(ctx, binary); err != nil {
 		return nil, fmt.Errorf("pre-launch engine gate: %w", err)
+	}
+	// 2. Captured schema/resolver identity: the job was captured under a
+	// specific naming-identity pair, and the binary about to run it must
+	// REPORT that exact pair. A changed resolver (engine re-pointed to a new
+	// build between capture and run) must be refused before media/source
+	// mutation, not only after the engine has already published: the
+	// post-result identity check below stays as the defense against the
+	// engine lying in its result document.
+	if caps, err := p.ProbeCapabilitiesFor(ctx, binary); err != nil {
+		return nil, fmt.Errorf("pre-launch engine gate: probe capabilities: %w", err)
+	} else if caps.SchemaVersion != opts.Identity.SchemaVersion || caps.ResolverVersion != opts.Identity.ResolverVersion {
+		return nil, fmt.Errorf("pre-launch engine gate: engine reports schema %d / resolver %s, job was captured under schema %d / resolver %s; re-preview and requeue the book under the current engine",
+			caps.SchemaVersion, caps.ResolverVersion, opts.Identity.SchemaVersion, opts.Identity.ResolverVersion)
 	}
 
 	absRoot, err := filepath.Abs(opts.OutputRoot)
@@ -130,7 +151,7 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	}
 	defer os.Remove(jobFile)
 
-	cmd := newEngineCommand(ctx, binary, jobFile, logLevel, false)
+	cmd := newEngineCommand(ctx, binary, jobFile, logLevel, numCPUs, false)
 	tree := newProcessTree(cmd)
 	cmd.Cancel = func() error {
 		if err := tree.start(cmd); err != nil {
