@@ -276,6 +276,23 @@ CREATE TABLE IF NOT EXISTS book_snapshots (
 ALTER TABLE processing_jobs ADD COLUMN snapshot_version INTEGER NOT NULL DEFAULT 0;
 `,
 	},
+	{
+		// v16: per-field metadata write selection (#518) and the subtitle
+		// capture. settings.metadata_fields stores the explicit selection as
+		// a JSON array ("[]" = write nothing); an EMPTY string means "not
+		// set" and the all-supported-available default applies — the same
+		// nil-vs-explicit distinction the Go config uses. book_snapshots
+		// gains subtitle so the title and subtitle write selections are
+		// backed by independently captured values (the engine's independent
+		// title/subtitle component policies, M1, need the subtitle value to
+		// write it and to preserve it across a title write).
+		version: 16,
+		sql: `
+ALTER TABLE settings ADD COLUMN metadata_fields TEXT NOT NULL DEFAULT '';
+ALTER TABLE settings ADD COLUMN metadata_chapters TEXT NOT NULL DEFAULT 'write';
+ALTER TABLE book_snapshots ADD COLUMN subtitle TEXT NOT NULL DEFAULT '';
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

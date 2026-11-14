@@ -54,6 +54,8 @@ func newSettingsTestDB(t *testing.T) *sql.DB {
 			api_key_digest TEXT NOT NULL DEFAULT '',
 			legacy_token_migrated BOOLEAN NOT NULL DEFAULT 0,
 			indexing_enabled BOOLEAN NOT NULL DEFAULT 0,
+			metadata_fields TEXT NOT NULL DEFAULT '',
+			metadata_chapters TEXT NOT NULL DEFAULT 'write',
 			created_at TEXT DEFAULT (datetime('now')),
 			updated_at TEXT DEFAULT (datetime('now'))
 		)`); err != nil {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -152,6 +153,24 @@ func main() {
 		log.Fatalf("m4b-merge capabilities check failed: %v", err)
 	}
 	processor.StoreCapabilities(engineCaps)
+
+	// Validate the STORED per-field write selection (#518) against the
+	// verified engine capabilities: a field the engine dropped from its
+	// scalar_fields (an unsupported or re-pointed engine) must fail boot
+	// with a nameable diagnosis, not be silently ignored by every job.
+	// The chapter policy accepts only the two Bragi-derived values.
+	if cfg.Processing.MetadataFields != nil {
+		if verr := audio.ValidateWriteSelectionForEngine(*cfg.Processing.MetadataFields, engineCaps); verr != nil {
+			log.Fatalf("stored metadata write selection %q is not valid for this engine: %v — fix metadata_fields in settings (the engine no longer supports that field)", strings.Join(*cfg.Processing.MetadataFields, ", "), verr)
+		}
+	}
+	if c := cfg.Processing.MetadataChapters; c != "" && c != audio.ChaptersPolicyValueWrite && c != audio.ChaptersPolicyValuePreserve {
+		log.Fatalf("stored chapter write policy %q is not write/preserve — fix metadata_chapters in settings", c)
+	}
+	// The queue-time snapshot reads the selection from the processor, so
+	// the DB/YAML/env-loaded value must be published before the first job
+	// is enqueued (ApplyConfig alone only refreshes on a settings save).
+	processor.ApplyWriteSelection(cfg.Processing.MetadataFields, cfg.Processing.MetadataChapters)
 
 	// Install the engine's path-format token vocabulary (the legacy {asin}
 	// token is gone: the engine resolves {book_id} and the people tokens)
@@ -406,11 +425,13 @@ func migrateLegacyAdminToken(database *sql.DB) (bool, string, error) {
 	var digest string
 	var markerVal int
 	var indexingEnabled int
+	var metadataFields, metadataChapters string
 	err := database.QueryRow(`
 		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url,
-		       api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0), COALESCE(indexing_enabled, 0)
+		       api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0), COALESCE(indexing_enabled, 0),
+		       COALESCE(metadata_fields, ''), COALESCE(metadata_chapters, 'write')
 		FROM settings WHERE id = 1
-	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &apiEnabled, &digest, &markerVal, &indexingEnabled)
+	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &apiEnabled, &digest, &markerVal, &indexingEnabled, &metadataFields, &metadataChapters)
 	if err == sql.ErrNoRows {
 		// A new database with no settings row yet: nothing to migrate.
 		return false, "", nil
@@ -443,8 +464,8 @@ func migrateLegacyAdminToken(database *sql.DB) (bool, string, error) {
 	sum := sha256.Sum256([]byte(legacyToken))
 	migratedDigest := hex.EncodeToString(sum[:])
 	if _, err := database.Exec(`
-		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, indexing_enabled, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, datetime('now'))
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, indexing_enabled, metadata_fields, metadata_chapters, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?, datetime('now'))
 	`,
 		apiKey,
 		baseURL,
@@ -457,6 +478,8 @@ func migrateLegacyAdminToken(database *sql.DB) (bool, string, error) {
 		region,
 		migratedDigest,
 		indexingEnabled,
+		metadataFields,
+		metadataChapters,
 	); err != nil {
 		// Fail closed: the seed write is what makes the cutover a fact
 		// (row + marker persisted). Retrying on the next boot would
@@ -486,19 +509,21 @@ func consumeLegacyTokenMarkerOnObservation(database *sql.DB, reason string) erro
 	var numCPUs, apiEnabled int
 	var digest string
 	var marker, indexingEnabled int
+	var metadataFields, metadataChapters string
 	if err := database.QueryRow(`
 		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url,
-		       api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0), COALESCE(indexing_enabled, 0), created_at
+		       api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0), COALESCE(indexing_enabled, 0), created_at,
+		       COALESCE(metadata_fields, ''), COALESCE(metadata_chapters, 'write')
 		FROM settings WHERE id = 1
-	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &apiEnabled, &digest, &marker, &indexingEnabled, &created); err != nil {
+	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &apiEnabled, &digest, &marker, &indexingEnabled, &created, &metadataFields, &metadataChapters); err != nil {
 		return err
 	}
 	if marker != 0 {
 		return nil // already consumed: no write, no timestamp churn
 	}
 	_, err := database.Exec(`
-		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, indexing_enabled, created_at, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'))
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, indexing_enabled, created_at, updated_at, metadata_fields, metadata_chapters)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'), ?, ?)
 	`,
 		apiKey,
 		baseURL,
@@ -513,6 +538,8 @@ func consumeLegacyTokenMarkerOnObservation(database *sql.DB, reason string) erro
 		digest,
 		indexingEnabled,
 		created,
+		metadataFields,
+		metadataChapters,
 	)
 	if err != nil {
 		return err
@@ -663,11 +690,13 @@ func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {
 	var numCPUs int
 	var endpointEnabled int
 	var indexingEnabled int
+	var metadataFields, metadataChapters string
 
 	err := database.QueryRow(`
-		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url, api_enabled, api_key_digest, indexing_enabled
+		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url, api_enabled, api_key_digest, indexing_enabled,
+		       COALESCE(metadata_fields, ''), COALESCE(metadata_chapters, 'write')
 		FROM settings WHERE id = 1
-	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &endpointEnabled, &endpointKeyDigest, &indexingEnabled)
+	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &endpointEnabled, &endpointKeyDigest, &indexingEnabled, &metadataFields, &metadataChapters)
 	if err != nil {
 		log.Printf("Warning: could not load settings from DB: %v", err)
 		return
@@ -721,6 +750,28 @@ func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {
 		cfg.Directories.IndexingEnabled = true
 	} else if !yamlKeys["directories.indexing_enabled"] {
 		cfg.Directories.IndexingEnabled = indexingEnabled != 0
+	}
+	// The per-field write selection (#518) follows the same precedence as
+	// the other processing settings: env pin, then YAML, then DB. The DB
+	// column stores '' for "not set" (the default all-supported-available
+	// behavior) and a JSON array for an explicit selection (possibly "[]"
+	// = write nothing); the env var and YAML key carry the same value
+	// shape (a comma-separated list / JSON list) and are parsed by
+	// loadWith. A corrupted JSON value in the DB is a deployment error:
+	// log it and keep the default rather than refuse every queue, since
+	// the UI can re-save the setting to repair the row.
+	if !yamlKeys["processing.metadata_fields"] && os.Getenv("PROCESSING_METADATA_FIELDS") == "" {
+		if metadataFields != "" {
+			var list []string
+			if err := json.Unmarshal([]byte(metadataFields), &list); err == nil {
+				cfg.Processing.MetadataFields = &list
+			} else {
+				log.Printf("Warning: settings.metadata_fields holds invalid JSON (%q); keeping the default all-supported-available write selection: %v", metadataFields, err)
+			}
+		}
+	}
+	if !yamlKeys["processing.metadata_chapters"] && os.Getenv("PROCESSING_METADATA_CHAPTERS") == "" && metadataChapters != "" {
+		cfg.Processing.MetadataChapters = metadataChapters
 	}
 }
 

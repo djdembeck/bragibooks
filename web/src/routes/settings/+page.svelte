@@ -3,6 +3,7 @@
 	import { Pencil, Trash2 } from '@lucide/svelte';
 	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker, Modal, PathFormatBuilder } from '#lib/components/index.js';
 	import { parseParts, validateScheme, trimSegment } from '#lib/scheme.js';
+	import { getEngineCapabilities } from '#lib/engineCapabilities.js';
 	import type { Settings, OutputProfile, IndexStatus, IndexState } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
@@ -177,6 +178,81 @@
 		return null;
 	}
 
+	// Client mirror of the server's NormalizeSelectableFields / chapter
+	// validation: the checkboxes cannot produce an unknown field, but a
+	// capabilities document that arrived after load (or a stale draft) must
+	// not reach the server. An unknown field is a server-side contract
+	// failure, so say so plainly instead of letting the save 400.
+	function validateWriteSelection(): string | null {
+		if (!settings) return null;
+		const fields = Array.isArray(settings.metadata_fields) ? settings.metadata_fields : [];
+		const supported = new Set(engineFields);
+		for (const f of fields) {
+			if (f === 'cover') continue;
+			if (!supported.has(f)) return `Unsupported metadata field “${f}” — the engine does not support per-field writes for it.`;
+		}
+		if (settings.metadata_chapters && !['write', 'preserve'].includes(settings.metadata_chapters)) {
+			return `Unsupported chapter policy “${settings.metadata_chapters}”.`;
+		}
+		return null;
+	}
+
+	// Per-field embedded-metadata write selection (#518). The engine's
+	// capabilities document is the source of the supported field vocabulary
+	// — Bragi owns no parallel registry. `metadataFields` is the draft
+	// selection in `settings`; the derived lists below drive the checkbox
+	// grid (display order is fixed; only fields the engine supports are
+	// offered) and the cover chapter radio.
+	const FIELD_LABELS: Record<string, string> = {
+		title: 'Title',
+		subtitle: 'Subtitle',
+		authors: 'Authors',
+		narrators: 'Narrators',
+		series: 'Series',
+		description: 'Description',
+		genres: 'Genre',
+		year: 'Year',
+		cover: 'Cover art'
+	};
+	const FIELD_ORDER = [
+		'title', 'subtitle', 'authors', 'narrators', 'series',
+		'description', 'genres', 'year', 'cover'
+	];
+	const engineFields = $derived(getEngineCapabilities()?.field_policies?.scalar_fields ?? []);
+	const selectionFields = $derived(FIELD_ORDER.filter((f) => f === 'cover' || engineFields.includes(f)));
+	// null (never saved) is the DEFAULT: every supported field is written.
+	// It must render every checkbox checked; a present array (possibly
+	// empty = write nothing) renders exactly its members. Cover is stored
+	// in the same list (setFieldChecked round-trips it through it), so the
+	// saved list — not a cover-filtered one — drives the checkbox states.
+	const selectionDefault = $derived(settings?.metadata_fields == null);
+	const selectedFields = $derived(Array.isArray(settings?.metadata_fields) ? settings!.metadata_fields : []);
+	// Deployment pins (PROCESSING_METADATA_FIELDS /
+	// PROCESSING_METADATA_CHAPTERS) outrank this form: the server ignores
+	// saves of the pinned value, so render those controls read-only.
+	const fieldsPinned = $derived(!!settings?.metadata_fields_pinned);
+	const chaptersPinned = $derived(!!settings?.metadata_chapters_pinned);
+	const chapterPolicy = $derived(settings?.metadata_chapters || 'write');
+	function fieldChecked(field: string): boolean {
+		return selectionDefault || selectedFields.includes(field);
+	}
+	function setFieldChecked(field: string, checked: boolean) {
+		if (!settings) return;
+		// A null (default) selection renders every supported field
+		// checked, so the FIRST edit must materialize the full
+		// supported list before toggling: building from `?? []` would
+		// persist a one-field selection and silently flip every other
+		// field from write to preserve.
+		const current = settings.metadata_fields ?? selectionFields;
+		if (field === 'cover') {
+			const cur = current.filter((f) => f !== 'cover');
+			settings.metadata_fields = checked ? [...cur, 'cover'] : cur;
+		} else {
+			const cur = current.filter((f) => f !== field);
+			settings.metadata_fields = checked ? [...cur, field] : cur;
+		}
+	}
+
 	let fieldErrors = $state<Record<string, string | null>>({});
 
 	// Derived aria-describedby IDs (Svelte 5 does not allow {#if} inside attributes)
@@ -200,6 +276,9 @@
 
 		const schemeErr = validateScheme(parseParts(settings.output_scheme)).errors[0];
 		if (schemeErr) { fieldErrors.output_scheme = schemeErr; valid = false; }
+
+		const selErr = validateWriteSelection();
+		if (selErr) { fieldErrors.metadata_selection = selErr; valid = false; }
 
 		return valid;
 	}
@@ -904,6 +983,100 @@
 			</div>
 		</section>
 
+		<!-- Metadata writes -->
+		<section class="settings-section" aria-labelledby="settings-metadata-writes">
+			<h2 class="settings-section__title" id="settings-metadata-writes">Metadata writes</h2>
+			<div class="settings-grid">
+				<div class="settings-field col-span-2">
+					<p class="settings-help">
+						Choose which embedded metadata fields processing is allowed to write
+						into the finished m4b. Checked fields are updated from the matched
+						and edited metadata; unchecked fields keep whatever is already
+						embedded in the source audio. Output naming always uses the selected
+						metadata, selected fields or not.
+					</p>
+					{#if engineFields.length === 0}
+						<p class="settings-field-error" role="alert">
+							The engine does not report per-field write support (m4b-merge ≥ 2.2.0
+							required), so this selection is unavailable.
+						</p>
+					{:else}
+						<div class="metadata-field-grid">
+							{#each selectionFields as field (field)}
+								<label class="settings-checkbox-row" for="meta_field_{field}">
+									<input
+										id="meta_field_{field}"
+										type="checkbox"
+										checked={fieldChecked(field)}
+										disabled={fieldsPinned}
+										onchange={(e) => setFieldChecked(field, e.currentTarget.checked)}
+									/>
+									<span>{FIELD_LABELS[field] ?? field}</span>
+								</label>
+							{/each}
+						</div>
+						<fieldset class="metadata-chapter-policy">
+							<legend class="settings-label">Chapters</legend>
+							{#if fieldsPinned}
+								<p class="settings-help">
+									The field selection is set by the deployment
+									(PROCESSING_METADATA_FIELDS) and cannot be changed here.
+								</p>
+							{/if}
+							<label class="settings-checkbox-row" for="chapters_policy_write">
+								<input
+									id="chapters_policy_write"
+									type="radio"
+									name="chapters_policy"
+									checked={chapterPolicy === 'write'}
+									value="write"
+									disabled={chaptersPinned}
+									onchange={() => settings && (settings.metadata_chapters = 'write')}
+								/>
+								<span>Write chapters</span>
+							</label>
+							<label class="settings-checkbox-row" for="chapters_policy_preserve">
+								<input
+									id="chapters_policy_preserve"
+									type="radio"
+									name="chapters_policy"
+									checked={chapterPolicy === 'preserve'}
+									value="preserve"
+									disabled={chaptersPinned}
+									onchange={() => settings && (settings.metadata_chapters = 'preserve')}
+								/>
+								<span>Preserve existing chapters</span>
+							</label>
+							{#if chaptersPinned}
+								<p class="settings-help">
+									The chapter policy is set by the deployment
+									(PROCESSING_METADATA_CHAPTERS) and cannot be changed here.
+								</p>
+							{/if}
+							<p class="settings-help">
+								Chapters take a separate engine path from tags: writing
+								embeds the matched edition’s explicit chapter list (and
+								generates a chapter sidecar file); preserving leaves the
+								source’s chapters untouched and generates no sidecar.
+								Preserving a book from multiple source files is not
+								supported — the engine reports an explicit error.
+							</p>
+						</fieldset>
+						{#if !selectionDefault && selectedFields.length === 0}
+							<p class="settings-help">
+								Nothing is selected: processing will not touch embedded tags,
+								cover art, or chapters — it only produces the merged audio and
+								its output file name.
+							</p>
+						{/if}
+						{#if fieldErrors.metadata_selection}
+							<p class="settings-field-error" role="alert">{fieldErrors.metadata_selection}</p>
+						{/if}
+					{/if}
+				</div>
+			</div>
+		</section>
+
 		<!-- AudiobookDB -->
 		<section class="settings-section" aria-labelledby="settings-audiobookdb">
 			<h2 class="settings-section__title" id="settings-audiobookdb">AudiobookDB</h2>
@@ -1470,6 +1643,31 @@
 		font-weight: 500;
 		color: var(--text);
 		cursor: pointer;
+	}
+
+	/* Metadata write selection: two columns of checkbox rows on wider
+	   surfaces, one column below 640px; the grid is gap-only so rows
+	   keep the panel's flat hairline-free look. */
+	.metadata-field-grid {
+		display: grid;
+		grid-template-columns: 1fr;
+		gap: 0 1.25rem;
+		margin-top: 0.375rem;
+	}
+	@media (min-width: 640px) {
+		.metadata-field-grid {
+			grid-template-columns: 1fr 1fr;
+		}
+	}
+
+	.metadata-chapter-policy {
+		margin-top: 0.75rem;
+		padding: 0.75rem 1rem;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+	}
+	.metadata-chapter-policy legend {
+		padding: 0 0.25rem;
 	}
 
 	.settings-index-status {

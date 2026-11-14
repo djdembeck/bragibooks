@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -49,10 +50,17 @@ type SnapshotChapter struct {
 // {book_id} token (#480), distinct from the legacy ASIN and the provider
 // metadata_id.
 type BookSnapshot struct {
-	BookID         int64    `json:"book_id"`
-	ADBBookID      string   `json:"audiobookdb_book_id"`
-	ADBReleaseID   string   `json:"audiobookdb_release_id"`
-	Title          string   `json:"title"`
+	BookID       int64  `json:"book_id"`
+	ADBBookID    string `json:"audiobookdb_book_id"`
+	ADBReleaseID string `json:"audiobookdb_release_id"`
+	Title        string `json:"title"`
+	// Subtitle is the independently captured subtitle value: the selected
+	// release's own subtitle, falling back to the book's, then the book's
+	// disambiguation (the engine's documented precedence). It exists so the
+	// title and subtitle write selections are backed by their own values —
+	// a title-only write must preserve this component, not erase it (M1's
+	// independent title/subtitle policies).
+	Subtitle       string   `json:"subtitle"`
 	Authors        []string `json:"authors"`
 	Narrators      []string `json:"narrators"`
 	SeriesName     string   `json:"series_name"`
@@ -85,6 +93,10 @@ func (s *BookSnapshot) toSupplied() audio.SuppliedMetadata {
 		Narrators: append([]string(nil), s.Narrators...),
 		Genres:    append([]string(nil), s.Genres...),
 	}
+	if strings.TrimSpace(s.Subtitle) != "" {
+		sub := strings.TrimSpace(s.Subtitle)
+		meta.Subtitle = &sub
+	}
 	if s.SeriesName != "" {
 		meta.SeriesName = &s.SeriesName
 	}
@@ -104,6 +116,26 @@ func (s *BookSnapshot) toSupplied() audio.SuppliedMetadata {
 	return meta
 }
 
+// WriteSelection is the per-field embedded-metadata write policy frozen into
+// a job's queue-time snapshot (#518). Fields is the EXPLICIT selection the
+// operator saved at queue time: nil (absent) is the default
+// all-supported-available behavior, and a non-nil slice (possibly empty)
+// writes exactly those fields and preserves the rest. The nil-vs-explicit
+// distinction must survive the JSON round trip, so Fields has no omitempty.
+// Cover and Chapters are the engine policy strings for the two non-scalar
+// write paths: cover is "write" (embed the captured cover) or "preserve"
+// (keep the source's cover; single natively-copyable input only), chapters is
+// "write" (embed the release's chapters + sidecar) or "preserve" (skip all
+// chapter mutation; single natively-copyable input only). A none-selected
+// selection sets both to preserve: no embedded tag/cover/chapter mutation and
+// no generated chapter sidecar, while naming still uses the effective
+// metadata.
+type WriteSelection struct {
+	Fields   []string `json:"fields"`
+	Cover    string   `json:"cover"`
+	Chapters string   `json:"chapters"`
+}
+
 // snapshotJSON is the wire/storage form of a job's captured snapshot. It is
 // embedded in the job args so a queued job is immutable: settings, profile
 // edits, and re-matches after enqueue cannot change a captured job.
@@ -111,6 +143,10 @@ type snapshotJSON struct {
 	Version  int                  `json:"snapshot_version"`
 	Engine   audio.EngineIdentity `json:"engine"`
 	Snapshot BookSnapshot         `json:"snapshot"`
+	// Selection is the write policy the job runs under, frozen at queue time
+	// from the operator's saved setting (or the default). A settings change
+	// after enqueue cannot alter a queued job's writes.
+	Selection *WriteSelection `json:"selection,omitempty"`
 }
 
 // snapshotRelevantChanged reports whether the update touched any field the
@@ -198,6 +234,10 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 		}
 		if sameBook && existing.ADBReleaseID != "" && existing.ADBReleaseID == snap.ADBReleaseID {
 			snap.Chapters = existing.Chapters
+			// The subtitle is RELEASE-level content (the release's own value
+			// wins in the precedence below): retain it under the same
+			// unchanged-selection rule as chapters.
+			snap.Subtitle = existing.Subtitle
 		}
 	}
 
@@ -230,12 +270,29 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 					snap.CoverFile = file
 				}
 			}
+			// Subtitle precedence mirrors the engine's documented
+			// resolution: the selected release's own subtitle when present,
+			// then the book's, then the book's disambiguation. The PREVIOUS
+			// release subtitle (retained above for an unchanged selection)
+			// yields only to the RELEASE's OWN subtitle: a GetRelease
+			// failure — or a successful release that carries none — keeps
+			// the retained release-specific subtitle. Only a release without
+			// its own subtitle AND nothing retained falls through to the
+			// book-level fallbacks.
 			if snap.ADBReleaseID != "" {
-				if rel, err := h.getAudiobookDB().GetRelease(ctx, snap.ADBReleaseID, "chapterDetail"); err == nil && rel != nil && rel.ChapterDetail != nil {
-					snap.Chapters = chaptersFromADB(rel.ChapterDetail.Chapters)
+				if rel, err := h.getAudiobookDB().GetRelease(ctx, snap.ADBReleaseID, "chapterDetail"); err == nil && rel != nil {
+					if rel.ChapterDetail != nil {
+						snap.Chapters = chaptersFromADB(rel.ChapterDetail.Chapters)
+					}
+					if own := strings.TrimSpace(rel.Subtitle); own != "" {
+						snap.Subtitle = own
+					}
 				} else if err != nil {
-					log.Printf("snapshot %d: release chapters unavailable: %v", bookID, err)
+					log.Printf("snapshot %d: release details unavailable: %v", bookID, err)
 				}
+			}
+			if snap.Subtitle == "" {
+				snap.Subtitle = subtitleFromCatalog(book, nil)
 			}
 		} else {
 			log.Printf("snapshot %d: catalog unavailable, keeping previously captured catalog content: %v", bookID, err)
@@ -342,17 +399,19 @@ func (h *Handler) upsertSnapshot(s *BookSnapshot) error {
 	}
 	_, err := h.svc.DB.Exec(
 		`INSERT INTO book_snapshots (book_id, audiobookdb_book_id, audiobookdb_release_id, title,
-	   authors, narrators, series_name, series_position, description, genres, year, cover_file, chapters, captured_at)
-	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+	   subtitle, authors, narrators, series_name, series_position, description, genres, year, cover_file, chapters, captured_at)
+	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 	 ON CONFLICT(book_id) DO UPDATE SET
 	   audiobookdb_book_id=excluded.audiobookdb_book_id,
 	   audiobookdb_release_id=excluded.audiobookdb_release_id,
 	   title=excluded.title,
+	   subtitle=excluded.subtitle,
 	   authors=excluded.authors, narrators=excluded.narrators,
 	   series_name=excluded.series_name, series_position=excluded.series_position,
 	   description=excluded.description, genres=excluded.genres, year=excluded.year,
 	   cover_file=excluded.cover_file, chapters=excluded.chapters, captured_at=datetime('now')`,
 		s.BookID, s.ADBBookID, s.ADBReleaseID, s.Title,
+		s.Subtitle,
 		string(authors), string(narrators), s.SeriesName, s.SeriesPosition,
 		s.Description, string(genres), year, s.CoverFile, string(chapters),
 	)
@@ -372,19 +431,19 @@ func (h *Handler) loadSnapshot(bookID int64) (*BookSnapshot, error) {
 // capture, usable by both the API handler and the processing worker.
 func loadBookSnapshot(db *sql.DB, bookID int64) (*BookSnapshot, error) {
 	var (
-		adbBook, adbRelease, title, seriesName, seriesPosition, description string
-		authorsJSON, narratorsJSON, genresJSON, chaptersJSON                string
-		coverFile                                                           string
-		year, bookIDCol                                                     sql.NullInt64
-		capturedAt                                                          sql.NullString
+		adbBook, adbRelease, title, subtitle, seriesName, seriesPosition, description string
+		authorsJSON, narratorsJSON, genresJSON, chaptersJSON                          string
+		coverFile                                                                     string
+		year, bookIDCol                                                               sql.NullInt64
+		capturedAt                                                                    sql.NullString
 	)
 	err := db.QueryRow(
 		`SELECT book_id, audiobookdb_book_id, audiobookdb_release_id, title,
-		        authors, narrators, series_name, series_position, description, genres,
+		        subtitle, authors, narrators, series_name, series_position, description, genres,
 		        year, cover_file, chapters, captured_at
 		 FROM book_snapshots WHERE book_id = ?`,
 		bookID,
-	).Scan(&bookIDCol, &adbBook, &adbRelease, &title, &authorsJSON,
+	).Scan(&bookIDCol, &adbBook, &adbRelease, &title, &subtitle, &authorsJSON,
 		&narratorsJSON, &seriesName, &seriesPosition, &description, &genresJSON,
 		&year, &coverFile, &chaptersJSON, &capturedAt)
 	if err == sql.ErrNoRows {
@@ -395,7 +454,7 @@ func loadBookSnapshot(db *sql.DB, bookID int64) (*BookSnapshot, error) {
 	}
 	s := &BookSnapshot{
 		BookID: bookIDCol.Int64, ADBBookID: adbBook, ADBReleaseID: adbRelease,
-		Title: title, SeriesName: seriesName,
+		Title: title, Subtitle: subtitle, SeriesName: seriesName,
 		SeriesPosition: seriesPosition, Description: description,
 		CoverFile: coverFile, CapturedAt: capturedAt.String,
 	}
@@ -418,17 +477,48 @@ func loadBookSnapshot(db *sql.DB, bookID int64) (*BookSnapshot, error) {
 	return s, nil
 }
 
+// validateWriteSelection checks a frozen queue-time write selection for the
+// worker-side defense invariants: every field in the vocabulary, and the
+// cover/chapters policies in the Bragi-derived subset (write/preserve —
+// explicit clear is the per-book editor's operation, never a frozen job
+// value). A corrupted row must fail with a clear re-queue message, never run
+// under a guessed policy.
+func validateWriteSelection(sel *WriteSelection) error {
+	if sel == nil {
+		return nil // default behavior, nothing to validate
+	}
+	for _, f := range sel.Fields {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if !slices.Contains(audio.SelectableFields, f) {
+			return fmt.Errorf("stored write selection names unsupported field %q", f)
+		}
+	}
+	if sel.Cover != audio.WritePolicyValueWrite && sel.Cover != audio.WritePolicyValuePreserve {
+		return fmt.Errorf("stored cover write policy %q is not write/preserve", sel.Cover)
+	}
+	if sel.Chapters != audio.ChaptersPolicyValueWrite && sel.Chapters != audio.ChaptersPolicyValuePreserve {
+		return fmt.Errorf("stored chapter write policy %q is not write/preserve", sel.Chapters)
+	}
+	return nil
+}
+
 // buildEngineJob assembles the structured engine job from a captured
 // snapshot: the effective metadata becomes input_supplied, the destination
 // and path format come from the resolved queue-time pair, and the immutable
-// chapter/artwork references are staged for this run. The cover policy is the
-// only per-run filesystem step: the captured cover file is copied into the
-// output root (the engine's asset root) under a job-owned hidden name, then
-// referenced by absolute path, because the engine requires a local cover file
-// to live under the job's output root. A missing or unreadable cover degrades
-// to "clear" (no cover) rather than failing the run: the selection's naming
-// and chapters are the load-bearing parts, and artwork loss is reported on
-// the snapshot capture, not hidden here.
+// chapter/artwork references are staged for this run. The write policy is the
+// job's frozen selection (args.Snapshot.Selection, #518): scalar fields come
+// from it (nil selection = the default all-supported-available policy), and
+// the cover/chapters engine policies follow its cover/chapters entries. The
+// cover policy is the only per-run filesystem step: a write cover is staged
+// into the output root (the engine's asset root) under a job-owned hidden
+// name, then referenced by absolute path, because the engine requires a
+// local cover file to live under the job's output root. A missing or
+// unreadable cover degrades to "clear" (no cover) rather than failing the
+// run: the selection's naming and chapters are the load-bearing parts, and
+// artwork loss is reported on the snapshot capture, not hidden here.
 // buildEngineJob returns the job file plus the absolute path of the cover
 // Bragi staged into the output root for this run ("" when none was staged);
 // the caller removes that file after RunJob in every case, since the engine
@@ -441,39 +531,94 @@ func buildEngineJob(args jobArgs, jobID string, snap BookSnapshot, outputRoot, p
 		return audio.JobFile{}, "", fmt.Errorf("create output root %s: %w", outputRoot, err)
 	}
 	supplied := snap.toSupplied()
+	// Production rows always carry a non-nil snapshot (the worker refuses
+	// legacy rows before reaching here); a nil selection inside it — or a
+	// nil snapshot in unit tests — is the default baseline.
+	var sel *WriteSelection
+	if args.Snapshot != nil {
+		sel = args.Snapshot.Selection
+	}
+	// Normalize ONCE and derive the policies from the normalized list:
+	// startup validation (ValidateWriteSelectionForEngine) trims field
+	// names, so a stored value like ` title ` reaches here with padding.
+	// WritePolicyFor compares literal names; feeding it the raw strings
+	// would silently skip the recognized field's write.
+	var normalizedFields []string
+	if sel != nil && sel.Fields != nil {
+		norm, err := audio.NormalizeSelectableFields(sel.Fields)
+		if err != nil {
+			return audio.JobFile{}, "", err
+		}
+		normalizedFields = norm
+	}
 	jf := audio.JobFile{
 		SchemaVersion: audio.JobSchemaVersion,
 		Inputs:        args.SrcPaths,
 		InputSupplied: supplied,
 		OutputRoot:    outputRoot,
 		PathFormat:    audio.NormalizeEnginePathFormat(pathFormat),
-		Policies:      audio.AllSupportedWritePolicyFor(supplied),
+	}
+	// The frozen selection owns the per-field policy: nil (no explicit
+	// selection saved) derives the all-supported-available default. A
+	// selection with nil Fields (a non-default chapter policy saved
+	// alongside the default scalar selection) keeps the scalar default and
+	// applies only its non-scalar policies below.
+	jf.Policies = audio.AllSupportedWritePolicyFor(supplied)
+	if normalizedFields != nil {
+		jf.Policies = audio.WritePolicyFor(normalizedFields, supplied)
 	}
 
-	// Cover: stage the captured file under the asset root, or clear.
-	jf.Cover = json.RawMessage(`"clear"`)
+	// Cover: the frozen selection's cover policy picks the engine policy.
+	// write (the default behavior) stages the captured file when one exists,
+	// degrading to clear when it does not; preserve skips all cover mutation
+	// (single natively-copyable input only — the engine rejects it with an
+	// explicit diagnosed error on a merge, which surfaces as the job error).
+	// The cover policy is only pinned by an explicit FIELD selection: the
+	// chapter-policy-only shape (nil Fields) keeps the default write.
 	var stagedCover string
-	if snap.CoverFile != "" {
-		if staged, cerr := stageCoverUnderRoot(snap.CoverFile, outputRoot, jobID, snap.BookID); cerr == nil && staged != "" {
-			// The engine's object form for a local cover file.
-			if raw, merr := json.Marshal(map[string]string{"write": staged}); merr == nil {
-				jf.Cover = raw
-			} else {
-				log.Printf("encode cover policy for book %d: %v", snap.BookID, merr)
+	coverPolicy := audio.WritePolicyValueWrite
+	if sel != nil && sel.Fields != nil {
+		coverPolicy = sel.Cover
+	}
+	switch coverPolicy {
+	case audio.WritePolicyValuePreserve:
+		jf.Cover = json.RawMessage(`"preserve"`)
+	default:
+		jf.Cover = json.RawMessage(`"clear"`)
+		if snap.CoverFile != "" {
+			if staged, cerr := stageCoverUnderRoot(snap.CoverFile, outputRoot, jobID, snap.BookID); cerr == nil && staged != "" {
+				// The engine's object form for a local cover file.
+				if raw, merr := json.Marshal(map[string]string{"write": staged}); merr == nil {
+					jf.Cover = raw
+				} else {
+					log.Printf("encode cover policy for book %d: %v", snap.BookID, merr)
+				}
+				stagedCover = staged
+			} else if cerr != nil {
+				// No usable local cover: embed nothing rather than fetch at
+				// run time (supplied mode is offline) or fail.
+				log.Printf("stage cover %s for book %d: %v", snap.CoverFile, snap.BookID, cerr)
 			}
-			stagedCover = staged
-		} else if cerr != nil {
-			// No usable local cover: embed nothing rather than fetch at run
-			// time (supplied mode is offline) or fail.
-			log.Printf("stage cover %s for book %d: %v", snap.CoverFile, snap.BookID, cerr)
 		}
 	}
 
-	// Chapters: embed the selected release's explicit chapter list when the
-	// snapshot captured one (immutable chapter references — the selected
+	// Chapters: the frozen selection's chapter policy picks the engine
+	// policy. write embeds the selected release's explicit chapter list when
+	// the snapshot captured one (immutable chapter references — the selected
 	// edition's chapters, not a re-derivation from input tracks); an empty
-	// list is an explicit clear.
+	// list is an explicit clear. preserve skips all chapter mutation — no
+	// embedding, no sidecar (single natively-copyable input only, enforced
+	// by the engine with a diagnosed error otherwise).
+	// Chapters honor the frozen policy whenever a selection is present —
+	// including the chapter-policy-only shape (nil Fields, non-default
+	// chapters), which is exactly the independent-setting case.
+	chapterPolicy := audio.ChaptersPolicyValueWrite
+	if sel != nil {
+		chapterPolicy = sel.Chapters
+	}
 	switch {
+	case chapterPolicy == audio.ChaptersPolicyValuePreserve:
+		jf.Chapters = json.RawMessage(`"preserve"`)
 	case len(snap.Chapters) > 0:
 		list := make([]audio.JobChapter, 0, len(snap.Chapters))
 		for _, c := range snap.Chapters {
@@ -602,6 +747,24 @@ func parseYear(date string) *int {
 		return nil
 	}
 	return &n
+}
+
+// subtitleFromCatalog resolves the subtitle the snapshot captures, in the
+// engine's documented precedence: the selected release's own subtitle when
+// present, then the book's, then the book's disambiguation. A nil release
+// (no release selected, or its detail fetch failed) applies the book-level
+// fallbacks only.
+func subtitleFromCatalog(book *audiobookdb.Book, rel *audiobookdb.Release) string {
+	if rel != nil && strings.TrimSpace(rel.Subtitle) != "" {
+		return strings.TrimSpace(rel.Subtitle)
+	}
+	if book != nil && book.Subtitle != nil && strings.TrimSpace(*book.Subtitle) != "" {
+		return strings.TrimSpace(*book.Subtitle)
+	}
+	if book != nil && book.Disambiguation != nil && strings.TrimSpace(*book.Disambiguation) != "" {
+		return strings.TrimSpace(*book.Disambiguation)
+	}
+	return ""
 }
 
 // genreTitles flattens ADB genre references to their display titles.

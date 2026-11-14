@@ -7,9 +7,13 @@ import (
 
 // Book represents an audiobookdb book entity.
 type Book struct {
-	ID                    string               `json:"id"`
-	Title                 string               `json:"title"`
-	Description           *string              `json:"description"`
+	ID          string  `json:"id"`
+	Title       string  `json:"title"`
+	Description *string `json:"description"`
+	// Subtitle and Disambiguation feed the snapshot's subtitle capture with
+	// the engine's own book-fallback, disambiguation-last precedence (the
+	// selected release's own subtitle wins; see captureSnapshot).
+	Subtitle              *string              `json:"subtitle"`
 	Disambiguation        *string              `json:"disambiguation"`
 	Type                  *string              `json:"type"`
 	OriginallyPublishedAt *string              `json:"originallyPublishedAt"`
@@ -24,8 +28,12 @@ type Book struct {
 
 // Release represents an audiobookdb release entity.
 type Release struct {
-	ID               string               `json:"id"`
-	Title            string               `json:"title"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	// Subtitle is the release's own subtitle; it wins over the book-level
+	// value in the snapshot's subtitle capture (the engine's documented
+	// release-first precedence).
+	Subtitle         string               `json:"subtitle"`
 	Duration         string               `json:"duration"`
 	RuntimeLengthMs  int                  `json:"runtimeLengthMs"`
 	RuntimeLengthSec int                  `json:"runtimeLengthSec"`

@@ -72,10 +72,26 @@ type DirectoriesConfig struct {
 
 // ProcessingConfig holds audiobook processing configuration.
 type ProcessingConfig struct {
-	NumCPUs    int    `mapstructure:"num_cpus" yaml:"num_cpus" json:"num_cpus"`
+	NumCPUs int `mapstructure:"num_cpus" yaml:"num_cpus" json:"num_cpus"`
+	// PathFormat is the global output path template.
 	PathFormat string `mapstructure:"path_format" yaml:"path_format" json:"path_format"`
 	Region     string `mapstructure:"region" yaml:"region" json:"region"`
 	LogLevel   string `mapstructure:"log_level" yaml:"log_level" json:"log_level"`
+	// MetadataFields is the per-field embedded-metadata write selection
+	// (#518): which supported logical fields processing may write into the
+	// output file. Nil means the DEFAULT behavior — write every supported
+	// field that has an available value (all-supported-available). An
+	// explicit list (possibly EMPTY, meaning write nothing) writes exactly
+	// the selected fields and preserves the rest. The selection is a WRITE
+	// permission, not a value source: output naming always uses the full
+	// effective metadata, and an unselected field is preserved, never
+	// cleared.
+	MetadataFields *[]string `mapstructure:"metadata_fields" yaml:"metadata_fields" json:"metadata_fields"`
+	// MetadataChapters is the chapter write policy (#518): "write" (the
+	// default; embed the release's chapters + the chapter sidecar) or
+	// "preserve" (no chapter mutation; the engine enforces the single
+	// natively-copyable input requirement with a diagnosed error).
+	MetadataChapters string `mapstructure:"metadata_chapters" yaml:"metadata_chapters" json:"metadata_chapters"`
 }
 
 // ConfigManager manages thread-safe config updates and persistence.
@@ -212,7 +228,18 @@ func loadWith(explicitPath string) (Config, string, error) {
 			setLoadError(fmt.Errorf("failed to parse config file for overrides: %w", err))
 			return Config{}, "", fmt.Errorf("failed to parse config file for overrides: %w", err)
 		}
-		for _, key := range flattenYAMLKeys(parseYAMLMap(raw), "") {
+		rawMap := parseYAMLMap(raw)
+		// yaml.Unmarshal decodes an empty list to a nil slice, so it cannot
+		// distinguish "explicit empty" from "absent". metadata_fields makes
+		// that distinction load-bearing (nil = default all-supported, [] =
+		// the explicit "write nothing" selection, #518), so an empty list
+		// PRESENT in the file is restored to a non-nil empty slice here.
+		if proc, ok := rawMap["processing"].(map[string]any); ok {
+			if v, present := proc["metadata_fields"]; present && isEmptyListValue(v) {
+				yamlOnly.Processing.MetadataFields = &[]string{}
+			}
+		}
+		for _, key := range flattenYAMLKeys(rawMap, "") {
 			overrideKey(&cfg, &yamlOnly, key)
 		}
 	}
@@ -275,6 +302,148 @@ func (cm *ConfigManager) Store(cfg *Config) {
 // UI renders the state read-only. This is the single source for that rule.
 func (cm *ConfigManager) APIEndpointEnvManaged() bool {
 	return os.Getenv("SERVER_API_ENDPOINT_ENABLED") != ""
+}
+
+// MetadataEnvManaged reports whether PROCESSING_METADATA_FIELDS and/or
+// PROCESSING_METADATA_CHAPTERS pin the per-field write selection
+// deployment-side. Env beats the settings stores in the documented
+// precedence: the UI renders the pinned controls read-only, the settings
+// save ignores the pinned keys, and ReassertMetadataPins keeps the pinned
+// values authoritative in the live config until the operator removes the
+// pin. Mirrors APIEndpointEnvManaged.
+func (cm *ConfigManager) MetadataEnvManaged() (fields, chapters bool) {
+	fields = os.Getenv("PROCESSING_METADATA_FIELDS") != ""
+	chapters = os.Getenv("PROCESSING_METADATA_CHAPTERS") != ""
+	return
+}
+
+// ReassertMetadataPins re-applies the PROCESSING_METADATA_* pins to a live
+// config. The full env priority runs at load time (applyEnvPriority), but
+// the settings save path stores a freshly merged config that would silently
+// drop an active pin from the live state for the rest of the process's
+// lifetime; callers that replace the live config must re-assert the pins so
+// the deployment value stays authoritative (and visible to readers) until
+// the operator removes it.
+func ReassertMetadataPins(cfg *Config) {
+	if v := os.Getenv("PROCESSING_METADATA_FIELDS"); v != "" {
+		list := normalizeMetadataPin(v)
+		cfg.Processing.MetadataFields = &list
+	}
+	if v := os.Getenv("PROCESSING_METADATA_CHAPTERS"); v != "" {
+		cfg.Processing.MetadataChapters = strings.TrimSpace(v)
+	}
+}
+
+// StoredMetadataSelection reads the durable config file (the store the
+// Settings save persists through) and returns the written metadata
+// selection: a nil pointer means "not set" (default all-supported-
+// available), a present empty list means the explicit none-selected save,
+// and a non-empty list is the saved selection. A missing file returns the
+// defaults, matching the empty-row baseline. fieldsOK and chaptersOK
+// report that the file's value for each key is a valid list / a valid
+// string (ABSENT counts as OK for both keys: an absent key is the
+// documented default, not an unreadable value); a present malformed
+// value leaves the key's value at its default AND its OK flag false, so
+// a caller that freezes a pinned key can preserve the durable row's
+// current value instead of writing a silently converted one.
+func (cm *ConfigManager) StoredMetadataSelection() (fields *[]string, chapters string, fieldsOK, chaptersOK bool) {
+	fields = nil
+	chapters = "write"
+	fieldsOK = true
+	chaptersOK = true
+	path := cm.configPath
+	if path == "" {
+		return
+	}
+	m := parseYAMLMap(mustReadFile(path))
+	if m == nil {
+		return
+	}
+	if proc, ok := m["processing"].(map[string]any); ok {
+		if v, present := proc["metadata_fields"]; present {
+			if list, ok := yamlStringListValue(v); ok {
+				fields = &list
+			} else {
+				fieldsOK = false
+			}
+		}
+		if v, present := proc["metadata_chapters"]; present {
+			if s, ok := v.(string); ok {
+				chapters = s
+			} else {
+				chaptersOK = false
+			}
+		}
+	}
+	return
+}
+
+// StoredMetadataKeyPresent reports whether the durable config file
+// carries a value for each metadata key at all (a present MALFORMED
+// value is "present": the typed loader discarded it, so the file has
+// said something it will not honor). StoredMetadataSelection's OK flags
+// alone cannot distinguish "the file says nothing about the selection"
+// (no fields key: the settings row is the durable selection) from "the
+// file actively manages the selection" (fields key present: its value,
+// default included, is authoritative over a stale row).
+func (cm *ConfigManager) StoredMetadataKeyPresent() (fields, chapters bool) {
+	path := cm.configPath
+	if path == "" {
+		return false, false
+	}
+	m := parseYAMLMap(mustReadFile(path))
+	if m == nil {
+		return false, false
+	}
+	proc, _ := m["processing"].(map[string]any)
+	_, f := proc["metadata_fields"]
+	_, c := proc["metadata_chapters"]
+	return f, c
+}
+
+// mustReadFile reads a file's raw bytes; missing files return nil. It is
+// for readers of optional stores (a not-found is a valid empty state), not
+// for callers that must distinguish other I/O errors.
+func mustReadFile(path string) []byte {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// yamlStringListValue converts a parsed-YAML list value to a string slice.
+// The second return reports that the value was a list (a present empty
+// list is valid and yields an empty slice); a non-list value is not valid
+// and yields ok=false.
+func yamlStringListValue(v any) ([]string, bool) {
+	l, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(l))
+	for _, item := range l {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out, true
+}
+
+// normalizeMetadataPin splits a PROCESSING_METADATA_FIELDS pin into its
+// field list (an all-whitespace pin is the explicit "write nothing"). The
+// values are NOT validated: the boot validation in main.go is the single
+// nameable gate (same as the path-format boot check), so a bad pin fails
+// startup with a clear diagnosis, not a silently dropped deployment value.
+func normalizeMetadataPin(v string) []string {
+	parts := strings.Split(v, ",")
+	list := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			list = append(list, p)
+		}
+	}
+	return list
 }
 
 // AddYAMLKeys records that the given dotted keys are now explicitly present
@@ -521,6 +690,15 @@ func applyEnvPriority(cfg *Config) {
 	if v := envVal("processing.region"); v != "" {
 		cfg.Processing.Region = v
 	}
+	// PROCESSING_METADATA_FIELDS pins the per-field write selection as a
+	// comma-separated list (an empty list is the explicit "write nothing").
+	if v := envVal("processing.metadata_fields"); v != "" {
+		list := normalizeMetadataPin(v)
+		cfg.Processing.MetadataFields = &list
+	}
+	if v := envVal("processing.metadata_chapters"); v != "" {
+		cfg.Processing.MetadataChapters = strings.TrimSpace(v)
+	}
 }
 
 // parseYAMLMap unmarshals raw YAML bytes into a generic map (nil on error).
@@ -548,6 +726,17 @@ func flattenYAMLKeys(m map[string]any, prefix string) []string {
 		}
 	}
 	return keys
+}
+
+// isEmptyListValue reports whether a parsed-YAML value is a present empty
+// list (a `key: []` in the file), as opposed to nil (absent) or a non-empty
+// list. A `key: []` decodes to an empty []interface{}; a `key:` with no
+// value decodes to nil.
+func isEmptyListValue(v any) bool {
+	if l, ok := v.([]any); ok {
+		return len(l) == 0
+	}
+	return false
 }
 
 // overrideKey copies a single dotted key from yamlOnly into target — but
@@ -604,6 +793,12 @@ func overrideKey(target, yamlOnly *Config, key string) {
 		target.Processing.Region = yamlOnly.Processing.Region
 	case "processing.log_level":
 		target.Processing.LogLevel = yamlOnly.Processing.LogLevel
+	case "processing.metadata_fields":
+		// The nil (default all) vs explicit-list distinction must survive the
+		// YAML pass: an empty YAML list is an explicit "write nothing".
+		target.Processing.MetadataFields = yamlOnly.Processing.MetadataFields
+	case "processing.metadata_chapters":
+		target.Processing.MetadataChapters = yamlOnly.Processing.MetadataChapters
 	}
 }
 
@@ -637,6 +832,16 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("processing.path_format", "{author}/{title}")
 	v.SetDefault("processing.region", "us")
 	v.SetDefault("processing.log_level", "info")
+	// processing.metadata_fields is intentionally NOT defaulted: nil (absent)
+	// is the documented all-supported-available behavior for existing installs,
+	// distinct from an explicit empty list (write nothing). Setting a default
+	// here would collapse that distinction. processing.metadata_chapters is
+	// not defaulted here either: viper folds SetDefault values into EVERY
+	// unmarshal, so a default would make the YAML pass (overrideKey) see a
+	// "write" that the YAML never set and clobber a DB-saved "preserve".
+	// The blank value is the documented default (write) at every consumer:
+	// the DB column carries DEFAULT 'write', the load COALESCEs a missing
+	// column to 'write', and buildEngineJob treats a blank policy as write.
 }
 
 // setDefaultsOnConfig sets default values directly on a Config struct.

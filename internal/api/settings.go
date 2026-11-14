@@ -43,6 +43,19 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 		"api_endpoint_env_managed": h.svc.Config.APIEndpointEnvManaged(),
 		"bragibooks_version":       version.Version,
 		"m4b_merge_version":        h.svc.Processor.ReadVersion(),
+		// The nil (default all) vs explicit-list distinction must reach the
+		// UI: null renders every checkbox checked (the default), [] renders
+		// none checked (write nothing).
+		"metadata_fields":   cfg.Processing.MetadataFields,
+		"metadata_chapters": cfg.Processing.MetadataChapters,
+		"metadata_fields_pinned": func() bool {
+			f, _ := h.svc.Config.MetadataEnvManaged()
+			return f
+		}(),
+		"metadata_chapters_pinned": func() bool {
+			_, c := h.svc.Config.MetadataEnvManaged()
+			return c
+		}(),
 	}
 
 	writeJSON(w, http.StatusOK, settings)
@@ -223,6 +236,18 @@ type UpdateSettingsRequest struct {
 	OutputScheme       *string `json:"output_scheme"`
 	Region             *string `json:"region"`
 	IndexingEnabled    *bool   `json:"indexing_enabled"`
+	// MetadataFields is the per-field embedded-metadata write selection
+	// (#518): a present array (possibly empty = write nothing) is the
+	// explicit selection; an ABSENT field leaves the saved selection
+	// untouched (standard partial-update semantics — the default
+	// all-supported-available behavior is the stored zero value, not a
+	// request-time reset). The values must name supported fields
+	// (validated below).
+	MetadataFields *[]string `json:"metadata_fields"`
+	// MetadataChapters is the chapter write policy: "write" (default;
+	// embed the release's chapters + sidecar) or "preserve" (no chapter
+	// mutation; single natively-copyable input only).
+	MetadataChapters *string `json:"metadata_chapters"`
 }
 
 // UpdateSettings handles PUT /api/settings.
@@ -274,6 +299,42 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A deployment pin (PROCESSING_METADATA_FIELDS /
+	// PROCESSING_METADATA_CHAPTERS) outranks the settings stores: it stays
+	// authoritative for jobs while present (applyEnvPriority re-asserts it),
+	// so a save of the pinned value must not be persisted as if it had
+	// taken effect. The pinned key is dropped from this save BEFORE
+	// validation, so a stale client that posts a malformed value for the
+	// pinned key cannot 400 unrelated settings in the same PUT; GET
+	// reports the pin so the UI renders those controls read-only. Same
+	// env-managed contract as the API endpoint.
+	fieldsPinned, chaptersPinned := h.svc.Config.MetadataEnvManaged()
+	if fieldsPinned {
+		req.MetadataFields = nil
+	}
+	if chaptersPinned {
+		req.MetadataChapters = nil
+	}
+	// Per-field write selection (#518): a PRESENT (unpinned) value is
+	// validated — an unknown field name is a 400 naming it, since the UI
+	// derives its checkbox list from the verified engine capabilities and
+	// a stale client that sends a dropped field must fail loudly. An
+	// ABSENT value leaves the saved selection untouched (partial-update
+	// semantics). The chapter policy accepts only the two Bragi-derived
+	// values (write/preserve).
+	if req.MetadataFields != nil {
+		if _, err := audio.NormalizeSelectableFields(*req.MetadataFields); err != nil {
+			writeError(w, http.StatusBadRequest, "metadata fields: "+err.Error())
+			return
+		}
+	}
+	if req.MetadataChapters != nil {
+		c := strings.TrimSpace(*req.MetadataChapters)
+		if c != audio.ChaptersPolicyValueWrite && c != audio.ChaptersPolicyValuePreserve {
+			writeError(w, http.StatusBadRequest, "chapter write policy must be \"write\" or \"preserve\"")
+			return
+		}
+	}
 
 	// Directories the server creates subdirectories in are probed before
 	// persisting, but only when this request CHANGES the value: the stored
@@ -311,6 +372,90 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	prev := h.svc.Config.Config()
 	snap := *prev
+	// Freeze deployment-pinned metadata keys to their STORED values before
+	// the DB/YAML writes: after an earlier save, the live config carries
+	// the re-asserted env values, and letting them ride along in snap
+	// would leak the pin into the durable stores (env must outrank, never
+	// overwrite, the settings stores — a pinned operator who later edits
+	// an unrelated setting would otherwise persist the pin as if it were
+	// a user selection). The durable file is read, not the live config,
+	// because the live config is exactly the contaminated copy. Pinned
+	// keys were dropped from req above, so they are never in changed and
+	// never reach the file save.
+	if f, c := h.svc.Config.MetadataEnvManaged(); f || c {
+		storedFields, storedChapters, fieldsOK, chaptersOK := h.svc.Config.StoredMetadataSelection()
+		fileFieldsPresent, fileChaptersPresent := h.svc.Config.StoredMetadataKeyPresent()
+		// The freeze, per pinned key, writes back the DURABLE value so the
+		// env pin never rides into a freshly written row. The durable value
+		// for a key follows the documented startup precedence — the file is
+		// primary, the settings row is the fallback the file falls back to:
+		//
+		//   * file carries a VALID value for the key (present + OK) -> the
+		//     file is authoritative; freeze its value.
+		//   * file is SILENT on the key (absent: not present, and absent
+		//     counts as OK so it is not treated as unreadable) -> the row is
+		//     where the effective value comes from; freeze the row, so a
+		//     DB-only selection survives an unrelated save. A MISSING row
+		//     is not corruption: with nothing stored, the documented
+		//     default (nil fields / "write" chapters) IS the durable value,
+		//     and the ordinary first save proceeds.
+		//   * file carries a MALFORMED value (present, not OK) -> the typed
+		//     loader discarded it, so the row (the documented DB fallback)
+		//     is the truth; freeze the row. A malformed file with no row at
+		//     all has nothing to fall back to: abort (a fresh INSERT would
+		//     persist the pin).
+		//
+		// Presence is tracked PER KEY: a file that sets only
+		// metadata_chapters is silent on metadata_fields and vice versa.
+		// A row the freeze falls back to must be readable before any write,
+		// or the save aborts.
+		needRow := (f && (!fieldsOK || !fileFieldsPresent)) || (c && (!chaptersOK || !fileChaptersPresent))
+		var rowFields *[]string
+		rowChapters := ""   // '' = the documented default (write)
+		rowCorrupt := false // the stored selection cannot be trusted (a
+		// corrupt column or a failed read)
+		if needRow {
+			var fieldsValid, chaptersValid, queryOK bool
+			rowFields, rowChapters, fieldsValid, chaptersValid, queryOK = h.storedMetadataRow()
+			// The reader returns the VALID sibling column and drops only
+			// the corrupt one, so a corrupt fields column keeps a good
+			// chapters value (and vice versa). Corruption is: a real query
+			// failure, or a row in which at least one column holds an
+			// invalid value. An empty column is the documented default
+			// for its key and counts as valid; a missing row is the valid
+			// empty state (both columns at their defaults).
+			if !queryOK || !fieldsValid || !chaptersValid {
+				rowCorrupt = true
+			}
+		}
+		if rowCorrupt && ((f && !fieldsOK) || (c && !chaptersOK)) {
+			// A pinned key's durable file value is unreadable AND the row
+			// that is supposed to be the fallback is corrupt: there is no
+			// trustworthy durable value to write back. The live config
+			// carries the pin, so any store write would persist the pin.
+			// Abort instead of guessing. (A missing row is NOT corruption —
+			// the documented default is the durable value there.)
+			writeError(w, http.StatusInternalServerError,
+				"cannot save while a metadata write pin is set: the stored selection is unreadable (corrupt settings row or malformed config value); resolve the corruption, then retry")
+			return
+		}
+		if f {
+			switch {
+			case !fieldsOK || !fileFieldsPresent:
+				snap.Processing.MetadataFields = rowFields
+			default:
+				snap.Processing.MetadataFields = storedFields
+			}
+		}
+		if c {
+			switch {
+			case !chaptersOK || !fileChaptersPresent:
+				snap.Processing.MetadataChapters = rowChapters
+			default:
+				snap.Processing.MetadataChapters = storedChapters
+			}
+		}
+	}
 	changed := make(map[string]any)
 	if h.svc.SettingsPersistDelay != nil {
 		h.svc.SettingsPersistDelay()
@@ -375,6 +520,18 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		snap.Directories.IndexingEnabled = *req.IndexingEnabled
 		changed["directories"] = mergeChangedMap(changed, "directories", "indexing_enabled", *req.IndexingEnabled)
 	}
+	if req.MetadataFields != nil {
+		// Store the normalized (trimmed, de-duplicated) list; nil would
+		// mean "reset to default" but a present array always yields a
+		// non-nil normalized value (possibly empty = write nothing).
+		norm, _ := audio.NormalizeSelectableFields(*req.MetadataFields)
+		snap.Processing.MetadataFields = &norm
+		changed["processing"] = mergeChangedMap(changed, "processing", "metadata_fields", norm)
+	}
+	if req.MetadataChapters != nil {
+		snap.Processing.MetadataChapters = strings.TrimSpace(*req.MetadataChapters)
+		changed["processing"] = mergeChangedMap(changed, "processing", "metadata_chapters", snap.Processing.MetadataChapters)
+	}
 
 	// 1. DB first.
 	if err := h.saveSettingsToDB(&snap); err != nil {
@@ -413,6 +570,11 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	live.Directories.InputDir = expandTilde(live.Directories.InputDir)
 	live.Directories.OutputDir = expandTilde(live.Directories.OutputDir)
 	live.Directories.CompletedDir = expandTilde(live.Directories.CompletedDir)
+	// A settings save stores a freshly merged config; without this the
+	// active PROCESSING_METADATA_* pins would vanish from the live state
+	// for the rest of the process's lifetime (jobs would then run the
+	// saved value, not the deployment pin).
+	config.ReassertMetadataPins(&live)
 	h.svc.Config.Store(&live)
 	for _, k := range changedDottedKeys(changed) {
 		h.svc.Config.AddYAMLKeys(k)
@@ -439,6 +601,10 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		audio.SetPathFormatTokens(tokenNames)
 	}
 	h.svc.Processor.ApplyConfig(h.svc.Config.Config())
+	// The per-field write selection feeds queue-time job snapshots, so it
+	// refreshes with the live config exactly like the CLI settings: queued
+	// jobs keep their frozen policy, new jobs pick up the saved selection.
+	h.svc.Processor.ApplyWriteSelection(live.Processing.MetadataFields, live.Processing.MetadataChapters)
 	h.svc.AudiobookDB.Store(audiobookdb.NewClient(live.APIKey.APIKey, live.APIKey.BaseURL))
 
 	// Scan trigger: turning the index on, or re-pointing the input root
@@ -466,16 +632,20 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		// Included so the client's draft-vs-saved tracking (the index
 		// status row appears only once the preference is saved) reads the
 		// saved truth from this response, matching GET's shape.
-		"indexing_enabled":     live.Directories.IndexingEnabled,
-		"input_dir":            live.Directories.InputDir,
-		"output_dir":           live.Directories.OutputDir,
-		"completed_dir":        live.Directories.CompletedDir,
-		"num_cpus":             live.Processing.NumCPUs,
-		"output_scheme":        live.Processing.PathFormat,
-		"region":               live.Processing.Region,
-		"audiobookdb_base_url": live.APIKey.BaseURL,
-		"bragibooks_version":   version.Version,
-		"m4b_merge_version":    m4bMergeVersion,
+		"indexing_enabled":         live.Directories.IndexingEnabled,
+		"input_dir":                live.Directories.InputDir,
+		"output_dir":               live.Directories.OutputDir,
+		"completed_dir":            live.Directories.CompletedDir,
+		"num_cpus":                 live.Processing.NumCPUs,
+		"output_scheme":            live.Processing.PathFormat,
+		"region":                   live.Processing.Region,
+		"audiobookdb_base_url":     live.APIKey.BaseURL,
+		"bragibooks_version":       version.Version,
+		"m4b_merge_version":        m4bMergeVersion,
+		"metadata_fields":          live.Processing.MetadataFields,
+		"metadata_chapters":        live.Processing.MetadataChapters,
+		"metadata_fields_pinned":   fieldsPinned,
+		"metadata_chapters_pinned": chaptersPinned,
 	}
 
 	writeJSON(w, http.StatusOK, settings)
@@ -518,6 +688,58 @@ func validateAudiobookdbBaseURL(raw string) error {
 	return err
 }
 
+// storedMetadataRow reads the settings row's metadata selection columns
+// with PER-COLUMN validity, decoding them the way saveSettingsToDB writes
+// them (fields: JSON array text, ” = unset default; chapters: policy
+// string, ” = default write). fieldsValid/chaptersValid report that each
+// column holds a valid value — an EMPTY column IS valid (the documented
+// default for that key) — so a corrupt value in one column does not
+// discard a valid value in the other (fields must be a JSON ARRAY — `null`
+// unmarshals to a nil slice without error and is corrupt; chapters must be
+// a present non-empty value).
+// queryOK is false only on a real query failure (it is true for a missing
+// row and for a read row); a missing row is a valid empty state — with
+// nothing stored the documented default is the durable value, while a
+// query failure is corruption and the caller must abort. With a read row,
+// a nil fields pointer is the UNSET default; a present empty list is the
+// none-selected save.
+func (h *Handler) storedMetadataRow() (fields *[]string, chapters string, fieldsValid, chaptersValid bool, queryOK bool) {
+	var fieldsCol, chaptersCol string
+	err := h.svc.DB.QueryRow(
+		`SELECT COALESCE(metadata_fields, ''), COALESCE(metadata_chapters, '') FROM settings WHERE id = 1`,
+	).Scan(&fieldsCol, &chaptersCol)
+	if err != nil {
+		if err != sql.ErrNoRows {
+			// A real query failure: not trustworthy, and distinct from a
+			// missing row (queryOK true) so the caller can treat it as
+			// corruption, not "nothing stored".
+			return nil, "", false, false, false
+		}
+		return nil, "", false, false, true // no row: a valid empty state
+	}
+	// An EMPTY column is the documented default for that key (fields: no
+	// selection saved; chapters: write) — a VALID value, not corruption.
+	// Only a PRESENT value that fails to parse is invalid.
+	switch {
+	case fieldsCol == "":
+		fieldsValid = true
+	default:
+		var f []string
+		if jerr := json.Unmarshal([]byte(fieldsCol), &f); jerr == nil && f != nil {
+			fields = &f
+			fieldsValid = true
+		}
+	}
+	switch {
+	case chaptersCol == "":
+		chaptersValid = true
+	default:
+		chapters = chaptersCol
+		chaptersValid = true
+	}
+	return fields, chapters, fieldsValid, chaptersValid, true
+}
+
 // saveSettingsToDB persists the config to the settings table in the database.
 // Uses INSERT OR REPLACE to handle both initial setup and updates.
 // Directory paths are stored in expanded (absolute) form.
@@ -537,6 +759,20 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 	// legacy token cutover) — and indexing_enabled, whose DEFAULT 0
 	// would silently disable the index on the next settings save
 	// (finding: settings writers reset indexing_enabled).
+	// The write selection (#518) round-trips as a JSON array; the EMPTY
+	// string means "not set" (default all-supported-available) — the same
+	// nil-vs-explicit distinction the Go config uses, so the column's
+	// NOT NULL DEFAULT '' matches the zero config value.
+	metadataFieldsCol := ""
+	if cfg.Processing.MetadataFields != nil {
+		if b, err := json.Marshal(*cfg.Processing.MetadataFields); err == nil {
+			metadataFieldsCol = string(b)
+		}
+	}
+	metadataChaptersCol := cfg.Processing.MetadataChapters
+	if metadataChaptersCol == "" {
+		metadataChaptersCol = "write"
+	}
 	var legacyMigrated int
 	if err := h.svc.DB.QueryRow(
 		`SELECT COALESCE(legacy_token_migrated, 0) FROM settings WHERE id = 1`,
@@ -544,8 +780,8 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 		return err
 	}
 	_, err := h.svc.DB.Exec(`
-		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, indexing_enabled, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, indexing_enabled, metadata_fields, metadata_chapters, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 	`,
 		cfg.APIKey.APIKey,
 		cfg.APIKey.BaseURL,
@@ -560,6 +796,8 @@ func (h *Handler) saveSettingsToDB(cfg *config.Config) error {
 		cfg.Server.APIEndpoint.KeyDigest,
 		legacyMigrated,
 		indexingEnabled,
+		metadataFieldsCol,
+		metadataChaptersCol,
 	)
 	return err
 }

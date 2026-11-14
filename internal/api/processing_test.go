@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS book_snapshots (
     audiobookdb_book_id TEXT NOT NULL DEFAULT '',
     audiobookdb_release_id TEXT NOT NULL DEFAULT '',
     title TEXT NOT NULL DEFAULT '',
+    subtitle TEXT NOT NULL DEFAULT '',
     authors TEXT NOT NULL DEFAULT '[]',
     narrators TEXT NOT NULL DEFAULT '[]',
     series_name TEXT NOT NULL DEFAULT '',
@@ -153,7 +154,7 @@ func writeStreamingSleepBinary(t *testing.T, dir string) string {
 	// gate: the mock must report a version at or above the floor and the
 	// schema/resolver identity the test seeded into the processor, or
 	// RunJob refuses to start it.
-	script := "#!/bin/sh\ncase \"$*\" in *--version*) echo 'm4b-merge 2.2.0'; exit 0;; *--capabilities*) echo '{\"schema_version\":1,\"resolver_version\":\"1\",\"default_path_format\":\"{author}/{title}\",\"path_tokens\":[{\"name\":\"title\",\"value\":\"t\",\"example\":\"T\"}],\"field_policies\":{\"values\":[\"write\",\"preserve\"],\"scalar_fields\":[\"title\"]},\"cover_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"clear\"]},\"chapter_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"clear\"]}}'; exit 0;; esac\nprintf 'partial live line\\n' 1>&2\nexec sleep 300 1>&- 2>&-\n"
+	script := "#!/bin/sh\ncase \"$*\" in *--version*) echo 'm4b-merge 2.2.0'; exit 0;; *--capabilities*) echo '{\"schema_version\":1,\"resolver_version\":\"1\",\"default_path_format\":\"{author}/{title}\",\"path_tokens\":[{\"name\":\"title\",\"value\":\"t\",\"example\":\"T\"}],\"field_policies\":{\"values\":[\"write\",\"preserve\"],\"scalar_fields\":[\"title\"]},\"cover_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"preserve\",\"clear\"]},\"chapter_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"preserve\",\"clear\"]}}'; exit 0;; esac\nprintf 'partial live line\\n' 1>&2\nexec sleep 300 1>&- 2>&-\n"
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatalf("write streaming sleeping binary: %v", err)
 	}
@@ -1937,8 +1938,8 @@ if "--capabilities" in sys.argv:
         "field_policies": {"values": ["write", "preserve", "clear"],
             "scalar_fields": ["title", "subtitle", "authors", "narrators",
                 "series", "description", "genres", "year"]},
-        "cover_policies": {"constraint": "str", "variants": ["write", "clear"]},
-        "chapter_policies": {"constraint": "str", "variants": ["write", "clear"]}}))
+        "cover_policies": {"constraint": "str", "variants": ["write", "preserve", "clear"]},
+        "chapter_policies": {"constraint": "str", "variants": ["write", "preserve", "clear"]}}))
     sys.exit(0)
 job = None
 for i, a in enumerate(sys.argv):
@@ -1994,8 +1995,8 @@ if "--capabilities" in sys.argv:
         "field_policies": {"values": ["write", "preserve", "clear"],
             "scalar_fields": ["title", "subtitle", "authors", "narrators",
                 "series", "description", "genres", "year"]},
-        "cover_policies": {"constraint": "str", "variants": ["write", "clear"]},
-        "chapter_policies": {"constraint": "str", "variants": ["write", "clear"]}}))
+        "cover_policies": {"constraint": "str", "variants": ["write", "preserve", "clear"]},
+        "chapter_policies": {"constraint": "str", "variants": ["write", "preserve", "clear"]}}))
     sys.exit(0)
 job = None
 for i, a in enumerate(sys.argv):
