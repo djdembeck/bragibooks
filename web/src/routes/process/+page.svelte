@@ -8,7 +8,8 @@
 	import { createJobLogTracker, type JobLogTracker } from '#lib/jobDestination.js';
 	import { mergeOutputEvent } from '#lib/jobOutput.js';
 	import { liveNow } from '#lib/liveNow.svelte.js';
-	import { CheckCircle, Clock, ArrowRight, FileText } from '@lucide/svelte';
+	import { summarizeLatestBatch, type BatchSummary } from '#lib/jobBatch.js';
+	import { CheckCircle, Clock, ArrowRight, FileText, X } from '@lucide/svelte';
 
 	interface JobItem {
 		id: string;
@@ -87,7 +88,10 @@
 			const [matched, pending, jobsResp] = await Promise.all([
 				get<BooksListResponse>('/books?status=matched&limit=100'),
 				get<BooksListResponse>('/books?status=pending&limit=100'),
-				get<JobsListResponse>('/jobs?limit=20'),
+				// 100 (the API cap) keeps a finished batch whole: the banner
+				// summarizes the latest contiguous run, and a run longer than
+				// the default window would read as a smaller one.
+				get<JobsListResponse>('/jobs?limit=100'),
 			]);
 			books = [...(matched.books || []), ...(pending.books || [])];
 			restoreJobs(jobsResp.jobs);
@@ -449,6 +453,98 @@
 	const runningJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'running').length);
 	const queuedJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'queued').length);
 
+	// The banner tracks the latest merge run (batch) so a finished queue has
+	// a result to look at, not just Recent activity. It states a result only
+	// — while a batch runs, the live job cards own that state. Dismissal is
+	// per run: a newer batch re-announces itself.
+	const batchSummary = $derived(
+		summarizeLatestBatch(
+			jobs.map((job) => ({
+				id: job.id,
+				status: job.status,
+				// An in-flight cancel holds an optimistic 'cancelled' badge;
+				// the run must not report itself stopped until the backend
+				// terminal row lands.
+				cancelRequested: job.cancelRequested,
+				action: job.action,
+				queueOrder: job.queueOrder,
+				startedAt: job.startedAt,
+				completedAt: job.completedAt,
+				createdAt: job.createdAt,
+			}))
+		)
+	);
+	let dismissedBatchId = $state<string | null>(null);
+	const batchVisible = $derived(
+		batchSummary !== null && batchSummary.allTerminal && dismissedBatchId !== batchSummary.id
+	);
+	let historyDetails = $state<HTMLDetailsElement>();
+	// The first failed row of the latest run: the banner's "Review" action
+	// expands Recent activity and lands there.
+	const firstFailedJobId = $derived.by(() => {
+		if (!batchSummary || batchSummary.failed === 0) return null;
+		const ids = new Set(batchSummary.jobIds);
+		const job = jobs.find((j) => ids.has(j.id) && (j.status === 'error' || j.status === 'failed'));
+		return job?.id ?? null;
+	});
+	/** The banner's single next step, when the outcome has one: a single
+	 *  book points at its record; multi-job failures point at their rows. */
+	const batchAction = $derived.by(() => {
+		if (!batchVisible || !batchSummary) return null;
+		if (batchSummary.jobIds.length === 1) {
+			const job = jobs.find((j) => j.id === batchSummary.jobIds[0]);
+			if (job?.bookId) return { label: 'View book', href: `/books/${job.bookId}` };
+			if (batchSummary.failed > 0) return { label: 'Review failure', review: true };
+			return null;
+		}
+		if (batchSummary.failed === 0) return null;
+		return {
+			label: `Review ${batchSummary.failed} ${batchSummary.failed === 1 ? 'failure' : 'failures'}`,
+			review: true,
+		};
+	});
+
+	function reviewFailures() {
+		if (historyDetails) historyDetails.open = true;
+		const id = firstFailedJobId;
+		if (!id) return;
+		// The row renders once the disclosure opens; land on it a frame later.
+		// 'smooth' is an animated page move — reduced-motion users get the
+		// jump, not the glide.
+		const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+		requestAnimationFrame(() => {
+			document.querySelector(`[data-job-id="${id}"]`)?.scrollIntoView({ block: 'center', behavior });
+		});
+	}
+
+	/** Headline for the banner: states the batch and its outcome, in words. */
+	function batchLabel(batch: BatchSummary): string {
+		const kind = batch.isBatch ? 'Batch' : 'Book';
+		if (batch.tone === 'success') {
+			if (!batch.isBatch) return 'Book processed';
+			const cancelledNote = batch.cancelled > 0 ? `, ${batch.cancelled} cancelled` : '';
+			return `Batch complete — ${batch.done} of ${batch.total} processed${cancelledNote}`;
+		}
+		if (batch.tone === 'error') return `${kind} failed — none of the ${batch.total} processed`;
+		if (batch.tone === 'warning') {
+			return `${kind} ended with ${batch.failed} ${batch.failed === 1 ? 'failure' : 'failures'}`;
+		}
+		return `${kind} stopped — ${batch.cancelled} ${batch.cancelled === 1 ? 'job was' : 'jobs were'} cancelled`;
+	}
+
+	/** Quiet detail line: the parts the headline doesn't name, plus the
+	 *  run's wall clock. "took" is a completion claim — interrupted runs
+	 *  report how long they ran. */
+	function batchDetail(batch: BatchSummary): string {
+		const parts: string[] = [];
+		if (!batch.isBatch && batch.done > 0) parts.push('M4B merge finished');
+		const verb = batch.tone === 'success' ? 'took' : 'ran for';
+		if (batch.startedAt && batch.finishedAt) {
+			parts.push(`${verb} ${formatElapsed(batch.startedAt, batch.finishedAt, 0)}`);
+		}
+		return parts.join(' · ');
+	}
+
 	function jobStatusLabel(status: string): string {
 		switch (status.toLowerCase()) {
 			case 'queued': return 'Waiting for a processing slot';
@@ -586,6 +682,18 @@
 	{#if dl.showSkeleton}
 		<div class="queue-loading" aria-label="Loading queue">{#each Array(5) as _}<Skeleton height="4.5rem" />{/each}</div>
 	{:else if !loading && (!dl.error || books.length > 0 || jobs.length > 0)}
+		{#if batchVisible && batchSummary}
+			<div class="queue-banner-wrap">
+				<Alert
+					variant={batchSummary.tone}
+					role={batchSummary.tone === 'error' ? 'alert' : 'status'}
+					actions={batchActions}
+				>
+					{batchLabel(batchSummary)}
+					{#if batchDetail(batchSummary)}<p class="batch-detail">{batchDetail(batchSummary)}</p>{/if}
+				</Alert>
+			</div>
+		{/if}
 		<div class="queue-columns" class:queue-columns--single={matchedBooks.length === 0 && activeJobs.length > 0}>
 			<div class="queue-work">
 				{#if matchedBooks.length > 0}
@@ -650,19 +758,30 @@
 					<section class="queue-idle"><Clock size={21} aria-hidden="true" /><h2 id="activity-title">Nothing processing</h2><p>Ready books stay in the list until you start a batch.</p></section>
 				{/if}
 				{#if pastJobs.length > 0}
-					<details class="job-history"><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each pastJobs as job (job.id)}{@render JobRecord(job, false)}{/each}</details>
+					<details class="job-history" bind:this={historyDetails}><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each pastJobs as job (job.id)}{@render JobRecord(job, false)}{/each}</details>
 				{/if}
 			</aside>
 		</div>
 	{/if}
 </div>
 
+{#snippet batchActions()}
+	{#if batchAction?.review}
+		<button type="button" class="batch-action" onclick={reviewFailures}>{batchAction.label} <ArrowRight size={14} aria-hidden="true" /></button>
+	{:else if batchAction?.href}
+		<a class="batch-action" href={batchAction.href}>View book <ArrowRight size={14} aria-hidden="true" /></a>
+	{/if}
+	<button type="button" class="batch-action batch-action--icon" aria-label="Dismiss batch result" onclick={() => { dismissedBatchId = batchSummary?.id ?? null; }}>
+		<X size={16} aria-hidden="true" />
+	</button>
+{/snippet}
+
 {#snippet JobRecord(job: JobItem, active: boolean)}
 	{@const destination = destinationFor(job)}
 	{@const profile = outputProfileLabel(job)}
 	{@const running = isRunning(job)}
 	{@const stage = activeStageLabel(job)}
-	<article class="job-record" class:job-record--active={active} aria-busy={active && running}>
+	<article class="job-record" data-job-id={job.id} class:job-record--active={active} aria-busy={active && running}>
 		{#if active && running}
 			<div class="job-progress" role="progressbar" aria-label="Processing {job.bookTitle || 'book'}" aria-valuetext={stage}><span></span></div>
 		{/if}
@@ -744,6 +863,13 @@
 	.live-dot { width: 0.45rem; height: 0.45rem; border-radius: 50%; background: var(--text-muted); }
 	.live-dot--running { background: var(--state-amber); }
 	.queue-loading { display: grid; gap: 0.75rem; }
+	.queue-banner-wrap { margin-top: 0.5rem; }
+	.batch-detail { margin: 0.25rem 0 0; font-size: 0.8125rem; color: var(--text-secondary); }
+	.batch-action { display: inline-flex; align-items: center; gap: 0.35rem; min-height: 2.75rem; min-width: 2.75rem; padding: 0 0.5rem; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--workspace-action); font-size: 0.8125rem; font-weight: 600; cursor: pointer; }
+	.batch-action:hover { background: rgb(41 41 35 / 0.06); }
+	.batch-action--icon { color: var(--text-muted); padding: 0; }
+	.batch-action--icon:hover { color: var(--text); }
+	.batch-action:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
 	.queue-columns { display: grid; grid-template-columns: minmax(0, 1fr) 21rem; align-items: start; gap: 1.5rem; margin-top: 1.5rem; }
 	.queue-columns--single { grid-template-columns: minmax(0, 1fr); }
 	.queue-columns--single .queue-work:empty { display: none; }
