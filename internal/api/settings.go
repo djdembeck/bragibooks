@@ -412,16 +412,18 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		needRow := (f && (!fieldsOK || !fileFieldsPresent)) || (c && (!chaptersOK || !fileChaptersPresent))
 		var rowFields *[]string
 		rowChapters := ""   // '' = the documented default (write)
-		rowCorrupt := false // a stored value exists but cannot be trusted
+		rowCorrupt := false // the stored selection cannot be trusted (a
+		// corrupt column or a failed read)
 		if needRow {
 			var fieldsValid, chaptersValid, queryOK bool
 			rowFields, rowChapters, fieldsValid, chaptersValid, queryOK = h.storedMetadataRow()
 			// The reader returns the VALID sibling column and drops only
 			// the corrupt one, so a corrupt fields column keeps a good
 			// chapters value (and vice versa). Corruption is: a real query
-			// failure, or a row in which at least one column failed to
-			// parse. A missing row is the valid empty state (both columns
-			// empty, the documented defaults).
+			// failure, or a row in which at least one column holds an
+			// invalid value. An empty column is the documented default
+			// for its key and counts as valid; a missing row is the valid
+			// empty state (both columns at their defaults).
 			if !queryOK || !fieldsValid || !chaptersValid {
 				rowCorrupt = true
 			}
