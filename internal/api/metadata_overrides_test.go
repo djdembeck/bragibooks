@@ -693,6 +693,46 @@ func TestLoadBookMetadataOverrideDecodesGuarded(t *testing.T) {
 	if o2, err := loadBookMetadataOverride(db, 2); err != nil || o2 != nil {
 		t.Fatalf("missing row = %v, %v; want nil, nil", o2, err)
 	}
+	// A stored literal null decodes to a nil slice WITHOUT a JSON error; it
+	// must still be a load error, not "no override" (which would let the
+	// next save fold the field into explicit-empty).
+	if _, err := db.Exec(`UPDATE book_metadata_overrides SET narrators = 'null', chapters = 'null' WHERE book_id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if o3, err := loadBookMetadataOverride(db, 1); err == nil {
+		t.Fatalf("null array columns loaded without error: %+v", o3)
+	}
+}
+
+// TestNormalizeClearedFieldsRecovery guards the clear-marker lifecycle:
+// an EMPTY list folds into cleared:["chapters"]; a NON-EMPTY list is an
+// edited value and drops the marker (a saved clear must not discard the
+// edited list); a NIL list means "no list state in this request" and
+// leaves the marker untouched — the client is expected to strip the marker
+// explicitly when the operator chooses the catalog list (the server cannot
+// guess intent, and the stale-marker case it guards against is the
+// non-empty one).
+func TestNormalizeClearedFieldsRecovery(t *testing.T) {
+	cases := []struct {
+		name     string
+		cleared  []string
+		chapters []SnapshotChapter
+		want     []string
+	}{
+		{"empty list folds to clear", []string{}, []SnapshotChapter{}, []string{"chapters"}},
+		{"explicit clear survives", []string{"chapters"}, nil, []string{"chapters"}},
+		{"non-empty list drops the clear", []string{"chapters", "title"}, []SnapshotChapter{{Title: "A"}}, []string{"title"}},
+		{"nil list leaves the marker", []string{"chapters", "title"}, nil, []string{"chapters", "title"}},
+		{"dedupes and sorts", []string{"b", "b", "a"}, nil, []string{"a", "b"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeClearedFields(tc.cleared, tc.chapters)
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("normalize = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 // TestMetadataOverrideAuditDetailIsTruthful guards the audit contract: the

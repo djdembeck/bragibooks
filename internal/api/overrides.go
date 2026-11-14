@@ -103,8 +103,12 @@ func validOverrideField(name string) bool {
 // list into cleared:["chapters"]. The empty-list form and the cleared-form
 // are the same operator intent (the engine's explicit chapter clear), so a
 // request may express it either way; the stored row and the applied
-// effective state agree on one spelling. A non-empty list is never folded
-// in — it is an edited value, not a clear.
+// effective state agree on one spelling. A NON-EMPTY list is an edited value,
+// not a clear: it drops any "chapters" entry, because a saved clear must not
+// survive the operator returning to the catalog list or adding custom
+// chapters — the clear intent is then gone (a stale marker would discard the
+// edited list and keep the tags removed with no way to recover short of a
+// full reset).
 func normalizeClearedFields(cleared []string, chapters []SnapshotChapter) []string {
 	out := make([]string, 0, len(cleared)+1)
 	seen := map[string]bool{}
@@ -114,7 +118,17 @@ func normalizeClearedFields(cleared []string, chapters []SnapshotChapter) []stri
 			out = append(out, c)
 		}
 	}
-	if chapters != nil && len(chapters) == 0 && !seen["chapters"] {
+	if chapters != nil && len(chapters) > 0 {
+		out = out[:0]
+		seen = map[string]bool{}
+		for _, c := range cleared {
+			if c == "chapters" || seen[c] {
+				continue
+			}
+			seen[c] = true
+			out = append(out, c)
+		}
+	} else if chapters != nil && len(chapters) == 0 && !seen["chapters"] {
 		out = append(out, "chapters")
 	}
 	sort.Strings(out)
@@ -230,6 +244,12 @@ func jsonStrings(raw string) ([]string, error) {
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
 		return nil, fmt.Errorf("decode %q: %w", raw, err)
 	}
+	if out == nil {
+		// A literal JSON null decodes into a nil slice WITHOUT an error. It
+		// is stored state, not a valid operator draft ('[]' is the explicit
+		// empty), so treat it as corrupt rather than "no override".
+		return nil, fmt.Errorf("decode %q: stored null is not a valid array", raw)
+	}
 	return out, nil
 }
 
@@ -245,6 +265,12 @@ func jsonChapters(raw string) ([]SnapshotChapter, error) {
 	var out []SnapshotChapter
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
 		return nil, fmt.Errorf("decode %q: %w", raw, err)
+	}
+	if out == nil && raw != "[]" {
+		// '[]' is the legitimate explicit-clear state and decodes to an
+		// empty (non-nil) slice; a literal null decodes to nil WITHOUT an
+		// error and is corrupt state, not "no override".
+		return nil, fmt.Errorf("decode %q: stored null is not a valid array", raw)
 	}
 	return out, nil
 }
@@ -672,7 +698,12 @@ func (h *Handler) UpdateBookMetadata(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "save metadata overrides: "+err.Error())
 		return
 	}
-	h.pruneOrphanedOverrideCovers(bookID, h.persistedOverrideCoverFile(bookID))
+	if keepFile, ok := h.persistedOverrideCoverFile(bookID); ok {
+		h.pruneOrphanedOverrideCovers(bookID, keepFile)
+	} else {
+		// The keep-set read failed: prune against no keep-set could delete
+		// the asset the saved row references, so skip the sweep this time.
+	}
 	unlock()
 	var title string
 	if err := h.svc.DB.QueryRow("SELECT title FROM books WHERE id = ?", bookID).Scan(&title); err != nil {
@@ -873,14 +904,29 @@ func overrideChangeSummary(o *MetadataOverride) string {
 // read under the per-book lock, not from the caller's request draft: two
 // concurrent saves can otherwise leave the row pointing at a NEW asset while
 // a stale prune (built from an older draft) deletes it.
-func (h *Handler) persistedOverrideCoverFile(bookID int64) string {
-	var coverSource, coverFile string
-	if err := h.svc.DB.QueryRow(
+// ok reports whether the read succeeded: a transient query failure must NOT
+// look like an empty keep-set, because the caller then prunes against no
+// keep-set at all and can delete the asset the saved row references. The
+// caller skips the sweep when ok is false.
+func (h *Handler) persistedOverrideCoverFile(bookID int64) (coverFile string, ok bool) {
+	var coverSource string
+	err := h.svc.DB.QueryRow(
 		"SELECT cover_source, cover_file FROM book_metadata_overrides WHERE book_id = ?", bookID,
-	).Scan(&coverSource, &coverFile); err != nil || coverSource != "file" {
-		return ""
+	).Scan(&coverSource, &coverFile)
+	switch {
+	case err == nil:
+		if coverSource != "file" {
+			return "", true
+		}
+		return coverFile, true
+	case errors.Is(err, sql.ErrNoRows):
+		// No row: nothing to keep, safe to prune.
+		return "", true
+	default:
+		// Transient DB failure: do not let a failed read masquerade as an
+		// empty keep-set.
+		return "", false
 	}
-	return coverFile
 }
 
 // pruneOrphanedOverrideCovers removes this book's override cover assets

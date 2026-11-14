@@ -312,6 +312,16 @@
 		draft.chapters = [...list];
 	}
 
+	function useCatalogChapters() {
+		if (!draft) return;
+		draft.chapters = null;
+		// A saved clear ("No chapters (clear tag)") must not survive the
+		// operator choosing the catalog list again: the server only drops
+		// the marker for a non-empty edited list, so the client strips it
+		// here explicitly (finding: clear-tag stuck after returning to catalog).
+		draft.cleared = draft.cleared.filter((f) => f !== 'chapters');
+	}
+
 	/** Client-side chapter diagnostics, mirroring the server's validation
 	 *  so the operator sees the problem before it round-trips. */
 	const chapterErrors = $derived.by(() => {
@@ -923,7 +933,7 @@
 				<button type="button" class="meditor__clearbtn" onclick={() => (d.chapters = [])}>
 					No chapters (clear tag)
 				</button>
-				<button type="button" class="meditor__clearbtn" onclick={() => (d.chapters = null)}>
+				<button type="button" class="meditor__clearbtn" onclick={useCatalogChapters}>
 					Use catalog chapters
 				</button>
 			</div>
