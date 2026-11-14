@@ -690,9 +690,11 @@ func validateAudiobookdbBaseURL(raw string) error {
 // with PER-COLUMN validity, decoding them the way saveSettingsToDB writes
 // them (fields: JSON array text, ” = unset default; chapters: policy
 // string, ” = default write). fieldsValid/chaptersValid report that each
-// column parsed, so a corrupt value in one column does not discard a valid
-// value in the other (fields must be a JSON ARRAY — `null` unmarshals to a
-// nil slice without error and is corrupt; chapters must be non-empty).
+// column holds a valid value — an EMPTY column IS valid (the documented
+// default for that key) — so a corrupt value in one column does not
+// discard a valid value in the other (fields must be a JSON ARRAY — `null`
+// unmarshals to a nil slice without error and is corrupt; chapters must be
+// a present non-empty value).
 // queryOK is false only on a real query failure (it is true for a missing
 // row and for a read row); a missing row is a valid empty state — with
 // nothing stored the documented default is the durable value, while a
@@ -713,14 +715,23 @@ func (h *Handler) storedMetadataRow() (fields *[]string, chapters string, fields
 		}
 		return nil, "", false, false, true // no row: a valid empty state
 	}
-	if fieldsCol != "" {
+	// An EMPTY column is the documented default for that key (fields: no
+	// selection saved; chapters: write) — a VALID value, not corruption.
+	// Only a PRESENT value that fails to parse is invalid.
+	switch {
+	case fieldsCol == "":
+		fieldsValid = true
+	default:
 		var f []string
 		if jerr := json.Unmarshal([]byte(fieldsCol), &f); jerr == nil && f != nil {
 			fields = &f
 			fieldsValid = true
 		}
 	}
-	if chaptersCol != "" {
+	switch {
+	case chaptersCol == "":
+		chaptersValid = true
+	default:
 		chapters = chaptersCol
 		chaptersValid = true
 	}
