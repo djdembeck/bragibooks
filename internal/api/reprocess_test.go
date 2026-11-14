@@ -68,6 +68,7 @@ func seedReprocessBook(t *testing.T, h *Handler, bookID int64, status, srcPath s
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, bookID)
 }
 
 // seedMergeRow inserts an action='merge' job row with the given stored args
@@ -194,6 +195,104 @@ func TestReprocessResolvesCompletedFirst(t *testing.T) {
 	}
 	if got := bookStatusFromDB(t, h.svc.DB, 1); got != "done" {
 		t.Errorf("book status = %q at queue time; want done", got)
+	}
+}
+
+// TestReprocessUsesFrozenCompletedDir pins that reprocess locates a run's
+// inputs against the FROZEN completed directory recorded on that run, not the
+// live global: the run's sources moved into frozenCompleted, the operator then
+// re-pointed the global completed dir elsewhere, and reprocess must still find
+// the inputs in the recorded job's directory (not report them missing).
+func TestReprocessUsesFrozenCompletedDir(t *testing.T) {
+	frozenCompleted, liveCompleted := t.TempDir(), t.TempDir()
+	h := newReprocessHandler(t, t.TempDir(), liveCompleted, "{author}/{title}", "")
+	// The recorded source path is a location where the file DOES NOT exist
+	// (it has been moved); the file exists ONLY in the run's frozen completed
+	// dir. The live completed dir is empty, so neither the recorded original
+	// path nor the live dir can resolve the input — only the frozen dir can.
+	origDir := t.TempDir()
+	recorded := filepath.Join(origDir, "a.m4b")
+	src := filepath.Join(frozenCompleted, "a.m4b")
+	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if ok, _ := mustFile(recorded); ok {
+		t.Fatalf("test setup: recorded original path %q must not exist", recorded)
+	}
+	seedReprocessBook(t, h, 1, "done", origDir)
+	// A post-cutover row: it carries the frozen completed_dir.
+	seedMergeRow(t, h, "seeded-frozen", 1,
+		fmt.Sprintf(`{"src_paths":[%q],"completed_dir":%q}`, recorded, frozenCompleted), "2026-07-03 10:00:00")
+
+	w := postReprocess(t, h, StartReprocessRequest{BookID: 1})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+	}
+	got := newestJobArgs(t, h.svc.DB, 1).SrcPaths
+	if len(got) != 1 || got[0] != src {
+		t.Fatalf("resolved src_paths = %v; want the frozen-completed-dir input %v", got, src)
+	}
+
+	// The preview reports the input found (not missing) against the frozen dir.
+	pw := getReprocess(t, h, 1)
+	if pw.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, want 200 (body %s)", pw.Code, pw.Body.String())
+	}
+	var preview reprocessPreviewWire
+	if err := json.Unmarshal(pw.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("preview decode: %v", err)
+	}
+	if preview.Inputs == nil || preview.Inputs.Found != 1 || len(preview.Inputs.Missing) != 0 {
+		t.Fatalf("preview inputs = %+v; want 1 found, none missing (via the frozen completed dir)", preview.Inputs)
+	}
+}
+
+// TestReprocessDisabledCompletionKeepsFrozenEmptyDir pins the legacy gate on
+// the live-global fallback: a POST-CUTOVER row (it carries a snapshot) with
+// completion deliberately DISABLED freezes an empty completed_dir. Re-
+// processing must keep that empty directory — it must NOT fall back to the
+// live global completed dir and locate an unrelated same-basename file in a
+// directory the run never used. Inputs resolve only from the recorded source
+// paths.
+func TestReprocessDisabledCompletionKeepsFrozenEmptyDir(t *testing.T) {
+	liveCompleted := t.TempDir()
+	h := newReprocessHandler(t, t.TempDir(), liveCompleted, "{author}/{title}", "")
+	origDir := t.TempDir()
+	recorded := filepath.Join(origDir, "a.m4b")
+	if err := os.WriteFile(recorded, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write recorded source: %v", err)
+	}
+	// The decoy: the same basename in the LIVE completed dir, a directory
+	// this run never used (completion was disabled at enqueue).
+	if err := os.WriteFile(filepath.Join(liveCompleted, "a.m4b"), []byte("decoy"), 0o644); err != nil {
+		t.Fatalf("write decoy: %v", err)
+	}
+	seedReprocessBook(t, h, 1, "done", origDir)
+	// A post-cutover row: snapshot present, completed_dir explicitly empty.
+	seedMergeRow(t, h, "seeded-disabled", 1,
+		`{"src_paths":["`+recorded+`"],"completed_dir":"","snapshot":{"snapshot_version":1,"snapshot":{"book_id":1}}}`,
+		"2026-07-03 10:00:00")
+
+	w := postReprocess(t, h, StartReprocessRequest{BookID: 1})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+	}
+	got := newestJobArgs(t, h.svc.DB, 1).SrcPaths
+	if len(got) != 1 || got[0] != recorded {
+		t.Fatalf("resolved src_paths = %v; want the recorded source path %v (never the live-completed-dir decoy)", got, recorded)
+	}
+
+	// The preview agrees: found via the recorded path, found_in_completed 0.
+	pw := getReprocess(t, h, 1)
+	if pw.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, want 200 (body %s)", pw.Code, pw.Body.String())
+	}
+	var preview reprocessPreviewWire
+	if err := json.Unmarshal(pw.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("preview decode: %v", err)
+	}
+	if preview.Inputs == nil || preview.Inputs.Found != 1 || preview.Inputs.FoundInCompleted != 0 || len(preview.Inputs.Missing) != 0 {
+		t.Fatalf("preview inputs = %+v; want 1 found in the original path, 0 in completed, none missing", preview.Inputs)
 	}
 }
 
@@ -501,7 +600,8 @@ func TestReprocessOverrideValidation(t *testing.T) {
 		t.Errorf("stored snapshot = %q / %q; want %q / %q", args.OutputDir, args.OutputScheme, absAlt, "{title}")
 	}
 
-	// Blank overrides + no profile => destination fields omitted entirely.
+	// Blank overrides + no profile => the globals are FROZEN into the job
+	// args at queue time: the effective root + format must be present.
 	clearQueuedJobs(t, h.svc.DB, 1)
 	w = postReprocess(t, h, StartReprocessRequest{BookID: 1})
 	if w.Code != http.StatusOK {
@@ -509,8 +609,16 @@ func TestReprocessOverrideValidation(t *testing.T) {
 	}
 	var raw string
 	h.svc.DB.QueryRow("SELECT m4b_merge_args FROM processing_jobs WHERE book_id = 1 ORDER BY rowid DESC LIMIT 1").Scan(&raw)
-	if strings.Contains(raw, "output_dir") || strings.Contains(raw, "output_scheme") {
-		t.Errorf("global-settings args = %q; want no destination fields", raw)
+	// The globals must be frozen into the args (both fields present), not
+	// omitted. The exact values are the processor's live globals, asserted
+	// field-by-field here (not the Config string, which the reprocess
+	// harness does not re-apply to the processor).
+	var f jobArgs
+	if err := json.Unmarshal([]byte(raw), &f); err != nil {
+		t.Fatalf("parse stored args: %v", err)
+	}
+	if f.OutputDir == "" || f.OutputScheme == "" {
+		t.Errorf("global-settings args = %q; want the frozen global destination fields (dir + scheme present)", raw)
 	}
 }
 
@@ -721,7 +829,7 @@ func TestReprocessEndToEndOnce(t *testing.T) {
 	out, completed := t.TempDir(), t.TempDir()
 	bin := writeMergingBinary(t, t.TempDir())
 	h := newReprocessHandler(t, out, completed, "{author}/{title}", bin)
-	h.svc.ProcessingSvc.proc = &audio.Processor{}
+	h.svc.ProcessingSvc.proc = testProcessor(&audio.Processor{})
 	h.svc.ProcessingSvc.proc.ApplyConfig(h.svc.Config.Config())
 
 	completedIn := filepath.Join(completed, "a.m4b")

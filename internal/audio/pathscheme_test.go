@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+// TestMain installs the engine's verified path-token vocabulary (the real
+// startup path does this from --capabilities): validation is
+// capability-driven, so the suite needs the engine's token set, which no
+// longer includes the legacy {asin} token.
+func TestMain(m *testing.M) {
+	SetPathFormatTokens([]string{
+		"author", "authors", "narrator", "narrators", "title", "subtitle",
+		"series_name", "series_position", "year", "genre", "metadata_id", "book_id",
+	})
+	m.Run()
+}
+
 func TestValidatePathFormat(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -28,9 +40,20 @@ func TestValidatePathFormat(t *testing.T) {
 		{name: "empty template", template: "", wantErrFr: "produces no path elements"},
 		{name: "separators only", template: "///", wantErrFr: "produces no path elements"},
 		{name: "whitespace only", template: "  / ", wantErrFr: "produces no path elements"},
-		{name: "asin alone has no substitutable placeholder", template: "{asin}", wantErrFr: "must include at least one placeholder"},
 		{name: "year scheme is valid (warnings are UI-only)", template: "{author}/{year}"},
-		{name: "unicode text allowed", template: "{author}/{.Grüße} mídia"},
+		{name: "unicode text allowed", template: "{author}/.Grüße mídia"},
+		// A closed brace is a token expression, so even a unicode "name" the
+		// engine does not know is an unsupported token, not literal text.
+		{name: "closed unicode brace is an unsupported token", template: "{author}/{.Grüße}", wantErrFr: `unsupported token {.Grüße}`},
+		// E0: a closed brace expression the engine does not know is rejected
+		// by the engine's parser, so it must be rejected here too.
+		{name: "unsupported token rejected", template: "{asin}", wantErrFr: `unsupported token {asin}`},
+		{name: "unsupported token mid-scheme", template: "{author}/{isbn}/{title}", wantErrFr: `unsupported token {isbn}`},
+		// A token the engine knows stays valid.
+		{name: "known token accepted", template: "{author}/{title}/{book_id}"},
+		// An UNCLOSED brace is literal text (the legacy pass-through), not a
+		// token: no E0, only the placeholder/element rules apply.
+		{name: "unclosed brace is literal text", template: "vol {x", wantErrFr: "must include at least one placeholder"},
 		{name: "control char forbidden", template: "{title}/a\x07b", wantErrFr: `path text cannot contain U+0007`},
 		// E1/E2 boundary on control-only segments: "\t" is a unicode.IsSpace
 		// rune, so trimming empties the segment and no element survives;
@@ -99,4 +122,29 @@ func TestValidateRelativePathFormat(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSetPathFormatTokensConcurrentExercises reads and republishes the token
+// registry simultaneously: a partially built map read mid-replacement would
+// race a concurrent map write (fatal), which -race surfaces as a data race.
+func TestSetPathFormatTokensConcurrentExercises(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			SetPathFormatTokens([]string{"author", "title", "book_id"})
+		}
+	}()
+	for i := 0; i < 2000; i++ {
+		if err := ValidatePathFormat("{author}/{title}"); err != nil {
+			t.Fatalf("concurrent validation: %v", err)
+		}
+	}
+	<-done
+	// The stress republished a reduced vocabulary; restore the full set so
+	// later tests in the package see the same registry TestMain installed.
+	SetPathFormatTokens([]string{
+		"author", "authors", "narrator", "narrators", "title", "subtitle",
+		"series_name", "series_position", "year", "genre", "metadata_id", "book_id",
+	})
 }

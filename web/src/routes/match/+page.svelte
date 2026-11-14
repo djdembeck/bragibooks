@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick, untrack } from 'svelte';
-	import { get, put, del } from '#lib/api.js';
+	import { get, post, put, del } from '#lib/api.js';
 	import { goto } from '$app/navigation';
 	import type {
 		BookWithPeople,
@@ -23,7 +23,6 @@
 	} from '#lib/types.js';
 	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, Modal } from '#lib/components/index.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
-	import { resolveScheme } from '#lib/scheme.js';
 	import { showBlockNudge, showEditorNudge, showPanelNudge } from '#lib/missingRelease.js';
 	import SourceEvidence from './SourceEvidence.svelte';
 	import RuntimeComparison from './RuntimeComparison.svelte';
@@ -34,6 +33,7 @@
 		type EvidenceField, type MatchEvidenceReport
 	} from '#lib/matchEvidence.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
+	import { trimSegment } from '#lib/scheme.js';
 
 	type ReviewMode = 'batch' | 'focused';
 
@@ -981,6 +981,24 @@
 		return typeof value === 'string' ? value.trim() : '';
 	}
 
+	/** Mirror of the server's splitSeries (internal/api/snapshot.go): the
+	 *  stored books.series string is "Name #N" (or several, comma-joined);
+	 *  the last " #" separates name from position, a leading "#N" with no
+	 *  name is an empty name. Keeping the preview's re-parse identical to
+	 *  capture is what guarantees the previewed name matches the saved
+	 *  snapshot's name. Trimming uses Go's unicode.IsSpace set (trimSegment)
+	 *  rather than String.prototype.trim — the server trims with
+	 *  strings.TrimSpace, and the two disagree on U+0085, which would let a
+	 *  series name carry into the saved snapshot while vanishing from the
+	 *  previewed one (or vice versa). */
+	function splitSeries(series: string): [string, string] {
+		series = trimSegment(series);
+		if (!series) return ['', ''];
+		const i = series.lastIndexOf(' #');
+		if (i >= 0) return [trimSegment(series.slice(0, i)), trimSegment(series.slice(i + 2))];
+		return [series, ''];
+	}
+
 	/** Upstream sends series positions as a number, a string, or an object
 	 *  carrying `value`/`label`. Accept those forms, never invent one. */
 	function seriesPositionValue(series: unknown): string {
@@ -1092,34 +1110,78 @@
 		return parent ? `${sourceBase(candidate)} in ${parent}` : sourceBase(candidate);
 	}
 
-	// ── Proposed output naming ─────────────────────────────────
-	// Preview only: the processor writes ASIN + scheme and reports the actual
-	// final path. Resolved through the shared scheme resolver, so this
-	// preview agrees with the Settings example (Go segment rules, no
-	// double `.m4b`). As with that resolver, unknown placeholders stay
-	// visible (unrecognized spellings are literal), and `{asin}` stays
-	// literal — m4b-merge does not substitute it (engine parity).
+	// ── Output naming preview (engine-backed) ──────────────────
+	// The engine's non-mutating job preview over the EXACT capture payload a
+	// save records (ordered people, canonical ADB book id, release year,
+	// series, genres) — so the name shown here is the name the job will
+	// publish. No local token substitution: the engine owns the resolver.
+	let outputPreviews = $state<Record<number, string>>({});
+	let outputPreviewSeq = 0;
 
-	function schemeValues(candidate: MatchCandidate): Record<string, string> {
-		const book = candidate.details.book;
-		const release = candidate.details.release;
-		const series = book?.series?.[0];
-		const releaseDate = release?.releaseDate || book?.originallyPublishedAt || '';
-		return {
-			author: roleNames(book, release, 'author'),
-			narrator: roleNames(book, release, 'narrator'),
-			series_name: seriesRecordName(series),
-			series_position: seriesPositionValue(series),
-			subtitle: valueFor(release, 'subtitle') || valueFor(book, 'subtitle'),
-			title: release?.title || book?.title || '',
-			year: yearOf(releaseDate)
+	const focusedCandidate = $derived(candidates.find((c) => c.bookId === activeId) ?? null);
+
+	$effect(() => {
+		const candidate = focusedCandidate;
+		const book = candidate?.details.book;
+		const format = outputScheme;
+		if (!candidate || !book || !format) {
+			if (candidate) delete outputPreviews[candidate.bookId];
+			return;
+		}
+		const seq = ++outputPreviewSeq;
+		outputPreviews[candidate.bookId] = '';
+		const timer = setTimeout(async () => {
+			try {
+				const resp = await post<{ relative_path: string }>('/engine/preview', {
+					metadata: captureMetadata(book, candidate.details.release),
+					path_format: format
+				});
+				if (seq !== outputPreviewSeq) return; // a newer source/scheme superseded it
+				outputPreviews[candidate.bookId] = resp.relative_path;
+			} catch {
+				if (seq !== outputPreviewSeq) return;
+				outputPreviews[candidate.bookId] = '';
+			}
+		}, 250);
+		return () => clearTimeout(timer);
+	});
+
+	/** The snapshot shape a save captures for this selection — ordered
+	 *  people arrays, canonical ADB book id (#480), release year. */
+	function captureMetadata(book: AudiobookDBBook, release: AudiobookDBRelease | null): Record<string, unknown> {
+		const releaseDate = release?.releaseDate || book.originallyPublishedAt || '';
+		const meta: Record<string, unknown> = {
+			title: release?.title || book.title || '',
+			authors: rolePeople(book, release, 'author').map((p) => p.name),
+			narrators: rolePeople(book, release, 'narrator').map((p) => p.name)
 		};
+		if (book.id) meta.book_id = book.id;
+		const year = Number(yearOf(releaseDate));
+		if (Number.isFinite(year) && year > 0) meta.year = year;
+		// Same series normalization the save captures: the stored books.series
+		// field is ALL named series entries comma-joined as "Name #N", and
+		// capture re-parses that string. A preview on only the first entry
+		// would diverge from the saved snapshot whenever a book has more
+		// than one named series.
+		const seriesName = (book.series ?? [])
+			.map((entry) => {
+				const name = seriesRecordName(entry);
+				if (!name) return '';
+				const position = seriesPositionValue(entry);
+				return [name, position ? `#${position}` : ''].filter(Boolean).join(' ');
+			})
+			.filter(Boolean)
+			.join(', ');
+		const [firstSeriesName, firstSeriesPosition] = splitSeries(seriesName);
+		if (firstSeriesName) meta.series_name = firstSeriesName;
+		if (firstSeriesPosition) meta.series_position = firstSeriesPosition;
+		const genre = (book.genres ?? [])[0]?.title;
+		if (genre) meta.genres = [genre];
+		return meta;
 	}
 
-	// ── Output naming preview (global Settings) ───────────────
 	function proposedRelativeName(candidate: MatchCandidate): string {
-		if (!outputScheme || !candidate.details.book) return '';
-		return resolveScheme(outputScheme, schemeValues(candidate));
+		return outputPreviews[candidate.bookId] ?? '';
 	}
 
 	function fullOutputPath(candidate: MatchCandidate): string {

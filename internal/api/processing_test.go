@@ -42,7 +42,25 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
 	completed_at TEXT,
 	created_at TEXT DEFAULT (datetime('now')),
 	queue_seq INTEGER,
-	book_pre_status TEXT
+	book_pre_status TEXT,
+	snapshot_version INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS book_snapshots (
+    book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    audiobookdb_book_id TEXT NOT NULL DEFAULT '',
+    audiobookdb_release_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    authors TEXT NOT NULL DEFAULT '[]',
+    narrators TEXT NOT NULL DEFAULT '[]',
+    series_name TEXT NOT NULL DEFAULT '',
+    series_position TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    genres TEXT NOT NULL DEFAULT '[]',
+    year INTEGER,
+    cover_file TEXT NOT NULL DEFAULT '',
+    chapters TEXT NOT NULL DEFAULT '[]',
+    captured_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `
 
@@ -73,9 +91,42 @@ func newTestJobsHandler(t *testing.T) (*Handler, *ProcessingService) {
 		t.Fatalf("create jobs schema: %v", err)
 	}
 
-	svc := NewProcessingService(db, &audio.Processor{}, 1)
+	// The processor carries a queueable global destination: the queue path
+	// freezes the effective output root + format into every job, so an
+	// empty global is a refused (not inheritable) configuration. Tests
+	// that exercise specific destinations swap svc.proc below (and re-store
+	// the engine identity via testProcessor, which seeds it).
+	svc := NewProcessingService(db, testProcessor(&audio.Processor{
+		OutputDir:  t.TempDir(),
+		PathFormat: "{title}",
+		LogLevel:   "info",
+	}), 1)
 	h := &Handler{svc: &Services{DB: db, ProcessingSvc: svc}}
 	return h, svc
+}
+
+// seedSnapshot inserts a minimal authoritative capture row for a book so the
+// queue path's hard prerequisite (an operator-captured selection) is met.
+// Pipeline tests are about the job mechanics, not the capture, so the row
+// carries just the book's title; a real capture comes from Match/save.
+func seedSnapshot(t *testing.T, db *sql.DB, bookID int64) {
+	t.Helper()
+	if _, err := db.Exec(
+		`INSERT INTO book_snapshots (book_id, title, authors, narrators)
+		 VALUES (?, (SELECT title FROM books WHERE id = ?), '["Author"]', '["Narrator"]')`,
+		bookID, bookID,
+	); err != nil {
+		t.Fatalf("seed snapshot for book %d: %v", bookID, err)
+	}
+}
+
+// testProcessor builds a fake-engine Processor with the verified engine
+// identity stored, the same pair the real startup path (CheckCapabilities +
+// StoreCapabilities) produces. A job reports back the identity captured at
+// queue time, so a test that swaps the processor must re-store it.
+func testProcessor(p *audio.Processor) *audio.Processor {
+	p.StoreCapabilities(&audio.Capabilities{SchemaVersion: 1, ResolverVersion: "1"})
+	return p
 }
 
 // writeSleepingBinary writes a shell script to dir that sleeps, so a queued
@@ -92,12 +143,17 @@ func writeSleepingBinary(t *testing.T, dir string) string {
 	return p
 }
 
-// writeStreamingSleepBinary prints one line before sleeping, so a running
-// job has live stdout in memory when it is cancelled.
+// writeStreamingSleepBinary prints one progress line to stderr (the engine's
+// log stream in machine mode) before sleeping, so a running job has live
+// output in memory when it is cancelled.
 func writeStreamingSleepBinary(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "stream-sleep-bin")
-	script := "#!/bin/sh\nprintf 'partial live line\\n'\nexec sleep 300 1>&- 2>&-\n"
+	// The --version and --capabilities branches serve the pre-launch engine
+	// gate: the mock must report a version at or above the floor and the
+	// schema/resolver identity the test seeded into the processor, or
+	// RunJob refuses to start it.
+	script := "#!/bin/sh\ncase \"$*\" in *--version*) echo 'm4b-merge 2.2.0'; exit 0;; *--capabilities*) echo '{\"schema_version\":1,\"resolver_version\":\"1\",\"default_path_format\":\"{author}/{title}\",\"path_tokens\":[{\"name\":\"title\",\"value\":\"t\",\"example\":\"T\"}],\"field_policies\":{\"values\":[\"write\",\"preserve\"],\"scalar_fields\":[\"title\"]},\"cover_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"clear\"]},\"chapter_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"clear\"]}}'; exit 0;; esac\nprintf 'partial live line\\n' 1>&2\nexec sleep 300 1>&- 2>&-\n"
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatalf("write streaming sleeping binary: %v", err)
 	}
@@ -171,12 +227,13 @@ func TestCancelQueuedJob(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, 1)
 
 	// Queue a job without starting workers, so it stays 'queued'.
 	// Queueing intentionally leaves the book in its pre-queue state ('matched'):
 	// the queued -> processing transition happens at worker start, so a queued
 	// cancel needs no status rollback.
-	id, err := h.svc.ProcessingSvc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := h.svc.ProcessingSvc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -230,7 +287,8 @@ func TestCancelQueuedJobRestoresPreQueueBookStatus(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
-	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	seedSnapshot(t, h.svc.DB, 1)
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -252,7 +310,8 @@ func TestWorkerLosingQueuedClaimRestoresPreQueueBookStatus(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
-	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	seedSnapshot(t, h.svc.DB, 1)
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -284,18 +343,19 @@ func TestCancelRunningJob(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
 	bin := writeSleepingBinary(t, t.TempDir())
-	svc.proc = &audio.Processor{Binary: bin}
+	svc.proc = testProcessor(&audio.Processor{Binary: bin, OutputDir: t.TempDir(), PathFormat: "{title}"})
 
 	if _, err := h.svc.DB.Exec(
 		"INSERT INTO books (id, title, status, status_message) VALUES (1, 'Running Book', 'matched', '')",
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, 1)
 
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(ctx, 1, []string{"/x/a.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -342,12 +402,18 @@ func TestCancelRunningJobPersistsLiveOutput(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
 	bin := writeStreamingSleepBinary(t, t.TempDir())
-	svc.proc = &audio.Processor{Binary: bin}
+	svc.proc = testProcessor(&audio.Processor{Binary: bin, OutputDir: t.TempDir(), PathFormat: "{title}"})
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (1, 'Book', 'matched')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	seedSnapshot(t, h.svc.DB, 1)
 
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(ctx, 1, []string{"/x/a.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -414,7 +480,11 @@ func TestFinalizeCancelledExecErrorSkipsBookRestoreAndCleansUp(t *testing.T) {
 	if _, err := db.Exec(processingSchemaSQL); err != nil {
 		t.Fatalf("create jobs schema: %v", err)
 	}
-	svc := NewProcessingService(db, &audio.Processor{}, 1)
+	svc := NewProcessingService(db, testProcessor(&audio.Processor{
+		OutputDir:  t.TempDir(),
+		PathFormat: "{title}",
+		LogLevel:   "info",
+	}), 1)
 
 	// Book in its pre-queue status: QueueJob records it as
 	// book_pre_status, so a SUCCESSFUL finalizeCancelled WOULD have
@@ -425,8 +495,9 @@ func TestFinalizeCancelledExecErrorSkipsBookRestoreAndCleansUp(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, db, 1)
 
-	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -512,7 +583,8 @@ func TestQueueJobRecordsMergeAction(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
-	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	seedSnapshot(t, h.svc.DB, 1)
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1146,24 +1218,13 @@ func TestJobsRoutesResolve(t *testing.T) {
 	}
 }
 
-// fakeM4bBinary writes a shell script that exits 0 immediately and reports a
-// version, standing in for m4b-merge in pipeline tests.
-func fakeM4bBinary(t *testing.T, dir string) string {
-	t.Helper()
-	p := filepath.Join(dir, "fake-m4b")
-	if err := os.WriteFile(p, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.0.0; exit 0; fi\necho ran\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write fake binary: %v", err)
-	}
-	return p
-}
-
 // TestStreamJobProgressCloseEndsStream covers the row-16 fix: finalize closes
 // the progress channel, so the SSE loop terminates on its own (and the
 // trailing "done" line is written) without waiting for a client disconnect.
 func TestStreamJobProgressCloseEndsStream(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1273,7 +1334,7 @@ func newStreamRequest(t *testing.T, id string) *http.Request {
 func TestStreamJobStreamsLiveOutput(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1337,7 +1398,7 @@ func TestStreamJobStreamsLiveOutput(t *testing.T) {
 func TestStreamJobFanOutToConcurrentTimeStreams(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1446,7 +1507,7 @@ func TestStreamJobSlowReaderCannotStallAppend(t *testing.T) {
 func TestStreamJobReconnectCarriesFullSnapshot(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1522,7 +1583,7 @@ func TestStreamJobFinalDrainDeliversTrailingLine(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
 	for i := range 20 {
-		id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+		id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{})
 		if err != nil {
 			t.Fatalf("iteration %d: queue job: %v", i, err)
 		}
@@ -1577,7 +1638,7 @@ func TestStreamJobFinalDrainDeliversTrailingLine(t *testing.T) {
 func TestStreamJobLateSubscriberGetsTerminalResult(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1764,11 +1825,11 @@ func TestJobStateOutputFrom(t *testing.T) {
 func TestJobsExposeDurableQueueOrder(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	first, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	first, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue first job: %v", err)
 	}
-	second, err := svc.QueueJob(t.Context(), 0, []string{"/x/b.m4b"}, audio.RunOptions{})
+	second, err := svc.QueueJob(t.Context(), 0, []string{"/x/b.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue second job: %v", err)
 	}
@@ -1809,18 +1870,19 @@ func TestQueueJobDuplicateRejected(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, 1)
 
-	first, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	first, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{})
 	if err != nil {
 		t.Fatalf("first queue: %v", err)
 	}
-	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{}); err == nil {
+	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}); err == nil {
 		t.Fatal("second queue for a book with a queued job: want error, got nil")
 	}
 
 	// A finished job frees the book for a new run.
 	setJobStatus(t, h.svc.DB, first, "done")
-	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{}); err != nil {
+	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}); err != nil {
 		t.Fatalf("queue after terminal job: %v", err)
 	}
 }
@@ -1835,6 +1897,7 @@ func TestStartProcessingDuplicateBook409(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, 1)
 	srcDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(srcDir, "a.m4b"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed audio: %v", err)
@@ -1850,21 +1913,56 @@ func TestStartProcessingDuplicateBook409(t *testing.T) {
 	}
 }
 
-// writeMergingBinary writes an executable shell script that mimics a
-// successful m4b-merge run: it honors -o <dir> and creates
-// <dir>/Author/Title.m4b.
+// writeMergingBinary writes an executable that mimics a successful
+// machine-protocol m4b-merge run: it reads the --job file, publishes
+// <root>/Author/Title.m4b directly under the job's output_root (the engine
+// publishes in place, no relocation), and emits the single machine result
+// document on stdout.
 func writeMergingBinary(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "merging-bin")
-	script := `#!/bin/sh
-out=""
-while [ $# -gt 0 ]; do
-  if [ "$1" = "-o" ]; then out="$2"; shift; fi
-  shift
-done
-mkdir -p "$out/Author"
-printf 'book' > "$out/Author/Title.m4b"
-echo merged
+	script := `#!/usr/bin/env python3
+import json, os, sys
+
+if "--version" in sys.argv:
+    print("m4b-merge 2.2.0")
+    sys.exit(0)
+if "--capabilities" in sys.argv:
+    print(json.dumps({"schema_version": 1, "resolver_version": "1",
+        "default_path_format": "{author}/{title}",
+        "path_tokens": [{"name": k, "value": k, "example": k} for k in
+            ("author", "authors", "narrator", "narrators", "title", "subtitle",
+             "series_name", "series_position", "year", "genre",
+             "metadata_id", "book_id")],
+        "field_policies": {"values": ["write", "preserve", "clear"],
+            "scalar_fields": ["title", "subtitle", "authors", "narrators",
+                "series", "description", "genres", "year"]},
+        "cover_policies": {"constraint": "str", "variants": ["write", "clear"]},
+        "chapter_policies": {"constraint": "str", "variants": ["write", "clear"]}}))
+    sys.exit(0)
+job = None
+for i, a in enumerate(sys.argv):
+    if a == "--job" and i + 1 < len(sys.argv):
+        job = sys.argv[i + 1]
+with open(job) as f:
+    jf = json.load(f)
+root = jf["output_root"]
+rel = "Author/Title.m4b"
+os.makedirs(os.path.join(root, "Author"), exist_ok=True)
+with open(os.path.join(root, rel), "w") as f:
+    f.write("book")
+sys.stderr.write("progress\n")
+print(json.dumps({
+    "schema_version": 1,
+    "resolver_version": "1",
+    "status": "succeeded",
+    "groups": [{
+        "group": "main",
+        "outcome": "succeeded",
+        "artifacts": [{"relative_path": rel, "kind": "audio", "exists": True}],
+        "files_moved": True
+    }]
+}))
 `
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatalf("write merging binary: %v", err)
@@ -1881,40 +1979,66 @@ func writeDerivedTitleBinary(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "derived-bin")
 	script := `#!/usr/bin/env python3
-import os, sys, re
+import json, os, sys
 
-args = sys.argv[1:]
-out = scheme = input_ = asin = None
-i = 0
-while i < len(args):
-    a = args[i]
-    if a == "-o" and i + 1 < len(args):
-        out = args[i + 1]; i += 2
-    elif a in ("-i", "--input") and i + 1 < len(args):
-        if input_ is None:
-            input_ = args[i + 1]
-        i += 2
-    elif a == "-p" and i + 1 < len(args):
-        scheme = args[i + 1]; i += 2
-    elif a == "-a" and i + 1 < len(args):
-        asin = args[i + 1]; i += 2
-    else:
-        i += 1
+if "--version" in sys.argv:
+    print("m4b-merge 2.2.0")
+    sys.exit(0)
+if "--capabilities" in sys.argv:
+    print(json.dumps({"schema_version": 1, "resolver_version": "1",
+        "default_path_format": "{author}/{title}",
+        "path_tokens": [{"name": k, "value": k, "example": k} for k in
+            ("author", "authors", "narrator", "narrators", "title", "subtitle",
+             "series_name", "series_position", "year", "genre",
+             "metadata_id", "book_id")],
+        "field_policies": {"values": ["write", "preserve", "clear"],
+            "scalar_fields": ["title", "subtitle", "authors", "narrators",
+                "series", "description", "genres", "year"]},
+        "cover_policies": {"constraint": "str", "variants": ["write", "clear"]},
+        "chapter_policies": {"constraint": "str", "variants": ["write", "clear"]}}))
+    sys.exit(0)
+job = None
+for i, a in enumerate(sys.argv):
+    if a == "--job" and i + 1 < len(sys.argv):
+        job = sys.argv[i + 1]
+with open(job) as f:
+    jf = json.load(f)
+root = jf["output_root"]
+scheme = jf.get("path_format") or "{title}"
+input_ = jf["inputs"][0]
 # {title} derives from the source basename so same-batch jobs in one shared
-# destination tree never collide; the remaining tokens fall back to the CLI
-# asin (test books pass none -> empty), mirroring m4b-merge's empty fields.
-title = os.path.basename(input_).rsplit(".", 1)[0]
-tokens = {"title": title, "asin": asin or "", "author": "", "narrator": "",
-          "series_name": "", "series_position": "", "subtitle": "", "year": ""}
-rel = re.sub(r"\{(\w+)\}", lambda m: tokens.get(m.group(1), ""), scheme or "{title}")
-# Empty token fields (author, series, ...) leave leading/duplicate slashes
-# in the relative path; normalize so os.path.join keeps the -o root
-# (an absolute rel would silently discard it) and directories collapse.
+# destination tree never collide; the remaining tokens come from the job's
+# input_supplied metadata (the engine substitutes them).
+meta = jf.get("input_supplied", {})
+def tok(key):
+    v = meta.get(key, "")
+    if isinstance(v, list):
+        return ", ".join(v)
+    return "" if v is None else str(v)
+tokens = {k: (tok(k) if k != "title" else os.path.basename(input_).rsplit(".", 1)[0])
+          for k in ("title", "author", "authors", "narrator", "narrators",
+                    "series_name", "series_position", "subtitle", "year",
+                    "genre", "metadata_id", "book_id")}
+import re
+rel = re.sub(r"\{(\w+)\}", lambda m: tokens.get(m.group(1), ""), scheme)
+# Empty token fields leave leading/duplicate slashes; normalize so the
+# relative path stays under the root.
 rel = re.sub(r"/+", "/", rel).strip("/")
-os.makedirs(os.path.join(out, os.path.dirname(rel) or "."), exist_ok=True)
-with open(os.path.join(out, rel + ".m4b"), "w") as f:
+os.makedirs(os.path.join(root, os.path.dirname(rel) or "."), exist_ok=True)
+with open(os.path.join(root, rel + ".m4b"), "w") as f:
     f.write("book")
-print("merged")
+sys.stderr.write("progress\n")
+print(json.dumps({
+    "schema_version": 1,
+    "resolver_version": "1",
+    "status": "succeeded",
+    "groups": [{
+        "group": "main",
+        "outcome": "succeeded",
+        "artifacts": [{"relative_path": rel + ".m4b", "kind": "audio", "exists": True}],
+        "files_moved": True
+    }]
+}))
 `
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatalf("write derived-title binary: %v", err)
@@ -1942,18 +2066,19 @@ func countM4Bs(t *testing.T, dir string) int {
 func TestProcessJobRecordsOutputFormat(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 	bin := writeMergingBinary(t, t.TempDir())
-	svc.proc = &audio.Processor{Binary: bin, OutputDir: t.TempDir(), PathFormat: "{title}", LogLevel: "info"}
+	svc.proc = testProcessor(&audio.Processor{Binary: bin, OutputDir: t.TempDir(), PathFormat: "{title}", LogLevel: "info"})
 
 	if _, err := h.svc.DB.Exec(
 		"INSERT INTO books (id, title, status) VALUES (1, 'Book', 'matched')",
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, 1)
 
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")}, audio.RunOptions{})
+	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1977,19 +2102,20 @@ func TestProcessJobRecordsOutputFormat(t *testing.T) {
 // terminal state its in-memory state is dropped, while the DB retains it.
 func TestFinishedJobLeavesMap(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
-	bin := fakeM4bBinary(t, t.TempDir())
-	svc.proc = &audio.Processor{Binary: bin, OutputDir: t.TempDir(), PathFormat: "{title}", LogLevel: "info"}
+	bin := writeMergingBinary(t, t.TempDir())
+	svc.proc = testProcessor(&audio.Processor{Binary: bin, OutputDir: t.TempDir(), PathFormat: "{title}", LogLevel: "info"})
 
 	if _, err := h.svc.DB.Exec(
 		"INSERT INTO books (id, title, status) VALUES (1, 'Book', 'matched')",
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, 1)
 
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")}, audio.RunOptions{})
+	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")}, queueDestination{})
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -2036,7 +2162,7 @@ func setupProfileSuite(t *testing.T) profileSuiteFixtures {
 		t.Fatalf("LoadFrom: %v", err)
 	}
 	h.svc.Config = cm
-	svc.proc = &audio.Processor{}
+	svc.proc = testProcessor(&audio.Processor{})
 	svc.proc.ApplyConfig(cm.Config())
 
 	// Book 1 -> source A (becomes "A"), book 2 -> source B (becomes "B").
@@ -2045,6 +2171,8 @@ func setupProfileSuite(t *testing.T) profileSuiteFixtures {
 	); err != nil {
 		t.Fatalf("seed books: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, 1)
+	seedSnapshot(t, h.svc.DB, 2)
 
 	fx := profileSuiteFixtures{h: h, svc: svc, cm: cm, bin: bin, rootA: rootA}
 	fx.profileB, fx.profileG = 0, 0
@@ -2270,11 +2398,17 @@ func TestQueueProfileFormatOnlySnapshotsGlobalDir(t *testing.T) {
 // queue-time snapshot, no ConfigManager dependency). Queuing with globals
 // (A, {author}/{title}) then reconfiguring to (C, {title}) before the worker
 // runs must move the output to C.
-func TestQueueUnprofiledUsesWorkerTimeGlobals(t *testing.T) {
+// TestQueueUnprofiledFreezesGlobalsAtQueue: a plain (unprofiled, no-
+// override) job must run on the globals FROZEN AT ENQUEUE TIME, not on a
+// later worker-time reconfigure: the queue freezes the effective triple
+// into the job args, and processJob consumes only the queued values.
+func TestQueueUnprofiledFreezesGlobalsAtQueue(t *testing.T) {
 	fx := setupProfileSuite(t)
 
 	fx.svc.workerStartHook = func(string) {
-		fx.reconfigure(t, t.TempDir(), "{title}")
+		// A settings change AFTER the job was queued: it must not redirect
+		// the frozen job.
+		fx.reconfigure(t, t.TempDir(), "{author}/{title}")
 	}
 	fx.svc.RunWorkers(t.Context(), 1)
 
@@ -2299,10 +2433,10 @@ func TestQueueUnprofiledUsesWorkerTimeGlobals(t *testing.T) {
 		t.Fatalf("dest query: %v", err)
 	}
 	if !strings.HasSuffix(dest, "a.m4b") {
-		t.Errorf("dest = %q; want it to end with a.m4b (worker-time {title})", dest)
+		t.Errorf("dest = %q; want it to end with a.m4b (queue-time {title})", dest)
 	}
-	if strings.HasPrefix(dest, fx.rootA) {
-		t.Errorf("dest = %q; must NOT be under queue-time global root (reconfigure must win unprofiled)", dest)
+	if !strings.HasPrefix(dest, fx.rootA) {
+		t.Errorf("dest = %q; MUST be under the queue-time global root %q (a post-queue reconfigure must not redirect it)", dest, fx.rootA)
 	}
 }
 
@@ -2483,13 +2617,18 @@ func TestQueueSingleBookReprocessUsesGlobals(t *testing.T) {
 	if got := m4bsForBook(t, fx.h, 1); got != want {
 		t.Errorf("single-book dest = %q; want %q (global root + global format)", got, want)
 	}
-	// Unprofiled jobs carry no destination snapshot in their stored args.
+	// Unprofiled jobs freeze the globals into their stored args at queue
+	// time: the effective root + format must be present and match the live
+	// globals, not omitted.
 	var stored string
 	if err := fx.h.svc.DB.QueryRow("SELECT m4b_merge_args FROM processing_jobs WHERE id = ?", resp.Jobs[0]["id"]).Scan(&stored); err != nil {
 		t.Fatalf("read stored args: %v", err)
 	}
-	if strings.Contains(stored, "output_dir") || strings.Contains(stored, "output_scheme") {
-		t.Errorf("stored args leak a destination snapshot for an unprofiled job: %s", stored)
+	if !strings.Contains(stored, `"output_dir":"`+fx.rootA+`"`) {
+		t.Errorf("stored args missing the frozen global output dir %q: %s", fx.rootA, stored)
+	}
+	if !strings.Contains(stored, `"output_scheme":"{author}/{title}"`) {
+		t.Errorf("stored args missing the frozen global path format: %s", stored)
 	}
 }
 

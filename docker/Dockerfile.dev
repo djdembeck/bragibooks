@@ -10,7 +10,10 @@ RUN go mod download
 
 COPY . .
 
-COPY --from=ghcr.io/djdembeck/m4b-merge:v2.0.1@sha256:4ab05f233ddd10f7f6d5a9f009998884921958ffd2997e1098268349a1a0bd0e /usr/local/bin/m4b-merge /usr/local/bin/m4b-merge
+# Authoritative processing cutover: engine v2.2.0 (schema 1, supplied-mode
+# {book_id}, plural people tokens), pinned by the immutable multi-arch index
+# digest.
+COPY --from=ghcr.io/djdembeck/m4b-merge:v2.2.0@sha256:ad08601cf802d93de4285ef0cb9056a0dcefbe063fc41272760a54899b4eeee2 /usr/local/bin/m4b-merge /usr/local/bin/m4b-merge
 
 EXPOSE 8000
 
