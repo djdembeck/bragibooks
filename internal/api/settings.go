@@ -384,24 +384,26 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// never reach the file save.
 	if f, c := h.svc.Config.MetadataEnvManaged(); f || c {
 		storedFields, storedChapters, fieldsOK, chaptersOK := h.svc.Config.StoredMetadataSelection()
-		_, fileFieldsPresent := h.svc.Config.StoredMetadataKeyPresent()
-		// The freeze, per pinned key, reads the durable file's value as
-		// authoritative only when the file carries a VALID value for
-		// that key. An ABSENT key is the documented default — a valid
-		// value, not an unreadable one (chaptersOK is true for an absent
-		// key) — and wins over a stale row selection. A present
-		// MALFORMED value is unreadable: the typed loader discarded the
-		// file wholesale, so the settings row (which startup loaded the
-		// preference from — the documented DB fallback) is the truth the
-		// pin must not clobber, frozen back explicitly (UNSET INCLUDED)
-		// so the pin does not ride into a freshly written row. When the
-		// file carries NO fields key at all (fieldsOK true, value nil),
-		// the file is silent on the selection: the row IS the durable
-		// selection, and it wins over the file's default for BOTH keys,
-		// or a DB-only selection would be wiped on the next unrelated
-		// save. A row the freeze falls back to must be readable before
-		// any write, or the save aborts.
-		needRow := (f && (!fieldsOK || !fileFieldsPresent)) || (c && !chaptersOK)
+		fileFieldsPresent, fileChaptersPresent := h.svc.Config.StoredMetadataKeyPresent()
+		// The freeze, per pinned key, writes back the DURABLE value so the
+		// env pin never rides into a freshly written row. The durable value
+		// for a key follows the documented startup precedence — the file is
+		// primary, the settings row is the fallback the file falls back to:
+		//
+		//   * file carries a VALID value for the key (present + OK) -> the
+		//     file is authoritative; freeze its value.
+		//   * file is SILENT on the key (absent: not present, and absent
+		//     counts as OK so it is not treated as unreadable) -> the row is
+		//     where the effective value comes from; freeze the row, so a
+		//     DB-only selection survives an unrelated save.
+		//   * file carries a MALFORMED value (present, not OK) -> the typed
+		//     loader discarded it, so the row (the documented DB fallback)
+		//     is the truth; freeze the row.
+		//
+		// Presence is tracked PER KEY: a file that sets only metadata_chapters
+		// is silent on metadata_fields and vice versa. A row the freeze falls
+		// back to must be readable before any write, or the save aborts.
+		needRow := (f && (!fieldsOK || !fileFieldsPresent)) || (c && (!chaptersOK || !fileChaptersPresent))
 		var rowFields *[]string
 		rowChapters := ""
 		rowOK := true
@@ -426,9 +428,7 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if c {
 			switch {
-			case !chaptersOK:
-				snap.Processing.MetadataChapters = rowChapters
-			case !fileFieldsPresent:
+			case !chaptersOK || !fileChaptersPresent:
 				snap.Processing.MetadataChapters = rowChapters
 			default:
 				snap.Processing.MetadataChapters = storedChapters

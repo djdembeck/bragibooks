@@ -481,3 +481,118 @@ func TestUpdateSettingsPinnedPreservesDBOnlySelection(t *testing.T) {
 		t.Fatalf("DB-only selection wiped on second pinned save: got %s/%s, want [\"title\"]/preserve", storedFields, storedChapters)
 	}
 }
+
+// TestUpdateSettingsPinnedFieldsPreservesDBOnlyFieldsWhenFileHasChaptersOnly
+// pins the asymmetric key-presence case: the durable file carries ONLY
+// metadata_chapters (a valid value), the DB row carries a fields-only
+// selection, and the fields key is pinned. The fields freeze must treat the
+// ABSENT fields key as "file is silent" and keep the row's fields selection,
+// not write the file's nil default into the row.
+func TestUpdateSettingsPinnedFieldsPreservesDBOnlyFieldsWhenFileHasChaptersOnly(t *testing.T) {
+	h := newSettingsTestService(t, newSettingsTestDB(t))
+	r := buildSettingsRouter(h)
+
+	put := func(body string) *httptestResponse {
+		req := httptest.NewRequest("PUT", "/api/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		var out map[string]any
+		if data, _ := io.ReadAll(rec.Result().Body); len(data) > 0 {
+			json.Unmarshal(data, &out)
+		}
+		return &httptestResponse{code: rec.Code, body: out}
+	}
+
+	// The durable file carries ONLY a valid chapters value.
+	if err := os.WriteFile(h.svc.Config.ConfigPath(), []byte("processing:\n    metadata_chapters: write\n"), 0o600); err != nil {
+		t.Fatalf("seed config file: %v", err)
+	}
+	// The DB row carries a fields-only selection.
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO settings (id, metadata_fields, metadata_chapters) VALUES (1, '["title"]', 'write')`,
+	); err != nil {
+		t.Fatalf("seed DB row: %v", err)
+	}
+	f, c, fOK, cOK := h.svc.Config.StoredMetadataSelection()
+	if storedString(f) == `["title"]` {
+		t.Fatalf("test setup: file must NOT carry the fields selection, got %s", storedString(f))
+	}
+	if c != "write" || !cOK {
+		t.Fatalf("test setup: file chapters must be valid write, got %s/OK=%v", c, cOK)
+	}
+	if fOK != true {
+		t.Fatalf("test setup: absent fields key is a valid default, fieldsOK=%v", fOK)
+	}
+
+	// Pin the fields key only; an unrelated save must keep the row's fields.
+	t.Setenv("PROCESSING_METADATA_FIELDS", "title,subtitle")
+	if resp := put(`{"num_cpus":3}`); resp.code != 200 {
+		t.Fatalf("unrelated pinned PUT: want 200, got %d: %v", resp.code, resp.body)
+	}
+	var storedFields, storedChapters string
+	if err := h.svc.DB.QueryRow(
+		`SELECT metadata_fields, metadata_chapters FROM settings WHERE id = 1`,
+	).Scan(&storedFields, &storedChapters); err != nil {
+		t.Fatalf("read settings row: %v", err)
+	}
+	if string(storedFields) != `["title"]` {
+		t.Fatalf("DB-only fields selection wiped under a fields pin with a chapters-only file: got %s, want [\"title\"]", storedFields)
+	}
+}
+
+// TestUpdateSettingsPinnedChaptersPreservesDBOnlyChaptersWhenFileHasFieldsOnly
+// pins the companion case: the durable file carries ONLY a valid
+// metadata_fields value, the DB row carries a chapters selection, and the
+// chapters key is pinned. The chapters freeze must treat the ABSENT fields
+// key (file silent on the selection) as a reason to read the row, and keep
+// the row's chapters value rather than writing the initial empty string.
+func TestUpdateSettingsPinnedChaptersPreservesDBOnlyChaptersWhenFileHasFieldsOnly(t *testing.T) {
+	h := newSettingsTestService(t, newSettingsTestDB(t))
+	r := buildSettingsRouter(h)
+
+	put := func(body string) *httptestResponse {
+		req := httptest.NewRequest("PUT", "/api/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		var out map[string]any
+		if data, _ := io.ReadAll(rec.Result().Body); len(data) > 0 {
+			json.Unmarshal(data, &out)
+		}
+		return &httptestResponse{code: rec.Code, body: out}
+	}
+
+	// The durable file carries ONLY a valid fields value.
+	if err := os.WriteFile(h.svc.Config.ConfigPath(), []byte("processing:\n    metadata_fields:\n        - title\n"), 0o600); err != nil {
+		t.Fatalf("seed config file: %v", err)
+	}
+	// The DB row carries a chapters selection.
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO settings (id, metadata_fields, metadata_chapters) VALUES (1, '["title"]', 'preserve')`,
+	); err != nil {
+		t.Fatalf("seed DB row: %v", err)
+	}
+	f, c, fOK, cOK := h.svc.Config.StoredMetadataSelection()
+	if storedString(f) != `["title"]` || !fOK {
+		t.Fatalf("test setup: file must carry a valid fields selection, got %s/OK=%v", storedString(f), fOK)
+	}
+	if c != "write" || !cOK {
+		t.Fatalf("test setup: absent chapters key is a valid default, got %s/OK=%v", c, cOK)
+	}
+
+	// Pin the chapters key only; an unrelated save must keep the row's chapters.
+	t.Setenv("PROCESSING_METADATA_CHAPTERS", "write")
+	if resp := put(`{"num_cpus":3}`); resp.code != 200 {
+		t.Fatalf("unrelated pinned PUT: want 200, got %d: %v", resp.code, resp.body)
+	}
+	var storedFields, storedChapters string
+	if err := h.svc.DB.QueryRow(
+		`SELECT metadata_fields, metadata_chapters FROM settings WHERE id = 1`,
+	).Scan(&storedFields, &storedChapters); err != nil {
+		t.Fatalf("read settings row: %v", err)
+	}
+	if storedChapters != "preserve" {
+		t.Fatalf("DB-only chapters selection wiped under a chapters pin with a fields-only file: got %q, want preserve", storedChapters)
+	}
+}
