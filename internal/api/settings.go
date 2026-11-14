@@ -387,10 +387,12 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		if f && !fieldsOK {
 			// A malformed (non-list) file value is discarded by the typed
 			// loader, so the durable row is the truth the pin must not
-			// clobber: read it back and preserve it. A silently converted
-			// file value would wipe a saved selection into the unset
-			// default on the next unrelated save.
-			if rowFields := h.storedMetadataFieldsRow(); rowFields != nil {
+			// clobber: read it back and preserve it, UNSET INCLUDED. A
+			// silently converted file value would wipe a saved selection
+			// into the unset default on the next unrelated save. Only a
+			// failed read leaves the live value in place (never a guess).
+			rowFields, rowOK := h.storedMetadataFieldsRow()
+			if rowOK {
 				snap.Processing.MetadataFields = rowFields
 			}
 		} else if f {
@@ -633,25 +635,27 @@ func validateAudiobookdbBaseURL(raw string) error {
 }
 
 // storedMetadataFieldsRow reads the settings row's metadata_fields column
-// and decodes it the way saveSettingsToDB writes it (JSON array text, ”
-// = unset default). Returns nil for the unset default, a present empty
-// list for the none-selected save, and nil when the row cannot be read
-// (in which case the caller preserves the live value, never a guess).
-func (h *Handler) storedMetadataFieldsRow() *[]string {
+// and decodes it the way saveSettingsToDB writes it (JSON array text,
+// empty string = unset default). ok=false means the row could not be read
+// (no row, decode failure): the caller must leave the live value in place,
+// never
+// guess. ok=true with a nil pointer is a successful read of the UNSET
+// default; a present empty list is the none-selected save.
+func (h *Handler) storedMetadataFieldsRow() (*[]string, bool) {
 	var col string
 	if err := h.svc.DB.QueryRow(
 		`SELECT COALESCE(metadata_fields, '') FROM settings WHERE id = 1`,
 	).Scan(&col); err != nil {
-		return nil
+		return nil, false
 	}
 	if col == "" {
-		return nil
+		return nil, true
 	}
 	var fields []string
 	if err := json.Unmarshal([]byte(col), &fields); err != nil {
-		return nil
+		return nil, false
 	}
-	return &fields
+	return &fields, true
 }
 
 // saveSettingsToDB persists the config to the settings table in the database.
