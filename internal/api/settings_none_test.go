@@ -365,7 +365,7 @@ func TestUpdateSettingsPinnedAbortWhenStoredSelectionUnreadable(t *testing.T) {
 	// the value lands from the live config (write) directly, not via the
 	// per-key file-presence fallback.
 	if string(storedFields) != `["title"]` || storedChapters != "write" {
-		t.Errorf("row not frozen correctly under pin: got %s/%s, want [\"title\"]/write (fields from row, chapters file default)", storedFields, storedChapters)
+		t.Errorf("row not frozen correctly under pin: got %s/%s, want [\"title\"]/write (fields from row, chapters from live config — not pinned)", storedFields, storedChapters)
 	}
 
 	// A VALID chapters value in the file stays authoritative for that key
@@ -385,10 +385,11 @@ func TestUpdateSettingsPinnedAbortWhenStoredSelectionUnreadable(t *testing.T) {
 	).Scan(&storedFields, &storedChapters); err != nil {
 		t.Fatal(err)
 	}
-	// fields frozen from the row (["title"]); chapters frozen from the
-	// FILE (write), not the row's preserve.
+	// fields frozen from the row (["title"]); chapters is not pinned, so
+	// it lands from the live config (write — the file's value) and
+	// overwrites the row's older preserve.
 	if string(storedFields) != `["title"]` || storedChapters != "write" {
-		t.Errorf("file chapters not kept under malformed fields pin: got %s/%s, want [\"title\"]/write (file value)", storedFields, storedChapters)
+		t.Errorf("row not frozen correctly: got %s/%s, want [\"title\"]/write (fields from row, chapters from live config — not pinned)", storedFields, storedChapters)
 	}
 
 	// Chapters is not pinned in this case, so the pinned-key freeze does
@@ -409,7 +410,7 @@ func TestUpdateSettingsPinnedAbortWhenStoredSelectionUnreadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(storedFields) != `["title"]` || storedChapters != "write" {
-		t.Errorf("absent chapters key: got %s/%s, want [\"title\"]/write (the file's default beats the stale row)", storedFields, storedChapters)
+		t.Errorf("absent chapters key: got %s/%s, want [\"title\"]/write (fields from row, chapters from live config — not pinned)", storedFields, storedChapters)
 	}
 }
 
