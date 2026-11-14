@@ -423,8 +423,10 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// with the old binary — never the new binary with the previous
 	// binary's capabilities. The latter pairing would record a stale
 	// engine identity at queue time that the new binary's run cannot match;
-	// the former self-heals (a job on the old binary reports the old
-	// identity, mismatches, fails closed, and re-queues onto the new one).
+	// the former fails closed and recovers by re-queue: a job captured
+	// under the old identity that runs on the new binary trips the
+	// identity check, errors with a re-preview/re-queue instruction, and
+	// the re-queued job captures the new identity.
 	if newBinaryCaps != nil {
 		h.svc.Processor.StoreCapabilities(newBinaryCaps)
 		tokenNames := make([]string, 0, len(newBinaryCaps.PathTokens))
