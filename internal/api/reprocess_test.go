@@ -206,15 +206,23 @@ func TestReprocessResolvesCompletedFirst(t *testing.T) {
 func TestReprocessUsesFrozenCompletedDir(t *testing.T) {
 	frozenCompleted, liveCompleted := t.TempDir(), t.TempDir()
 	h := newReprocessHandler(t, t.TempDir(), liveCompleted, "{author}/{title}", "")
+	// The recorded source path is a location where the file DOES NOT exist
+	// (it has been moved); the file exists ONLY in the run's frozen completed
+	// dir. The live completed dir is empty, so neither the recorded original
+	// path nor the live dir can resolve the input — only the frozen dir can.
+	origDir := t.TempDir()
+	recorded := filepath.Join(origDir, "a.m4b")
 	src := filepath.Join(frozenCompleted, "a.m4b")
 	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
-	seedReprocessBook(t, h, 1, "done", frozenCompleted)
-	// A post-cutover row: it carries the frozen completed_dir. The input lives
-	// ONLY in frozenCompleted; liveCompleted is empty.
+	if ok, _ := mustFile(recorded); ok {
+		t.Fatalf("test setup: recorded original path %q must not exist", recorded)
+	}
+	seedReprocessBook(t, h, 1, "done", origDir)
+	// A post-cutover row: it carries the frozen completed_dir.
 	seedMergeRow(t, h, "seeded-frozen", 1,
-		fmt.Sprintf(`{"src_paths":[%q],"completed_dir":%q}`, src, frozenCompleted), "2026-07-03 10:00:00")
+		fmt.Sprintf(`{"src_paths":[%q],"completed_dir":%q}`, recorded, frozenCompleted), "2026-07-03 10:00:00")
 
 	w := postReprocess(t, h, StartReprocessRequest{BookID: 1})
 	if w.Code != http.StatusOK {

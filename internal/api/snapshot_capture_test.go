@@ -209,6 +209,36 @@ func TestPruneSupersededCoversKeepsActiveJobReference(t *testing.T) {
 	}
 }
 
+// TestPruneSupersededCoversOnlyThisBook pins that pruning is scoped to THIS
+// book's snapshot-cover files: the covers directory is shared, so source
+// covers ("<bookID>.jpg", attachSourceCover), other books' snapshot covers,
+// and other books' source covers must all survive one book's prune — only
+// that book's own unreferenced snapshot covers are removed.
+func TestPruneSupersededCoversOnlyThisBook(t *testing.T) {
+	h := newTestHandler(t)
+	covers := t.TempDir()
+	h.svc.CoversDir = covers
+	// Book 1: current capture 1-999.jpg, an orphan capture 1-500.jpg, and a
+	// legacy 1-snapshot.jpg. Also present: book 1's SOURCE cover 1.jpg, and
+	// book 2's source cover 2.jpg and snapshot cover 2-777.jpg.
+	for _, name := range []string{"1-999.jpg", "1-500.jpg", "1-snapshot.jpg", "1.jpg", "2.jpg", "2-777.jpg"} {
+		if err := os.WriteFile(filepath.Join(covers, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	h.pruneSupersededCovers(1, &BookSnapshot{BookID: 1, CoverFile: "1-999.jpg"})
+	for _, gone := range []string{"1-500.jpg", "1-snapshot.jpg"} {
+		if ok, _ := mustFile(filepath.Join(covers, gone)); ok {
+			t.Errorf("book 1's unreferenced snapshot cover %q must be pruned", gone)
+		}
+	}
+	for _, kept := range []string{"1-999.jpg", "1.jpg", "2.jpg", "2-777.jpg"} {
+		if ok, _ := mustFile(filepath.Join(covers, kept)); !ok {
+			t.Errorf("cover %q must survive book 1's prune (it is not one of its snapshot covers)", kept)
+		}
+	}
+}
+
 // TestPruneSupersededCoversPrunesOrphanDespiteActiveJob pins that the active-
 // job guard is per FILE, not a book-wide skip: a legacy orphan the active job's
 // snapshot does not name is still pruned (the old "skip the whole book" guard

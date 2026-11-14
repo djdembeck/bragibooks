@@ -189,6 +189,21 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 		snap.Genres, snap.Chapters, snap.CoverFile = existing.Genres, existing.Chapters, existing.CoverFile
 	}
 
+	// The per-book lock spans the whole capture critical section: the cover
+	// download, the snapshot WRITE, and the superseded-cover PRUNE (defer
+	// releases it at function end). It is the same lock QueueJob holds across
+	// its snapshot read→insert, so a capture and an enqueue for one book never
+	// interleave: a capture cannot prune the file a not-yet-inserted enqueue
+	// already read (its active-job count is still zero in the gap), and two
+	// captures cannot race so that one writes an unreferenced file and the
+	// other prunes it before the first's upsert references it. Holding it
+	// across the download (not just the write+prune) is what closes the second
+	// race: the file a capture writes is referenced by its own upsert before
+	// any other capture may prune.
+	if h.svc.ProcessingSvc != nil {
+		defer h.svc.ProcessingSvc.lockBookCover(bookID)()
+	}
+
 	// Catalog enrichment for the SELECTED release: genres, chapters, and a
 	// locally stored cover — one GetBook feeds genres AND the cover. It is
 	// best-effort: a catalog that is down must not block a metadata save,
@@ -216,16 +231,8 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 		}
 	}
 
-	// The snapshot WRITE and the superseded-cover PRUNE are one critical
-	// section, held under the per-book lock (also held by QueueJob across its
-	// snapshot read→insert, so the two never interleave): without the lock a
-	// capture could upsert the new cover reference, prune the file the book's
-	// not-yet-inserted enqueue already read, and leave that job naming a file
-	// that is gone — its active-job count being zero in the gap (finding:
-	// prune vs enqueue).
-	if h.svc.ProcessingSvc != nil {
-		defer h.svc.ProcessingSvc.lockBookCover(bookID)()
-	}
+	// The snapshot write and the superseded-cover prune run under the per-book
+	// lock acquired above (the whole capture critical section).
 	if err := h.upsertSnapshot(snap); err != nil {
 		return false, err
 	}
@@ -250,44 +257,59 @@ func (h *Handler) pruneSupersededCovers(bookID int64, s *BookSnapshot) {
 		return
 	}
 	// The set of cover filenames that must survive: the current snapshot's
-	// reference plus every active job's queued snapshot reference.
+	// reference plus every active job's queued snapshot reference. If the
+	// active-reference scan itself fails, do NOT prune at all: deleting on an
+	// incomplete keep-set would remove a file some active job names, so on a
+	// query error the sweep is skipped (orphan covers simply accumulate).
 	keep := map[string]struct{}{s.CoverFile: {}}
 	rows, err := h.svc.DB.Query(
 		`SELECT m4b_merge_args FROM processing_jobs WHERE book_id = ? AND status IN ('queued','running')`, bookID,
 	)
-	if err == nil {
-		for rows.Next() {
-			var raw string
-			if err := rows.Scan(&raw); err != nil {
-				continue
-			}
-			var args struct {
-				Snapshot *snapshotJSON `json:"snapshot"`
-			}
-			if json.Unmarshal([]byte(raw), &args) == nil && args.Snapshot != nil {
-				if cf := args.Snapshot.Snapshot.CoverFile; cf != "" {
-					keep[cf] = struct{}{}
-				}
+	if err != nil {
+		return
+	}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			continue
+		}
+		var args struct {
+			Snapshot *snapshotJSON `json:"snapshot"`
+		}
+		if json.Unmarshal([]byte(raw), &args) == nil && args.Snapshot != nil {
+			if cf := args.Snapshot.Snapshot.CoverFile; cf != "" {
+				keep[cf] = struct{}{}
 			}
 		}
-		rows.Close()
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return
 	}
 	// Housekeeping only: a covers-dir read failure leaves the files in place.
 	dirEntries, err := os.ReadDir(h.svc.CoversDir)
 	if err != nil {
 		return
 	}
+	// Prune ONLY this book's snapshot-cover files: the capture-specific
+	// "<bookID>-<unixnano>.jpg" images and the legacy "<bookID>-snapshot.jpg".
+	// The covers directory is SHARED: source covers are stored as
+	// "<bookID>.jpg" (attachSourceCover) and other books' snapshot covers live
+	// here too, so a whole-directory sweep would delete files it does not own.
+	prefix := fmt.Sprintf("%d-", bookID)
+	legacy := fmt.Sprintf("%d-snapshot.jpg", bookID)
 	for _, e := range dirEntries {
 		if e.IsDir() {
 			continue
 		}
-		if !strings.HasSuffix(e.Name(), ".jpg") {
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) && name != legacy {
 			continue
 		}
-		if _, ok := keep[e.Name()]; ok {
+		if _, ok := keep[name]; ok {
 			continue
 		}
-		os.Remove(filepath.Join(h.svc.CoversDir, e.Name()))
+		os.Remove(filepath.Join(h.svc.CoversDir, name))
 	}
 }
 
