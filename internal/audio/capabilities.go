@@ -138,7 +138,7 @@ func (p *Processor) CheckCapabilities(ctx context.Context) (*Capabilities, error
 // save uses it before accepting a re-pointed engine binary: the path being
 // saved is the one that must pass, not whatever p.Binary holds today.
 func (p *Processor) CheckCapabilitiesFor(ctx context.Context, binary string) (*Capabilities, error) {
-	if _, err := p.CheckVersionFor(binary); err != nil {
+	if _, err := p.CheckVersionFor(ctx, binary); err != nil {
 		return nil, err
 	}
 	caps, err := p.ProbeCapabilitiesFor(ctx, binary)

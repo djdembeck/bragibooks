@@ -105,7 +105,7 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	// after startup. The same snapshot call that produced `binary` above is
 	// used throughout, so a single job observes one consistent executable,
 	// destination, and format (AGENTS: one settings snapshot per run).
-	if _, err := p.CheckVersionFor(binary); err != nil {
+	if _, err := p.CheckVersionFor(ctx, binary); err != nil {
 		return nil, fmt.Errorf("pre-launch engine gate: %w", err)
 	}
 

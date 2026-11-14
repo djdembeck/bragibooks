@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -516,53 +517,83 @@ const coverDownloadTimeout = 15 * time.Second
 // book. A URL that streams past this is not a cover; stop.
 const coverMaxBytes = 8 << 20
 
-// coverDownloadClient is the shared client for snapshot cover fetches. The
-// cover URL comes from the ADB client (already origin-gated by the ADB
-// trusted-base config); the bounded client adds the size, redirect, and
-// destination guards an untrusted-ish image URL deserves.
-var coverDownloadClient = &http.Client{
-	Timeout: coverDownloadTimeout,
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 3 {
-			return errors.New("too many redirects")
-		}
-		// A redirect can escape the ADB trusted base: re-validate the
-		// destination the same way the initial URL is.
-		return assertPublicCoverURL(req.URL)
-	},
+// coverHop is one public, IP-pinned step of a cover fetch: the host was
+// resolved, every address was checked as public, and the connection goes
+// only to those addresses. Pinning the dial to the validated answers closes
+// DNS-rebinding between the check and the connect: a name whose record
+// flips to a private address after validation cannot reach it, and the
+// original hostname is kept for Host/Authority and TLS (SNI, cert check).
+type coverHop struct {
+	url  *url.URL
+	ip   string
+	port string
 }
 
 // assertPublicCoverURL refuses a cover destination that is not a public
-// http(s) URL: private, loopback, link-local, and multicast ranges are
-// internal infrastructure, and a catalog-provided (or redirect-hopped)
-// cover URL must never fetch from it. The host is resolved and EVERY
-// address checked, because a name resolving to mixed records must not
-// pass on the public one.
-func assertPublicCoverURL(u *url.URL) error {
+// http(s) URL: private, loopback, link-local, multicast, unspecified, and
+// carrier-grade NAT ranges are not public destinations, and a
+// catalog-provided (or redirect-hopped) cover URL must never fetch from
+// one. The host is resolved and EVERY address checked, because a name
+// resolving to mixed records must not pass on the public one. Returns the
+// pinned hop (first validated address) the fetch must connect to.
+func assertPublicCoverURL(u *url.URL) (coverHop, error) {
 	if u == nil {
-		return errors.New("empty cover URL")
+		return coverHop{}, errors.New("empty cover URL")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("cover URL scheme %q is not http(s)", u.Scheme)
+		return coverHop{}, fmt.Errorf("cover URL scheme %q is not http(s)", u.Scheme)
 	}
 	host := u.Hostname()
 	if host == "" {
-		return errors.New("cover URL has no host")
+		return coverHop{}, errors.New("cover URL has no host")
 	}
 	addrs, err := net.LookupHost(host)
 	if err != nil {
-		return fmt.Errorf("resolve cover host: %w", err)
+		return coverHop{}, fmt.Errorf("resolve cover host: %w", err)
 	}
+	if len(addrs) == 0 {
+		return coverHop{}, fmt.Errorf("cover host %s has no addresses", host)
+	}
+	pinned := ""
 	for _, a := range addrs {
 		ip := net.ParseIP(a)
 		if ip == nil {
-			continue
+			return coverHop{}, fmt.Errorf("cover host %s resolves to an unparsable address %s", host, a)
 		}
-		if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
-			return fmt.Errorf("cover host %s resolves to a non-public address", host)
+		if isNonPublicCoverAddress(ip) {
+			return coverHop{}, fmt.Errorf("cover host %s resolves to a non-public address", host)
+		}
+		if pinned == "" {
+			pinned = ip.String()
 		}
 	}
-	return nil
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return coverHop{url: u, ip: pinned, port: port}, nil
+}
+
+// isNonPublicCoverAddress classifies an address as a non-public fetch
+// destination: the standard private/loopback/link-local/multicast sets,
+// unspecified (0.0.0.0, :: — locally routable on applicable systems), and
+// the 100.64.0.0/10 shared address space, none of which a cover fetch may
+// reach.
+func isNonPublicCoverAddress(ip net.IP) bool {
+	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	return ip4InCGNAT(ip)
+}
+
+func ip4InCGNAT(ip net.IP) bool {
+	v4 := ip.To4()
+	return v4 != nil && v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127
 }
 
 // downloadCoverFile fetches url into dest with the bounded client, writing
@@ -573,22 +604,77 @@ func downloadCoverFile(ctx context.Context, coverURL string, dest string) error 
 	if err != nil {
 		return fmt.Errorf("parse cover URL: %w", err)
 	}
-	if err := assertPublicCoverURL(parsed); err != nil {
+	if _, err := assertPublicCoverURL(parsed); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, coverURL, nil)
-	if err != nil {
-		return err
+	current := parsed
+	for hop := 0; hop < 4; hop++ {
+		hp, err := assertPublicCoverURL(current)
+		if err != nil {
+			return err
+		}
+		resp, err := doPinnedCoverGet(ctx, hp)
+		if err != nil {
+			return err
+		}
+		switch {
+		case resp.StatusCode >= 300 && resp.StatusCode < 400:
+			resp.Body.Close()
+			loc, lerr := resp.Location()
+			if lerr != nil || loc == nil {
+				return fmt.Errorf("cover redirect %d has no location", resp.StatusCode)
+			}
+			current = current.ResolveReference(loc)
+			continue
+		case resp.StatusCode != http.StatusOK:
+			resp.Body.Close()
+			return fmt.Errorf("cover status %d", resp.StatusCode)
+		}
+		return writeCoverBody(ctx, resp, dest)
 	}
-	resp, err := coverDownloadClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("cover status %d", resp.StatusCode)
-	}
+	return errors.New("cover: too many redirects")
+}
 
+// doPinnedCoverGet fetches one hop, connecting only to the validated IP
+// while keeping the hostname for routing, Host, and TLS.
+func doPinnedCoverGet(ctx context.Context, hop coverHop) (*http.Response, error) {
+	scheme := hop.url.Scheme
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	transport := &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, net.JoinHostPort(hop.ip, hop.port))
+		},
+		TLSClientConfig:       &tls.Config{ServerName: hop.url.Hostname()},
+		ForceAttemptHTTP2:     scheme == "https",
+		IdleConnTimeout:       5 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
+	client := &http.Client{
+		Timeout:   coverDownloadTimeout,
+		Transport: transport,
+	}
+	defer transport.CloseIdleConnections()
+	target := scheme + "://" + net.JoinHostPort(hop.url.Hostname(), hop.port)
+	if p := hop.url.RequestURI(); p != "" {
+		target += p
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Host = hop.url.Host
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// writeCoverBody streams the response into dest atomically, capped.
+func writeCoverBody(ctx context.Context, resp *http.Response, dest string) error {
+	defer resp.Body.Close()
 	tmp := dest + ".tmp"
 	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {

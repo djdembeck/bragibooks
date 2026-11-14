@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseParts, setEngineTokens, validateScheme } from '../scheme';
+import { parseParts, setEngineTokens, trimSegment, validateScheme } from '../scheme';
 
 const tokens = [
 	{ name: 'author', value: 'author', example: 'A. Author' },
@@ -27,5 +27,27 @@ describe('validateScheme', () => {
 		const { errors } = validateScheme(parseParts('{title}/vol {'));
 		// No E0: an unclosed brace is literal text, not a token expression.
 		expect(errors).not.toContain('Path format contains unsupported token {vol}.');
+	});
+
+	it('rejects an unknown expression split across parts ({{title})', () => {
+		setEngineTokens(tokens);
+		// parseParts splits `{{title}` into a lone `{` text part + the {title}
+		// token: on the wire it is the closed expression `{{title}`, which the
+		// engine and the Go validator reject. The E0 scan must see the
+		// serialized string, not per-part text.
+		const parts = parseParts('{{title}');
+		const { errors } = validateScheme(parts);
+		// Same key the Go validator derives: the FIRST `}` closes the
+		// expression, so the unknown token is `{title` (with the leading
+		// brace) and the message prints `{{title}`.
+		expect(errors).toEqual(['Path format contains unsupported token {{title}.']);
+	});
+});
+
+describe('trimSegment', () => {
+	it('trims U+0085 (NEL) where String.prototype.trim does not', () => {
+		const s = 'A\u0085';
+		expect(s.trim()).toBe(s); // JS keeps it
+		expect(trimSegment(s)).toBe('A'); // Go strings.TrimSpace trims it
 	});
 });

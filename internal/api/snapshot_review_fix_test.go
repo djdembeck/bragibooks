@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,35 @@ import (
 
 	"github.com/bragibooks/bragibooks/internal/audio"
 )
+
+// TestIsNonPublicCoverAddress guards the cover SSRF classifier: unspecified
+// addresses and the 100.64.0.0/10 shared (CGNAT) space must be rejected as
+// non-public, while ordinary public addresses pass.
+func TestIsNonPublicCoverAddress(t *testing.T) {
+	tests := []struct {
+		ip   string
+		want bool
+	}{
+		{"0.0.0.0", true},         // unspecified
+		{"::", true},              // unspecified
+		{"100.64.0.1", true},      // CGNAT start
+		{"100.127.255.254", true}, // CGNAT end
+		{"100.63.0.1", false},     // just below CGNAT
+		{"100.128.0.1", false},    // just above CGNAT
+		{"127.0.0.1", true},       // loopback
+		{"192.168.1.1", true},     // private
+		{"10.0.0.1", true},        // private
+		{"169.254.1.1", true},     // link-local
+		{"93.184.216.34", false},  // public
+		{"8.8.8.8", false},        // public
+	}
+	for _, tt := range tests {
+		got := isNonPublicCoverAddress(net.ParseIP(tt.ip))
+		if got != tt.want {
+			t.Errorf("isNonPublicCoverAddress(%s) = %v, want %v", tt.ip, got, tt.want)
+		}
+	}
+}
 
 // TestBuildEngineJobEmptyAuthorsSerializeAsArray guards the S4 fix: an
 // authorless book must produce a non-null authors array in input_supplied,

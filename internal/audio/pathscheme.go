@@ -3,6 +3,7 @@ package audio
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 )
 
 // tokenRegistry is the set of "{key}" placeholders the web scheme accepts,
@@ -11,16 +12,31 @@ import (
 // Unknown braces are literal text, so a registry that drifts only changes
 // which keys count as substitutions; the structural rules below are the
 // safety-critical part and are local.
-var tokenRegistry = map[string]struct{}{}
+//
+// The registry is a complete, immutable map published atomically: a binary
+// re-point can republish it from a settings request while request and worker
+// paths validate concurrently, and a partially built map read mid-replacement
+// would race the write (fatal concurrent-map panic). Readers therefore always
+// see either the old complete registry or the new complete one.
+var tokenRegistry atomic.Pointer[map[string]struct{}]
 
 // SetPathFormatTokens installs the engine's substitution tokens after its
 // capabilities are verified. Must be called before any path-format
 // validation runs (main does it right after CheckCapabilities).
 func SetPathFormatTokens(tokens []string) {
-	tokenRegistry = make(map[string]struct{}, len(tokens))
+	reg := make(map[string]struct{}, len(tokens))
 	for _, t := range tokens {
-		tokenRegistry[t] = struct{}{}
+		reg[t] = struct{}{}
 	}
+	tokenRegistry.Store(&reg)
+}
+
+func pathTokenSet() map[string]struct{} {
+	return *tokenRegistry.Load()
+}
+
+func init() {
+	tokenRegistry.Store(&map[string]struct{}{})
 }
 
 const pathFormatIllegalChars = `<:>"\|?*`
@@ -41,6 +57,7 @@ type pathFormatSegment struct {
 // validatePathFormatParse walks a template: every '/' separates segments,
 // "{known-key}" is a token, and all other runs are literal text.
 func parsePathFormat(template string) []pathFormatSegment {
+	reg := pathTokenSet()
 	var segs []pathFormatSegment
 	var cur strings.Builder
 	var curHasToken bool
@@ -59,7 +76,7 @@ func parsePathFormat(template string) []pathFormatSegment {
 		if c == '{' {
 			if end := strings.IndexByte(template[i+1:], '}'); end >= 0 {
 				key := template[i+1 : i+1+end]
-				if isPathFormatToken(key) {
+				if isPathFormatToken(reg, key) {
 					curHasToken = true
 					i += 2 + end
 					continue
@@ -73,8 +90,8 @@ func parsePathFormat(template string) []pathFormatSegment {
 	return segs
 }
 
-func isPathFormatToken(key string) bool {
-	_, ok := tokenRegistry[key]
+func isPathFormatToken(reg map[string]struct{}, key string) bool {
+	_, ok := reg[key]
 	return ok
 }
 
@@ -123,20 +140,24 @@ func ValidateRelativePathFormat(template string) error {
 // mounts). Mirrors the web scheme rules so live UI feedback and saved
 // 400s agree.
 func ValidatePathFormat(template string) error {
+	// One registry snapshot for the whole validation: a concurrent binary
+	// re-point republishes the registry atomically, and mixing snapshots
+	// between the E0 scan and the parse would make the two disagree.
+	reg := pathTokenSet()
 	// E0: brace-delimited tokens the engine does not know are rejected by the
 	// engine's parser (PathResolutionError::UnknownToken), so a stored format
 	// containing one must fail validation HERE, before save — the legacy
 	// literal pass-through applied only to an UNCLOSED brace, which a closing
 	// brace is not. An engine-version capability gap (registry empty) is not
 	// a user typo: the boot gate already refused to start in that state.
-	if len(tokenRegistry) > 0 {
+	if len(reg) > 0 {
 		for i := 0; i < len(template); i++ {
 			if template[i] != '{' {
 				continue
 			}
 			if end := strings.IndexByte(template[i+1:], '}'); end >= 0 {
 				name := template[i+1 : i+1+end]
-				if !isPathFormatToken(name) {
+				if !isPathFormatToken(reg, name) {
 					return fmt.Errorf("path format contains unsupported token {%s}", name)
 				}
 				i += end
@@ -192,7 +213,7 @@ func ValidatePathFormat(template string) error {
 	// set. Tokens only exist in the exact "{key}" spelling, so a raw scan
 	// is equivalent to scanning parsed parts. (The engine's set is
 	// capability-driven; it no longer includes the legacy {asin} token.)
-	for t := range tokenRegistry {
+	for t := range reg {
 		if strings.Contains(template, "{"+t+"}") {
 			return nil
 		}

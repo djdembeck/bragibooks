@@ -123,3 +123,28 @@ func TestValidateRelativePathFormat(t *testing.T) {
 		})
 	}
 }
+
+// TestSetPathFormatTokensConcurrentExercises reads and republishes the token
+// registry simultaneously: a partially built map read mid-replacement would
+// race a concurrent map write (fatal), which -race surfaces as a data race.
+func TestSetPathFormatTokensConcurrentExercises(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			SetPathFormatTokens([]string{"author", "title", "book_id"})
+		}
+	}()
+	for i := 0; i < 2000; i++ {
+		if err := ValidatePathFormat("{author}/{title}"); err != nil {
+			t.Fatalf("concurrent validation: %v", err)
+		}
+	}
+	<-done
+	// The stress republished a reduced vocabulary; restore the full set so
+	// later tests in the package see the same registry TestMain installed.
+	SetPathFormatTokens([]string{
+		"author", "authors", "narrator", "narrators", "title", "subtitle",
+		"series_name", "series_position", "year", "genre", "metadata_id", "book_id",
+	})
+}

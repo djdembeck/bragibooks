@@ -517,20 +517,22 @@ func (p *Processor) UpdateVersion() string {
 	p.mu.RLock()
 	binary := p.Binary
 	p.mu.RUnlock()
-	return p.probeVersion(binary)
+	return p.probeVersion(context.Background(), binary)
 }
 
 // CheckVersionFor reports the version of the EXACT binary named and errors
 // when it is missing, unreportable, or below MinimumM4bMergeVersion. Unlike
 // CheckVersion it does not read p.Binary, so a caller that captured a
 // binary snapshot can gate on the precise executable it is about to launch
-// (the per-run pre-launch gate). The probe never stores the result: the
-// display version stays tied to the live config binary.
-func (p *Processor) CheckVersionFor(binary string) (string, error) {
+// (the per-run pre-launch gate). The probe runs under the caller's context,
+// so a cancelled run dies with the probe's process tree instead of stalling
+// the gate. The probe never stores the result: the display version stays
+// tied to the live config binary.
+func (p *Processor) CheckVersionFor(ctx context.Context, binary string) (string, error) {
 	if binary == "" {
 		return "", errors.New("m4b-merge binary is not set")
 	}
-	reported := p.probeVersion(binary)
+	reported := p.probeVersion(ctx, binary)
 	if reported == "unknown" {
 		return "", fmt.Errorf("m4b-merge %s cannot report a version", binary)
 	}
@@ -543,12 +545,12 @@ func (p *Processor) CheckVersionFor(binary string) (string, error) {
 // probeVersion runs the --version probe against binary ("" yields "unknown"
 // without spawning anything) and stores the result only when binary is the
 // live config binary.
-func (p *Processor) probeVersion(binary string) string {
+func (p *Processor) probeVersion(ctx context.Context, binary string) string {
 	if binary == "" {
 		// Nothing to execute; never spawn the bare "" command.
 		return p.storeLinkedVersion(binary, "unknown")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), versionProbeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, versionProbeTimeout)
 	defer cancel()
 
 	// Execute, retrying the transient ETXTBSY: Linux refuses to exec a

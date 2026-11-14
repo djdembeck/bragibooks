@@ -243,20 +243,21 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 	// E0: a closed brace expression the engine does not know. The engine's
 	// template parser rejects unknown tokens (unlike an unclosed brace,
 	// which is literal text), so a format the UI accepts must be one the
-	// engine will run — same rule as the Go ValidatePathFormat gate.
-	for (const p of parts) {
-		if (p.kind !== 'text') continue;
-		for (let i = 0; i < p.value.length; i++) {
-			if (p.value[i] !== '{') continue;
-			const close = p.value.indexOf('}', i + 1);
-			if (close !== -1) {
-				const key = p.value.slice(i + 1, close);
-				if (!keys.has(key)) {
-					errors.push(`Path format contains unsupported token {${key}}.`);
-					return { errors, warnings };
-				}
-				i = close;
+	// engine will run — same rule as the Go ValidatePathFormat gate. Scan
+	// the serialized template, not individual parts: serialization
+	// round-trips exactly, and a spelling split across parts (e.g. `{` +
+	// `{title}` from `{{title}`) is one closed expression on the wire.
+	const raw = serializeParts(parts);
+	for (let i = 0; i < raw.length; i++) {
+		if (raw[i] !== '{') continue;
+		const close = raw.indexOf('}', i + 1);
+		if (close !== -1) {
+			const key = raw.slice(i + 1, close);
+			if (!keys.has(key)) {
+				errors.push(`Path format contains unsupported token {${key}}.`);
+				return { errors, warnings };
 			}
+			i = close;
 		}
 	}
 

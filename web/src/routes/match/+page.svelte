@@ -33,6 +33,7 @@
 		type EvidenceField, type MatchEvidenceReport
 	} from '#lib/matchEvidence.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
+	import { trimSegment } from '#lib/scheme.js';
 
 	type ReviewMode = 'batch' | 'focused';
 
@@ -985,12 +986,16 @@
 	 *  the last " #" separates name from position, a leading "#N" with no
 	 *  name is an empty name. Keeping the preview's re-parse identical to
 	 *  capture is what guarantees the previewed name matches the saved
-	 *  snapshot's name. */
+	 *  snapshot's name. Trimming uses Go's unicode.IsSpace set (trimSegment)
+	 *  rather than String.prototype.trim — the server trims with
+	 *  strings.TrimSpace, and the two disagree on U+0085, which would let a
+	 *  series name carry into the saved snapshot while vanishing from the
+	 *  previewed one (or vice versa). */
 	function splitSeries(series: string): [string, string] {
-		series = series.trim();
+		series = trimSegment(series);
 		if (!series) return ['', ''];
 		const i = series.lastIndexOf(' #');
-		if (i >= 0) return [series.slice(0, i).trim(), series.slice(i + 2).trim()];
+		if (i >= 0) return [trimSegment(series.slice(0, i)), trimSegment(series.slice(i + 2))];
 		return [series, ''];
 	}
 

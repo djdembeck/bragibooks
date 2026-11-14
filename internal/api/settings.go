@@ -321,6 +321,7 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		snap.APIKey.BaseURL = *req.AudiobookdbBaseURL
 		changed["api_key"] = mergeChangedMap(changed, "api_key", "base_url", *req.AudiobookdbBaseURL)
 	}
+	var newBinaryCapsChecked *audio.Capabilities
 	if req.M4bMergeBinary != nil {
 		if *req.M4bMergeBinary != prev.M4bMerge.Binary {
 			// A re-pointed engine binary is gated BEFORE the save is
@@ -328,10 +329,14 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			// too old, no protocol capabilities) must not become the live
 			// engine and start failing jobs. The gate probes the exact
 			// path requested, so a relative path resolves against the
-			// server's cwd the same way the launch will.
-			if _, err := h.svc.Processor.CheckCapabilitiesFor(r.Context(), *req.M4bMergeBinary); err != nil {
+			// server's cwd the same way the launch will. The verified
+			// capabilities are retained: step 3 publishes them together
+			// with the binary swap (no second probe after the swap).
+			if caps, err := h.svc.Processor.CheckCapabilitiesFor(r.Context(), *req.M4bMergeBinary); err != nil {
 				writeError(w, http.StatusBadRequest, "engine check failed for "+*req.M4bMergeBinary+": "+err.Error())
 				return
+			} else {
+				newBinaryCapsChecked = caps
 			}
 		}
 		snap.M4bMerge.Binary = *req.M4bMergeBinary
@@ -389,6 +394,18 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// 3. Both stores persisted: swap in the new immutable live config
 	//    (directory ~ expanded so the live value is absolute) and refresh
 	//    the live services (finding: live settings apply).
+	//
+	// newBinaryCaps is the verified capabilities of a re-pointed engine
+	// binary, captured by the pre-save gate above. It is published TOGETHER
+	// with the binary swap below: re-probing after ApplyConfig would leave a
+	// window where jobs run the new binary against the previous binary's
+	// capabilities and token registry, and a transient probe failure there
+	// would only be logged while the stale state kept serving. The pre-save
+	// result is the same probe, already succeeded, so nothing is lost.
+	var newBinaryCaps *audio.Capabilities
+	if req.M4bMergeBinary != nil && *req.M4bMergeBinary != prev.M4bMerge.Binary {
+		newBinaryCaps = newBinaryCapsChecked
+	}
 	live := snap
 	live.Directories.InputDir = expandTilde(live.Directories.InputDir)
 	live.Directories.OutputDir = expandTilde(live.Directories.OutputDir)
@@ -398,22 +415,18 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		h.svc.Config.AddYAMLKeys(k)
 	}
 	h.svc.Processor.ApplyConfig(h.svc.Config.Config())
-	// A swapped engine binary means a new protocol surface: the capabilities
-	// document stored for the previous binary is now stale, and the Settings
-	// picker + every save-time format validation render from it. Re-probe
-	// the new binary (it already passed CheckCapabilitiesFor above, so this
-	// is a fast re-confirmation) and refresh the token registry.
-	if req.M4bMergeBinary != nil && *req.M4bMergeBinary != prev.M4bMerge.Binary {
-		if caps, err := h.svc.Processor.CheckCapabilitiesFor(r.Context(), live.M4bMerge.Binary); err != nil {
-			log.Printf("Warning: engine capability refresh after binary change failed: %v", err)
-		} else {
-			h.svc.Processor.StoreCapabilities(caps)
-			tokenNames := make([]string, 0, len(caps.PathTokens))
-			for _, t := range caps.PathTokens {
-				tokenNames = append(tokenNames, t.Name)
-			}
-			audio.SetPathFormatTokens(tokenNames)
+	if newBinaryCaps != nil {
+		// A swapped engine binary means a new protocol surface: the
+		// capabilities stored for the previous binary are stale, and the
+		// Settings picker + every save-time format validation render from
+		// them. Publish the pre-save-verified document now, alongside the
+		// binary the run paths have just been pointed at.
+		h.svc.Processor.StoreCapabilities(newBinaryCaps)
+		tokenNames := make([]string, 0, len(newBinaryCaps.PathTokens))
+		for _, t := range newBinaryCaps.PathTokens {
+			tokenNames = append(tokenNames, t.Name)
 		}
+		audio.SetPathFormatTokens(tokenNames)
 	}
 	h.svc.AudiobookDB.Store(audiobookdb.NewClient(live.APIKey.APIKey, live.APIKey.BaseURL))
 
