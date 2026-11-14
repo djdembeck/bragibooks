@@ -3,13 +3,40 @@ package audio
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 )
 
-// pathFormatTokens is the set of "{key}" placeholders the web scheme accepts:
-// m4b-merge's seven substitution tokens plus {asin}, which the engine leaves
-// literal (mirrors format_path in the m4b-merge processor).
-var pathFormatTokens = []string{
-	"asin", "author", "narrator", "series_name", "series_position", "subtitle", "title", "year",
+// tokenRegistry is the set of "{key}" placeholders the web scheme accepts,
+// populated from the ENGINE's verified capabilities at startup
+// (Capabilities.PathTokens) — not a local copy of the engine's token set.
+// Unknown braces are literal text, so a registry that drifts only changes
+// which keys count as substitutions; the structural rules below are the
+// safety-critical part and are local.
+//
+// The registry is a complete, immutable map published atomically: a binary
+// re-point can republish it from a settings request while request and worker
+// paths validate concurrently, and a partially built map read mid-replacement
+// would race the write (fatal concurrent-map panic). Readers therefore always
+// see either the old complete registry or the new complete one.
+var tokenRegistry atomic.Pointer[map[string]struct{}]
+
+// SetPathFormatTokens installs the engine's substitution tokens after its
+// capabilities are verified. Must be called before any path-format
+// validation runs (main does it right after CheckCapabilities).
+func SetPathFormatTokens(tokens []string) {
+	reg := make(map[string]struct{}, len(tokens))
+	for _, t := range tokens {
+		reg[t] = struct{}{}
+	}
+	tokenRegistry.Store(&reg)
+}
+
+func pathTokenSet() map[string]struct{} {
+	return *tokenRegistry.Load()
+}
+
+func init() {
+	tokenRegistry.Store(&map[string]struct{}{})
 }
 
 const pathFormatIllegalChars = `<:>"\|?*`
@@ -30,6 +57,10 @@ type pathFormatSegment struct {
 // validatePathFormatParse walks a template: every '/' separates segments,
 // "{known-key}" is a token, and all other runs are literal text.
 func parsePathFormat(template string) []pathFormatSegment {
+	return parsePathFormatFor(template, pathTokenSet())
+}
+
+func parsePathFormatFor(template string, reg map[string]struct{}) []pathFormatSegment {
 	var segs []pathFormatSegment
 	var cur strings.Builder
 	var curHasToken bool
@@ -48,7 +79,7 @@ func parsePathFormat(template string) []pathFormatSegment {
 		if c == '{' {
 			if end := strings.IndexByte(template[i+1:], '}'); end >= 0 {
 				key := template[i+1 : i+1+end]
-				if isPathFormatToken(key) {
+				if isPathFormatToken(reg, key) {
 					curHasToken = true
 					i += 2 + end
 					continue
@@ -62,13 +93,27 @@ func parsePathFormat(template string) []pathFormatSegment {
 	return segs
 }
 
-func isPathFormatToken(key string) bool {
-	for _, t := range pathFormatTokens {
-		if t == key {
-			return true
+func isPathFormatToken(reg map[string]struct{}, key string) bool {
+	_, ok := reg[key]
+	return ok
+}
+
+// NormalizeEnginePathFormat strips a trailing literal ".m4b" from a path
+// format before it is handed to the engine's job protocol. The engine appends
+// ".m4b" to the last component itself (and the legacy -p path did the same),
+// so a stored format that already carries the extension must not gain a
+// second one: "{author}/{title}.m4b" resolves to exactly the same file name
+// as "{author}/{title}". Only the last path segment's suffix is considered,
+// so a token like "{title}" or a literal "archive.tar" is untouched.
+func NormalizeEnginePathFormat(template string) string {
+	if idx := strings.LastIndexByte(template, '/'); idx >= 0 {
+		rest := template[idx+1:]
+		if n := strings.TrimSuffix(rest, ".m4b"); n != rest {
+			return template[:idx+1] + n
 		}
+		return template
 	}
-	return false
+	return strings.TrimSuffix(template, ".m4b")
 }
 
 // ValidateRelativePathFormat checks a template that must resolve INSIDE the
@@ -98,7 +143,32 @@ func ValidateRelativePathFormat(template string) error {
 // mounts). Mirrors the web scheme rules so live UI feedback and saved
 // 400s agree.
 func ValidatePathFormat(template string) error {
-	segs := parsePathFormat(template)
+	// One registry snapshot for the whole validation: a concurrent binary
+	// re-point republishes the registry atomically, and mixing snapshots
+	// between the E0 scan and the parse would make the two disagree.
+	reg := pathTokenSet()
+	// E0: brace-delimited tokens the engine does not know are rejected by the
+	// engine's parser (PathResolutionError::UnknownToken), so a stored format
+	// containing one must fail validation HERE, before save — the legacy
+	// literal pass-through applied only to an UNCLOSED brace, which a closing
+	// brace is not. An engine-version capability gap (registry empty) is not
+	// a user typo: the boot gate already refused to start in that state.
+	if len(reg) > 0 {
+		for i := 0; i < len(template); i++ {
+			if template[i] != '{' {
+				continue
+			}
+			if end := strings.IndexByte(template[i+1:], '}'); end >= 0 {
+				name := template[i+1 : i+1+end]
+				if !isPathFormatToken(reg, name) {
+					return fmt.Errorf("path format contains unsupported token {%s}", name)
+				}
+				i += end
+			}
+		}
+	}
+
+	segs := parsePathFormatFor(template, reg)
 
 	plainSegs := make([]string, 0, len(segs))
 	anyElement := false
@@ -142,13 +212,11 @@ func ValidatePathFormat(template string) error {
 		}
 	}
 
-	// E4: at least one substitutable (non-asin) placeholder. Tokens only
-	// exist in the exact "{key}" spelling, so a raw scan is equivalent to
-	// scanning parsed parts.
-	for _, t := range pathFormatTokens {
-		if t == "asin" {
-			continue
-		}
+	// E4: at least one placeholder from the engine's substitution token
+	// set. Tokens only exist in the exact "{key}" spelling, so a raw scan
+	// is equivalent to scanning parsed parts. (The engine's set is
+	// capability-driven; it no longer includes the legacy {asin} token.)
+	for t := range reg {
 		if strings.Contains(template, "{"+t+"}") {
 			return nil
 		}

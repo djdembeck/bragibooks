@@ -114,7 +114,7 @@ The normal work is deliberately linear: **select, match, queue, finish**.
 
 2. **Intake:** browse the mounted input directory and select one or more audiobook folders or files.
 3. **Match:** let Bragibooks search AudiobookDB, then confirm or correct the book, release, author, and narrator metadata. Custom search is available when the first match is wrong.
-4. **Queue:** select the matched books and, optionally, a **saved output profile** — a named preset (output directory and/or path format) created under Settings — then submit the batch. The profile applies only to the jobs created by that queue request and is snapshotted into each job, so later profile or Settings changes do not move already-queued work. Without a profile the global output directory and path format apply. Bragibooks invokes `m4b-merge` to merge, convert, clean, tag, and repackage the source files.
+4. **Queue:** select the matched books and, optionally, a **saved output profile** — a named preset (output directory and/or path format) created under Settings — then submit the batch. The effective destination (output directory, path format, and completed directory) is snapshotted into each job at queue time — for profile, override, and plain global jobs alike — so later profile or Settings changes do not move, re-format, or redirect already-queued work. Bragibooks invokes `m4b-merge` to merge, convert, clean, tag, and repackage the source files.
 5. **Finish:** follow live processing output in the browser, then review completed books and any errors. Jobs can take from seconds to hours depending on the number and type of files.
 
 ## Screens

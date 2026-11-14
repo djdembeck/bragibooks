@@ -334,6 +334,19 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A missing book is a 400/404, not a later 500: the UPDATE below would
+	// match zero rows silently, and the snapshot capture would then fail
+	// with a not-found that the caller cannot distinguish from a real DB
+	// error.
+	var exists int64
+	if err := h.svc.DB.QueryRow("SELECT 1 FROM books WHERE id = ?", bookID).Scan(&exists); err == sql.ErrNoRows {
+		writeError(w, http.StatusNotFound, "book not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "book lookup: "+err.Error())
+		return
+	}
+
 	setters := []string{}
 	args := []interface{}{}
 
@@ -428,6 +441,42 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("replace people: %v", err))
 			return
 		}
+	}
+
+	// Re-capture the authoritative snapshot now that the book row and its
+	// people are the operator's current selection. A catalog-linked book is
+	// what a processing job will run on, so its capture must track this
+	// save; for a non-catalog book the capture still records the local
+	// fields (title, people, series, year) that the job will name from.
+	// The catalog round trip is skipped for pipeline-only updates.
+	//
+	// On a hard capture failure (a DB error, not a catalog one) the book
+	// update above has ALREADY committed, so the save cannot be undone:
+	// the row is invalidated (deleted) and the save reports 500, leaving
+	// the book with no authoritative snapshot. A book with no snapshot row
+	// is refused at queue time with an explicit re-match and re-preview
+	// message — it can never run on stale data.
+	//
+	// On catalog unavailability the capture degrades: the row is refreshed
+	// with the new local fields while retaining the previously captured
+	// catalog content (genres/chapters/cover), and the save succeeds.
+	if _, cerr := h.captureSnapshot(r.Context(), bookID, snapshotRelevantChanged(&req)); cerr != nil {
+		// Fail closed: the stale row MUST be invalidated so the book can never
+		// later run on it. If the invalidation itself fails, do NOT report a
+		// clean 503 — the book's state is now unknown (a row that may be
+		// stale and loadable), so report 500 and say the snapshot is in an
+		// unknown state, never "re-preview to restore it" (finding: ignored
+		// invalidation DELETE).
+		if _, derr := h.svc.DB.Exec("DELETE FROM book_snapshots WHERE book_id = ?", bookID); derr != nil {
+			log.Printf("capture snapshot for book %d: %v — AND invalidation failed: %v", bookID, cerr, derr)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+				"book saved, but its processing snapshot capture failed (%v) and the old snapshot could not be invalidated (%v): the book's metadata is in an unknown state — do not process it until a fresh save/re-preview succeeds", cerr, derr))
+			return
+		}
+		log.Printf("capture snapshot for book %d: %v — invalidated snapshot row", bookID, cerr)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+			"book saved, but its processing snapshot capture failed: %v — re-preview the book to restore it", cerr))
+		return
 	}
 
 	book, err := h.getBook(bookID)

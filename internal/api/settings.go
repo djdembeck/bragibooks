@@ -258,7 +258,10 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.OutputScheme != nil {
-		if verr := audio.ValidatePathFormat(*req.OutputScheme); verr != nil {
+		// The same relative-path rules the boot check and enqueue apply:
+		// a value the engine cannot resolve inside the output root must
+		// fail HERE (400), not make the next startup fatal.
+		if verr := audio.ValidateRelativePathFormat(*req.OutputScheme); verr != nil {
 			writeError(w, http.StatusBadRequest, "output scheme: "+verr.Error())
 			return
 		}
@@ -321,7 +324,24 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		snap.APIKey.BaseURL = *req.AudiobookdbBaseURL
 		changed["api_key"] = mergeChangedMap(changed, "api_key", "base_url", *req.AudiobookdbBaseURL)
 	}
+	var newBinaryCapsChecked *audio.Capabilities
 	if req.M4bMergeBinary != nil {
+		if *req.M4bMergeBinary != prev.M4bMerge.Binary {
+			// A re-pointed engine binary is gated BEFORE the save is
+			// accepted: a binary the boot gate would refuse (missing,
+			// too old, no protocol capabilities) must not become the live
+			// engine and start failing jobs. The gate probes the exact
+			// path requested, so a relative path resolves against the
+			// server's cwd the same way the launch will. The verified
+			// capabilities are retained: step 3 publishes them together
+			// with the binary swap (no second probe after the swap).
+			if caps, err := h.svc.Processor.CheckCapabilitiesFor(r.Context(), *req.M4bMergeBinary); err != nil {
+				writeError(w, http.StatusBadRequest, "engine check failed for "+*req.M4bMergeBinary+": "+err.Error())
+				return
+			} else {
+				newBinaryCapsChecked = caps
+			}
+		}
 		snap.M4bMerge.Binary = *req.M4bMergeBinary
 		changed["m4b_merge"] = mergeChangedMap(changed, "m4b_merge", "binary", *req.M4bMergeBinary)
 	}
@@ -377,6 +397,18 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// 3. Both stores persisted: swap in the new immutable live config
 	//    (directory ~ expanded so the live value is absolute) and refresh
 	//    the live services (finding: live settings apply).
+	//
+	// newBinaryCaps is the verified capabilities of a re-pointed engine
+	// binary, captured by the pre-save gate above. It is published TOGETHER
+	// with the binary swap below: re-probing after ApplyConfig would leave a
+	// window where jobs run the new binary against the previous binary's
+	// capabilities and token registry, and a transient probe failure there
+	// would only be logged while the stale state kept serving. The pre-save
+	// result is the same probe, already succeeded, so nothing is lost.
+	var newBinaryCaps *audio.Capabilities
+	if req.M4bMergeBinary != nil && *req.M4bMergeBinary != prev.M4bMerge.Binary {
+		newBinaryCaps = newBinaryCapsChecked
+	}
 	live := snap
 	live.Directories.InputDir = expandTilde(live.Directories.InputDir)
 	live.Directories.OutputDir = expandTilde(live.Directories.OutputDir)
@@ -384,6 +416,27 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	h.svc.Config.Store(&live)
 	for _, k := range changedDottedKeys(changed) {
 		h.svc.Config.AddYAMLKeys(k)
+	}
+	// A swapped engine binary means a new protocol surface: the
+	// capabilities stored for the previous binary are stale, and the
+	// Settings picker + every save-time format validation render from
+	// them. Publish the pre-save-verified document and the token registry
+	// BEFORE the binary swap below: a reader then pairs either the complete
+	// old state (old binary + old capabilities) or the new capabilities
+	// with the old binary — never the new binary with the previous
+	// binary's capabilities. The latter pairing would record a stale
+	// engine identity at queue time that the new binary's run cannot match;
+	// the former fails closed and recovers by re-queue: a job captured
+	// under the old identity that runs on the new binary trips the
+	// identity check, errors with a re-preview/re-queue instruction, and
+	// the re-queued job captures the new identity.
+	if newBinaryCaps != nil {
+		h.svc.Processor.StoreCapabilities(newBinaryCaps)
+		tokenNames := make([]string, 0, len(newBinaryCaps.PathTokens))
+		for _, t := range newBinaryCaps.PathTokens {
+			tokenNames = append(tokenNames, t.Name)
+		}
+		audio.SetPathFormatTokens(tokenNames)
 	}
 	h.svc.Processor.ApplyConfig(h.svc.Config.Config())
 	h.svc.AudiobookDB.Store(audiobookdb.NewClient(live.APIKey.APIKey, live.APIKey.BaseURL))

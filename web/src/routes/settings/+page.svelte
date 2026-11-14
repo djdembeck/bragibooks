@@ -464,20 +464,6 @@
 		profilePickerOpen = false;
 	}
 
-	// m4b-merge template tokens a relative format must contain at least one of.
-	// {asin} is deliberately excluded: the engine leaves it unsubstituted, so
-	// a scheme whose only placeholder is {asin} is rejected server-side and
-	// the client must agree.
-	const PROFILE_SCHEME_TOKENS: readonly string[] = [
-		'author',
-		'narrator',
-		'series_name',
-		'series_position',
-		'subtitle',
-		'title',
-		'year'
-	];
-
 	async function loadProfiles() {
 		profileLoading = true;
 		profileError = null;
@@ -552,9 +538,15 @@
 			} else if (scheme.split('/').some((seg) => trimSegment(seg) === '..')) {
 				profileFieldErrors.output_scheme = 'Must not contain a “..” path segment.';
 				valid = false;
-			} else if (!PROFILE_SCHEME_TOKENS.some((t) => scheme.includes(`{${t}}`))) {
-				profileFieldErrors.output_scheme = 'Must contain at least one token (e.g. {author}/{title}).';
-				valid = false;
+			} else {
+				// Token vocabulary is the engine's capability document (no
+				// local registry): validateScheme's placeholder rule already
+				// checks the engine's set.
+				const schemeErr = validateScheme(parseParts(scheme)).errors[0];
+				if (schemeErr) {
+					profileFieldErrors.output_scheme = schemeErr;
+					valid = false;
+				}
 			}
 		}
 

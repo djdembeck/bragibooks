@@ -241,6 +241,41 @@ CREATE TABLE IF NOT EXISTS index_state (
 ALTER TABLE settings ADD COLUMN indexing_enabled BOOLEAN NOT NULL DEFAULT 0;
 `,
 	},
+	{
+		// v15: authoritative processing snapshots. book_snapshots stores the
+		// operator's SELECTED catalog record per book, captured at Match
+		// save / metadata edit: the effective metadata (title, ordered
+		// authors/narrators — array order is the path/author order — series,
+		// description, genres, year), the canonical AudiobookDB book id
+		// ({book_id} token), the selected release id, an integer-millisecond
+		// chapter list, and a local cover filename under the covers
+		// directory (immutable artwork reference, staged into the job's own
+		// staging root at run time). A job's m4b_merge_args now embeds a
+		// copy of its book's snapshot (snapshot_version >= 1); jobs captured
+		// before this column (snapshot_version = 0) are legacy and are
+		// resolved explicitly at queue time, never guessed.
+		version: 15,
+		sql: `
+CREATE TABLE IF NOT EXISTS book_snapshots (
+    book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    audiobookdb_book_id TEXT NOT NULL DEFAULT '',
+    audiobookdb_release_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    authors TEXT NOT NULL DEFAULT '[]',
+    narrators TEXT NOT NULL DEFAULT '[]',
+    series_name TEXT NOT NULL DEFAULT '',
+    series_position TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    genres TEXT NOT NULL DEFAULT '[]',
+    year INTEGER,
+    cover_file TEXT NOT NULL DEFAULT '',
+    chapters TEXT NOT NULL DEFAULT '[]',
+    captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+ALTER TABLE processing_jobs ADD COLUMN snapshot_version INTEGER NOT NULL DEFAULT 0;
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

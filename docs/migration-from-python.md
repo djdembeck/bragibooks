@@ -110,6 +110,8 @@ Python environment variables are not reused, except for the legacy `REGION` alia
 
 Go settings precedence is **environment variable > YAML file > default**, with the database settings row (where the migration writes the legacy settings) loaded below YAML and env.
 
+**Path format token change (action needed if you used `{asin}`).** The Python app let you build the output path from the book's ASIN (`{asin}`). The new app resolves the output name through the `m4b-merge` engine, which does not accept `{asin}` — it resolves `{book_id}` (the canonical AudiobookDB book id) and the people tokens (`{author}`, `{authors}`, `{narrator}`, `{narrators}`, …) instead. A stored path format (the global `processing.path_format`, or an output profile's scheme) that still contains `{asin}` is **refused at startup** with a clear diagnosis naming the offending value, so the app will not boot until it is fixed. Replace `{asin}` in the format with `{book_id}` (or a people/title token) in Settings before starting. This check runs on every stored value at boot, so a pre-existing legacy scheme surfaces once, at upgrade time, not on the first job.
+
 One binding detail to be aware of: `SERVER_HOST` defaults to *empty*, and an empty host makes the Go server listen on **all interfaces** (`:8000`), not loopback. In Docker the published port is what controls exposure — use `--publish 127.0.0.1:8888:8000` to keep it reachable from the host only. If you run the binary directly on a host and want loopback-only, set `SERVER_HOST=127.0.0.1` explicitly.
 
 ## Verifying the migration
