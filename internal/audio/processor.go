@@ -33,6 +33,28 @@ type Processor struct {
 	PathFormat   string
 	LogLevel     string
 	version      string
+	// capabilities is the engine's --capabilities document, verified at
+	// startup and refreshed after any settings change that swaps the binary.
+	// Every token/policy decision the API makes (preview validation, the
+	// Settings picker, save-time format checks) derives from this — Bragi owns
+	// no token registry of its own.
+	capabilities *Capabilities
+}
+
+// Capabilities returns the verified engine capabilities, or nil before the
+// startup probe has run. Callers on the request path should treat nil as "not
+// verified" and refuse, never as a fallback to a local token table.
+func (p *Processor) Capabilities() *Capabilities {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.capabilities
+}
+
+// StoreCapabilities records the verified capabilities for the current binary.
+func (p *Processor) StoreCapabilities(c *Capabilities) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.capabilities = c
 }
 
 // snapshot returns a consistent copy of the mutable CLI settings (see the
@@ -41,6 +63,16 @@ func (p *Processor) snapshot() (binary, outputDir, completedDir, pathFormat, log
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.Binary, p.OutputDir, p.CompletedDir, p.PathFormat, p.LogLevel, p.NumCPUs
+}
+
+// SettingsSnapshot returns a consistent copy of the effective destination
+// and path-format settings for the worker: the output root the job's
+// artifacts are published under, the completed directory (empty when
+// disabled), and the global relative path format. A blank override in the
+// caller's queue-time destination pair resolves to these live values.
+func (p *Processor) SettingsSnapshot() (outputDir, completedDir, pathFormat string) {
+	_, outputDir, completedDir, pathFormat, _, _ = p.snapshot()
+	return
 }
 
 // ApplyConfig refreshes the mutable m4b-merge settings (binary, output and
@@ -416,8 +448,13 @@ func findNewestM4B(dir string, since time.Time) (string, error) {
 	return filepath.Abs(newest)
 }
 
-// MinimumM4bMergeVersion is the minimum required m4b-merge version.
-const MinimumM4bMergeVersion = "1.0.0"
+// MinimumM4bMergeVersion is the minimum required m4b-merge version. 2.2.0 is
+// the first release with the full protocol Bragi's authoritative snapshot
+// cutover runs on: schema_version 1 jobs with the plural people tokens AND
+// a supplied-mode canonical book id that feeds the {book_id} naming token
+// (#480). The capabilities probe is the authoritative protocol gate and
+// this is the coarse floor reported in messages.
+const MinimumM4bMergeVersion = "2.2.0"
 
 // Version runs the m4b-merge binary with --version and returns the last
 // whitespace-separated token of its output as the reported version.

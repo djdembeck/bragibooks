@@ -5,11 +5,22 @@ import (
 	"strings"
 )
 
-// pathFormatTokens is the set of "{key}" placeholders the web scheme accepts:
-// m4b-merge's seven substitution tokens plus {asin}, which the engine leaves
-// literal (mirrors format_path in the m4b-merge processor).
-var pathFormatTokens = []string{
-	"asin", "author", "narrator", "series_name", "series_position", "subtitle", "title", "year",
+// tokenRegistry is the set of "{key}" placeholders the web scheme accepts,
+// populated from the ENGINE's verified capabilities at startup
+// (Capabilities.PathTokens) — not a local copy of the engine's token set.
+// Unknown braces are literal text, so a registry that drifts only changes
+// which keys count as substitutions; the structural rules below are the
+// safety-critical part and are local.
+var tokenRegistry = map[string]struct{}{}
+
+// SetPathFormatTokens installs the engine's substitution tokens after its
+// capabilities are verified. Must be called before any path-format
+// validation runs (main does it right after CheckCapabilities).
+func SetPathFormatTokens(tokens []string) {
+	tokenRegistry = make(map[string]struct{}, len(tokens))
+	for _, t := range tokens {
+		tokenRegistry[t] = struct{}{}
+	}
 }
 
 const pathFormatIllegalChars = `<:>"\|?*`
@@ -63,12 +74,26 @@ func parsePathFormat(template string) []pathFormatSegment {
 }
 
 func isPathFormatToken(key string) bool {
-	for _, t := range pathFormatTokens {
-		if t == key {
-			return true
+	_, ok := tokenRegistry[key]
+	return ok
+}
+
+// NormalizeEnginePathFormat strips a trailing literal ".m4b" from a path
+// format before it is handed to the engine's job protocol. The engine appends
+// ".m4b" to the last component itself (and the legacy -p path did the same),
+// so a stored format that already carries the extension must not gain a
+// second one: "{author}/{title}.m4b" resolves to exactly the same file name
+// as "{author}/{title}". Only the last path segment's suffix is considered,
+// so a token like "{title}" or a literal "archive.tar" is untouched.
+func NormalizeEnginePathFormat(template string) string {
+	if idx := strings.LastIndexByte(template, '/'); idx >= 0 {
+		rest := template[idx+1:]
+		if n := strings.TrimSuffix(rest, ".m4b"); n != rest {
+			return template[:idx+1] + n
 		}
+		return template
 	}
-	return false
+	return strings.TrimSuffix(template, ".m4b")
 }
 
 // ValidateRelativePathFormat checks a template that must resolve INSIDE the
@@ -142,13 +167,11 @@ func ValidatePathFormat(template string) error {
 		}
 	}
 
-	// E4: at least one substitutable (non-asin) placeholder. Tokens only
-	// exist in the exact "{key}" spelling, so a raw scan is equivalent to
-	// scanning parsed parts.
-	for _, t := range pathFormatTokens {
-		if t == "asin" {
-			continue
-		}
+	// E4: at least one placeholder from the engine's substitution token
+	// set. Tokens only exist in the exact "{key}" spelling, so a raw scan
+	// is equivalent to scanning parsed parts. (The engine's set is
+	// capability-driven; it no longer includes the legacy {asin} token.)
+	for t := range tokenRegistry {
 		if strings.Contains(template, "{"+t+"}") {
 			return nil
 		}

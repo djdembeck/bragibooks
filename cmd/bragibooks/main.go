@@ -141,6 +141,28 @@ func main() {
 	}
 	processor.StoreVersion(mergeVersion)
 
+	// Verify the engine's ACTUAL protocol capabilities, not just its version
+	// string: the authoritative job protocol requires schema 1, the canonical
+	// {book_id} token, and the plural people tokens. A version that lies about
+	// its protocol (or a repackaged binary) must not reach the first job.
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	engineCaps, err := processor.CheckCapabilities(probeCtx)
+	probeCancel()
+	if err != nil {
+		log.Fatalf("m4b-merge capabilities check failed: %v", err)
+	}
+	processor.StoreCapabilities(engineCaps)
+
+	// Install the engine's path-format token vocabulary (the legacy {asin}
+	// token is gone: the engine resolves {book_id} and the people tokens)
+	// and the covers directory the worker stages captured covers from.
+	tokenNames := make([]string, 0, len(engineCaps.PathTokens))
+	for _, t := range engineCaps.PathTokens {
+		tokenNames = append(tokenNames, t.Name)
+	}
+	audio.SetPathFormatTokens(tokenNames)
+	api.SetCoversDir(coversDir)
+
 	audiobookDBClient := audiobookdb.NewClient(cfg.APIKey.APIKey, cfg.APIKey.BaseURL)
 	audiobookDBVal := &atomic.Value{}
 	audiobookDBVal.Store(audiobookDBClient)

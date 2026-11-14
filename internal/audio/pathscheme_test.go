@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+// TestMain installs the engine's verified path-token vocabulary (the real
+// startup path does this from --capabilities): validation is
+// capability-driven, so the suite needs the engine's token set, which no
+// longer includes the legacy {asin} token.
+func TestMain(m *testing.M) {
+	SetPathFormatTokens([]string{
+		"author", "authors", "narrator", "narrators", "title", "subtitle",
+		"series_name", "series_position", "year", "genre", "metadata_id", "book_id",
+	})
+	m.Run()
+}
+
 func TestValidatePathFormat(t *testing.T) {
 	tests := []struct {
 		name      string

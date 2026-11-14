@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { tick } from 'svelte';
-	import { MARTIAN, parseParts, resolveExample, serializeParts, TOKEN_META, TOKEN_ORDER, validateScheme, type Part, type TokenKey } from '#lib/scheme.js';
+	import { engineTokens, parseParts, serializeParts, validateScheme, type Part, type TokenKey } from '#lib/scheme.js';
+	import { post } from '#lib/api.js';
+	import { toCleanedError } from '#lib/adbError.js';
 
 	let { value = $bindable(''), outputDir = '', allowEmpty = false }: {
 		value?: string;
@@ -19,7 +21,64 @@
 	const { errors: allErrors, warnings: allWarnings } = $derived(validateScheme(parts));
 	const errors = $derived(allowEmpty && isEmpty ? [] : allErrors);
 	const warnings = $derived(allowEmpty && isEmpty ? [] : allWarnings);
-	const example = $derived(resolveExample(parts, MARTIAN.values, outputDir));
+
+	// Live name example: the ENGINE's non-mutating job preview over the
+	// token's own example values (the engine's capability document supplies
+	// them; Bragi no longer resolves a sample book locally). Debounced, and
+	// stale responses are discarded so a slow preview can never paint over a
+	// newer edit.
+	let example = $state('');
+	let exampleLoading = $state(false);
+	let exampleError = $state<string | null>(null);
+	let previewSeq = 0;
+
+	$effect(() => {
+		const format = serializeParts(parts);
+		if (!format) {
+			example = '';
+			exampleError = null;
+			exampleLoading = false;
+			return;
+		}
+		const seq = ++previewSeq;
+		exampleLoading = true;
+		exampleError = null;
+		const timer = setTimeout(async () => {
+			try {
+				const metadata = previewMetadata();
+				const resp = await post<{ relative_path: string }>('/engine/preview', {
+					metadata,
+					path_format: format
+				});
+				if (seq !== previewSeq) return; // a newer edit superseded this one
+				example = outputDir ? `${outputDir.replace(/\/+$/, '')}/${resp.relative_path}` : resp.relative_path;
+			} catch (e) {
+				if (seq !== previewSeq) return;
+				example = '';
+				exampleError = toCleanedError(e).message;
+			} finally {
+				if (seq === previewSeq) exampleLoading = false;
+			}
+		}, 250);
+		return () => clearTimeout(timer);
+	});
+
+	/** The engine's own example values for each token, in the effective
+	 *  snapshot shape the preview endpoint expects (arrays, not strings). */
+	function previewMetadata(): Record<string, unknown> {
+		const tokens = $engineTokens;
+		const value = (name: string) => tokens.find((t) => t.name === name)?.example ?? '';
+		const meta: Record<string, unknown> = {
+			title: value('title'),
+			authors: [value('author')].filter(Boolean),
+			narrators: [value('narrator')].filter(Boolean)
+		};
+		for (const key of ['subtitle', 'series_name', 'series_position', 'year', 'genre', 'metadata_id', 'book_id']) {
+			const v = value(key);
+			if (v) meta[key] = key === 'year' ? Number(v) : v;
+		}
+		return meta;
+	}
 
 	// Single sync point: external writes to `value` (page load, other
 	// programmatic updates) re-parse. Own mutations always write
@@ -151,9 +210,9 @@
 
 <div class="pbf">
 	<div class="pbf-palette" role="group" aria-label="Insert path parts">
-		{#each TOKEN_ORDER as key}
-			<button type="button" class="pbf-chip pbf-chip--token" class:pbf-chip--muted={key === 'asin'} title={TOKEN_META[key].desc} aria-label={`Insert ${TOKEN_META[key].label}`} onclick={() => insertToken(key)}>
-				{key}
+		{#each $engineTokens as token (token.name)}
+			<button type="button" class="pbf-chip pbf-chip--token" title={token.value} aria-label={`Insert ${token.name}`} onclick={() => insertToken(token.name)}>
+				{token.name}
 			</button>
 		{/each}
 		<button type="button" class="pbf-chip" title="Insert literal path text" aria-label="Insert path text" onclick={insertText}>Text</button>
@@ -203,9 +262,9 @@
 	{/each}
 
 	<p class="pbf-preview-label">
-		Example — {MARTIAN.label} · <a href={MARTIAN.link} target="_blank" rel="noopener noreferrer">release page</a>{allowEmpty && isEmpty ? ' — leaving this empty uses the global path format' : errors.length > 0 ? ' — format is invalid, not applied' : outputDir ? '' : ' — output folder not set'}:
+		Example — engine preview of this format with the engine's sample values{allowEmpty && isEmpty ? ' — leaving this empty uses the global path format' : errors.length > 0 ? ' — format is invalid, not applied' : exampleError ? ' — preview unavailable' : exampleLoading ? ' — resolving…' : outputDir ? '' : ' — output folder not set'}:
 	</p>
-	<code class="pbf-preview">{example || '—'}</code>
+	<code class="pbf-preview">{example || (exampleError ? 'preview unavailable' : '—')}</code>
 </div>
 
 <style>
@@ -245,14 +304,6 @@
 	.pbf-chip--token {
 		background: var(--accent-wash);
 		color: var(--accent-text);
-	}
-
-	/* {asin} is not substituted by m4b-merge — it must not read as a
-	   working choice, so it sits out of the endorsement wash. */
-	.pbf-chip--muted {
-		background: var(--surface);
-		border-color: var(--border);
-		color: var(--text-muted);
 	}
 
 	.pbf-strip {
@@ -396,10 +447,6 @@
 	.pbf-preview-label {
 		font-size: 12px;
 		color: var(--text-muted);
-	}
-
-	.pbf-preview-label a {
-		color: var(--workspace-action);
 	}
 
 	.pbf-preview {

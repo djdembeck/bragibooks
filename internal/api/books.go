@@ -430,6 +430,18 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Re-capture the authoritative snapshot now that the book row and its
+	// people are the operator's current selection. A catalog-linked book is
+	// what a processing job will run on, so its capture must track this
+	// save; for a non-catalog book the capture still records the local
+	// fields (title, people, series, year) that the job will name from.
+	// Capture failures are logged, not fatal: the book update itself
+	// succeeded, and a missing capture degrades to the explicit queue-time
+	// refusal below rather than silently proceeding on stale data.
+	if err := h.captureSnapshot(r.Context(), bookID); err != nil {
+		log.Printf("capture snapshot for book %d: %v", bookID, err)
+	}
+
 	book, err := h.getBook(bookID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("get updated book: %v", err))

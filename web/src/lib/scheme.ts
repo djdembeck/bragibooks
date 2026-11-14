@@ -1,55 +1,44 @@
 /**
  * Shared logic for the output path format builder.
  *
- * The wire value is the raw m4b-merge `-p` template (e.g. `{author}/{title}`);
- * this module parses it into parts, validates it, and resolves a live example
- * against a pinned sample book. The builder is a view over the string —
- * serialization round-trips exactly.
+ * The wire value is the raw path template (e.g. `{author}/{title}`);
+ * this module parses it into parts, validates it, and reports the live
+ * example. The builder is a view over the string — serialization
+ * round-trips exactly.
  *
- * The engine substitutes `{key}` wherever it appears in the `-p` string, so
- * recognized token spellings inside literal text are treated as tokens for
- * validation and the example; the saved string is always whatever the user
- * typed.
+ * The token vocabulary is NOT owned here: the ENGINE's verified
+ * --capabilities document is the single source of truth, installed into
+ * `engineTokens` (via `setEngineTokens`) when the app loads
+ * /api/engine/capabilities. Validation mirrors the server's
+ * capability-driven rules; the live name example comes from the server's
+ * non-mutating job preview, not a local sample-book resolver.
  */
 
-export type TokenKey =
-	| 'asin'
-	| 'author'
-	| 'narrator'
-	| 'series_name'
-	| 'series_position'
-	| 'subtitle'
-	| 'title'
-	| 'year';
+import { get, writable } from 'svelte/store';
+
+export interface EngineToken {
+	name: string;
+	value: string;
+	example: string;
+}
+
+/**
+ * Reactive store of the engine's verified path tokens, in the engine's
+ * declared order (the Settings palette renders it as-is). Empty until
+ * /api/engine/capabilities loads; components must handle the empty state
+ * (the app refuses to save a format without a verified engine anyway).
+ */
+export const engineTokens = writable<EngineToken[]>([]);
+export function setEngineTokens(tokens: EngineToken[]): void {
+	engineTokens.set(tokens);
+}
+
+export type TokenKey = string;
 
 export type Part =
 	| { kind: 'sep' } // one "/"
 	| { kind: 'token'; key: TokenKey } // "{key}"
 	| { kind: 'text'; value: string }; // literal path text
-
-export const TOKEN_ORDER: TokenKey[] = [
-	'author',
-	'title',
-	'subtitle',
-	'series_name',
-	'series_position',
-	'narrator',
-	'year',
-	'asin',
-];
-
-export const TOKEN_META: Record<TokenKey, { label: string; desc: string }> = {
-	author: { label: 'Author', desc: 'First listed author' },
-	narrator: { label: 'Narrator', desc: 'First listed narrator' },
-	title: { label: 'Title', desc: 'Book title' },
-	subtitle: { label: 'Subtitle', desc: 'Blank for most books' },
-	series_name: { label: 'Series', desc: 'Series name, when known' },
-	series_position: { label: 'Series position', desc: 'Numeric position in series, when known' },
-	year: { label: 'Year', desc: 'Publication year' },
-	asin: { label: 'ASIN (Audible ID)', desc: 'm4b-merge does not substitute this' },
-};
-
-const TOKEN_KEYS = new Set<string>(TOKEN_ORDER);
 
 // Windows-forbidden set; applied on every OS because output roots are
 // commonly SMB/NFS mounts owned by a foreign OS. Tuple, not a string, so
@@ -73,14 +62,15 @@ const RESERVED_NAMES = new Set([
  */
 export function parseParts(template: string): Part[] {
 	const parts: Part[] = [];
+	const keys = new Set(get(engineTokens).map((t) => t.name));
 	for (let i = 0; i < template.length; i++) {
 		const ch = template[i];
 		if (ch === '{') {
 			const close = template.indexOf('}', i + 1);
 			if (close !== -1) {
 				const key = template.slice(i + 1, close);
-				if (TOKEN_KEYS.has(key)) {
-					parts.push({ kind: 'token', key: key as TokenKey });
+				if (keys.has(key)) {
+					parts.push({ kind: 'token', key });
 					i = close;
 					continue;
 				}
@@ -97,7 +87,7 @@ export function parseParts(template: string): Part[] {
 			if (c === '/') break;
 			if (c === '{') {
 				const close = template.indexOf('}', j + 1);
-				if (close !== -1 && TOKEN_KEYS.has(template.slice(j + 1, close))) break;
+				if (close !== -1 && keys.has(template.slice(j + 1, close))) break;
 			}
 			j++;
 		}
@@ -144,11 +134,11 @@ function isGoSpace(ch: string): boolean {
 
 /**
  * Trim a path segment with Go's strings.TrimSpace semantics (unicode.IsSpace:
- * tab/LF/VT/FF/CR/space, U+0085, U+00A0, U+1680, U+2000–U+200A, U+2028, U+2029,
- * U+202F, U+205F, U+3000). Exported so callers that mirror the Go validator's
- * segment rules elsewhere (e.g. the settings page's ".." parity check) agree
- * with the server — String.prototype.trim accepts more, so it must not be
- * used there.
+ * tab/LF/VT/FF/CR/space, U+0085, U+00A0, U+1680, U+2000–U+200A, U+2028,
+ * U+2029, U+202F, U+205F, U+3000). Exported so callers that mirror the Go
+ * validator's segment rules elsewhere (e.g. the settings page's ".." parity
+ * check) agree with the server — String.prototype.trim accepts more, so it
+ * must not be used there.
  */
 export function trimSegment(s: string): string {
 	let a = 0;
@@ -164,18 +154,19 @@ type TextPiece = { lit: string } | { token: TokenKey };
  * Splits a literal text run into literal pieces and recognized token
  * spellings. The engine substitutes `{key}` wherever it appears in the
  * template, so `{title}` typed inside a text part behaves like a token for
- * validation and the example — the saved string is still what was typed.
+ * validation — the saved string is still what was typed.
  */
 function splitTextPieces(value: string): TextPiece[] {
 	const pieces: TextPiece[] = [];
+	const keys = new Set(get(engineTokens).map((t) => t.name));
 	for (let i = 0; i < value.length; ) {
 		const c = value[i];
 		if (c === '{') {
 			const close = value.indexOf('}', i + 1);
 			if (close !== -1) {
 				const key = value.slice(i + 1, close);
-				if (TOKEN_KEYS.has(key)) {
-					pieces.push({ token: key as TokenKey });
+				if (keys.has(key)) {
+					pieces.push({ token: key });
 					i = close + 1;
 					continue;
 				}
@@ -185,7 +176,7 @@ function splitTextPieces(value: string): TextPiece[] {
 		while (j < value.length) {
 			if (value[j] === '{') {
 				const close = value.indexOf('}', j + 1);
-				if (close !== -1 && TOKEN_KEYS.has(value.slice(j + 1, close))) break;
+				if (close !== -1 && keys.has(value.slice(j + 1, close))) break;
 			}
 			j++;
 		}
@@ -282,96 +273,25 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 		}
 	}
 
-	// E4: at least one substitutable (non-asin) token, in any spelling.
-	const hasSubstitutable = segs.some((s) => s.tokens.some((t) => t !== 'asin'));
-	if (!hasSubstitutable) {
-		errors.push('Include at least one placeholder (e.g. {title}) so different books get different files.');
-	}
-
-	// W1: {asin} is not substituted by the engine.
-	if (segs.some((s) => s.tokens.includes('asin'))) {
-		warnings.push('{asin} is not substituted by m4b-merge — it would appear literally in the path. Remove it.');
-	}
-
-	// W2: every book should land in a distinct file. Skipped when E4 already
-	// fired — without any substitutable token, {title} cannot be present.
-	const hasTitle = segs.some((s) => s.tokens.includes('title'));
-	if (hasSubstitutable && !hasTitle) {
-		warnings.push('This format can produce the same file for different books — include {title}.');
-	}
-
-	// W3: unseparated parts sharing a segment concatenate against the
-	// resolved values (the engine joins segments without separators),
-	// producing paths like "The MartianFavorites.m4b" — and two adjacent
-	// tokens merge into one name, e.g. {author}{title} -> "Andy WeirThe Martian.m4b".
-	for (const seg of segs) {
-		if (seg.tokens.length > 0 && (trimSegment(seg.text) !== '' || seg.tokens.length > 1)) {
-			warnings.push('Parts in this segment join without a separator and will merge — add a "/" or text to keep them apart.');
-			break;
+	// E4: at least one placeholder from the engine's token set (a token part
+	// or a recognized token spelling typed inside text).
+	const keys = new Set(get(engineTokens).map((t) => t.name));
+	let hasToken = parts.some((p) => p.kind === 'token' && keys.has(p.key));
+	if (!hasToken) {
+		for (const p of parts) {
+			if (p.kind !== 'text') continue;
+			for (const piece of splitTextPieces(p.value)) {
+				if ('token' in piece && keys.has(piece.token)) {
+					hasToken = true;
+					break;
+				}
+			}
+			if (hasToken) break;
 		}
+	}
+	if (!hasToken) {
+		errors.push('Add at least one placeholder such as {title}.');
 	}
 
 	return { errors, warnings };
 }
-
-/**
- * Resolve a scheme string through value lookups, mirroring the engine:
- * substitute recognized token spellings (wherever they appear in the raw
- * string, including across part boundaries), split on `/`, trim per the
- * Go rules, drop empty segments, and append `.m4b` only when the result
- * does not already end in one (case-insensitive). `{asin}` is NOT
- * substituted by m4b-merge, so it stays literal — engine-parity behavior
- * kept deliberately (documented as such for consumers). Returns `''` when
- * nothing survives (callers show an em dash).
- */
-export function resolveScheme(raw: string, values: Record<TokenKey, string>): string {
-	let out = '';
-	for (const piece of splitTextPieces(raw)) {
-		out += 'token' in piece ? (piece.token === 'asin' ? '{asin}' : values[piece.token]) : piece.lit;
-	}
-	const rel = out
-		.split('/')
-		.map((s) => trimSegment(s))
-		.filter((s) => s !== '')
-		.join('/');
-	if (!rel) return '';
-	return /\.m4b$/i.test(rel) ? rel : rel + '.m4b';
-}
-
-/**
- * Resolve the sample book through the parts, mirroring the engine:
- * `resolveExample` = serialized parts + Go segment rules + `.m4b`
- * suffix (no double-append). Returns `''` when nothing survives
- * (the widget shows an em dash).
- */
-export function resolveExample(
-	parts: Part[],
-	values: Record<TokenKey, string>,
-	outputDir: string
-): string {
-	const final = resolveScheme(serializeParts(parts), values);
-	if (!final) return '';
-	if (!outputDir) return final;
-	return outputDir.replace(/\/+$/, '') + '/' + final;
-}
-
-/**
- * Pinned sample book for the live example: AudiobookDB release dPL9fC7YnK8X —
- * "The Martian" (2013), Andy Weir, narrated by R.C. Bray. Hard-coded so the
- * preview is deterministic and offline-safe; the ADB release page is the
- * source of truth for these values.
- */
-export const MARTIAN = {
-	label: '\u201cThe Martian\u201d (2013) — Andy Weir, narrated by R.C. Bray',
-	link: 'https://audiobookdb.org/releases/dPL9fC7YnK8X',
-	values: {
-		asin: 'B00B5HZGUG',
-		author: 'Andy Weir',
-		narrator: 'R.C. Bray',
-		series_name: '',
-		series_position: '',
-		subtitle: '',
-		title: 'The Martian',
-		year: '2013',
-	} satisfies Record<TokenKey, string>,
-};

@@ -73,6 +73,13 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Features & Improvements
 
+- **Authoritative processing jobs: engine-owned naming and previews** (#479, #480)
+  - A processing job is captured as a durable, versioned snapshot of the effective metadata (ordered authors and narrators, canonical AudiobookDB book ID, release year, series, genres, title/subtitle) together with the engine's schema/resolver identity. The worker hands the engine a structured `--job` file and consumes its `--machine` result; Bragi no longer re-matches the catalog at worker time and no longer performs its own path substitution. The engine owns sanitization, tagging, and naming.
+  - People are ordered arrays end to end: the capture order in the UI is the order that names the output (the plural `{authors}` / `{narrators}` tokens join with ", "), and the path format gains the canonical AudiobookDB book ID token `{book_id}`.
+  - The path-token vocabulary now comes from the engine's capability document instead of local registries: the Settings builder, profile validation, and Match's proposed output name all derive from `GET /api/engine/capabilities`.
+  - `POST /api/engine/preview` runs the engine's non-mutating job preview, and Match's proposed output name is that preview over the exact payload a save records, so the name shown is the name the job will publish.
+  - The worker verifies the pinned engine's capabilities (accepted schema/resolver identity, non-empty token list) before executing, and a published machine result that reports a different identity fails the job and preserves its staging for re-queue.
+  - The production and dev Docker images pin the `m4b-merge` v2.2.0 image by its immutable multi-arch index digest; the startup check verifies schema, resolver, and token capabilities (including the supplied-mode `{book_id}` token), not just the version string.
 - A Windows amd64 release archive is now built alongside the existing
   Linux and macOS amd64/arm64 archives. On Windows, process cancellation
   kills the spawned m4b-merge tree through a job object (kill-on-close),

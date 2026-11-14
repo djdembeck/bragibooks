@@ -1,0 +1,571 @@
+package api
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/bragibooks/bragibooks/internal/audio"
+	"github.com/bragibooks/bragibooks/internal/audiobookdb"
+	"github.com/bragibooks/bragibooks/internal/models"
+)
+
+// This file is the authoritative-snapshot half of the processing cutover.
+// A book's SELECTED catalog record (the release the operator chose at Match,
+// plus the operator's own edits to the fields Bragi already edits) is
+// captured ONCE into a durable per-book row, and that capture is what a job
+// runs on. The engine never re-looks-up the catalog at worker time: the
+// snapshot is the source of truth for naming, tags, chapters and artwork.
+//
+// The capture is re-taken on every Match save and every metadata edit, so
+// the stored row always reflects the current selection. Historical rows
+// that predate this table are resolved explicitly at queue time (or refused
+// when they cannot be), never guessed.
+
+// SnapshotChapter is the stored form of one chapter: integer-millisecond
+// times, the shape the engine's chapters write policy consumes verbatim.
+type SnapshotChapter struct {
+	Title          string `json:"title"`
+	StartMillis    uint64 `json:"start_millis"`
+	DurationMillis uint64 `json:"duration_millis"`
+}
+
+// BookSnapshot is the durable per-book capture. Authors/Narrators are
+// ORDERED arrays: the engine joins them with ", " and orders path segments
+// by array position, so the operator's ordering is the output ordering
+// (#479). ADBBookID is the canonical AudiobookDB book id that feeds the
+// {book_id} token (#480), distinct from the legacy ASIN and the provider
+// metadata_id.
+type BookSnapshot struct {
+	BookID         int64    `json:"book_id"`
+	ADBBookID      string   `json:"audiobookdb_book_id"`
+	ADBReleaseID   string   `json:"audiobookdb_release_id"`
+	Title          string   `json:"title"`
+	Authors        []string `json:"authors"`
+	Narrators      []string `json:"narrators"`
+	SeriesName     string   `json:"series_name"`
+	SeriesPosition string   `json:"series_position"`
+	Description    string   `json:"description"`
+	Genres         []string `json:"genres"`
+	Year           *int     `json:"year"`
+	// CoverFile is a filename under the covers directory: an immutable
+	// local artwork reference. At run time it is staged into the job's
+	// staging root (the engine's asset root) and embedded by local-file
+	// cover policy, so the selected release's art never depends on a live
+	// catalog fetch.
+	CoverFile  string            `json:"cover_file"`
+	Chapters   []SnapshotChapter `json:"chapters"`
+	CapturedAt string            `json:"captured_at"`
+}
+
+// toSupplied converts a snapshot into the engine's input_supplied payload.
+// The captured ADBBookID is forwarded as book_id so the {book_id} naming
+// token (#480) resolves to the canonical AudiobookDB book id; the engine
+// (>= 2.2.0) accepts a supplied book_id directly.
+func (s *BookSnapshot) toSupplied() audio.SuppliedMetadata {
+	meta := audio.SuppliedMetadata{
+		Title:     s.Title,
+		Authors:   append([]string(nil), s.Authors...),
+		Narrators: append([]string(nil), s.Narrators...),
+		Genres:    append([]string(nil), s.Genres...),
+	}
+	if s.SeriesName != "" {
+		meta.SeriesName = &s.SeriesName
+	}
+	if s.SeriesPosition != "" {
+		meta.SeriesPosition = &s.SeriesPosition
+	}
+	if s.Description != "" {
+		meta.Description = &s.Description
+	}
+	if s.Year != nil {
+		y := *s.Year
+		meta.Year = &y
+	}
+	if s.ADBBookID != "" {
+		meta.BookID = &s.ADBBookID
+	}
+	return meta
+}
+
+// snapshotJSON is the wire/storage form of a job's captured snapshot. It is
+// embedded in the job args so a queued job is immutable: settings, profile
+// edits, and re-matches after enqueue cannot change a captured job.
+type snapshotJSON struct {
+	Version  int                  `json:"snapshot_version"`
+	Engine   audio.EngineIdentity `json:"engine"`
+	Snapshot BookSnapshot         `json:"snapshot"`
+}
+
+// captureSnapshot re-captures the book's authoritative snapshot from the
+// stored book row, its ordered people, and (when the book is catalog-linked)
+// the selected release's details and cover. It is called after a Match save
+// or a metadata edit. ADB detail/cover failures degrade gracefully: the row
+// is still written with the local fields, and a cover that cannot be
+// downloaded leaves CoverFile empty (the engine then writes no cover) rather
+// than failing the save. Only a missing book row is a hard error.
+func (h *Handler) captureSnapshot(ctx context.Context, bookID int64) error {
+	var (
+		title, description, series, releaseDate string
+		adbBook, adbRelease                     sql.NullString
+	)
+	err := h.svc.DB.QueryRow(
+		"SELECT title, description, series, release_date, audiobookdb_book_id, audiobookdb_release_id FROM books WHERE id = ?",
+		bookID,
+	).Scan(&title, &description, &series, &releaseDate, &adbBook, &adbRelease)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("book %d not found", bookID)
+	}
+	if err != nil {
+		return fmt.Errorf("load book for snapshot: %w", err)
+	}
+
+	// Ordered by id (= insert/rowid order), which is the operator's
+	// requested order from Match: the array position is the path/author
+	// ordering (#479), so the read MUST be ordered, not rely on scan order.
+	people, err := h.getOrderedPeopleByBookID(bookID)
+	if err != nil {
+		return fmt.Errorf("load people for snapshot: %w", err)
+	}
+	authors := orderedNames(filterPeople(people, "author"))
+	narrators := orderedNames(filterPeople(people, "narrator"))
+
+	snap := &BookSnapshot{
+		BookID:       bookID,
+		ADBBookID:    adbBook.String,
+		ADBReleaseID: adbRelease.String,
+		Title:        title,
+		Description:  description,
+		Authors:      authors,
+		Narrators:    narrators,
+		Year:         parseYear(releaseDate),
+	}
+	snap.SeriesName, snap.SeriesPosition = splitSeries(series)
+
+	// Catalog enrichment for the SELECTED release: genres, chapters, and a
+	// locally stored cover. This is the "capture selected catalog content at
+	// match/save" step. It is best-effort: a catalog that is down must not
+	// block a metadata save the operator is making, so failures here leave
+	// the corresponding snapshot fields empty and log the reason.
+	if snap.ADBBookID != "" {
+		if book, err := h.getAudiobookDB().GetBook(ctx, snap.ADBBookID, "genres,series"); err == nil && book != nil {
+			snap.Genres = genreTitles(book.Genres)
+		} else if err != nil {
+			log.Printf("snapshot %d: book genres unavailable: %v", bookID, err)
+		}
+		if snap.ADBReleaseID != "" {
+			if rel, err := h.getAudiobookDB().GetRelease(ctx, snap.ADBReleaseID, "chapterDetail"); err == nil && rel != nil && rel.ChapterDetail != nil {
+				snap.Chapters = chaptersFromADB(rel.ChapterDetail.Chapters)
+			} else if err != nil {
+				log.Printf("snapshot %d: release chapters unavailable: %v", bookID, err)
+			}
+		}
+		if h.svc.CoversDir != "" {
+			if file, ok := h.storeCoverForBook(ctx, bookID, snap); ok {
+				snap.CoverFile = file
+			}
+		}
+	}
+
+	if err := h.upsertSnapshot(snap); err != nil {
+		return err
+	}
+	return nil
+}
+
+// upsertSnapshot persists the capture row (insert-or-replace on book_id).
+func (h *Handler) upsertSnapshot(s *BookSnapshot) error {
+	authors, _ := json.Marshal(s.Authors)
+	narrators, _ := json.Marshal(s.Narrators)
+	genres, _ := json.Marshal(s.Genres)
+	chapters, _ := json.Marshal(s.Chapters)
+	var year sql.NullInt64
+	if s.Year != nil {
+		year = sql.NullInt64{Int64: int64(*s.Year), Valid: true}
+	}
+	_, err := h.svc.DB.Exec(
+		`INSERT INTO book_snapshots (book_id, audiobookdb_book_id, audiobookdb_release_id, title,
+	   authors, narrators, series_name, series_position, description, genres, year, cover_file, chapters, captured_at)
+	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+	 ON CONFLICT(book_id) DO UPDATE SET
+	   audiobookdb_book_id=excluded.audiobookdb_book_id,
+	   audiobookdb_release_id=excluded.audiobookdb_release_id,
+	   title=excluded.title,
+	   authors=excluded.authors, narrators=excluded.narrators,
+	   series_name=excluded.series_name, series_position=excluded.series_position,
+	   description=excluded.description, genres=excluded.genres, year=excluded.year,
+	   cover_file=excluded.cover_file, chapters=excluded.chapters, captured_at=datetime('now')`,
+		s.BookID, s.ADBBookID, s.ADBReleaseID, s.Title,
+		string(authors), string(narrators), s.SeriesName, s.SeriesPosition,
+		s.Description, string(genres), year, s.CoverFile, string(chapters),
+	)
+	if err != nil {
+		return fmt.Errorf("upsert snapshot: %w", err)
+	}
+	return nil
+}
+
+// loadSnapshot reads the book's stored snapshot, or nil when no capture row
+// exists (a historical book not yet matched through the new flow).
+func (h *Handler) loadSnapshot(bookID int64) (*BookSnapshot, error) {
+	return loadBookSnapshot(h.svc.DB, bookID)
+}
+
+// loadBookSnapshot is the shared database read for a book's authoritative
+// capture, usable by both the API handler and the processing worker.
+func loadBookSnapshot(db *sql.DB, bookID int64) (*BookSnapshot, error) {
+	var (
+		adbBook, adbRelease, title, seriesName, seriesPosition, description string
+		authorsJSON, narratorsJSON, genresJSON, chaptersJSON                string
+		coverFile                                                           string
+		year, bookIDCol                                                     sql.NullInt64
+		capturedAt                                                          sql.NullString
+	)
+	err := db.QueryRow(
+		`SELECT book_id, audiobookdb_book_id, audiobookdb_release_id, title,
+		        authors, narrators, series_name, series_position, description, genres,
+		        year, cover_file, chapters, captured_at
+		 FROM book_snapshots WHERE book_id = ?`,
+		bookID,
+	).Scan(&bookIDCol, &adbBook, &adbRelease, &title, &authorsJSON,
+		&narratorsJSON, &seriesName, &seriesPosition, &description, &genresJSON,
+		&year, &coverFile, &chaptersJSON, &capturedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load snapshot: %w", err)
+	}
+	s := &BookSnapshot{
+		BookID: bookIDCol.Int64, ADBBookID: adbBook, ADBReleaseID: adbRelease,
+		Title: title, SeriesName: seriesName,
+		SeriesPosition: seriesPosition, Description: description,
+		CoverFile: coverFile, CapturedAt: capturedAt.String,
+	}
+	if year.Valid {
+		v := int(year.Int64)
+		s.Year = &v
+	}
+	if err := json.Unmarshal([]byte(authorsJSON), &s.Authors); err != nil {
+		s.Authors = []string{}
+	}
+	if err := json.Unmarshal([]byte(narratorsJSON), &s.Narrators); err != nil {
+		s.Narrators = []string{}
+	}
+	if err := json.Unmarshal([]byte(genresJSON), &s.Genres); err != nil {
+		s.Genres = []string{}
+	}
+	if err := json.Unmarshal([]byte(chaptersJSON), &s.Chapters); err != nil {
+		s.Chapters = []SnapshotChapter{}
+	}
+	return s, nil
+}
+
+// buildEngineJob assembles the structured engine job from a captured
+// snapshot: the effective metadata becomes input_supplied, the destination
+// and path format come from the resolved queue-time pair, and the immutable
+// chapter/artwork references are staged for this run. The cover policy is the
+// only per-run filesystem step: the captured cover file is copied into the
+// output root (the engine's asset root) under a job-owned hidden name, then
+// referenced by absolute path, because the engine requires a local cover file
+// to live under the job's output root. A missing or unreadable cover degrades
+// to "clear" (no cover) rather than failing the run: the selection's naming
+// and chapters are the load-bearing parts, and artwork loss is reported on
+// the snapshot capture, not hidden here.
+func buildEngineJob(args jobArgs, snap BookSnapshot, outputRoot, pathFormat string) (audio.JobFile, error) {
+	supplied := snap.toSupplied()
+	jf := audio.JobFile{
+		SchemaVersion: audio.JobSchemaVersion,
+		Inputs:        args.SrcPaths,
+		InputSupplied: supplied,
+		OutputRoot:    outputRoot,
+		PathFormat:    audio.NormalizeEnginePathFormat(pathFormat),
+		Policies:      audio.AllSupportedWritePolicyFor(supplied),
+	}
+
+	// Cover: stage the captured file under the asset root, or clear.
+	jf.Cover = json.RawMessage(`"clear"`)
+	if snap.CoverFile != "" {
+		if staged, cerr := stageCoverUnderRoot(snap.CoverFile, outputRoot, snap.BookID); cerr == nil && staged != "" {
+			// The engine's object form for a local cover file.
+			if raw, merr := json.Marshal(map[string]string{"write": staged}); merr == nil {
+				jf.Cover = raw
+			} else {
+				log.Printf("encode cover policy for book %d: %v", snap.BookID, merr)
+			}
+		} else if cerr != nil {
+			// No usable local cover: embed nothing rather than fetch at run
+			// time (supplied mode is offline) or fail.
+			log.Printf("stage cover %s for book %d: %v", snap.CoverFile, snap.BookID, cerr)
+		}
+	}
+
+	// Chapters: embed the selected release's explicit chapter list when the
+	// snapshot captured one (immutable chapter references — the selected
+	// edition's chapters, not a re-derivation from input tracks); an empty
+	// list is an explicit clear.
+	switch {
+	case len(snap.Chapters) > 0:
+		list := make([]audio.JobChapter, 0, len(snap.Chapters))
+		for _, c := range snap.Chapters {
+			list = append(list, audio.JobChapter{
+				Title: c.Title, StartMillis: c.StartMillis, DurationMillis: c.DurationMillis,
+			})
+		}
+		enc, err := json.Marshal(list)
+		if err != nil {
+			return jf, fmt.Errorf("encode chapters: %w", err)
+		}
+		jf.Chapters = json.RawMessage(`{"write":{"chapters":` + string(enc) + `}}`)
+	case snap.Chapters != nil:
+		jf.Chapters = json.RawMessage(`{"write":{"chapters":[]}}`)
+	default:
+		jf.Chapters = nil
+	}
+
+	return jf, nil
+}
+
+// coversDirPath is the app's on-disk covers directory, set once at startup
+// (it is derived from the database path and cannot change at runtime). The
+// worker stages a book's captured cover from here into the engine's asset
+// root at run time.
+var coversDirPath string
+
+// SetCoversDir records the covers directory for the worker's cover staging.
+func SetCoversDir(dir string) { coversDirPath = dir }
+
+// stageCoverUnderRoot copies the book's captured cover (by filename in the
+// covers directory) into the output root under a job-owned hidden name and
+// returns its absolute path.
+func stageCoverUnderRoot(coverFile, outputRoot string, bookID int64) (string, error) {
+	if coversDirPath == "" {
+		return "", errors.New("covers directory is not configured")
+	}
+	src := filepath.Join(coversDirPath, filepath.Base(coverFile))
+	info, err := os.Stat(src)
+	if err != nil {
+		return "", fmt.Errorf("cover file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("cover file is not a regular file")
+	}
+	dest := filepath.Join(outputRoot, fmt.Sprintf(".bragi-cover-%d%s", bookID, filepath.Ext(coverFile)))
+	in, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o640)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(dest)
+		return "", err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(dest)
+		return "", err
+	}
+	abs, err := filepath.Abs(dest)
+	if err != nil {
+		os.Remove(dest)
+		return "", err
+	}
+	return abs, nil
+}
+
+// orderedNames returns the people's names in their stored (insert) order.
+// The people table's rowid IS the operator's ordering because Match writes
+// them in request order; preserving that order is what makes #479's
+// singular/plural people deterministic.
+func orderedNames(people []models.Person) []string {
+	out := make([]string, 0, len(people))
+	for _, p := range people {
+		if strings.TrimSpace(p.Name) != "" {
+			out = append(out, strings.TrimSpace(p.Name))
+		}
+	}
+	return out
+}
+
+// splitSeries parses the books.series display string "Name #1" into its
+// name and position parts. A name without a trailing "#N" yields just the
+// name; a leading "#N" with no name is treated as an empty name.
+func splitSeries(series string) (name, position string) {
+	series = strings.TrimSpace(series)
+	if series == "" {
+		return "", ""
+	}
+	if i := strings.LastIndex(series, " #"); i >= 0 {
+		return strings.TrimSpace(series[:i]), strings.TrimSpace(series[i+2:])
+	}
+	return series, ""
+}
+
+// parseYear extracts a four-digit year from a date string (YYYY, YYYY-MM-DD,
+// or a leading run of digits), or nil when none is present.
+func parseYear(date string) *int {
+	s := strings.TrimSpace(date)
+	if len(s) < 4 {
+		return nil
+	}
+	digits := s
+	if i := strings.IndexAny(digits, "-/"); i > 0 {
+		digits = digits[:i]
+	}
+	if len(digits) < 4 {
+		return nil
+	}
+	n := 0
+	for _, c := range digits[:4] {
+		if c < '0' || c > '9' {
+			return nil
+		}
+		n = n*10 + int(c-'0')
+	}
+	if n < 1000 || n > 9999 {
+		return nil
+	}
+	return &n
+}
+
+// genreTitles flattens ADB genre references to their display titles.
+func genreTitles(genres []audiobookdb.IdTitle) []string {
+	out := make([]string, 0, len(genres))
+	for _, g := range genres {
+		if t := strings.TrimSpace(g.Title); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// chaptersFromADB converts ADB chapter details to the stored integer-millisecond
+// form the engine consumes.
+func chaptersFromADB(chs []audiobookdb.Chapter) []SnapshotChapter {
+	out := make([]SnapshotChapter, 0, len(chs))
+	for _, c := range chs {
+		out = append(out, SnapshotChapter{
+			Title:          c.Title,
+			StartMillis:    uint64(c.StartOffsetMs),
+			DurationMillis: uint64(c.LengthMs),
+		})
+	}
+	return out
+}
+
+// storeCoverForBook downloads the selected book's primary cover into the
+// covers directory under a stable, snapshot-owned filename and returns it.
+// It returns false (and logs) when there is no cover or the download fails;
+// a capture must never hard-fail on artwork.
+func (h *Handler) storeCoverForBook(ctx context.Context, bookID int64, s *BookSnapshot) (string, bool) {
+	book, err := h.getAudiobookDB().GetBook(ctx, s.ADBBookID, "images")
+	if err != nil || book == nil || len(book.Images) == 0 || book.Images[0].URL == "" {
+		return "", false
+	}
+	name := fmt.Sprintf("%d-snapshot.jpg", bookID)
+	dest := filepath.Join(h.svc.CoversDir, name)
+	dlCtx, cancel := context.WithTimeout(ctx, coverDownloadTimeout)
+	defer cancel()
+	if err := downloadCoverFile(dlCtx, book.Images[0].URL, dest); err != nil {
+		log.Printf("snapshot %d: cover download: %v", bookID, err)
+		os.Remove(dest)
+		return "", false
+	}
+	return name, true
+}
+
+// coverDownloadTimeout bounds a snapshot cover fetch so a slow catalog does
+// not stall a save.
+const coverDownloadTimeout = 15 * time.Second
+
+// coverMaxBytes caps a snapshot cover fetch: a cover is a thumbnail, not a
+// book. A URL that streams past this is not a cover; stop.
+const coverMaxBytes = 8 << 20
+
+// coverDownloadClient is the shared client for snapshot cover fetches. The
+// cover URL comes from the ADB client (already origin-gated by the ADB
+// trusted-base config); the bounded client adds the size and redirect
+// limits that an untrusted-ish image URL deserves.
+var coverDownloadClient = &http.Client{
+	Timeout: coverDownloadTimeout,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return errors.New("too many redirects")
+		}
+		return nil
+	},
+}
+
+// downloadCoverFile fetches url into dest with the bounded client, writing
+// to a temp file in the same directory and renaming into place so a partial
+// download never leaves a truncated cover served.
+func downloadCoverFile(ctx context.Context, url string, dest string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := coverDownloadClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("cover status %d", resp.StatusCode)
+	}
+
+	tmp := dest + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	n, err := io.Copy(out, io.LimitReader(resp.Body, coverMaxBytes+1))
+	if cl := out.Close(); err == nil {
+		err = cl
+	}
+	if err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if n > coverMaxBytes {
+		os.Remove(tmp)
+		return fmt.Errorf("cover exceeds %d bytes", coverMaxBytes)
+	}
+	return os.Rename(tmp, dest)
+}
+
+// getOrderedPeopleByBookID is the snapshot's people read: id-ordered so the
+// result is the operator's requested order, deterministically.
+func (h *Handler) getOrderedPeopleByBookID(bookID int64) ([]models.Person, error) {
+	rows, err := h.svc.DB.Query(
+		"SELECT id, book_id, name, role, audiobookdb_person_id, created_at FROM people WHERE book_id = ? ORDER BY id",
+		bookID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var people []models.Person
+	for rows.Next() {
+		var p models.Person
+		var personID sql.NullString
+		if err := rows.Scan(&p.ID, &p.BookID, &p.Name, &p.Role, &personID, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		p.AudiobookdbPersonID = personID
+		people = append(people, p)
+	}
+	return people, rows.Err()
+}

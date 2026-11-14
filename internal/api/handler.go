@@ -107,6 +107,11 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 		r.Get("/search/books/{id}", h.GetBookFromDB)
 		r.Get("/search/releases/{id}", h.GetReleaseFromDB)
 
+		// Engine protocol: verified capabilities (Settings picker and path
+		// examples) and the non-mutating job preview (Match preview).
+		r.Get("/engine/capabilities", h.EngineCapabilities)
+		r.Post("/engine/preview", h.EnginePreview)
+
 		// Output profiles
 		r.Get("/output-profiles", h.ListOutputProfiles)
 		r.Post("/output-profiles", h.CreateOutputProfile)

@@ -367,6 +367,46 @@ type jobArgs struct {
 	OutputDir string `json:"output_dir,omitempty"`
 	// OutputScheme is the effective relative path format ("" = inherit).
 	OutputScheme string `json:"output_scheme,omitempty"`
+	// Snapshot is the authoritative capture the job runs on: the effective
+	// metadata, the engine identity it was captured under, and the immutable
+	// chapter/artwork references. Non-nil for jobs queued after the
+	// cutover; nil (snapshot_version 0) for legacy rows, which the worker
+	// refuses with an explicit re-preview/requeue path rather than guessing.
+	Snapshot *snapshotJSON `json:"snapshot,omitempty"`
+}
+
+// errNoSnapshotForBook is the pre-enqueue refusal for a book that has no
+// authoritative capture row. The operator path is re-match (or re-save) the
+// book so its selection is captured; the message says exactly that.
+var errNoSnapshotForBook = errors.New("book has no captured metadata snapshot; re-match the book before processing")
+
+// snapshotVersionCurrent is the durable snapshot schema version written at
+// queue time. v1 is the authoritative-snapshot shape (effective metadata +
+// engine identity + chapter/cover references).
+const snapshotVersionCurrent = 1
+
+// loadSnapshotForQueue reads the book's authoritative capture and pairs it
+// with the CURRENT engine identity — the identity the job must report back,
+// and the gate the worker re-checks before execution. A missing engine
+// identity (capabilities not verified) is a hard error: a job captured under
+// an unknown resolver must not queue.
+func (s *ProcessingService) loadSnapshotForQueue(bookID int64) (*snapshotJSON, error) {
+	caps := s.proc.Capabilities()
+	if caps == nil {
+		return nil, errors.New("engine capabilities not verified; cannot capture a job snapshot")
+	}
+	snap, err := loadBookSnapshot(s.db, bookID)
+	if err != nil {
+		return nil, err
+	}
+	if snap == nil {
+		return nil, nil
+	}
+	return &snapshotJSON{
+		Version:  snapshotVersionCurrent,
+		Engine:   audio.EngineIdentity{SchemaVersion: caps.SchemaVersion, ResolverVersion: caps.ResolverVersion},
+		Snapshot: *snap,
+	}, nil
 }
 
 // QueueJob creates a processing job, persists it to the DB, and enqueues it.
@@ -379,6 +419,23 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	// refused here with a clear message (finding: F22).
 	if unsupported := firstUnsupportedMergePath(srcPaths); unsupported != "" {
 		return "", fmt.Errorf("unsupported input format %q: m4b-merge accepts .mp3, .m4a, .m4b only", unsupported)
+	}
+
+	// The authoritative snapshot is a HARD prerequisite: a job runs on the
+	// operator's captured selection, never on a worker-time lookup. A book
+	// with no capture row (a historical row not yet matched/edited through
+	// the new flow) is refused here with an explicit re-match/re-preview
+	// path — never guessed, never silently run under a guessed schema.
+	var snap *snapshotJSON
+	if bookID > 0 {
+		captured, err := s.loadSnapshotForQueue(bookID)
+		if err != nil {
+			return "", fmt.Errorf("load snapshot for queue: %w", err)
+		}
+		if captured == nil {
+			return "", errNoSnapshotForBook
+		}
+		snap = captured
 	}
 
 	// The active-job guard is the advisory fast path (a clean 409 with no
@@ -400,8 +457,10 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	id := uuid.New().String()
 
 	// Serialize the typed args for storage; when no profile is selected the
-	// destination fields are omitted entirely.
-	args := jobArgs{SrcPaths: srcPaths}
+	// destination fields are omitted entirely. The snapshot is embedded by
+	// value so a captured job is IMMUTABLE: settings, profile edits, and
+	// re-matches after enqueue change future jobs, never this one.
+	args := jobArgs{SrcPaths: srcPaths, Snapshot: snap}
 	if d := strings.TrimSpace(opts.OutputDirOverride); d != "" {
 		args.OutputDir = d
 	}
@@ -426,18 +485,23 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 		BookPreStatus: bookPreStatus,
 	}
 
+	snapshotVersion := 0
+	if snap != nil {
+		snapshotVersion = snap.Version
+	}
+
 	// Atomic enqueue: the INSERT only lands when the book has no queued/
 	// running job (finding: F5). RowsAffected()==0 means a concurrent
 	// enqueue won the race — translate the losing write to the same 409 the
 	// fast path returns, so the HTTP contract is identical.
 	res, err := s.db.Exec(
-		`INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action, book_pre_status, queue_seq)
-		 SELECT ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(queue_seq), 0) + 1 FROM processing_jobs)
+		`INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action, book_pre_status, queue_seq, snapshot_version)
+		 SELECT ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(queue_seq), 0) + 1 FROM processing_jobs), ?
 		 WHERE ? = 0 OR NOT EXISTS (
 		     SELECT 1 FROM processing_jobs
 		     WHERE book_id = ? AND status IN (?, ?))`,
 		job.ID, job.BookID.Int64, job.M4bMergeArgs, job.Status, job.Action, job.BookPreStatus,
-		bookID, job.BookID.Int64, jobStatusQueued, jobStatusRunning,
+		snapshotVersion, bookID, job.BookID.Int64, jobStatusQueued, jobStatusRunning,
 	)
 	if err != nil {
 		return "", fmt.Errorf("insert processing job: %w", err)
@@ -614,6 +678,15 @@ func (st *jobState) registerProgressSubscriber(ch chan string) (deregister func(
 		delete(st.progressSubs, ch)
 		st.progressMu.Unlock()
 	}
+}
+
+// appendOutputFn adapts the job state's line sink to the worker's callback
+// surface; nil when the job has no in-memory state (a restarted process).
+func appendOutputFn(st *jobState) func(line string) {
+	if st == nil {
+		return nil
+	}
+	return st.appendOutput
 }
 
 // appendOutput adds one stripped m4b-merge stdout line to the live buffer and
@@ -938,20 +1011,6 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		state.sendProgress(`{"status":"running","message":"started processing"}`)
 	}
 
-	// Get the ASIN from the matched book. The destination snapshot, when
-	// present, is the fully-resolved queue-time profile pair persisted in
-	// the job args — it is NOT re-read from any persisted setting, so the
-	// job keeps the destination the requester selected even if the profile
-	// or globals change after enqueueing.
-	var asin string
-	if job.BookID.Valid {
-		var bookAsin sql.NullString
-		if err := s.db.QueryRow("SELECT asin FROM books WHERE id = ?", job.BookID.Int64).
-			Scan(&bookAsin); err == nil && bookAsin.Valid {
-			asin = bookAsin.String
-		}
-	}
-
 	// Parse the stored typed args
 	var args jobArgs
 	argsErr := fmt.Errorf("failed to parse args")
@@ -980,19 +1039,51 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		return
 	}
 
-	// Build run options from the stored snapshot. The destination fields are
-	// validated at queue time; re-validate the relative format here as
-	// worker-side defense before authored data can steer file writes. The
-	// directory was validated absolute at queue time and is used as-is.
-	opts := audio.RunOptions{
-		OutputDirOverride:  strings.TrimSpace(args.OutputDir),
-		PathFormatOverride: strings.TrimSpace(args.OutputScheme),
+	// The destination snapshot, when present, is the fully-resolved
+	// queue-time profile pair persisted in the job args — it is NOT re-read
+	// from any persisted setting, so the job keeps the destination the
+	// requester selected even if the profile or globals change after
+	// enqueueing. The authoritative snapshot is embedded the same way: the
+	// engine runs on the operator's captured selection, never a worker-time
+	// lookup.
+	if args.Snapshot == nil {
+		// A job captured before the authoritative cutover carries no
+		// snapshot. It must NOT run under a guessed schema or the live
+		// globals: mark it an explicit error with the re-preview/requeue
+		// path, preserving the original source and any prior output.
+		legacyErr := fmt.Errorf("this job predates the authoritative processing snapshot and will not run automatically; re-preview and requeue the book to process it under the current engine")
+		if job.BookID.Valid {
+			s.db.Exec(
+				"UPDATE books SET status = 'error', status_message = ? WHERE id = ?",
+				legacyErr.Error(), job.BookID.Int64,
+			)
+		}
+		s.db.Exec(
+			"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE id = ?",
+			jobStatusError, legacyErr.Error(), job.ID,
+		)
+		if state != nil {
+			state.finalize(`{"status":"error","message":"`+escapeJSON(legacyErr.Error())+`"}`, legacyErr)
+		}
+		s.forgetJob(job.ID)
+		return
 	}
-	if state != nil {
-		opts.OnOutput = state.appendOutput
+
+	// Build the structured engine job from the authoritative snapshot. The
+	// destination is the resolved queue-time pair (override wins; blank
+	// inherits the processor's live value). Re-validate the relative format
+	// as worker-side defense before authored data can steer file writes.
+	outputRoot, completedDir, globalFormat := s.proc.SettingsSnapshot()
+	effRoot := outputRoot
+	if d := strings.TrimSpace(args.OutputDir); d != "" {
+		if abs, aerr := filepath.Abs(d); aerr == nil {
+			effRoot = abs
+		}
 	}
-	if opts.PathFormatOverride != "" {
-		if err := audio.ValidateRelativePathFormat(opts.PathFormatOverride); err != nil {
+	effFormat := globalFormat
+	if f := strings.TrimSpace(args.OutputScheme); f != "" {
+		effFormat = f
+		if err := audio.ValidateRelativePathFormat(effFormat); err != nil {
 			invalidSnapshotErr := fmt.Errorf("invalid stored output snapshot: %v", err)
 			if job.BookID.Valid {
 				s.db.Exec(
@@ -1012,14 +1103,46 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		}
 	}
 
-	result, err := s.proc.Run(runCtx, job.ID, args.SrcPaths, asin, opts)
+	jf, err := buildEngineJob(args, args.Snapshot.Snapshot, effRoot, effFormat)
+	if err != nil {
+		buildErr := fmt.Errorf("build engine job: %v", err)
+		if job.BookID.Valid {
+			s.db.Exec(
+				"UPDATE books SET status = 'error', status_message = ? WHERE id = ?",
+				buildErr.Error(), job.BookID.Int64,
+			)
+		}
+		s.db.Exec(
+			"UPDATE processing_jobs SET status = ?, error = ?, completed_at = datetime('now') WHERE id = ?",
+			jobStatusError, buildErr.Error(), job.ID,
+		)
+		if state != nil {
+			state.finalize(`{"status":"error","message":"`+escapeJSON(buildErr.Error())+`"}`, buildErr)
+		}
+		s.forgetJob(job.ID)
+		return
+	}
+
+	// A completed directory, when the job was captured with one, is passed to
+	// the engine so it moves the (validated) sources there only on a fully
+	// successful group — the no-loss invariant: a failed run leaves the
+	// sources in place and the recoverable staging behind.
+	if completedDir != "" {
+		jf.CompletedDir = &completedDir
+	}
+
+	result, err := s.proc.RunJob(runCtx, job.ID, jf, audio.JobRunOptions{
+		OutputRoot: effRoot,
+		Identity:   args.Snapshot.Engine,
+		OnOutput:   appendOutputFn(state),
+	})
 	if err != nil {
 		// A cancellation during the run kills m4b-merge via its context;
 		// that is 'cancelled', not 'error'.
 		if state != nil && state.jobCtx != nil && state.jobCtx.Err() != nil {
 			stdout := ""
 			if result != nil {
-				stdout = result.Stdout
+				stdout = result.Stderr
 			}
 			s.finalizeCancelled(job, stdout)
 			return
@@ -1030,13 +1153,16 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 				err.Error(), job.BookID.Int64,
 			)
 		}
-		stdout := ""
+		output := ""
 		if result != nil {
-			stdout = result.Stdout
+			output = result.Stderr
+			if result.MachineJSON != "" {
+				output = strings.TrimRight(output, "\n") + "\n\n" + result.MachineJSON
+			}
 		}
 		s.db.Exec(
 			"UPDATE processing_jobs SET status = ?, error = ?, output = ?, completed_at = datetime('now') WHERE id = ?",
-			jobStatusError, err.Error(), stdout, job.ID,
+			jobStatusError, err.Error(), output, job.ID,
 		)
 		if state != nil {
 			state.finalize(`{"status":"error","message":"`+escapeJSON(err.Error())+`"}`, err)
@@ -1045,22 +1171,18 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		return
 	}
 
-	outputFile := result.OutputFile
+	// Success: the engine has published the validated artifacts under the
+	// output root. The audio artifact is the book's output file.
+	outputFile := result.PrimaryOutput
 	if job.BookID.Valid {
-		// An empty discovered output is a warning, not a failure: the book
-		// stays 'done' and the warning is recorded in its status message.
-		msg := ""
-		if outputFile == "" && result.OutputWarning != "" {
-			msg = result.OutputWarning
-		}
 		s.db.Exec(
-			"UPDATE books SET status = 'done', status_message = ?, dest_path = ?, format_type = ? WHERE id = ?",
-			msg, outputFile, outputFormat(outputFile), job.BookID.Int64,
+			"UPDATE books SET status = 'done', status_message = '', dest_path = ?, format_type = ? WHERE id = ?",
+			outputFile, outputFormat(outputFile), job.BookID.Int64,
 		)
 	}
-	output := result.Stdout
-	if outputFile == "" && result.OutputWarning != "" {
-		output = strings.TrimRight(output, "\n") + "\n" + result.OutputWarning
+	output := result.Stderr
+	if result.MachineJSON != "" {
+		output = strings.TrimRight(output, "\n") + "\n\n" + result.MachineJSON
 	}
 	s.db.Exec(
 		"UPDATE processing_jobs SET status = ?, output = ?, output_file = ?, completed_at = datetime('now') WHERE id = ?",

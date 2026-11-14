@@ -68,6 +68,7 @@ func seedReprocessBook(t *testing.T, h *Handler, bookID int64, status, srcPath s
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, bookID)
 }
 
 // seedMergeRow inserts an action='merge' job row with the given stored args
@@ -721,7 +722,7 @@ func TestReprocessEndToEndOnce(t *testing.T) {
 	out, completed := t.TempDir(), t.TempDir()
 	bin := writeMergingBinary(t, t.TempDir())
 	h := newReprocessHandler(t, out, completed, "{author}/{title}", bin)
-	h.svc.ProcessingSvc.proc = &audio.Processor{}
+	h.svc.ProcessingSvc.proc = testProcessor(&audio.Processor{})
 	h.svc.ProcessingSvc.proc.ApplyConfig(h.svc.Config.Config())
 
 	completedIn := filepath.Join(completed, "a.m4b")
