@@ -69,6 +69,16 @@ type httptestResponse struct {
 	body map[string]any
 }
 
+// storedString renders a stored field selection the way the DB row does:
+// null for the unset default, a JSON array otherwise.
+func storedString(fields *[]string) string {
+	if fields == nil {
+		return "null"
+	}
+	b, _ := json.Marshal(*fields)
+	return string(b)
+}
+
 // TestUpdateSettingsOmittedFieldsRetainsSelection pins the partial-update
 // semantics: a PUT that does not send metadata_fields must leave the saved
 // selection untouched — a saved explicit selection (including the none-
@@ -179,15 +189,31 @@ func TestUpdateSettingsIgnoresPinnedMetadataSelection(t *testing.T) {
 		if getBody["metadata_fields_pinned"] != true || getBody["metadata_chapters_pinned"] != true {
 			t.Errorf("pinned GET: want both flags true, got %v / %v", getBody["metadata_fields_pinned"], getBody["metadata_chapters_pinned"])
 		}
-		// The persisted store must carry the pin values, not the submitted
-		// (non-pinned) ones.
+		// The live config must carry the pin values, not the submitted
+		// (non-pinned) ones (ReassertMetadataPins re-applies them after
+		// the store swap).
 		raw, _ = json.Marshal(getBody["metadata_fields"])
 		if string(raw) != `["title","subtitle"]` {
-			t.Errorf("pinned fields in store: want the pin [title,subtitle], got %s", raw)
+			t.Errorf("live config fields with pins: want the pin [title,subtitle], got %s", raw)
 		}
 		raw, _ = json.Marshal(getBody["metadata_chapters"])
 		if string(raw) != `"write"` {
-			t.Errorf("pinned chapters in store: want the pin (write), got %s", raw)
+			t.Errorf("live config chapters with pins: want the pin (write), got %s", raw)
+		}
+		// The persisted DB row must keep the BASELINE saved values: the
+		// pinned keys are dropped before the save, so the pin must NOT
+		// leak into the store, and neither must the submitted values.
+		var storedFields, storedChapters string
+		if err := h.svc.DB.QueryRow(
+			`SELECT metadata_fields, metadata_chapters FROM settings WHERE id = 1`,
+		).Scan(&storedFields, &storedChapters); err != nil {
+			t.Fatalf("read settings row: %v", err)
+		}
+		if string(storedFields) != `["title"]` {
+			t.Errorf("pinned save leaked into DB row: want the baseline [\"title\"], got %s", storedFields)
+		}
+		if storedChapters != "preserve" {
+			t.Errorf("pinned save leaked into DB row: want the baseline preserve, got %s", storedChapters)
 		}
 
 		// A malformed value for the pinned key must not 400 the save of an
@@ -198,6 +224,32 @@ func TestUpdateSettingsIgnoresPinnedMetadataSelection(t *testing.T) {
 		}
 		if resp.body["num_cpus"] != 4.0 {
 			t.Errorf("unrelated num_cpus not saved alongside malformed pinned values: %v", resp.body["num_cpus"])
+		}
+		// A second save while the pin is active must NOT leak the pin (now
+		// riding in the live config) into the durable stores: the live
+		// config carries the pin, but the row and the config file keep the
+		// baseline saved values.
+		if err := h.svc.DB.QueryRow(
+			`SELECT metadata_fields, metadata_chapters FROM settings WHERE id = 1`,
+		).Scan(&storedFields, &storedChapters); err != nil {
+			t.Fatalf("read settings row after second save: %v", err)
+		}
+		if string(storedFields) != `["title"]` {
+			t.Errorf("pin leaked into DB row on second save: want the baseline [\"title\"], got %s", storedFields)
+		}
+		if storedChapters != "preserve" {
+			t.Errorf("pin leaked into DB row on second save: want the baseline preserve, got %s", storedChapters)
+		}
+		if gotF, gotC := h.svc.Config.StoredMetadataSelection(); storedString(gotF) != `["title"]` || gotC != "preserve" {
+			t.Errorf("pin leaked into config file on second save: want [\"title\"]/preserve, got %s/%s", storedString(gotF), gotC)
+		}
+		// The live config still carries the pin (env outranks the stores).
+		live := h.svc.Config.Config()
+		if live.Processing.MetadataChapters != "write" {
+			t.Errorf("live config lost the chapter pin: want write, got %s", live.Processing.MetadataChapters)
+		}
+		if gotF := storedString(live.Processing.MetadataFields); gotF != `["title","subtitle"]` {
+			t.Errorf("live config lost the fields pin: want [title,subtitle], got %s", gotF)
 		}
 	})
 
@@ -224,6 +276,20 @@ func TestUpdateSettingsIgnoresPinnedMetadataSelection(t *testing.T) {
 		raw, _ = json.Marshal(getBody["metadata_fields"])
 		if string(raw) != `["title"]` {
 			t.Errorf("fields selection with only the chapter pin: want [title] saved, got %s", raw)
+		}
+		// Direct DB row check: the unpinned fields selection landed, the
+		// pinned chapter value did NOT (the row keeps the baseline).
+		var storedFields, storedChapters string
+		if err := h.svc.DB.QueryRow(
+			`SELECT metadata_fields, metadata_chapters FROM settings WHERE id = 1`,
+		).Scan(&storedFields, &storedChapters); err != nil {
+			t.Fatalf("read settings row: %v", err)
+		}
+		if string(storedFields) != `["title"]` {
+			t.Errorf("unpinned fields selection not persisted with chapter pin: want [\"title\"], got %s", storedFields)
+		}
+		if storedChapters != "preserve" {
+			t.Errorf("chapter pin leaked into DB row: want the baseline preserve, got %s", storedChapters)
 		}
 	})
 }

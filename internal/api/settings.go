@@ -372,6 +372,25 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	prev := h.svc.Config.Config()
 	snap := *prev
+	// Freeze deployment-pinned metadata keys to their STORED values before
+	// the DB/YAML writes: after an earlier save, the live config carries
+	// the re-asserted env values, and letting them ride along in snap
+	// would leak the pin into the durable stores (env must outrank, never
+	// overwrite, the settings stores — a pinned operator who later edits
+	// an unrelated setting would otherwise persist the pin as if it were
+	// a user selection). The durable file is read, not the live config,
+	// because the live config is exactly the contaminated copy. Pinned
+	// keys were dropped from req above, so they are never in changed and
+	// never reach the file save.
+	if f, c := h.svc.Config.MetadataEnvManaged(); f || c {
+		storedFields, storedChapters := h.svc.Config.StoredMetadataSelection()
+		if f {
+			snap.Processing.MetadataFields = storedFields
+		}
+		if c {
+			snap.Processing.MetadataChapters = storedChapters
+		}
+	}
 	changed := make(map[string]any)
 	if h.svc.SettingsPersistDelay != nil {
 		h.svc.SettingsPersistDelay()

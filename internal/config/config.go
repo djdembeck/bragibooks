@@ -334,6 +334,64 @@ func ReassertMetadataPins(cfg *Config) {
 	}
 }
 
+// StoredMetadataSelection reads the durable config file (the store the
+// Settings save persists through) and returns the written metadata
+// selection: a nil pointer means "not set" (default all-supported-
+// available), a present empty list means the explicit none-selected save,
+// and a non-empty list is the saved selection. A missing file returns the
+// defaults, matching the empty-row baseline.
+func (cm *ConfigManager) StoredMetadataSelection() (fields *[]string, chapters string) {
+	fields = nil
+	chapters = "write"
+	path := cm.configPath
+	if path == "" {
+		return
+	}
+	m := parseYAMLMap(mustReadFile(path))
+	if m == nil {
+		return
+	}
+	if proc, ok := m["processing"].(map[string]any); ok {
+		if v, present := proc["metadata_fields"]; present {
+			list := yamlStringListValue(v)
+			fields = &list
+		}
+		if v, present := proc["metadata_chapters"]; present {
+			if s, ok := v.(string); ok {
+				chapters = s
+			}
+		}
+	}
+	return
+}
+
+// mustReadFile reads a file's raw bytes; missing files return nil. It is
+// for readers of optional stores (a not-found is a valid empty state), not
+// for callers that must distinguish other I/O errors.
+func mustReadFile(path string) []byte {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// yamlStringListValue converts a parsed-YAML list value to a string slice,
+// returning nil for a non-list value.
+func yamlStringListValue(v any) []string {
+	l, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(l))
+	for _, item := range l {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // normalizeMetadataPin splits a PROCESSING_METADATA_FIELDS pin into its
 // field list (an all-whitespace pin is the explicit "write nothing"). The
 // values are NOT validated: the boot validation in main.go is the single
