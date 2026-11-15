@@ -407,7 +407,7 @@
 
 	// ── Save / reset ─────────────────────────────────────────────
 	async function save() {
-		if (!draft || saving) return;
+		if (!draft || saving || uploading) return; // the server sweep races an in-flight upload
 		if (chapterErrors.length) return; // diagnostics already visible
 		saving = true;
 		saveError = null;
@@ -425,7 +425,7 @@
 	}
 
 	async function doReset() {
-		if (resetting) return;
+		if (resetting || uploading) return; // the server sweep races an in-flight upload
 		resetting = true;
 		saveError = null;
 		try {
@@ -984,7 +984,7 @@
 		{#if confirmingReset}
 			<div class="meditor__confirm">
 				<span>Discard all manual edits and use the catalog values again? (Your chosen release is kept.)</span>
-				<Button variant="danger" loading={resetting} onclick={doReset}>Yes, reset</Button>
+				<Button variant="danger" loading={resetting} disabled={uploading} onclick={doReset}>Yes, reset</Button>
 				<Button variant="ghost" onclick={() => (confirmingReset = false)}>Cancel</Button>
 			</div>
 		{:else}
