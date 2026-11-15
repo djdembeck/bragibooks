@@ -13,6 +13,11 @@
 		ReprocessPreview,
 		ReprocessRequest,
 		Settings,
+		BookMetadataResponse,
+		BookMetadataDraft,
+		EnginePreviewResponse,
+		CoverUploadResponse,
+		SnapshotChapter,
 	} from '#lib/types.js';
 	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '#lib/types.js';
 	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
@@ -36,9 +41,22 @@
 	import { parseParts, trimSegment, validateScheme } from '#lib/scheme.js';
 	import { ExternalLink, ArrowLeft, CheckCircle, ChevronDown, FolderOpen } from '@lucide/svelte';
 
+	import MetadataEditor from './MetadataEditor.svelte';
+
 	let { data }: { data: PageData } = $props();
 
 	let book: BookWithPeople | null = $derived(data.book);
+
+	/* The editor's naming preview needs the GLOBAL path format (the queue
+	 * destination a bare book inherits), loaded once — a missing value just
+	 * states the hint, it never blocks editing. */
+	let globalPathFormat = $state<string | null>(null);
+	$effect(() => {
+		if (!book) return;
+		get<Settings>('/settings')
+			.then((s) => (globalPathFormat = s.output_scheme || null))
+			.catch(() => (globalPathFormat = null));
+	});
 
 	const authorNames = $derived(book ? book.authors.map((a) => a.name).join(', ') : '');
 	const narratorNames = $derived(book ? book.narrators.map((n) => n.name).join(', ') : '');
@@ -737,6 +755,19 @@
 				</Alert>
 			</div>
 		{/if}
+	</section>
+
+	<!-- ── Manual metadata: the per-book override layer ──────────
+	 * Every supported engine value is editable here; the draft,
+	 * effective state and audit all live on the server, and a save
+	 * records a database row only — a processing job writes the tags. -->
+	<section class="card record-section" aria-label="Manual metadata">
+		<h2 class="detail__section-title">Manual metadata</h2>
+		<MetadataEditor
+			bookId={book.id}
+			pathFormat={globalPathFormat}
+			onSaved={() => void refreshAll()}
+		/>
 	</section>
 
 	<!-- ── Re-process dialog — done books, destination settings ── -->

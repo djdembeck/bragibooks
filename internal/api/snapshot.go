@@ -123,17 +123,38 @@ func (s *BookSnapshot) toSupplied() audio.SuppliedMetadata {
 // writes exactly those fields and preserves the rest. The nil-vs-explicit
 // distinction must survive the JSON round trip, so Fields has no omitempty.
 // Cover and Chapters are the engine policy strings for the two non-scalar
-// write paths: cover is "write" (embed the captured cover) or "preserve"
-// (keep the source's cover; single natively-copyable input only), chapters is
-// "write" (embed the release's chapters + sidecar) or "preserve" (skip all
-// chapter mutation; single natively-copyable input only). A none-selected
-// selection sets both to preserve: no embedded tag/cover/chapter mutation and
-// no generated chapter sidecar, while naming still uses the effective
+// write paths: cover is "write" (embed the captured cover), "preserve"
+// (keep the source's cover; single natively-copyable input only), "clear"
+// (remove the cover — a per-book editor pin), or "write_url" (embed the
+// operator's cover URL at run time — a per-book editor pin); chapters is
+// "write" (embed the release's chapters + sidecar), "preserve" (skip all
+// chapter mutation; single natively-copyable input only), or "clear"
+// (remove the chapters — a per-book editor pin). A none-selected
+// selection sets both to preserve: no embedded tag/cover/chapter mutation
+// and no generated chapter sidecar, while naming still uses the effective
 // metadata.
+//
+// ScalarPins are the per-book editor's EXPLICIT clears (B3), frozen onto
+// the selection: the scalar fields named there run under the engine's
+// "clear" policy on top of the selection-derived baseline, independent of
+// the Fields choice. Nil (absent) = no pins; a non-nil map carries only
+// the pinned fields.
 type WriteSelection struct {
 	Fields   []string `json:"fields"`
 	Cover    string   `json:"cover"`
 	Chapters string   `json:"chapters"`
+	// ScalarPins freezes the editor's cleared scalar fields. JSON object
+	// form (field -> "clear"): an empty-but-present object round-trips as
+	// an empty map, and a missing key is nil — the distinction
+	// "no pins" vs "pins were present" is load-bearing for a future
+	// re-derivation, and the map never carries a value other than
+	// "clear".
+	ScalarPins map[string]string `json:"scalar_pins,omitempty"`
+	// CoverURL freezes the editor's operator cover URL for the job's
+	// write_url cover policy ("" when no URL cover is pinned): the run
+	// embeds it at execution time, so the URL must live on the frozen
+	// selection, not in the mutable override row.
+	CoverURL string `json:"cover_url,omitempty"`
 }
 
 // snapshotJSON is the wire/storage form of a job's captured snapshot. It is
@@ -478,11 +499,12 @@ func loadBookSnapshot(db *sql.DB, bookID int64) (*BookSnapshot, error) {
 }
 
 // validateWriteSelection checks a frozen queue-time write selection for the
-// worker-side defense invariants: every field in the vocabulary, and the
-// cover/chapters policies in the Bragi-derived subset (write/preserve —
-// explicit clear is the per-book editor's operation, never a frozen job
-// value). A corrupted row must fail with a clear re-queue message, never run
-// under a guessed policy.
+// worker-side defense invariants: every field in the vocabulary, the
+// cover/chapters policies in the Bragi-derived subset (write/preserve from
+// the settings selection, plus the per-book editor's clear/write_url pins),
+// and the scalar pins (only the editor's vocabulary, only "clear" values).
+// A corrupted row must fail with a clear re-queue message, never run under a
+// guessed policy.
 func validateWriteSelection(sel *WriteSelection) error {
 	if sel == nil {
 		return nil // default behavior, nothing to validate
@@ -496,11 +518,25 @@ func validateWriteSelection(sel *WriteSelection) error {
 			return fmt.Errorf("stored write selection names unsupported field %q", f)
 		}
 	}
-	if sel.Cover != audio.WritePolicyValueWrite && sel.Cover != audio.WritePolicyValuePreserve {
-		return fmt.Errorf("stored cover write policy %q is not write/preserve", sel.Cover)
+	if !slices.Contains([]string{
+		audio.WritePolicyValueWrite, audio.WritePolicyValuePreserve,
+		audio.WritePolicyValueClear, "write_url",
+	}, sel.Cover) {
+		return fmt.Errorf("stored cover write policy %q is not write/preserve/clear/write_url", sel.Cover)
 	}
-	if sel.Chapters != audio.ChaptersPolicyValueWrite && sel.Chapters != audio.ChaptersPolicyValuePreserve {
-		return fmt.Errorf("stored chapter write policy %q is not write/preserve", sel.Chapters)
+	if !slices.Contains([]string{
+		audio.ChaptersPolicyValueWrite, audio.ChaptersPolicyValuePreserve,
+		audio.WritePolicyValueClear,
+	}, sel.Chapters) {
+		return fmt.Errorf("stored chapter write policy %q is not write/preserve/clear", sel.Chapters)
+	}
+	for f, p := range sel.ScalarPins {
+		if !validOverrideField(f) || f == "cover" || f == "chapters" {
+			return fmt.Errorf("stored scalar pin names unsupported field %q", f)
+		}
+		if p != audio.WritePolicyValueClear {
+			return fmt.Errorf("stored scalar pin %q carries policy %q (only clear is pinned)", f, p)
+		}
 	}
 	return nil
 }
@@ -567,22 +603,66 @@ func buildEngineJob(args jobArgs, jobID string, snap BookSnapshot, outputRoot, p
 	if normalizedFields != nil {
 		jf.Policies = audio.WritePolicyFor(normalizedFields, supplied)
 	}
+	// The per-book editor's EXPLICIT clears (B3) are authoritative on top
+	// of the selection-derived baseline: a cleared field runs under the
+	// engine's "clear" policy regardless of the selection (the operator
+	// deliberately removed that tag; the selection checkbox never
+	// re-enables it).
+	if sel != nil {
+		for f, p := range sel.ScalarPins {
+			switch f {
+			case "title":
+				jf.Policies.Title = p
+			case "subtitle":
+				jf.Policies.Subtitle = p
+			case "authors":
+				jf.Policies.Authors = p
+			case "narrators":
+				jf.Policies.Narrators = p
+			case "series":
+				jf.Policies.Series = p
+			case "description":
+				jf.Policies.Description = p
+			case "genres":
+				jf.Policies.Genres = p
+			case "year":
+				jf.Policies.Year = p
+			}
+		}
+	}
 
 	// Cover: the frozen selection's cover policy picks the engine policy.
-	// write (the default behavior) stages the captured file when one exists,
-	// degrading to clear when it does not; preserve skips all cover mutation
-	// (single natively-copyable input only — the engine rejects it with an
-	// explicit diagnosed error on a merge, which surfaces as the job error).
-	// The cover policy is only pinned by an explicit FIELD selection: the
-	// chapter-policy-only shape (nil Fields) keeps the default write.
+	// write (the default behavior) stages the captured file when one exists
+	// (for an operator cover edit, snap.CoverFile IS the override's asset —
+	// applyMetadataOverride already layered it in), degrading to clear when
+	// it does not; preserve skips all cover mutation (single
+	// natively-copyable input only — the engine rejects it with an explicit
+	// diagnosed error on a merge); clear removes the cover (the per-book
+	// editor's pin); write_url embeds the operator's cover URL at run time
+	// (the per-book editor's pin — the engine's own remote-embed path, the
+	// same surface catalog covers use). The policy is honored whenever a
+	// selection is present, including a pin-forced one with nil Fields.
 	var stagedCover string
 	coverPolicy := audio.WritePolicyValueWrite
-	if sel != nil && sel.Fields != nil {
+	if sel != nil {
 		coverPolicy = sel.Cover
 	}
 	switch coverPolicy {
 	case audio.WritePolicyValuePreserve:
 		jf.Cover = json.RawMessage(`"preserve"`)
+	case "write_url":
+		// The engine's URL-embed object form; a missing URL (a pin with no
+		// value, which save-time validation prevents) degrades to the bare
+		// policy, which in supplied mode embeds nothing.
+		if sel != nil && sel.CoverURL != "" {
+			if raw, merr := json.Marshal(map[string]string{"write_url": sel.CoverURL}); merr == nil {
+				jf.Cover = raw
+			} else {
+				jf.Cover = json.RawMessage(`"write_url"`)
+			}
+		} else {
+			jf.Cover = json.RawMessage(`"write_url"`)
+		}
 	default:
 		jf.Cover = json.RawMessage(`"clear"`)
 		if snap.CoverFile != "" {
@@ -619,6 +699,10 @@ func buildEngineJob(args jobArgs, jobID string, snap BookSnapshot, outputRoot, p
 	switch {
 	case chapterPolicy == audio.ChaptersPolicyValuePreserve:
 		jf.Chapters = json.RawMessage(`"preserve"`)
+	case chapterPolicy == audio.WritePolicyValueClear:
+		// The per-book editor's chapter clear pin: remove the chapters
+		// (the engine's explicit-clear shape, same as an empty write list).
+		jf.Chapters = json.RawMessage(`{"write":{"chapters":[]}}`)
 	case len(snap.Chapters) > 0:
 		list := make([]audio.JobChapter, 0, len(snap.Chapters))
 		for _, c := range snap.Chapters {
@@ -845,7 +929,10 @@ type coverHop struct {
 // lookupCoverHost resolves host under the capture's context deadline, so a
 // stuck DNS resolution dies on the same clock as the HTTP fetch instead of
 // holding the metadata-save request past the intended cover timeout.
-func lookupCoverHost(ctx context.Context, host string) ([]string, error) {
+// Var-bound so tests may substitute a deterministic resolver (the override
+// save-time URL guard resolves the host too, and a test must not depend on
+// a live resolver answering for its fixture domain).
+var lookupCoverHost = func(ctx context.Context, host string) ([]string, error) {
 	return net.DefaultResolver.LookupHost(ctx, host)
 }
 

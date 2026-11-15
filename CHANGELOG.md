@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file. See [standa
 
 ## [Unreleased]
 
+### Added
+
+- Manual metadata editor (per book): a durable override layer on the book
+  record exposing every supported engine value — title, subtitle, ordered
+  author/narrator lists, series name/position, description, genres, year,
+  cover (catalog, uploaded local asset, secure URL, or remove-from-output),
+  and a millisecond-precision chapter editor with ordered-range diagnostics.
+  Each field keeps the three states the engine needs: the catalog value, an
+  explicit edited value, and an explicit clear (tag removed from the output),
+  and the UI states which action it is taking. Saving records a database row
+  only (the audit entry says so); tags are written when a processing job runs.
+  The book's record page now carries an engine-backed live output-name
+  preview of the draft, a "Reset to catalog" action that discards the manual
+  layer without touching the chosen release, and cover uploads stored as
+  immutable per-book assets that a queued job keeps even after later edits.
+  A queued job's frozen metadata, write policy, and asset references are
+  unchanged by later edits (verified by behavior tests).
+
 ### Fixed
 
 - Authoritative processing hardening (post-review):

@@ -238,6 +238,11 @@ The web frontend uses the HTTP API below. Responses are JSON unless noted otherw
 | `PUT` | `/api/books/{id}` | Update a book |
 | `DELETE` | `/api/books/{id}` | Remove a book |
 | `GET` | `/api/books/{id}/match-evidence?book_id=...&release_id=...` | Match source-vs-catalog evidence for one selected record |
+| `GET` | `/api/books/{id}/metadata` | Read a book's catalog snapshot, its manual override layer, and the effective (merged) values |
+| `PUT` | `/api/books/{id}/metadata` | Save the manual override layer (edited values, explicit clears, artwork choice, millisecond chapters); records a database row only — tags are written when a processing job runs |
+| `POST` | `/api/books/{id}/metadata/reset` | Discard the manual override layer and return to the captured catalog values |
+| `POST` | `/api/books/{id}/metadata/cover` | Upload local artwork as an immutable per-book cover asset |
+| `POST` | `/api/engine/preview` | Non-mutating engine preview: resolve the effective values against the engine's output-name resolver (no files are read or written) |
 | `GET` | `/api/search?query=...&types=books&skip=0&take=20` | Search AudiobookDB |
 | `GET` | `/api/search/books/{id}` | Fetch an AudiobookDB book |
 | `GET` | `/api/search/releases/{id}` | Fetch an AudiobookDB release |

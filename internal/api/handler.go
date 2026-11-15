@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -46,6 +47,16 @@ type Services struct {
 	// CoversDir is the on-disk directory for cover art extracted from
 	// source media. Empty disables extraction; the UI keeps its placeholder.
 	CoversDir string
+
+	// pendingCovers tracks override cover assets ("ovr-<bookID>-*.jpg") that
+	// an upload has written but that the SAVED override row does not reference
+	// yet: the editor uploads first and persists the filename in a later
+	// draft save. Prune sweeps keep non-expired entries so a save or reset
+	// arriving between the upload and the draft save cannot delete the asset
+	// the draft points at (the job would then degrade to no cover). Entries
+	// expire after pendingCoverTTL. Guarded by pendingCoversMu.
+	pendingCoversMu sync.Mutex
+	pendingCovers   map[string]time.Time
 	// FFmpeg is the ffmpeg binary used to read embedded art. Empty disables
 	// extraction (ffmpeg is not installed).
 	FFmpeg string
@@ -93,6 +104,13 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 		r.Delete("/books/{id}", h.DeleteBook)
 		r.Get("/books/{id}/reprocess", h.GetBookReprocess)
 		r.Get("/books/{id}/match-evidence", h.GetMatchEvidence)
+
+		// Manual metadata editor (per-book override layer, B3): state,
+		// save, reset-to-catalog, and the operator's own artwork upload.
+		r.Get("/books/{id}/metadata", h.GetBookMetadata)
+		r.Put("/books/{id}/metadata", h.UpdateBookMetadata)
+		r.Post("/books/{id}/metadata/reset", h.ResetBookMetadata)
+		r.Post("/books/{id}/metadata/cover", h.UploadBookMetadataCover)
 
 		// Processing
 		r.Post("/process", h.StartProcessing)

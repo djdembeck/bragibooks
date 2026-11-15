@@ -360,6 +360,87 @@ export interface ReprocessRequest {
 	path_format?: string;
 }
 
+/** Wire shape of GET /api/books/{id}/metadata (the manual editor state). */
+export interface SnapshotChapter {
+	title: string;
+	start_millis: number;
+	duration_millis: number;
+}
+
+export interface BookMetadataSnapshot {
+	book_id: number;
+	audiobookdb_book_id: string;
+	audiobookdb_release_id: string;
+	title: string;
+	subtitle: string;
+	authors: string[];
+	narrators: string[];
+	series_name: string;
+	series_position: string;
+	description: string;
+	genres: string[];
+	year: number | null;
+	cover_file: string;
+	chapters: SnapshotChapter[] | null;
+	captured_at: string;
+}
+
+/** The stored manual override layer. Absent (null) = no overrides saved. */
+export interface BookMetadataOverrides {
+	title: string;
+	subtitle: string;
+	authors: string[] | null;
+	narrators: string[] | null;
+	series_name: string;
+	series_position: string;
+	description: string;
+	genres: string[] | null;
+	year: number | null;
+	cleared: string[];
+	cover_source: '' | 'clear' | 'file' | 'url';
+	cover_file: string;
+	cover_url: string;
+	chapters: SnapshotChapter[] | null;
+	updated_at: string;
+}
+
+/** PUT /api/books/{id}/metadata body: the editor's full override draft.
+ *  Field conventions: '' = no scalar override; null array = no array
+ *  override; null year = no year override; cleared = explicit tag removal. */
+export interface BookMetadataDraft {
+	title: string;
+	subtitle: string;
+	authors: string[] | null;
+	narrators: string[] | null;
+	series_name: string;
+	series_position: string;
+	description: string;
+	genres: string[] | null;
+	year: number | null;
+	cleared: string[];
+	cover_source: '' | 'clear' | 'file' | 'url';
+	cover_file: string;
+	cover_url: string;
+	chapters: SnapshotChapter[] | null;
+}
+
+export interface BookMetadataResponse {
+	snapshot: BookMetadataSnapshot | null;
+	overrides: BookMetadataOverrides | null;
+	effective: BookMetadataSnapshot | null;
+	effective_chapters: SnapshotChapter[] | null;
+}
+
+/** Wire shape of POST /api/engine/preview. */
+export interface EnginePreviewResponse {
+	relative_path: string;
+}
+
+/** Wire shape of POST /api/books/{id}/metadata/cover. */
+export interface CoverUploadResponse {
+	cover_file: string;
+}
+
 /** Wire shape of models.OutputProfile. */
 export interface OutputProfile {
 	id: number;

@@ -293,6 +293,58 @@ ALTER TABLE settings ADD COLUMN metadata_chapters TEXT NOT NULL DEFAULT 'write';
 ALTER TABLE book_snapshots ADD COLUMN subtitle TEXT NOT NULL DEFAULT '';
 `,
 	},
+	{
+		// v17: manual metadata overrides. One durable per-book override row,
+		// separate from the book_snapshots catalog capture: the capture
+		// records the selected catalog record (and re-takes it on every
+		// match/save), while this row records the OPERATOR'S explicit
+		// per-field intent on top of it — an edited value, an explicit clear
+		// (remove the embedded tag), or no opinion (the catalog value
+		// applies). Effective metadata = catalog capture with the override
+		// layer applied, and only the effective values name the output and
+		// feed the selected writes. Storage conventions per field:
+		//   - scalar text (title, subtitle, series, description): '' = no
+		//     override (the field's own "clear" lives in the cleared list,
+		//     because a blank value is a legal catalog state);
+		//   - people arrays (authors, narrators, genres): '' = no override,
+		//     '[]' = explicitly empty;
+		//   - year: NULL = no override, a value = the edited year; an
+		//     explicit clear is the 'year' entry in cleared (the column
+		//     alone cannot carry all three states);
+		//   - cleared: JSON array of field names the operator explicitly
+		//     cleared (remove the embedded tag from the output), distinct
+		//     from resetting to the catalog value;
+		//   - cover: cover_source '' = no override (the catalog cover
+		//     applies), 'clear' = remove the cover from the output, 'file'
+		//     = the operator's own artwork (cover_file, an immutable local
+		//     asset under the covers directory);
+		//   - chapters: '' = no override (the selected release's chapters
+		//     and the chapter write policy apply), a JSON array (possibly
+		//     empty = remove chapters) = the operator's explicit list.
+		// A queued job embeds a copy of the row in its snapshot, so later
+		// edits change future jobs only.
+		version: 17,
+		sql: `
+CREATE TABLE IF NOT EXISTS book_metadata_overrides (
+    book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    title TEXT NOT NULL DEFAULT '',
+    subtitle TEXT NOT NULL DEFAULT '',
+    authors TEXT NOT NULL DEFAULT '',
+    narrators TEXT NOT NULL DEFAULT '',
+    series_name TEXT NOT NULL DEFAULT '',
+    series_position TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    genres TEXT NOT NULL DEFAULT '',
+    year INTEGER,
+    cleared TEXT NOT NULL DEFAULT '[]',
+    cover_source TEXT NOT NULL DEFAULT '',
+    cover_file TEXT NOT NULL DEFAULT '',
+    cover_url TEXT NOT NULL DEFAULT '',
+    chapters TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

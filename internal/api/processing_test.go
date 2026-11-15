@@ -63,6 +63,25 @@ CREATE TABLE IF NOT EXISTS book_snapshots (
     chapters TEXT NOT NULL DEFAULT '[]',
     captured_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS book_metadata_overrides (
+    book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    title TEXT NOT NULL DEFAULT '',
+    subtitle TEXT NOT NULL DEFAULT '',
+    authors TEXT NOT NULL DEFAULT '',
+    narrators TEXT NOT NULL DEFAULT '',
+    series_name TEXT NOT NULL DEFAULT '',
+    series_position TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    genres TEXT NOT NULL DEFAULT '',
+    year INTEGER,
+    cleared TEXT NOT NULL DEFAULT '[]',
+    cover_source TEXT NOT NULL DEFAULT '',
+    cover_file TEXT NOT NULL DEFAULT '',
+    cover_url TEXT NOT NULL DEFAULT '',
+    chapters TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `
 
 // newTestJobsHandler returns a Handler with a ProcessingService backed by an

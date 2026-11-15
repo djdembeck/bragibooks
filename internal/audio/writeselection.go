@@ -27,12 +27,15 @@ const FieldCover = "cover"
 var SelectableFields = append(append([]string{}, SupportedWriteFields...), FieldCover)
 
 // WritePolicyValue is the per-field policy vocabulary the engine accepts for
-// Bragi's derived job policies. Bragi only ever derives write or preserve:
-// explicit clear is the per-book editor's operation (B3), never something a
-// settings selection implies.
+// Bragi's derived job policies. The settings selection derives only write
+// and preserve: explicit clear is the per-book editor's operation (B3),
+// never something a settings selection implies — it exists here because the
+// editor pins a cleared field to it on top of the selection-derived
+// baseline, and the engine's clear atoms are its documented vocabulary.
 const (
 	WritePolicyValueWrite    = "write"
 	WritePolicyValuePreserve = "preserve"
+	WritePolicyValueClear    = "clear"
 )
 
 // ChaptersPolicyValueWrite / ...Preserve are the derived chapter policy
