@@ -46,18 +46,45 @@
 	let previewPath = $state('');
 	let previewSeq = 0;
 
-	function load() {
+	// Fetch generation (finding: SvelteKit reuses this component when
+	// navigating /books/1 -> /books/2, and a draft loaded for book A must
+	// never be submitted for book B — every save/upload URL is built from
+	// the LIVE bookId). A plain, deliberately non-reactive counter: the
+	// fetch effect re-runs on the bookId prop change and via the reload()
+	// token below; each run mints a generation token, and the .then/.catch
+	// guard against the LIVE token, so a response that outlived a
+	// navigation (or a reset) is dropped instead of populating the wrong
+	// book's state.
+	let bookFetchSeq = 0;
+	let reloadToken = $state(0);
+	$effect(() => {
+		bookId; // navigation dependency (state is wiped on every run)
+		reloadToken; // explicit-reload dependency (same id)
+		const gen = ++bookFetchSeq;
+		const id = bookId;
+		previewSeq++;
+		previewPath = '';
 		loadError = null;
 		meta = null;
 		draft = null;
-		get<BookMetadataResponse>(`/books/${bookId}/metadata`)
+		get<BookMetadataResponse>(`/books/${id}/metadata`)
 			.then((resp) => {
+				if (gen !== bookFetchSeq) return;
 				meta = resp;
 				draft = draftFrom(resp);
 			})
-			.catch((e) => (loadError = toCleanedError(e)));
+			.catch((e) => {
+				if (gen !== bookFetchSeq) return;
+				loadError = toCleanedError(e);
+			});
+	});
+
+	// Reload the current book (used after a reset, which deletes the
+	// override row without touching bookId): a new generation for the
+	// SAME id.
+	function reload() {
+		reloadToken++;
 	}
-	load();
 
 	function draftFrom(resp: BookMetadataResponse): BookMetadataDraft {
 		const ov = resp.overrides;
@@ -106,36 +133,42 @@
 	}
 
 	// ── Effective draft → engine naming preview ──────────────────
-	// Mirrors the server's applyMetadataOverride for NAMING purposes:
-	// edited value wins, a cleared field blanks, nothing else changes.
+	// Mirrors the server's applyMetadataOverride effective state for NAMING
+	// purposes: edited value wins, catalog value otherwise, nothing else
+	// changes. A cleared field is intentionally NOT blanked here: the
+	// server no longer blanks the effective value for a clear (the engine
+	// "clear" policy removes the tag atom at run time, while the effective
+	// value keeps naming the output), so the preview payload must carry the
+	// value the frozen job will name from.
 	// The payload is a $derived so it is recomputed synchronously from the
 	// CURRENT draft fields (the effect below reads only this derived, which
 	// is what tracks every nested edit — reading fields inside the delayed
 	// callback would not retrigger the preview after the first request).
-	// Every clear is applied, including the ordered people: a cleared
-	// authors/narrators shows as an empty list, matching the queued job's
-	// server-computed effective state (not the catalog people).
+	// Cleared fields are intentionally NOT blanked here: the server no
+	// longer blanks the effective value for a clear (the engine "clear"
+	// policy removes the tag atom at run time, while the effective value
+	// keeps naming the output), so the payload carries the value the
+	// frozen job will name from — the catalog value for a cleared list,
+	// the edited value for a cleared scalar.
 	const previewMetadata = $derived.by((): Record<string, unknown> => {
 		const d = draft;
 		if (!d) return {};
-		const blank = (v: string, field: string) => (isCleared(field) ? '' : v);
-		const snapTitle = snapshot?.title ?? '';
 		const metaPayload: Record<string, unknown> = {
-			title: blank(d.title || snapTitle, 'title'),
-			authors: isCleared('authors') ? [] : d.authors ?? (snapshot?.authors ?? []),
-			narrators: isCleared('narrators') ? [] : d.narrators ?? (snapshot?.narrators ?? [])
+			title: d.title || (snapshot?.title ?? ''),
+			authors: d.authors ?? (snapshot?.authors ?? []),
+			narrators: d.narrators ?? (snapshot?.narrators ?? [])
 		};
-		const subtitle = blank(d.subtitle || (snapshot?.subtitle ?? ''), 'subtitle');
+		const subtitle = d.subtitle || (snapshot?.subtitle ?? '');
 		if (subtitle) metaPayload.subtitle = subtitle;
-		const seriesName = blank(d.series_name || (snapshot?.series_name ?? ''), 'series');
+		const seriesName = d.series_name || (snapshot?.series_name ?? '');
 		if (seriesName) metaPayload.series_name = seriesName;
-		const seriesPosition = blank(d.series_position || (snapshot?.series_position ?? ''), 'series');
+		const seriesPosition = d.series_position || (snapshot?.series_position ?? '');
 		if (seriesPosition) metaPayload.series_position = seriesPosition;
-		const description = blank(d.description || (snapshot?.description ?? ''), 'description');
+		const description = d.description || (snapshot?.description ?? '');
 		if (description) metaPayload.description = description;
 		const genres = d.genres ?? (snapshot?.genres ?? []);
-		if (genres.length) metaPayload.genres = isCleared('genres') ? [] : genres;
-		const year = isCleared('year') ? null : d.year ?? snapshot?.year ?? null;
+		if (genres.length) metaPayload.genres = genres;
+		const year = d.year ?? snapshot?.year ?? null;
 		if (year) metaPayload.year = year;
 		if (snapshot?.audiobookdb_book_id) metaPayload.book_id = snapshot.audiobookdb_book_id;
 		return metaPayload;
@@ -383,7 +416,7 @@
 		try {
 			await post(`/books/${bookId}/metadata/reset`, {});
 			confirmingReset = false;
-			load();
+			reload();
 			onSaved?.();
 		} catch (e) {
 			saveError = toCleanedError(e);

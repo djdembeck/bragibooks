@@ -286,10 +286,19 @@ func (h *Handler) saveMetadataOverride(o *MetadataOverride) error {
 		}
 		return nil
 	}
-	authors, _ := json.Marshal(nonNilStrings(o.Authors))
-	narrators, _ := json.Marshal(nonNilStrings(o.Narrators))
-	genres, _ := json.Marshal(nonNilStrings(o.Genres))
-	cleared, _ := json.Marshal(nonNilStrings(o.Cleared))
+	// The optional arrays follow the same storage convention as chapters
+	// below: nil (no override) stores the empty string, and a non-nil slice
+	// — INCLUDING an explicit empty [] — stores its JSON. This is load-bearing
+	// (finding: nil arrays persisted as "[]"): a field the operator did not
+	// edit must round-trip to nil so applyMetadataOverride keeps the catalog
+	// value, while an edited value (even a deliberate empty list) stores its
+	// JSON so it reads back non-nil. nonNilStrings would collapse nil into []
+	// and the catalog people/genres would be silently blanked on the first
+	// edit of any other field.
+	authors := marshalOptionalStrings(o.Authors)
+	narrators := marshalOptionalStrings(o.Narrators)
+	genres := marshalOptionalStrings(o.Genres)
+	cleared := marshalOptionalStrings(o.Cleared)
 	chapters := ""
 	if o.Chapters != nil {
 		b, _ := json.Marshal(o.Chapters)
@@ -312,9 +321,9 @@ func (h *Handler) saveMetadataOverride(o *MetadataOverride) error {
 	   cleared=excluded.cleared, cover_source=excluded.cover_source,
 	   cover_file=excluded.cover_file, cover_url=excluded.cover_url,
 	   chapters=excluded.chapters, updated_at=datetime('now')`,
-		o.BookID, o.Title, o.Subtitle, string(authors), string(narrators),
-		o.SeriesName, o.SeriesPos, o.Description, string(genres), year,
-		string(cleared), o.CoverSource, o.CoverFile, o.CoverURL, chapters,
+		o.BookID, o.Title, o.Subtitle, authors, narrators,
+		o.SeriesName, o.SeriesPos, o.Description, genres, year,
+		cleared, o.CoverSource, o.CoverFile, o.CoverURL, chapters,
 	)
 	if err != nil {
 		return fmt.Errorf("save metadata overrides: %w", err)
@@ -322,13 +331,17 @@ func (h *Handler) saveMetadataOverride(o *MetadataOverride) error {
 	return nil
 }
 
-// nonNilStrings maps a nil slice to an empty one so JSON storage is '[]'
-// (explicit empty) and never null.
-func nonNilStrings(in []string) []string {
+// marshalOptionalStrings serializes the optional-array storage convention:
+// nil (no override) is the empty string, a non-nil slice — including an
+// explicit empty one — is its JSON ('[]' for the empty case). The decoder
+// (jsonStrings/jsonChapters) is the exact inverse: ” -> nil, '[]' -> an
+// empty non-nil slice, anything else -> the list.
+func marshalOptionalStrings(in []string) string {
 	if in == nil {
-		return []string{}
+		return ""
 	}
-	return in
+	b, _ := json.Marshal(in)
+	return string(b)
 }
 
 // overrideIsEmpty reports whether every field is at its "no override"
@@ -457,38 +470,38 @@ func applyMetadataOverride(snap *BookSnapshot, o *MetadataOverride) (BookSnapsho
 		// the pins on top of the write-selection-derived baseline, so an
 		// edited value keeps the selection's write/preserve decision and
 		// the cleared fields are authoritative "clear".
+		//
+		// A cleared field's EFFECTIVE value is deliberately NOT blanked
+		// (finding: clear vs naming). The effective snapshot is what names
+		// the output (toSupplied -> the engine's path resolver) and what a
+		// frozen job carries; blanking it here made a cleared title/series/
+		// year produce an empty naming segment while the editor promised
+		// the value is kept. The engine's "clear" policy already removes
+		// the tag atom at run time, so the value stays for naming and the
+		// policy removes the tag — no field needs to be blanked to clear it.
 		p := audio.WritePolicies{}
 		if clearSet["title"] {
-			eff.Title = ""
 			p.Title = "clear"
 		}
 		if clearSet["subtitle"] {
-			eff.Subtitle = ""
 			p.Subtitle = "clear"
 		}
 		if clearSet["authors"] {
-			eff.Authors = []string{}
 			p.Authors = "clear"
 		}
 		if clearSet["narrators"] {
-			eff.Narrators = []string{}
 			p.Narrators = "clear"
 		}
 		if clearSet["series"] {
-			eff.SeriesName = ""
-			eff.SeriesPosition = ""
 			p.Series = "clear"
 		}
 		if clearSet["description"] {
-			eff.Description = ""
 			p.Description = "clear"
 		}
 		if clearSet["genres"] {
-			eff.Genres = []string{}
 			p.Genres = "clear"
 		}
 		if clearSet["year"] {
-			eff.Year = nil
 			p.Year = "clear"
 		}
 		pinned.Scalars = &p

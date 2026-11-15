@@ -131,18 +131,20 @@ func TestMetadataOverrideRoundTrip(t *testing.T) {
 }
 
 // TestMetadataOverrideClearDistinctFromReset guards the plan's load-bearing
-// distinction: an explicit clear (remove the embedded tag) blanks the
-// effective value AND pins the engine clear policy, while the override row
-// SURVIVES a re-capture (unlike reset-to-catalog, which deletes the row).
+// distinction: an explicit clear (remove the embedded tag) pins the engine
+// clear policy — while the effective value is KEPT, so the output is still
+// named from it — and the override row survives a re-capture (unlike
+// reset-to-catalog, which deletes the row).
 func TestMetadataOverrideClearDistinctFromReset(t *testing.T) {
 	h := newOverrideTestHandler(t)
-	// Clear the year: the tag comes off the output, the value blanks.
+	// Clear the year: the tag comes off the output (the engine clear policy
+	// pins it), but the effective value is kept for naming.
 	if code := putOverride(t, h, 1, `{"cleared":["year"]}`); code != http.StatusOK {
 		t.Fatalf("PUT = %d", code)
 	}
 	state := getOverrideState(t, h, 1)
-	if state.Effective.Year != nil {
-		t.Fatalf("effective year = %v, want nil after clear", state.Effective.Year)
+	if state.Effective.Year == nil || *state.Effective.Year != 2019 {
+		t.Fatalf("effective year = %v, want 2019 (kept for naming after clear)", state.Effective.Year)
 	}
 	if state.Overrides == nil || len(state.Overrides.Cleared) != 1 || state.Overrides.Cleared[0] != "year" {
 		t.Fatalf("cleared = %v, want [year]", state.Overrides.Cleared)
@@ -172,6 +174,129 @@ func TestMetadataOverrideClearDistinctFromReset(t *testing.T) {
 	}
 	if state.Effective.Title != "Catalog Title" {
 		t.Fatalf("effective title after reset = %q, want catalog", state.Effective.Title)
+	}
+}
+
+// TestMetadataOverrideNilArraysStayCatalog guards the nil-array storage
+// fix: an override that edits ONE field (title) and leaves authors,
+// narrators, and genres untouched must round-trip those arrays as NIL
+// (stored as the empty string, not '[]'), so the effective people/genres
+// stay the catalog values. An explicit empty [] still stores its JSON and
+// reads back non-nil (deliberate empty), which the editor's people editor
+// relies on to show "edited: none".
+func TestMetadataOverrideNilArraysStayCatalog(t *testing.T) {
+	h := newOverrideTestHandler(t)
+	if code := putOverride(t, h, 1, `{"title":"Edited"}`); code != http.StatusOK {
+		t.Fatalf("PUT = %d", code)
+	}
+	// Raw storage: the untouched arrays are the empty string (nil), the
+	// title is stored.
+	var authors, narrators, genres string
+	if err := h.svc.DB.QueryRow(
+		`SELECT authors, narrators, genres FROM book_metadata_overrides WHERE book_id = 1`,
+	).Scan(&authors, &narrators, &genres); err != nil {
+		t.Fatal(err)
+	}
+	if authors != "" || narrators != "" || genres != "" {
+		t.Fatalf("raw arrays = (authors=%q, narrators=%q, genres=%q), want all empty (nil stored)", authors, narrators, genres)
+	}
+	state := getOverrideState(t, h, 1)
+	if state.Overrides == nil || state.Overrides.Title != "Edited" {
+		t.Fatalf("overrides = %+v, want title edit present", state.Overrides)
+	}
+	if state.Overrides.Authors != nil || state.Overrides.Narrators != nil || state.Overrides.Genres != nil {
+		t.Fatalf("override people/genres = %+v, want nil (no override recorded)", state.Overrides)
+	}
+	if state.Effective == nil {
+		t.Fatal("effective = nil")
+	}
+	if len(state.Effective.Authors) != 2 || state.Effective.Authors[0] != "Auth One" {
+		t.Fatalf("effective authors = %v, want catalog [Auth One Auth Two]", state.Effective.Authors)
+	}
+	if len(state.Effective.Narrators) != 1 || state.Effective.Narrators[0] != "Narr A" {
+		t.Fatalf("effective narrators = %v, want catalog [Narr A]", state.Effective.Narrators)
+	}
+	// An explicit empty list is an EDIT: it stores its JSON and reads back
+	// non-nil, blanking the catalog people in the effective state.
+	if code := putOverride(t, h, 1, `{"title":"Edited","authors":[]}`); code != http.StatusOK {
+		t.Fatalf("PUT empty authors = %d", code)
+	}
+	state = getOverrideState(t, h, 1)
+	if state.Overrides.Authors == nil {
+		t.Fatalf("override authors = nil, want non-nil empty (explicit edit)")
+	}
+	if len(state.Overrides.Authors) != 0 {
+		t.Fatalf("override authors = %v, want empty", state.Overrides.Authors)
+	}
+	if len(state.Effective.Authors) != 0 {
+		t.Fatalf("effective authors = %v, want blanked by the explicit empty edit", state.Effective.Authors)
+	}
+}
+
+// TestMetadataOverrideScalarClearKeepsValueForNaming guards the clear-vs-
+// naming fix: a cleared title/series/year keeps its effective value (the
+// output is still named from it) while the engine clear policy pins the
+// tag for removal.
+func TestMetadataOverrideScalarClearKeepsValueForNaming(t *testing.T) {
+	h := newOverrideTestHandler(t)
+	// Catalog snapshot: Title "Catalog Title", Series X (2), year 2019.
+	if code := putOverride(t, h, 1, `{"cleared":["title","series","year"]}`); code != http.StatusOK {
+		t.Fatalf("PUT = %d", code)
+	}
+	state := getOverrideState(t, h, 1)
+	if state.Effective == nil {
+		t.Fatal("effective = nil")
+	}
+	if state.Effective.Title != "Catalog Title" {
+		t.Fatalf("effective title = %q, want the catalog title kept for naming", state.Effective.Title)
+	}
+	if state.Effective.SeriesName != "Series X" || state.Effective.SeriesPosition != "2" {
+		t.Fatalf("effective series = %q (%q), want kept for naming", state.Effective.SeriesName, state.Effective.SeriesPosition)
+	}
+	if state.Effective.Year == nil || *state.Effective.Year != 2019 {
+		t.Fatalf("effective year = %v, want 2019 kept for naming", state.Effective.Year)
+	}
+	// The engine job pins the clears on top of the effective values. The
+	// frozen selection mirrors what QueueJob produces for a nil saved
+	// selection plus scalar pins (the pin-forced default).
+	_, pins := applyMetadataOverride(state.Snapshot, state.Overrides)
+	if pins == nil || pins.Scalars == nil {
+		t.Fatal("pins = nil; the clears must force scalar pins")
+	}
+	sel := &WriteSelection{
+		Fields:     nil,
+		Cover:      audio.WritePolicyValueWrite,
+		Chapters:   audio.ChaptersPolicyValueWrite,
+		ScalarPins: map[string]string{},
+	}
+	for k, v := range map[string]string{
+		"title": pins.Scalars.Title, "series": pins.Scalars.Series, "year": pins.Scalars.Year,
+	} {
+		if v != "" {
+			sel.ScalarPins[k] = v
+		}
+	}
+	if sel.ScalarPins["title"] != "clear" || sel.ScalarPins["series"] != "clear" || sel.ScalarPins["year"] != "clear" {
+		t.Fatalf("scalar pins = %v, want title/series/year pinned to clear", sel.ScalarPins)
+	}
+	jf, _, err := buildEngineJob(jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{Snapshot: *state.Effective, Selection: sel}}, "job-clear", *state.Effective, t.TempDir(), "{title}")
+	if err != nil {
+		t.Fatalf("buildEngineJob: %v", err)
+	}
+	if jf.Policies.Title != "clear" || jf.Policies.Series != "clear" || jf.Policies.Year != "clear" {
+		t.Fatalf("policies = %+v, want title/series/year pinned to clear", jf.Policies)
+	}
+	supplied := jf.InputSupplied
+	if supplied.Title != "Catalog Title" {
+		t.Fatalf("naming title = %q, want the kept value", supplied.Title)
+	}
+	// An edited-then-cleared title keeps the EDITED value for naming.
+	if code := putOverride(t, h, 1, `{"title":"Edited","cleared":["title"]}`); code != http.StatusOK {
+		t.Fatalf("PUT = %d", code)
+	}
+	state = getOverrideState(t, h, 1)
+	if state.Effective.Title != "Edited" {
+		t.Fatalf("effective title = %q, want the edited value kept for naming", state.Effective.Title)
 	}
 }
 
