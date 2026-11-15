@@ -960,12 +960,25 @@ const pendingCoverTTL = 24 * time.Hour
 // recordPendingCover registers an uploaded override cover asset as
 // in-use-by-an-unsaved-draft so prune sweeps keep it until the draft save
 // persists the reference (or the entry expires).
+// reapPendingCovers removes expired entries. The caller must hold
+// pendingCoversMu; calling it from every registry access bounds growth even
+// when uploads never reach a draft save.
+func (s *Services) reapPendingCovers(now time.Time) {
+	for name, exp := range s.pendingCovers {
+		if !now.Before(exp) {
+			delete(s.pendingCovers, name)
+		}
+	}
+}
+
 func (s *Services) recordPendingCover(name string) {
 	s.pendingCoversMu.Lock()
 	if s.pendingCovers == nil {
 		s.pendingCovers = make(map[string]time.Time)
 	}
-	s.pendingCovers[name] = time.Now().Add(pendingCoverTTL)
+	now := time.Now()
+	s.reapPendingCovers(now)
+	s.pendingCovers[name] = now.Add(pendingCoverTTL)
 	s.pendingCoversMu.Unlock()
 }
 
@@ -976,9 +989,10 @@ func (s *Services) pendingOverrideCoversFor(bookID int64) map[string]struct{} {
 	defer s.pendingCoversMu.Unlock()
 	prefix := fmt.Sprintf("ovr-%d-", bookID)
 	now := time.Now()
+	s.reapPendingCovers(now)
 	var out map[string]struct{}
-	for name, exp := range s.pendingCovers {
-		if strings.HasPrefix(name, prefix) && now.Before(exp) {
+	for name := range s.pendingCovers {
+		if strings.HasPrefix(name, prefix) {
 			if out == nil {
 				out = make(map[string]struct{})
 			}
@@ -989,15 +1003,14 @@ func (s *Services) pendingOverrideCoversFor(bookID int64) map[string]struct{} {
 }
 
 // dropPendingCoversFor forgets this book's pending cover entries (the draft
-// save persisted the row, so the keep-set now comes from the row itself) and
-// reaps expired entries for other books, bounding the registry.
+// save persisted the row, so the keep-set now comes from the row itself).
+// Expired entries for other books are reaped on every registry access.
 func (s *Services) dropPendingCoversFor(bookID int64) {
 	s.pendingCoversMu.Lock()
 	defer s.pendingCoversMu.Unlock()
 	prefix := fmt.Sprintf("ovr-%d-", bookID)
-	now := time.Now()
-	for name, exp := range s.pendingCovers {
-		if strings.HasPrefix(name, prefix) || !now.Before(exp) {
+	for name := range s.pendingCovers {
+		if strings.HasPrefix(name, prefix) {
 			delete(s.pendingCovers, name)
 		}
 	}

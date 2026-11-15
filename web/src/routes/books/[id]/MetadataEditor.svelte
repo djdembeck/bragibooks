@@ -67,6 +67,10 @@
 		loadError = null;
 		meta = null;
 		draft = null;
+		// A stale upload from the previous book cannot clear its own
+		// `finally` (the generation guard skips it); a new generation owns
+		// a fresh flag so the new book never inherits a stuck loading state.
+		uploading = false;
 		get<BookMetadataResponse>(`/books/${id}/metadata`)
 			.then((resp) => {
 				if (gen !== bookFetchSeq) return;
@@ -985,15 +989,18 @@
 			</div>
 		{:else}
 			<div class="meditor__commit-btns">
+				<!-- Save/reset both run the server's cover-prune sweep; an
+				 in-flight upload's asset is not referenced by the saved row
+				 yet, so commits are blocked until the upload settles. -->
 				<Button
 					variant="primary"
 					loading={saving}
-					disabled={chapterErrors.length > 0}
+					disabled={chapterErrors.length > 0 || uploading}
 					onclick={save}
 				>
 					Save manual metadata
 				</Button>
-				<Button variant="ghost" onclick={() => (confirmingReset = true)}>
+				<Button variant="ghost" disabled={uploading} onclick={() => (confirmingReset = true)}>
 					Reset to catalog
 				</Button>
 			</div>
