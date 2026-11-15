@@ -108,46 +108,74 @@ type NameRef struct {
 
 // BookInSeries indicates a book's position within a series. Upstream
 // sends Position as either a plain integer or an object
-// ({"value":"1","label":"1",...}) depending on the record.
+// ({"value":"1","label":"1",...}) depending on the record; a box set or
+// omnibus carries a range instead ("1-4"), which has no single integer
+// position and decodes as 0.
 type BookInSeries struct {
 	SeriesId string  `json:"seriesId"`
 	Position flexInt `json:"position"`
 }
 
 // flexInt accepts a JSON number or an object whose "value"/"label" field is
-// a number or string-encoded number, as upstream series positions vary.
+// a number or string-encoded number, as upstream series positions vary. A
+// position that is not a plain integer (a "1-4" range, a null, an
+// unexpected shape) decodes as 0: one odd series record must not fail the
+// enclosing book.
 type flexInt int
 
 func (f *flexInt) UnmarshalJSON(data []byte) error {
-	var n int
-	if err := json.Unmarshal(data, &n); err == nil {
-		*f = flexInt(n)
+	*f = 0
+	// A bare number or string position.
+	var flat flexText
+	if err := json.Unmarshal(data, &flat); err == nil && flat != "" {
+		*f = flexIntOf(flat)
 		return nil
 	}
+	// An object position: {"value":"1","label":"1","kind":"range",...}.
 	var obj struct {
-		Value json.Number `json:"value"`
-		Label json.Number `json:"label"`
+		Value flexText `json:"value"`
+		Label flexText `json:"label"`
 	}
 	if err := json.Unmarshal(data, &obj); err != nil {
-		return err
+		return nil
 	}
-	for _, cand := range []json.Number{obj.Value, obj.Label} {
+	for _, cand := range []flexText{obj.Value, obj.Label} {
 		if cand == "" {
 			continue
 		}
-		if n, err := cand.Int64(); err == nil {
-			*f = flexInt(n)
-			return nil
-		}
-		if s := cand.String(); s != "" {
-			if n, err := strconv.Atoi(s); err == nil {
-				*f = flexInt(n)
-				return nil
-			}
-		}
+		*f = flexIntOf(cand)
+		return nil
 	}
-	*f = 0
 	return nil
+}
+
+// flexText keeps a JSON string or number as its literal text; any other
+// JSON value (object, array, bool, null) decodes as empty.
+type flexText string
+
+func (t *flexText) UnmarshalJSON(data []byte) error {
+	*t = ""
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*t = flexText(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err == nil {
+		*t = flexText(n)
+		return nil
+	}
+	return nil
+}
+
+// flexIntOf parses a plain integer, yielding 0 for anything else (e.g. the
+// "1-4" range of a box set).
+func flexIntOf(t flexText) flexInt {
+	n, err := strconv.Atoi(string(t))
+	if err != nil {
+		return 0
+	}
+	return flexInt(n)
 }
 
 // ExternalRelation links to an external resource (Goodreads, etc.).
