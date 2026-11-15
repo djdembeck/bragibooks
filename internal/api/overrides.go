@@ -711,6 +711,11 @@ func (h *Handler) UpdateBookMetadata(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "save metadata overrides: "+err.Error())
 		return
 	}
+	// The row about to be pruned against is now the authoritative reference
+	// for this book's covers; drop the pending-upload entries so this save's
+	// own sweep prunes an upload the saved row does NOT reference (an upload
+	// that IS referenced stays via the row's keep-set).
+	h.svc.dropPendingCoversFor(bookID)
 	if keepFile, ok := h.persistedOverrideCoverFile(bookID); ok {
 		h.pruneOrphanedOverrideCovers(bookID, keepFile)
 	} else {
@@ -845,6 +850,10 @@ func (h *Handler) UploadBookMetadataCover(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, copyErr.Error())
 		return
 	}
+	// The draft save that will reference this asset has not happened yet:
+	// register it so a prune sweep (save/reset of the same book) running in
+	// that window keeps the file (finding: pending upload vs prune).
+	h.svc.recordPendingCover(name)
 	if err := os.Rename(tmpName, filepath.Join(h.svc.CoversDir, name)); err != nil {
 		os.Remove(tmpName)
 		writeError(w, http.StatusInternalServerError, "store cover file: "+err.Error())
@@ -942,6 +951,58 @@ func (h *Handler) persistedOverrideCoverFile(bookID int64) (coverFile string, ok
 	}
 }
 
+// pendingCoverTTL bounds how long an uploaded override cover is kept by the
+// pending-upload registry when the draft save never arrives (the file is
+// small — capped at maxOverrideCoverUploadBytes — and the next prune sweep
+// reaps expired entries).
+const pendingCoverTTL = 24 * time.Hour
+
+// recordPendingCover registers an uploaded override cover asset as
+// in-use-by-an-unsaved-draft so prune sweeps keep it until the draft save
+// persists the reference (or the entry expires).
+func (s *Services) recordPendingCover(name string) {
+	s.pendingCoversMu.Lock()
+	if s.pendingCovers == nil {
+		s.pendingCovers = make(map[string]time.Time)
+	}
+	s.pendingCovers[name] = time.Now().Add(pendingCoverTTL)
+	s.pendingCoversMu.Unlock()
+}
+
+// pendingOverrideCoversFor returns this book's non-expired pending override
+// cover assets (the prune keep-set contribution).
+func (s *Services) pendingOverrideCoversFor(bookID int64) map[string]struct{} {
+	s.pendingCoversMu.Lock()
+	defer s.pendingCoversMu.Unlock()
+	prefix := fmt.Sprintf("ovr-%d-", bookID)
+	now := time.Now()
+	var out map[string]struct{}
+	for name, exp := range s.pendingCovers {
+		if strings.HasPrefix(name, prefix) && now.Before(exp) {
+			if out == nil {
+				out = make(map[string]struct{})
+			}
+			out[name] = struct{}{}
+		}
+	}
+	return out
+}
+
+// dropPendingCoversFor forgets this book's pending cover entries (the draft
+// save persisted the row, so the keep-set now comes from the row itself) and
+// reaps expired entries for other books, bounding the registry.
+func (s *Services) dropPendingCoversFor(bookID int64) {
+	s.pendingCoversMu.Lock()
+	defer s.pendingCoversMu.Unlock()
+	prefix := fmt.Sprintf("ovr-%d-", bookID)
+	now := time.Now()
+	for name, exp := range s.pendingCovers {
+		if strings.HasPrefix(name, prefix) || !now.Before(exp) {
+			delete(s.pendingCovers, name)
+		}
+	}
+}
+
 // pruneOrphanedOverrideCovers removes this book's override cover assets
 // ("ovr-<bookID>-*.jpg") that neither the CURRENT override row (keepFile,
 // read under the per-book lock by the caller) nor any active job's queued
@@ -959,6 +1020,11 @@ func (h *Handler) pruneOrphanedOverrideCovers(bookID int64, keepFile string) {
 	keep := map[string]struct{}{}
 	if keepFile != "" {
 		keep[keepFile] = struct{}{}
+	}
+	// Assets an upload wrote for a not-yet-saved draft: keep them (the draft
+	// PUT may still reference them before the save persists the row).
+	for name := range h.svc.pendingOverrideCoversFor(bookID) {
+		keep[name] = struct{}{}
 	}
 	rows, err := h.svc.DB.Query(
 		`SELECT m4b_merge_args FROM processing_jobs WHERE book_id = ? AND status IN ('queued','running')`, bookID,

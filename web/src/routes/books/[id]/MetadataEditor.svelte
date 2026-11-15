@@ -118,7 +118,6 @@
 	// ── Edited / cleared indicators (server state, not a local guess) ──
 	const isEditedScalar = (v: string) => v !== '';
 	const isEditedList = (l: string[] | null) => l !== null;
-	const isEditedYear = (y: number | null) => y !== null;
 	const isEditedChapters = $derived(draft?.chapters !== null);
 
 	function isCleared(field: string): boolean {
@@ -210,6 +209,13 @@
 		if (!file || !draft) return;
 		uploading = true;
 		saveError = null;
+		// Capture the book + generation the upload started for: if the user
+		// navigates (bookId changes, bookFetchSeq bumps) while the request is
+		// in flight, the response must not be applied to the NEW book's draft
+		// (it would set a cover file owned by the old book, which the server
+		// rejects on save).
+		const startBook = bookId;
+		const startSeq = bookFetchSeq;
 		try {
 			const form = new FormData();
 			form.append('file', file);
@@ -222,14 +228,19 @@
 				throw new Error((await res.text()) || `upload failed (${res.status})`);
 			}
 			const resp = (await res.json()) as CoverUploadResponse;
+			if (bookId !== startBook || bookFetchSeq !== startSeq || !draft) return;
 			draft.cover_source = 'file';
 			draft.cover_file = resp.cover_file;
 			draft.cover_url = '';
 			draft.cleared = draft.cleared.filter((f) => f !== 'cover');
 		} catch (err) {
-			saveError = cleanAdbError(String(err));
+			if (bookId === startBook && bookFetchSeq === startSeq) {
+				saveError = cleanAdbError(String(err));
+			}
 		} finally {
-			uploading = false;
+			if (bookId === startBook && bookFetchSeq === startSeq) {
+				uploading = false;
+			}
 		}
 	}
 
@@ -503,9 +514,7 @@
 				type="button"
 				class="meditor__clearbtn"
 				class:is-on={isCleared('title')}
-				class:is-dim={!isEditedScalar(d.title)}
-				disabled={!isEditedScalar(d.title)}
-				onclick={() => toggleClear('title', isEditedScalar(d.title))}
+				onclick={() => toggleClear('title', true)}
 			>
 				Clear tag
 			</button>
@@ -513,6 +522,8 @@
 		<p class="meditor__hint" id="meditor-title-help">
 			{#if isEditedScalar(d.title)}
 				Writes this title to the output.{#if isCleared('title')} The tag is also cleared from the file.{/if}
+			{:else if isCleared('title')}
+				The title tag is cleared from the file; the catalog title keeps naming the output.
 			{:else}
 				Blank keeps the catalog title.
 			{/if}
@@ -533,9 +544,7 @@
 				type="button"
 				class="meditor__clearbtn"
 				class:is-on={isCleared('subtitle')}
-				class:is-dim={!isEditedScalar(d.subtitle)}
-				disabled={!isEditedScalar(d.subtitle)}
-				onclick={() => toggleClear('subtitle', isEditedScalar(d.subtitle))}
+				onclick={() => toggleClear('subtitle', true)}
 			>
 				Clear tag
 			</button>
@@ -647,10 +656,7 @@
 				type="button"
 				class="meditor__clearbtn"
 				class:is-on={isCleared('series')}
-				class:is-dim={!isEditedScalar(d.series_name) && !isEditedScalar(d.series_position)}
-				disabled={!isEditedScalar(d.series_name) && !isEditedScalar(d.series_position)}
-				onclick={() =>
-					toggleClear('series', isEditedScalar(d.series_name) || isEditedScalar(d.series_position))}
+				onclick={() => toggleClear('series', true)}
 			>
 				Clear tag
 			</button>
@@ -677,9 +683,7 @@
 				type="button"
 				class="meditor__clearbtn"
 				class:is-on={isCleared('description')}
-				class:is-dim={!isEditedScalar(d.description)}
-				disabled={!isEditedScalar(d.description)}
-				onclick={() => toggleClear('description', isEditedScalar(d.description))}
+				onclick={() => toggleClear('description', true)}
 			>
 				Clear tag
 			</button>
@@ -754,9 +758,7 @@
 				type="button"
 				class="meditor__clearbtn"
 				class:is-on={isCleared('year')}
-				class:is-dim={!isEditedYear(d.year)}
-				disabled={!isEditedYear(d.year)}
-				onclick={() => toggleClear('year', isEditedYear(d.year))}
+				onclick={() => toggleClear('year', true)}
 			>
 				Clear tag
 			</button>

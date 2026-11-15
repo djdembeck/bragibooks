@@ -213,6 +213,47 @@ describe('MetadataEditor naming preview payload', () => {
 	});
 });
 
+describe('MetadataEditor clear-tag on unedited scalars', () => {
+	it('lets the operator clear a catalog scalar with no edited value', async () => {
+		getImpl = (url) =>
+			url === '/books/1/metadata' ? Promise.resolve(resA) : Promise.reject(new Error(`GET ${url}`));
+		postImpl = (url) =>
+			url === '/engine/preview' ? Promise.resolve({ relative_path: 'x' }) : Promise.reject(new Error(`POST ${url}`));
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, '{title}');
+		flushSync();
+		await settle();
+
+		// The title is unedited (blank). The Clear tag button must still be
+		// usable: clearing the catalog value is a distinct operator intent
+		// from editing, so the button is never gated on an edited value.
+		const titleBlock = Array.from(target.querySelectorAll<HTMLFieldSetElement>('fieldset')).find(
+			(f) => f.querySelector('.meditor__block-title')?.textContent?.trim() === 'Title'
+		) as HTMLFieldSetElement;
+		const btn = titleBlock.querySelector<HTMLButtonElement>('.meditor__clearbtn');
+		expect(btn, 'title clear button not found').toBeDefined();
+		expect(btn!.disabled).toBe(false);
+
+		// Toggling on marks the clear intent (is-on); the payload keeps the
+		// effective catalog value for naming (the server clears the atom).
+		btn!.click();
+		flushSync();
+		expect(btn!.className).toContain('is-on');
+		await vi.advanceTimersByTimeAsync(250);
+		flushSync();
+		const last = previewBodies()[previewBodies().length - 1];
+		expect(last.title).toBe('Book A');
+		// Toggling off removes the intent.
+		btn!.click();
+		flushSync();
+		expect(btn!.className).not.toContain('is-on');
+
+		unmount(comp);
+		target.remove();
+	});
+});
+
 describe('MetadataEditor no-capture (snapshot null) state', () => {
 	it('renders the unavailable-catalog state without crashing and keeps the editor usable', async () => {
 		getImpl = (url) =>

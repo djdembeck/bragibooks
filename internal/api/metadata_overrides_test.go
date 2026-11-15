@@ -760,6 +760,41 @@ func TestMetadataOverrideResetPrunesOrphanedAsset(t *testing.T) {
 	}
 }
 
+// TestMetadataOverrideResetKeepsPendingUpload guards the upload→save window:
+// an override cover an upload just wrote (not yet referenced by the saved
+// row) must survive a same-book reset that runs before the draft save lands.
+// Without the pending-upload keep-set the reset prunes it and the later save
+// points at a deleted asset (the job degrades to no cover).
+func TestMetadataOverrideResetKeepsPendingUpload(t *testing.T) {
+	h := newOverrideTestHandler(t)
+	covers := t.TempDir()
+	h.svc.CoversDir = covers
+	asset := "ovr-1-00000001.jpg"
+	if err := os.WriteFile(filepath.Join(covers, asset), []byte("art"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The upload wrote the file and registered it; the draft save has not
+	// persisted a row referencing it yet.
+	h.svc.recordPendingCover(asset)
+	req := routeReq(t, "POST", "/api/books/1/metadata/reset", 1, nil)
+	w := httptest.NewRecorder()
+	h.ResetBookMetadata(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("reset = %d", w.Code)
+	}
+	if _, err := os.Stat(filepath.Join(covers, asset)); err != nil {
+		t.Fatalf("pending upload pruned by reset before its draft save: %v", err)
+	}
+	// Once the draft save lands (and drops the pending entry), a later save
+	// that no longer references the asset prunes it again.
+	if code := putOverride(t, h, 1, `{"title":"T2"}`); code != http.StatusOK {
+		t.Fatalf("PUT = %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(covers, asset)); !os.IsNotExist(err) {
+		t.Fatalf("pending entry survived the referencing save")
+	}
+}
+
 // mustMarshalJobArgs builds the stored m4b_merge_args JSON for a job whose
 // frozen snapshot blob is snapshotJSONBlob (the asset-prune scan reads it).
 func mustMarshalJobArgs(t *testing.T, snapshotJSONBlob []byte) string {
