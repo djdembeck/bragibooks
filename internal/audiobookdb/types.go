@@ -128,7 +128,9 @@ func (f *flexInt) UnmarshalJSON(data []byte) error {
 	// A bare number or string position.
 	var flat flexText
 	if err := json.Unmarshal(data, &flat); err == nil && flat != "" {
-		*f = flexIntOf(flat)
+		if n, ok := flexIntOf(flat); ok {
+			*f = n
+		}
 		return nil
 	}
 	// An object position: {"value":"1","label":"1","kind":"range",...}.
@@ -139,12 +141,17 @@ func (f *flexInt) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return nil
 	}
+	// value wins over label, but an unparseable value falls through to the
+	// label ({"value":1.0,"label":"1"}) rather than pinning the position to
+	// the zero fallback.
 	for _, cand := range []flexText{obj.Value, obj.Label} {
 		if cand == "" {
 			continue
 		}
-		*f = flexIntOf(cand)
-		return nil
+		if n, ok := flexIntOf(cand); ok {
+			*f = n
+			return nil
+		}
 	}
 	return nil
 }
@@ -168,14 +175,14 @@ func (t *flexText) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// flexIntOf parses a plain integer, yielding 0 for anything else (e.g. the
-// "1-4" range of a box set).
-func flexIntOf(t flexText) flexInt {
+// flexIntOf parses a plain integer. The bool is false when the text is not
+// an integer (e.g. the "1-4" range of a box set, or a fractional 1.0).
+func flexIntOf(t flexText) (flexInt, bool) {
 	n, err := strconv.Atoi(string(t))
 	if err != nil {
-		return 0
+		return 0, false
 	}
-	return flexInt(n)
+	return flexInt(n), true
 }
 
 // ExternalRelation links to an external resource (Goodreads, etc.).

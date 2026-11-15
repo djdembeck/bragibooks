@@ -87,6 +87,8 @@ func TestFlexIntDecodesUpstreamPositionForms(t *testing.T) {
 		{"object value", `{"value":"3","label":"3"}`, 3},
 		{"object numeric value", `{"value":3,"label":3}`, 3},
 		{"object label only", `{"label":"7"}`, 7},
+		{"fractional value integer label", `{"value":1.0,"label":"1"}`, 1},
+		{"fractional value only", `{"value":1.5,"label":"1.5"}`, 0},
 		{"range", `{"value":"1-4","label":"1–4","kind":"range"}`, 0},
 		{"string range", `"1-4"`, 0},
 		{"missing", `{}`, 0},
