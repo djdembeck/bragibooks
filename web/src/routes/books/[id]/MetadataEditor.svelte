@@ -186,6 +186,11 @@
 		const fmt = pathFormat;
 		const payload = previewMetadata;
 		if (!draft || !fmt) return;
+		// The engine rejects an empty effective title ("effective title is
+		// empty"), so a payload with none can only produce a 502 — for a
+		// book whose catalog title is blank (rare) there is nothing to
+		// preview: skip instead of posting a guaranteed failure.
+		if (!String(payload.title ?? '').trim()) return;
 		const seq = ++previewSeq;
 		previewPath = '';
 		const timer = setTimeout(async () => {
@@ -720,7 +725,7 @@
 	<fieldset class="meditor__block">
 		<legend class="meditor__block-title">Genres</legend>
 		{#if d.genres === null}
-			<p class="meditor__list-catalog">Catalog: {snap.genres.join(', ') || '—'}</p>
+			<p class="meditor__list-catalog">Catalog: {(snap.genres ?? []).join(', ') || '—'}</p>
 			<Button variant="secondary" onclick={() => ensureGenres()}>Edit list</Button>
 		{:else}
 			<ul class="meditor__chips" role="list">

@@ -467,3 +467,80 @@ func TestCaptureSnapshotRetainsReleaseSubtitleOnEmptyRelease(t *testing.T) {
 		t.Fatalf("subtitle = %q; want the retained release subtitle \"Release Sub\" (a release that carries no subtitle of its own must not trigger the book fallback over a retained value)", s.Subtitle)
 	}
 }
+
+// TestLoadSnapshotGenrelessBookNormalizesNull pins the wire contract for a
+// catalog book with NO genres: the capture stores the empty list as JSON
+// null, and the load MUST normalize it to an empty (non-nil) slice so the
+// snapshot's string[] contract holds — a null genres payload crashed the
+// metadata editor (snap.genres.join) with a SvelteKit 500 for genreless
+// books.
+func TestLoadSnapshotGenrelessBookNormalizesNull(t *testing.T) {
+	h := newTestHandler(t)
+
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status, audiobookdb_book_id, audiobookdb_release_id) VALUES (1, 'Seed Book', 'matched', '42', '5')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	// genres stored as the literal JSON null: a genreless catalog book.
+	if _, err := h.svc.DB.Exec(
+		`INSERT INTO book_snapshots (book_id, audiobookdb_book_id, audiobookdb_release_id, title,
+			authors, narrators, genres, cover_file, chapters, captured_at)
+		 VALUES (1, '42', '5', 'Seed Book', '["First Author"]', '["The Narrator"]',
+		   'null', '', 'null', datetime("now"))`,
+	); err != nil {
+		t.Fatalf("seed snapshot row: %v", err)
+	}
+
+	// The shared load normalizes null to []: a nil slice would serialize
+	// back to null and break the consumer contract.
+	s, err := h.loadSnapshot(1)
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	if s.Genres == nil {
+		t.Fatalf("genres = nil; want an empty (non-nil) slice for a genreless book")
+	}
+	if len(s.Genres) != 0 {
+		t.Errorf("genres = %v; want empty", s.Genres)
+	}
+
+	// The editor endpoint must serve the same normalized shape: the
+	// response's snapshot.genres is [] in the wire JSON, never null.
+	state := getOverrideState(t, h, 1)
+	if state.Snapshot == nil {
+		t.Fatalf("snapshot = nil; want the captured snapshot")
+	}
+	if state.Snapshot.Genres == nil {
+		t.Errorf("response snapshot.genres = null on the wire; want [] (the editor joins it)")
+	}
+	if state.Effective == nil {
+		t.Fatalf("effective = nil; want the effective snapshot")
+	}
+	if state.Effective.Genres == nil {
+		t.Errorf("response effective.genres = null on the wire; want []")
+	}
+	var wire struct {
+		Snapshot struct {
+			Genres []string `json:"genres"`
+		} `json:"snapshot"`
+		Effective struct {
+			Genres []string `json:"genres"`
+		} `json:"effective"`
+	}
+	req := routeReq(t, "GET", "/api/books/1/metadata", 1, nil)
+	w := httptest.NewRecorder()
+	h.GetBookMetadata(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET metadata = %d; want 200 — %s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &wire); err != nil {
+		t.Fatalf("decode wire: %v", err)
+	}
+	if wire.Snapshot.Genres == nil {
+		t.Errorf("wire snapshot.genres = null; want []")
+	}
+	if wire.Effective.Genres == nil {
+		t.Errorf("wire effective.genres = null; want []")
+	}
+}

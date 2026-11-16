@@ -352,6 +352,76 @@ describe('MetadataEditor clear-tag on unedited scalars', () => {
 	});
 });
 
+describe('MetadataEditor genreless snapshot', () => {
+	// The server used to serve snapshot.genres as JSON null for a catalog
+	// book with NO genres; the editor's "Catalog: …" line called
+	// snap.genres.join(', ') and the whole book page died with a SvelteKit
+	// 500. The genre block must render its empty state instead.
+	it('renders the catalog-genres empty state when the snapshot has no genres', async () => {
+		const resNoGenres = {
+			...BASE,
+			snapshot: snap({ genres: null as unknown as string[] })
+		} as BookMetadataResponse;
+		getImpl = (url) =>
+			url === '/books/1/metadata' ? Promise.resolve(resNoGenres) : Promise.reject(new Error(`GET ${url}`));
+		postImpl = (url) =>
+			url === '/engine/preview' ? Promise.resolve({ relative_path: 'x' }) : Promise.reject(new Error(`POST ${url}`));
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, '{title}');
+		flushSync();
+		await settle();
+
+		const genresBlock = Array.from(target.querySelectorAll<HTMLFieldSetElement>('fieldset')).find(
+			(f) => f.querySelector('.meditor__block-title')?.textContent?.trim() === 'Genres'
+		);
+		expect(genresBlock, 'genres section not found').toBeDefined();
+		expect(genresBlock!.textContent).toContain('Catalog:');
+		expect(genresBlock!.textContent).toContain('—');
+
+		unmount(comp);
+		target.remove();
+	});
+});
+
+describe('MetadataEditor empty-title preview guard', () => {
+	// The engine rejects a blank effective title ("effective title is
+	// empty"), so previewing it can only produce a 502. A book whose
+	// catalog title is blank must not POST a guaranteed-failing preview.
+	it('posts no engine preview while the effective title is blank', async () => {
+		const resNoTitle = {
+			...BASE,
+			snapshot: snap({ title: '' })
+		} as BookMetadataResponse;
+		getImpl = (url) =>
+			url === '/books/1/metadata' ? Promise.resolve(resNoTitle) : Promise.reject(new Error(`GET ${url}`));
+		postImpl = (url) =>
+			url === '/engine/preview' ? Promise.resolve({ relative_path: 'x' }) : Promise.reject(new Error(`POST ${url}`));
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, '{title}');
+		flushSync();
+		await settle();
+		await vi.advanceTimersByTimeAsync(250);
+		flushSync();
+		expect(calls.filter((c) => c.url === '/engine/preview').length).toBe(0);
+
+		// A typed title unblocks the preview: the POST must arrive with it.
+		const input = titleInput(target);
+		input.value = 'Typed Title';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		await vi.advanceTimersByTimeAsync(250);
+		flushSync();
+		const bodies = previewBodies();
+		expect(bodies.length).toBe(1);
+		expect(bodies[0].title).toBe('Typed Title');
+
+		unmount(comp);
+		target.remove();
+	});
+});
+
 describe('MetadataEditor no-capture (snapshot null) state', () => {
 	it('renders the unavailable-catalog state without crashing and keeps the editor usable', async () => {
 		getImpl = (url) =>
