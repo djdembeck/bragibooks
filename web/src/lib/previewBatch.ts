@@ -177,10 +177,14 @@ export function settle(
 	} else if (count === 0 && state.payloadFor.get(id) === payload) {
 		// The last outstanding request for the id was superseded and
 		// settled without painting (a stale response, or a failure of a
-		// non-latest dispatch): the id is still wanted, so drop the
-		// pending slot to make the next plan requeue it. (A settled
-		// NEWER value is untouched: its payload differs from this
-		// request's, so this branch cannot fire on top of it.)
+		// non-latest dispatch): the id is still wanted, so drop BOTH the
+		// pending preview slot and the payload-cache entry to make the
+		// next plan requeue it — a surviving payload record would match
+		// the (re-wanted) payload against a missing preview and make the
+		// row read as already settled, stranding it with no dispatch. (A
+		// settled NEWER value is untouched: its payload differs from
+		// this request's, so this branch cannot fire on top of it.)
+		state.payloadFor.delete(id);
 		delete state.previews[id];
 	}
 	// The slot is released when the LAST outstanding request for the id

@@ -106,6 +106,29 @@ describe('settle', () => {
 		expect(s.previews[1]).toBe('a.m4b');
 	});
 
+	it('re-dispatches a superseded id once its original payload is wanted again', () => {
+		const s = state();
+		plan(s, new Map([[1, 'p-1']]), 1); // id 1 dispatched, gen 1
+		// The payload changes while in flight: gen bumped to 2, the
+		// replacement cannot dispatch (cap saturated by the in-flight
+		// request).
+		const d2 = plan(s, new Map([[1, 'p-1-v2'], [2, 'p-2']]), 1);
+		expect(d2).toEqual([]);
+		// Re-plan with the same new payload: gen bumped to 3, still no
+		// dispatch.
+		const d3 = plan(s, new Map([[1, 'p-1-v2'], [2, 'p-2']]), 1);
+		expect(d3).toEqual([]);
+		// The superseded gen-1 request settles: it must not paint, and the
+		// pending slot is dropped.
+		settle(s, 1, 'p-1', 1, { ok: true, value: 'STALE.m4b' });
+		expect(s.previews[1]).not.toBe('STALE.m4b');
+		expect(s.inFlight).toEqual(new Set());
+		// The payload reverts: the id must be re-dispatched, not treated
+		// as already settled by a leftover payload record.
+		const d4 = plan(s, new Map([[1, 'p-1']]), 1);
+		expect(d4.map((x) => x.id)).toEqual([1]);
+	});
+
 	it('releases the slot when the id was wanted at dispatch but is not anymore', () => {
 		const s = state();
 		plan(s, wanted(1), 3);
