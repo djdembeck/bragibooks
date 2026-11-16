@@ -533,13 +533,18 @@ func loadBookSnapshot(db *sql.DB, bookID int64) (*BookSnapshot, error) {
 		v := int(year.Int64)
 		s.Year = &v
 	}
-	if err := json.Unmarshal([]byte(authorsJSON), &s.Authors); err != nil {
+	// A stored "null" (a catalog book with NO genres, which the capture
+	// writes for an empty list) unmarshals into a NIL slice without error;
+	// normalize it to the empty slice so the snapshot's wire shape keeps
+	// its string[] contract — a null genres payload crashed the metadata
+	// editor for genreless books.
+	if err := json.Unmarshal([]byte(authorsJSON), &s.Authors); err != nil || s.Authors == nil {
 		s.Authors = []string{}
 	}
-	if err := json.Unmarshal([]byte(narratorsJSON), &s.Narrators); err != nil {
+	if err := json.Unmarshal([]byte(narratorsJSON), &s.Narrators); err != nil || s.Narrators == nil {
 		s.Narrators = []string{}
 	}
-	if err := json.Unmarshal([]byte(genresJSON), &s.Genres); err != nil {
+	if err := json.Unmarshal([]byte(genresJSON), &s.Genres); err != nil || s.Genres == nil {
 		s.Genres = []string{}
 	}
 	// A MALFORMED chapters value is corruption, not a valid empty list: a
