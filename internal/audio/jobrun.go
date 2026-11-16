@@ -417,8 +417,16 @@ const stagingSiblingPrefix = ".m4b-merge-staging-"
 // recoverable staging in the same root during its success cleanup.
 func existingStagingSiblings(root string) map[string]bool {
 	existing := make(map[string]bool)
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		// A walk error (e.g. a permission failure on a subdirectory)
+		// leaves the baseline INCOMPLETE: log it so an under-counted
+		// baseline — which cleanup later treats as "not pre-existing" —
+		// is observable rather than silently destructive.
+		if err != nil {
+			log.Printf("audio: staging baseline walk under %s: %v", root, err)
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		if strings.HasPrefix(d.Name(), stagingSiblingPrefix) {

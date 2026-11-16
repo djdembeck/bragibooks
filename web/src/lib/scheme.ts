@@ -359,7 +359,11 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 			i = close;
 		}
 	}
-	if (!hasToken) {
+	if (!hasToken && keys.size > 0) {
+		// An EMPTY registry is a capability gap (E0 above is gated on the
+		// same condition), not a missing placeholder: every non-empty
+		// format would otherwise be rejected while the registry is still
+		// loading.
 		errors.push('Add at least one placeholder such as {title}.');
 	}
 

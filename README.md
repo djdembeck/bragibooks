@@ -200,6 +200,8 @@ processing:
   # metadata_chapters: write                  # or: preserve
 ```
 
+Output-directory validation (saved output profiles and queue output-directory overrides) is platform-appropriate: the directory must be absolute, and on the Windows build `C:\...` and UNC roots are accepted alongside the `/`-prefixed paths used on Unix.
+
 <details>
 <summary>All configuration keys and precedence details</summary>
 
@@ -242,7 +244,7 @@ The web frontend uses the HTTP API below. Responses are JSON unless noted otherw
 | `PUT` | `/api/books/{id}/metadata` | Save the manual override layer (edited values, explicit clears, artwork choice, millisecond chapters); records a database row only — tags are written when a processing job runs |
 | `POST` | `/api/books/{id}/metadata/reset` | Discard the manual override layer and return to the captured catalog values |
 | `POST` | `/api/books/{id}/metadata/cover` | Upload local artwork as an immutable per-book cover asset (5 MiB max, the pinned engine's limit) |
-| `POST` | `/api/engine/preview` | Non-mutating engine preview: resolve the effective values against the engine's output-name resolver (no files are read or written) |
+| `POST` | `/api/engine/preview` | Non-mutating engine preview: resolve the effective values against the engine's output-name resolver (no files are read or written); request body is capped at 1 MiB, and a larger body is refused with 413 |
 | `GET` | `/api/search?query=...&types=books&skip=0&take=20` | Search AudiobookDB |
 | `GET` | `/api/search/books/{id}` | Fetch an AudiobookDB book |
 | `GET` | `/api/search/releases/{id}` | Fetch an AudiobookDB release |

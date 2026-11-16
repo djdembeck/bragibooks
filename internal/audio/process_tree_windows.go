@@ -140,10 +140,11 @@ func openPrimaryThread(pid int) (windows.Handle, error) {
 		return 0, fmt.Errorf("thread snapshot for child %d: %w", pid, err)
 	}
 	defer windows.CloseHandle(snap)
-	for {
-		if err := windows.Thread32First(snap, &te); err != nil {
-			return 0, fmt.Errorf("enumerate child threads: %w", err)
-		}
+	// Thread32First initializes the cursor once; each iteration advances
+	// with Thread32Next, which also reports exhaustion. Calling First
+	// again inside the loop would reset the cursor to the first entry
+	// every pass, so the scan would never reach a later thread.
+	for err := windows.Thread32First(snap, &te); err == nil; err = windows.Thread32Next(snap, &te) {
 		if te.OwnerProcessID == uint32(pid) {
 			// ResumeThread requires THREAD_SUSPEND_RESUME on the handle;
 			// the limited-information right alone would make every
@@ -153,9 +154,6 @@ func openPrimaryThread(pid int) (windows.Handle, error) {
 				return 0, fmt.Errorf("open child thread %d: %w", te.ThreadID, oerr)
 			}
 			return h, nil
-		}
-		if windows.Thread32Next(snap, &te) != nil {
-			break // no more threads
 		}
 	}
 	return 0, fmt.Errorf("primary thread of child %d not found", pid)

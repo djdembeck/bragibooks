@@ -432,16 +432,21 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			// validated against the CURRENT engine, and a scheme the old
 			// engine accepted that the new one rejects must refuse the
 			// save — not become a run-time failure for every job that
-			// resolves through it. (The request's own scheme, if present,
-			// is snap's value at that point: it already passed the
-			// candidate-independent structural rules above and is part of
-			// the set validated here.)
+			// resolves through it. Validation runs BEFORE req.OutputScheme
+			// is merged into snap below, so the effective global scheme
+			// is the request's own value when it supplies one (it already
+			// passed the candidate-independent structural rules above),
+			// falling back to snap's persisted value.
 			candReg := make(map[string]struct{}, len(caps.PathTokens))
 			for _, t := range caps.PathTokens {
 				candReg[t.Name] = struct{}{}
 			}
-			if snap.Processing.PathFormat != "" {
-				if verr := audio.ValidatePathFormatForRegistry(snap.Processing.PathFormat, candReg); verr != nil {
+			effectiveScheme := snap.Processing.PathFormat
+			if req.OutputScheme != nil {
+				effectiveScheme = *req.OutputScheme
+			}
+			if effectiveScheme != "" {
+				if verr := audio.ValidatePathFormatForRegistry(effectiveScheme, candReg); verr != nil {
 					writeError(w, http.StatusBadRequest, "output scheme: "+verr.Error())
 					return
 				}

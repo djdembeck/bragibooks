@@ -1121,27 +1121,21 @@
 	// payload (batch mode shows one row per source, so a focused-only
 	// request left every other row without a name). The bookkeeping (what
 	// stands, what is requeued, what a response may change) lives in the
-	// pure #lib/previewBatch module; the in-flight set is reactive state,
-	// so a settling request re-runs the effect and the queue advances.
+	// pure #lib/previewBatch module.
 	const PREVIEW_CONCURRENCY = 3;
 	const batch = newPreviewBatchState();
-	// Reactive mirror of batch.inFlight: the effect below tracks the
-	// mirror's SIZE, and every dispatch/settle in this flow changes the
-	// count, so a settling request re-runs the effect and the queue
-	// advances. The binding is never reassigned — syncPreviewInFlight
-	// rewrites the set's contents in place.
-	const previewInFlight = $state<Set<number>>(new Set());
-
-	function syncPreviewInFlight() {
-		previewInFlight.clear();
-		for (const id of batch.inFlight) previewInFlight.add(id);
-	}
+	// Version counter that wakes the effect below. A $state Set is NOT a
+	// working wake: Svelte 5 proxies plain objects and arrays, not native
+	// Sets, so an in-place clear()/add() creates no dependency and a
+	// settling request would never re-run the effect (batches past the
+	// cap stalled at "Resolving…"). Reassigning this counter on every
+	// settle is an explicit reactive write: the effect re-runs, plan()
+	// skips the slots that still stand (unchanged payload), and dispatches
+	// the next queued rows.
+	let previewBatchVersion = $state(0);
 
 	$effect(() => {
-		// Dependency: read the mirror's SIZE (a tracked member of the
-		// $state Set proxy) so an in-place dispatch/settle re-runs this
-		// effect and advances the queue. The binding is never reassigned.
-		void previewInFlight.size;
+		void previewBatchVersion;
 		const wanted = new Map<number, string>();
 		for (const c of candidates) {
 			if (c.details.book && outputScheme) {
@@ -1155,7 +1149,6 @@
 			}
 		}
 		const dispatched = plan(batch, wanted, PREVIEW_CONCURRENCY);
-		syncPreviewInFlight();
 		for (const d of dispatched) {
 			outputPreviews[d.id] = '';
 			setTimeout(async () => {
@@ -1171,11 +1164,13 @@
 					// requeues (a failed fetch retries, never pins a
 					// permanent pending row).
 				} finally {
-					settle(batch, d.id, d.payload, { ok, value });
+					settle(batch, d.id, d.payload, d.gen, { ok, value });
 					// Sync the render state: settled values and pending
 					// slots both live in the module's bookkeeping now.
 					outputPreviews = { ...batch.previews };
-					syncPreviewInFlight();
+					// Wake the effect so the freed slot advances the
+					// queue (plan() skips the slots that stand).
+					previewBatchVersion++;
 				}
 			}, 250);
 		}

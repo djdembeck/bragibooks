@@ -205,7 +205,15 @@ func loadWith(explicitPath string) (Config, string, error) {
 	// a valid value and stays.
 	var rawFileBytes []byte
 	if !configFileNotFound {
-		rawFileBytes, _ = os.ReadFile(v.ConfigFileUsed())
+		// A failed read must not leave a possibly-truncated buffer in
+		// rawFileBytes: the yamlOnly override decode below reuses it, and
+		// a nil buffer there triggers the loud re-read error path that
+		// this one would bypass.
+		var readErr error
+		rawFileBytes, readErr = os.ReadFile(v.ConfigFileUsed())
+		if readErr != nil {
+			rawFileBytes = nil
+		}
 		var rawMap map[string]any
 		if rawFileBytes != nil && yaml.Unmarshal(rawFileBytes, &rawMap) == nil {
 			if proc, ok := rawMap["processing"].(map[string]any); ok {

@@ -317,10 +317,12 @@ func (s *IndexService) scan(ctx context.Context) {
 	// a same-root refresh landing while the rescan runs would miss the
 	// "running on the same root" coalesce and queue a full extra
 	// generation. Setting it here, under the same lock as the running
-	// status, closes that gap for the whole walk.
-	if r := s.resolveScanRoot(); r != "" {
-		s.activeRoot = r
-	}
+	// status, closes that gap for the whole walk. It stores the LEXICAL
+	// canonical form, not the symlink-resolved scan root: RequestScan
+	// compares activeRoot against canonicalRoot of the configured InputDir,
+	// so a resolved form would never match for a symlinked dir and every
+	// refresh during the walk would miss the coalesce.
+	s.activeRoot = canonicalRoot(s.cfg.Config().Directories.InputDir)
 	s.persistLocked()
 	s.mu.Unlock()
 
@@ -483,8 +485,19 @@ func (s *IndexService) scan(ctx context.Context) {
 	// releases it (below, in setTerminal); an error terminal keeps it.
 	s.mu.Lock()
 	if s.writeFailedRoot != root {
+		// Persist the guard BEFORE claiming it in memory: a failed write
+		// means the guard is not durable, so the half-written table this
+		// scan is about to commit is exactly what a restart would serve —
+		// the failure the guard exists to prevent. Abort (same terminal
+		// "error" treatment as a failed upsert) instead of exposing it.
 		s.writeFailedRoot = root
-		s.persistLocked()
+		perr := s.persistLocked()
+		if perr != nil {
+			s.writeFailedRoot = ""
+			s.mu.Unlock()
+			s.setTerminal(gen, "error", fmt.Sprintf("persist write-failed guard: %v", perr), 0, s.last.Root)
+			return
+		}
 	}
 	s.mu.Unlock()
 	if err := s.upsertAll(append(unchanged, extract...)); err != nil {
@@ -1050,8 +1063,11 @@ func (s *IndexService) loadState() error {
 	return nil
 }
 
-// persistLocked writes the mirror to index_state. Must hold s.mu.
-func (s *IndexService) persistLocked() {
+// persistLocked writes the mirror to index_state. Must hold s.mu. It
+// returns the write error (logged here too): callers that depend on the
+// persisted state (the partial-write guard) must check it; best-effort
+// callers may ignore it.
+func (s *IndexService) persistLocked() error {
 	_, err := s.db.Exec(`
 		INSERT INTO index_state (id, root, entries, last_run_at, status, detail, generation, write_failed_root)
 		VALUES (1, ?, ?, ?, ?, ?, ?, ?)
@@ -1067,6 +1083,7 @@ func (s *IndexService) persistLocked() {
 	if err != nil {
 		log.Printf("index: persist state: %v", err)
 	}
+	return err
 }
 
 // canonicalRoot is the one canonical form every index-mode path handling

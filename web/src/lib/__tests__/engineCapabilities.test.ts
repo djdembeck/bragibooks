@@ -57,6 +57,23 @@ describe('engineCapabilities load/retry/refresh', () => {
 		expect(mod.engineCapabilitiesLoaded()).toBe(false);
 	});
 
+	it('a swap-save refresh retries a failed initial load', async () => {
+		const mod = await freshModule();
+		// The shell's initial load fails (server restarting): nothing is
+		// loaded and the registry is empty.
+		getMock.mockRejectedValueOnce(new Error('initial down'));
+		await mod.loadEngineCapabilities();
+		expect(mod.engineCapabilitiesLoaded()).toBe(false);
+		// A swap-save refresh must not inherit the initial load's
+		// swallowed failure silently: it chains a re-fetch after the
+		// failed settle.
+		getMock.mockResolvedValueOnce(CAPS);
+		await mod.refreshEngineCapabilities();
+		expect(getMock).toHaveBeenCalledTimes(2);
+		expect(mod.engineCapabilitiesLoaded()).toBe(true);
+		expect(mod.getEngineCapabilities()?.path_tokens).toHaveLength(1);
+	});
+
 	it('refresh re-fetches after a swap and keeps the last good registry on failure', async () => {
 		const mod = await freshModule();
 		getMock.mockResolvedValueOnce(CAPS);

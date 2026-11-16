@@ -41,14 +41,17 @@ describe('validateScheme', () => {
 		expect(errors).not.toContain('Path format contains unsupported token {vol}.');
 	});
 
-	it('skips the E0 scan while the token registry is empty (capability not loaded)', () => {
+	it('skips the token checks while the registry is empty (capability not loaded)', () => {
 		setEngineTokens([]);
 		// Same closed brace expression a loaded registry rejects; an empty
 		// registry is a capability gap, not a user typo (the Go twin guards
-		// on len(reg) > 0). No E0 while the registry is still loading.
+		// on len(reg) > 0). Neither the unknown-token scan nor the
+		// placeholder requirement may fire while the registry is still
+		// loading: the format is clean, not a missing placeholder.
 		const { errors } = validateScheme(parseParts('{author}/{isbn}/{title}'));
 		expect(errors).not.toContain('Path format contains unsupported token {author}.');
 		expect(errors).not.toContain('Path format contains unsupported token {isbn}.');
+		expect(errors).toEqual([]);
 	});
 
 	it('recognizes a token split across adjacent parts ({tit + le})', () => {

@@ -1190,27 +1190,32 @@ func doPinnedCoverGet(ctx context.Context, hop coverHop) (*http.Response, error)
 	return resp, nil
 }
 
-// writeCoverBody streams the response into dest atomically, capped.
+// writeCoverBody streams the response into dest atomically, capped. The
+// body is staged in an exclusively created, unpredictable temp file in
+// dest's directory (os.CreateTemp is O_EXCL, 0o600) and renamed into
+// place: a predictably named dest+".tmp" with O_TRUNC would let an
+// output-dir writer plant the name as a symlink before the write and
+// redirect it to an arbitrary path.
 func writeCoverBody(ctx context.Context, resp *http.Response, dest string) error {
 	defer resp.Body.Close()
-	tmp := dest + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	tmp, err := os.CreateTemp(filepath.Dir(dest), ".bragi-cover-url-tmp-*")
 	if err != nil {
 		return err
 	}
-	n, err := io.Copy(out, io.LimitReader(resp.Body, coverMaxBytes+1))
-	if cl := out.Close(); err == nil {
+	tmpPath := tmp.Name()
+	n, err := io.Copy(tmp, io.LimitReader(resp.Body, coverMaxBytes+1))
+	if cl := tmp.Close(); err == nil {
 		err = cl
 	}
 	if err != nil {
-		os.Remove(tmp)
+		os.Remove(tmpPath)
 		return err
 	}
 	if n > coverMaxBytes {
-		os.Remove(tmp)
+		os.Remove(tmpPath)
 		return fmt.Errorf("cover exceeds %d bytes", coverMaxBytes)
 	}
-	return os.Rename(tmp, dest)
+	return os.Rename(tmpPath, dest)
 }
 
 // getOrderedPeopleByBookID is the snapshot's people read: id-ordered so the
