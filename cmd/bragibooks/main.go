@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -141,6 +142,82 @@ func main() {
 	}
 	processor.StoreVersion(mergeVersion)
 
+	// Verify the engine's ACTUAL protocol capabilities, not just its version
+	// string: the authoritative job protocol requires schema 1, the canonical
+	// {book_id} token, and the plural people tokens. A version that lies about
+	// its protocol (or a repackaged binary) must not reach the first job.
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	engineCaps, err := processor.CheckCapabilities(probeCtx)
+	probeCancel()
+	if err != nil {
+		log.Fatalf("m4b-merge capabilities check failed: %v", err)
+	}
+	processor.StoreCapabilities(engineCaps)
+
+	// Validate the STORED per-field write selection (#518) against the
+	// verified engine capabilities: a field the engine dropped from its
+	// scalar_fields (an unsupported or re-pointed engine) must fail boot
+	// with a nameable diagnosis, not be silently ignored by every job.
+	// The chapter policy accepts only the two Bragi-derived values.
+	if cfg.Processing.MetadataFields != nil {
+		if verr := audio.ValidateWriteSelectionForEngine(*cfg.Processing.MetadataFields, engineCaps); verr != nil {
+			log.Fatalf("stored metadata write selection %q is not valid for this engine: %v — fix metadata_fields in settings (the engine no longer supports that field)", strings.Join(*cfg.Processing.MetadataFields, ", "), verr)
+		}
+	}
+	if c := cfg.Processing.MetadataChapters; c != "" && c != audio.ChaptersPolicyValueWrite && c != audio.ChaptersPolicyValuePreserve {
+		log.Fatalf("stored chapter write policy %q is not write/preserve — fix metadata_chapters in settings", c)
+	}
+	// The queue-time snapshot reads the selection from the processor, so
+	// the DB/YAML/env-loaded value must be published before the first job
+	// is enqueued (ApplyConfig alone only refreshes on a settings save).
+	processor.ApplyWriteSelection(cfg.Processing.MetadataFields, cfg.Processing.MetadataChapters)
+
+	// Install the engine's path-format token vocabulary (the legacy {asin}
+	// token is gone: the engine resolves {book_id} and the people tokens)
+	// and the covers directory the worker stages captured covers from.
+	tokenNames := make([]string, 0, len(engineCaps.PathTokens))
+	for _, t := range engineCaps.PathTokens {
+		tokenNames = append(tokenNames, t.Name)
+	}
+	audio.SetPathFormatTokens(tokenNames)
+
+	// Validate the STORED global path format against the engine's token
+	// vocabulary at boot: the engine no longer accepts the legacy {asin}
+	// token (it resolves {book_id} and the people tokens), and a stored
+	// format containing a token the engine does not know must fail with a
+	// clear diagnosis here — at upgrade time — not only deep in the first
+	// job run. Profile formats are validated at save time; the inherited
+	// global is validated at enqueue, so this boot check is what catches a
+	// pre-existing stored value on upgrade.
+	if verr := audio.ValidateRelativePathFormat(cfg.Processing.PathFormat); verr != nil {
+		log.Fatalf("stored global output format %q is not valid for this engine: %v — fix the path format in settings (the legacy {asin} token is no longer supported)", cfg.Processing.PathFormat, verr)
+	}
+	// Stored output-profile formats inherit the same token vocabulary. A
+	// profile the engine cannot resolve cannot produce a valid path, so
+	// each stored value is validated at boot too: fatal with a clear,
+	// nameable diagnosis, consistent with the global check above (fixing
+	// the global alone would leave the profile job refusing at enqueue
+	// with a message that does not name the profile).
+	profileRows, perr := database.Query("SELECT id, name, output_scheme FROM output_profiles WHERE output_scheme <> ''")
+	if perr != nil {
+		log.Fatalf("list output profiles for boot validation: %v", perr)
+	}
+	for profileRows.Next() {
+		var pid int64
+		var pname, scheme string
+		if err := profileRows.Scan(&pid, &pname, &scheme); err != nil {
+			log.Fatalf("read output profile for boot validation: %v", err)
+		}
+		if verr := audio.ValidateRelativePathFormat(scheme); verr != nil {
+			log.Fatalf("stored output profile %q (id %d) format %q is not valid for this engine: %v — fix the profile (the legacy {asin} token is no longer supported)", pname, pid, scheme, verr)
+		}
+	}
+	if err := profileRows.Err(); err != nil {
+		log.Fatalf("iterate output profiles for boot validation: %v", err)
+	}
+	profileRows.Close()
+	api.SetCoversDir(coversDir)
+
 	audiobookDBClient := audiobookdb.NewClient(cfg.APIKey.APIKey, cfg.APIKey.BaseURL)
 	audiobookDBVal := &atomic.Value{}
 	audiobookDBVal.Store(audiobookDBClient)
@@ -149,6 +226,15 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	go processingSvc.RunWorkers(ctx, cfg.Processing.NumCPUs)
+
+	// Input-directory index: one background scanner, opt-in via the
+	// settings flag. A cold index (fresh DB, new root) would be useless on
+	// first Import visit, so a warm boot schedules one incremental scan.
+	indexSvc := api.NewIndexService(database, cfgMgr, ffprobePath)
+	go indexSvc.Run(ctx)
+	if indexSvc.Enabled() {
+		indexSvc.RequestScan()
+	}
 
 	handler := api.NewHandler(&api.Services{
 		DB:            database,
@@ -159,6 +245,7 @@ func main() {
 		CoversDir:     coversDir,
 		FFmpeg:        ffmpegPath,
 		FFprobe:       ffprobePath,
+		IndexSvc:      indexSvc,
 	})
 
 	// Router
@@ -234,6 +321,9 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("graceful shutdown failed: %v", err)
 	}
+	// Join the index worker before returning: the deferred database.Close()
+	// runs last and must not close the DB under a live index writer.
+	indexSvc.Wait()
 }
 
 // externalAPIStatusLine renders the one startup line about the external
@@ -334,11 +424,14 @@ func migrateLegacyAdminToken(database *sql.DB) (bool, string, error) {
 	var apiEnabled int
 	var digest string
 	var markerVal int
+	var indexingEnabled int
+	var metadataFields, metadataChapters string
 	err := database.QueryRow(`
 		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url,
-		       api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0)
+		       api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0), COALESCE(indexing_enabled, 0),
+		       COALESCE(metadata_fields, ''), COALESCE(metadata_chapters, 'write')
 		FROM settings WHERE id = 1
-	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &apiEnabled, &digest, &markerVal)
+	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &apiEnabled, &digest, &markerVal, &indexingEnabled, &metadataFields, &metadataChapters)
 	if err == sql.ErrNoRows {
 		// A new database with no settings row yet: nothing to migrate.
 		return false, "", nil
@@ -371,8 +464,8 @@ func migrateLegacyAdminToken(database *sql.DB) (bool, string, error) {
 	sum := sha256.Sum256([]byte(legacyToken))
 	migratedDigest := hex.EncodeToString(sum[:])
 	if _, err := database.Exec(`
-		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, datetime('now'))
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, indexing_enabled, metadata_fields, metadata_chapters, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?, datetime('now'))
 	`,
 		apiKey,
 		baseURL,
@@ -384,6 +477,9 @@ func migrateLegacyAdminToken(database *sql.DB) (bool, string, error) {
 		outputScheme,
 		region,
 		migratedDigest,
+		indexingEnabled,
+		metadataFields,
+		metadataChapters,
 	); err != nil {
 		// Fail closed: the seed write is what makes the cutover a fact
 		// (row + marker persisted). Retrying on the next boot would
@@ -412,20 +508,22 @@ func consumeLegacyTokenMarkerOnObservation(database *sql.DB, reason string) erro
 	var m4bBinary, inputDir, outputDir, completedDir, outputScheme, region, apiKey, baseURL, created string
 	var numCPUs, apiEnabled int
 	var digest string
-	var marker int
+	var marker, indexingEnabled int
+	var metadataFields, metadataChapters string
 	if err := database.QueryRow(`
 		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url,
-		       api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0), created_at
+		       api_enabled, api_key_digest, COALESCE(legacy_token_migrated, 0), COALESCE(indexing_enabled, 0), created_at,
+		       COALESCE(metadata_fields, ''), COALESCE(metadata_chapters, 'write')
 		FROM settings WHERE id = 1
-	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &apiEnabled, &digest, &marker, &created); err != nil {
+	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &apiEnabled, &digest, &marker, &indexingEnabled, &created, &metadataFields, &metadataChapters); err != nil {
 		return err
 	}
 	if marker != 0 {
 		return nil // already consumed: no write, no timestamp churn
 	}
 	_, err := database.Exec(`
-		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, created_at, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'))
+		INSERT OR REPLACE INTO settings (id, audiobookdb_api_key, audiobookdb_base_url, m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, api_enabled, api_key_digest, legacy_token_migrated, indexing_enabled, created_at, updated_at, metadata_fields, metadata_chapters)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'), ?, ?)
 	`,
 		apiKey,
 		baseURL,
@@ -438,7 +536,10 @@ func consumeLegacyTokenMarkerOnObservation(database *sql.DB, reason string) erro
 		region,
 		apiEnabled,
 		digest,
+		indexingEnabled,
 		created,
+		metadataFields,
+		metadataChapters,
 	)
 	if err != nil {
 		return err
@@ -588,11 +689,14 @@ func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {
 	var m4bBinary, inputDir, outputDir, completedDir, outputScheme, region, apiKey, baseURL, endpointKeyDigest string
 	var numCPUs int
 	var endpointEnabled int
+	var indexingEnabled int
+	var metadataFields, metadataChapters string
 
 	err := database.QueryRow(`
-		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url, api_enabled, api_key_digest
+		SELECT m4b_merge_binary, input_dir, output_dir, completed_dir, num_cpus, output_scheme, region, audiobookdb_api_key, audiobookdb_base_url, api_enabled, api_key_digest, indexing_enabled,
+		       COALESCE(metadata_fields, ''), COALESCE(metadata_chapters, 'write')
 		FROM settings WHERE id = 1
-	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &endpointEnabled, &endpointKeyDigest)
+	`).Scan(&m4bBinary, &inputDir, &outputDir, &completedDir, &numCPUs, &outputScheme, &region, &apiKey, &baseURL, &endpointEnabled, &endpointKeyDigest, &indexingEnabled, &metadataFields, &metadataChapters)
 	if err != nil {
 		log.Printf("Warning: could not load settings from DB: %v", err)
 		return
@@ -636,6 +740,47 @@ func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {
 		cfg.Server.APIEndpoint.Enabled = endpointEnabled != 0
 	}
 	cfg.Server.APIEndpoint.KeyDigest = endpointKeyDigest
+	// DIRECTORIES_INDEXING_ENABLED is on-only: a true value force-enables
+	// (deployment pin); ANY other value — including "false" and the
+	// unset case — falls through to the persisted/YAML setting. Treating
+	// a non-true value as a pin would override a saved true on every
+	// restart (finding: env gate skips persisted setting). Exact "true"
+	// only: a case-variant or other true-ish value is NOT a pin.
+	if env := os.Getenv("DIRECTORIES_INDEXING_ENABLED"); env == "true" {
+		cfg.Directories.IndexingEnabled = true
+	} else if !yamlKeys["directories.indexing_enabled"] {
+		cfg.Directories.IndexingEnabled = indexingEnabled != 0
+	}
+	// The per-field write selection (#518) follows the same precedence as
+	// the other processing settings: env pin, then YAML, then DB. The DB
+	// column stores '' for "not set" (the default all-supported-available
+	// behavior) and a JSON array for an explicit selection (possibly "[]"
+	// = write nothing); the env var and YAML key carry the same value
+	// shape (a comma-separated list / JSON list) and are parsed by
+	// loadWith. A corrupted JSON value in the DB is a deployment error:
+	// log it and keep the default rather than refuse every queue, since
+	// the UI can re-save the setting to repair the row.
+	if !yamlKeys["processing.metadata_fields"] && os.Getenv("PROCESSING_METADATA_FIELDS") == "" {
+		if metadataFields != "" {
+			var list []string
+			// A nil slice is corrupt here: JSON `null` unmarshals to nil
+			// without error, and taking its address would make it a
+			// non-nil pointer — the "explicit empty (write nothing)"
+			// selection — collapsing a corrupt row into a durable
+			// preserve-everything default. Reject nil and keep the
+			// default, like the invalid-JSON branch.
+			if err := json.Unmarshal([]byte(metadataFields), &list); err == nil && list != nil {
+				cfg.Processing.MetadataFields = &list
+			} else if err != nil {
+				log.Printf("Warning: settings.metadata_fields holds invalid JSON (%q); keeping the default all-supported-available write selection: %v", metadataFields, err)
+			} else {
+				log.Printf("Warning: settings.metadata_fields holds JSON null (%q); keeping the default all-supported-available write selection", metadataFields)
+			}
+		}
+	}
+	if !yamlKeys["processing.metadata_chapters"] && os.Getenv("PROCESSING_METADATA_CHAPTERS") == "" && metadataChapters != "" {
+		cfg.Processing.MetadataChapters = metadataChapters
+	}
 }
 
 func ensureDefaultSettings(database *sql.DB) error {

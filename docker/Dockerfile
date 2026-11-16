@@ -26,7 +26,12 @@ RUN apt-get update && \
     mkdir -p /config /input /output
 WORKDIR /app
 COPY --from=builder /build/bragibooks /usr/local/bin/
-COPY --from=ghcr.io/djdembeck/m4b-merge:v2.0.1@sha256:4ab05f233ddd10f7f6d5a9f009998884921958ffd2997e1098268349a1a0bd0e /usr/local/bin/m4b-merge /usr/local/bin/
+# The authoritative processing cutover requires engine v2.2.0: schema 1
+# jobs, the canonical {book_id} token in supplied mode, and plural people
+# tokens (verified at startup via --capabilities, not the version string
+# alone). Pinned to the multi-arch INDEX digest, not an architecture
+# manifest digest.
+COPY --from=ghcr.io/djdembeck/m4b-merge:v2.2.0@sha256:ad08601cf802d93de4285ef0cb9056a0dcefbe063fc41272760a54899b4eeee2 /usr/local/bin/m4b-merge /usr/local/bin/
 COPY docker/entrypoint.sh /usr/local/bin/bragibooks-entrypoint
 RUN chmod 0755 /usr/local/bin/bragibooks-entrypoint
 # The image runs as root by default (matching the legacy image); the

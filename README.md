@@ -114,7 +114,7 @@ The normal work is deliberately linear: **select, match, queue, finish**.
 
 2. **Intake:** browse the mounted input directory and select one or more audiobook folders or files.
 3. **Match:** let Bragibooks search AudiobookDB, then confirm or correct the book, release, author, and narrator metadata. Custom search is available when the first match is wrong.
-4. **Queue:** select the matched books and, optionally, a **saved output profile** — a named preset (output directory and/or path format) created under Settings — then submit the batch. The profile applies only to the jobs created by that queue request and is snapshotted into each job, so later profile or Settings changes do not move already-queued work. Without a profile the global output directory and path format apply. Bragibooks invokes `m4b-merge` to merge, convert, clean, tag, and repackage the source files.
+4. **Queue:** select the matched books and, optionally, a **saved output profile** — a named preset (output directory and/or path format) created under Settings — then submit the batch. The effective destination (output directory, path format, and completed directory) is snapshotted into each job at queue time — for profile, override, and plain global jobs alike — so later profile or Settings changes do not move, re-format, or redirect already-queued work. Bragibooks invokes `m4b-merge` to merge, convert, clean, tag, and repackage the source files.
 5. **Finish:** follow live processing output in the browser, then review completed books and any errors. Jobs can take from seconds to hours depending on the number and type of files.
 
 ## Screens
@@ -172,8 +172,11 @@ The key environment variables are:
 | `DIRECTORIES_INPUT_DIR` | Source audiobook directory | unset |
 | `DIRECTORIES_OUTPUT_DIR` | Destination directory for processed books | unset |
 | `DIRECTORIES_COMPLETED_DIR` | Directory for completed source files | unset |
+| `DIRECTORIES_INDEXING_ENABLED` | Force the input directory pre-index on at boot (exact `"true"` value only — unlike `SERVER_API_ENDPOINT_ENABLED`, any other value such as `false`, `1`, `yes`, or `TRUE` is ignored and the saved/YAML preference stays in effect; disabling stays to the Settings toggle) | `false` |
 | `PROCESSING_NUM_CPUS` | Number of processing workers | `1` |
 | `PROCESSING_PATH_FORMAT` | Output path format | `{author}/{title}` |
+| `PROCESSING_METADATA_FIELDS` | Comma-separated embedded-metadata fields processing may write (`title`, `subtitle`, `authors`, `narrators`, `series`, `description`, `genres`, `year`, `cover`). While set, the pin stays authoritative for processing jobs: the Settings UI renders the selection read-only, saves of it are ignored (unrelated settings in the same save still apply), and the pin never reaches the durable stores — it stops applying the moment it is removed | empty (all supported fields) |
+| `PROCESSING_METADATA_CHAPTERS` | Chapter write policy: `write` or `preserve`. While set, the pin stays authoritative for processing jobs: the Settings UI renders the policy read-only, saves of it are ignored (unrelated settings in the same save still apply), and the pin never reaches the durable stores — it stops applying the moment it is removed | `write` |
 | `PROCESSING_REGION` | Accepted for compatibility with older setups; no effect | `us` |
 | `PROCESSING_LOG_LEVEL` | Processing log level | `info` |
 
@@ -187,12 +190,17 @@ directories:
   input_dir: /input
   output_dir: /output
   completed_dir: /input/done
+  indexing_enabled: false
 
 processing:
   num_cpus: 1
   path_format: "{author}/{title}"
   region: us
+  # metadata_fields: [title, authors, cover]  # omit for all supported fields
+  # metadata_chapters: write                  # or: preserve
 ```
+
+Output-directory validation (saved output profiles and queue output-directory overrides) is platform-appropriate: the directory must be absolute, and on the Windows build `C:\...` and UNC roots are accepted alongside the `/`-prefixed paths used on Unix.
 
 <details>
 <summary>All configuration keys and precedence details</summary>
@@ -231,6 +239,12 @@ The web frontend uses the HTTP API below. Responses are JSON unless noted otherw
 | `GET` | `/api/books/{id}` | Read a book |
 | `PUT` | `/api/books/{id}` | Update a book |
 | `DELETE` | `/api/books/{id}` | Remove a book |
+| `GET` | `/api/books/{id}/match-evidence?book_id=...&release_id=...` | Match source-vs-catalog evidence for one selected record |
+| `GET` | `/api/books/{id}/metadata` | Read a book's catalog snapshot, its manual override layer, and the effective (merged) values |
+| `PUT` | `/api/books/{id}/metadata` | Save the manual override layer (edited values, explicit clears, artwork choice, millisecond chapters); records a database row only — tags are written when a processing job runs |
+| `POST` | `/api/books/{id}/metadata/reset` | Discard the manual override layer and return to the captured catalog values |
+| `POST` | `/api/books/{id}/metadata/cover` | Upload local artwork as an immutable per-book cover asset (5 MiB max, the pinned engine's limit) |
+| `POST` | `/api/engine/preview` | Non-mutating engine preview: resolve the effective values against the engine's output-name resolver (no files are read or written); request body is capped at 1 MiB, and a larger body is refused with 413 |
 | `GET` | `/api/search?query=...&types=books&skip=0&take=20` | Search AudiobookDB |
 | `GET` | `/api/search/books/{id}` | Fetch an AudiobookDB book |
 | `GET` | `/api/search/releases/{id}` | Fetch an AudiobookDB release |
@@ -263,9 +277,9 @@ Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). Feat
 
 Promote `develop` to `main` with one normal merge-commit PR. Release runs automatically; **Actions → Release → Run workflow** on `main` uses the same publisher with optional version/bump overrides. Manual-only installations remove the push trigger once. No release-preparation branch, manifest commit or merge-back is required.
 
-The immutable `vX.Y.Z` tag reserves the exact source SHA before publication. Retry the original run after a partial failure, including when main has advanced; an existing unlabelled archive is reused only when its content digest matches the rebuild (a stale asset fails the run and must be resolved out of band), a labelled historical archive is verified by its provenance label instead of its bytes, and a conflicting version/source, image digest or asset provenance label fails instead of overwriting an output. The existing Go linker input supplies the normalised application version consumed by `/api/health` and Settings. GoReleaser still builds Linux/macOS amd64/arm64 archives and checksums. GHCR and Docker Hub receive the same verified image bytes with `vX.Y.Z` and `X.Y.Z` tags, copied without changing digests; production consumers pin one of those tags or the digest.
+The immutable `vX.Y.Z` tag reserves the exact source SHA before publication. Retry the original run after a partial failure, including when main has advanced; an existing unlabelled archive is reused only when its content digest matches the rebuild (a stale asset fails the run and must be resolved out of band), a labelled historical archive is verified by its provenance label instead of its bytes, and a conflicting version/source, image digest or asset provenance label fails instead of overwriting an output. The existing Go linker input supplies the normalised application version consumed by `/api/health` and Settings. GoReleaser builds Linux/macOS amd64/arm64 and Windows amd64 archives plus checksums. GHCR and Docker Hub receive the same verified image bytes with `vX.Y.Z` and `X.Y.Z` tags, copied without changing digests; production consumers pin one of those tags or the digest.
 
-Release lookups list every draft and published record (paginated, exact tag match; duplicates fail closed), so a delayed lower stable publishes with `--latest=false` while a new highest stable advances GitHub Latest; an already-published retry is a no-op. Existing labelled archives are preserved even when a rebuild produces different bytes: the four-archive checksum manifest is verified against the preserved-plus-pending set before any upload, a manifest missing from the release is generated from the combined verified digests, and an immutable manifest that cannot describe the combined set stops the run with no writes.
+Release lookups list every draft and published record (paginated, exact tag match; duplicates fail closed), so a delayed lower stable publishes with `--latest=false` while a new highest stable advances GitHub Latest; an already-published retry is a no-op. The draft is created up front in the reserve job, and if the release listing does not return a record — because the draft was just created and the listing lags — the asset step treats that as an empty store and uploads every built artifact, and a create rejected as `already exists` is tolerated; absence is a state, not an error. Existing labelled archives are preserved even when a rebuild produces different bytes: the five-archive checksum manifest is verified against the preserved-plus-pending set before any upload, a manifest missing from the release is generated from the combined verified digests, and an immutable manifest that cannot describe the combined set stops the run with no writes.
 
 CI remains the sole branch/PR-preview writer with dev/SHA identities. Release owns named version outputs; mutable latest/major/minor aliases are no longer written. The Docker build also pins its consumed m4b-merge binary image by digest. After outputs complete, the existing Annalist App fills notes from the previous published ancestor release rather than an unfinished reservation.
 

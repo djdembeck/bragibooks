@@ -20,7 +20,7 @@
 		<p>Embedded metadata has not been read. The source name is used for title suggestions, not narrator or edition verification.</p>
 	{/if}
 	{#if report?.sourceRead.detail}<p>{report.sourceRead.detail}</p>{/if}
-	{#if report && !current}
+	{#if report?.selection.bookId && !current}
 		<p>No evidence report applies to the currently loaded selection. Source read status does not verify this choice.</p>
 	{/if}
 	{#if current && (current.sourceRead.status === 'read' || current.sourceRead.status === 'partial')}

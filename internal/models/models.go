@@ -49,6 +49,10 @@ type BookWithPeople struct {
 	// unknown (no row, malformed row, or incomplete snapshot). It never
 	// writes to books.asin.
 	SourceASIN *SourceASIN `json:"source_asin,omitempty"`
+	// MatchEvidence is the optional Match presentation report. The pending
+	// list carries a source-only report (read status, no selection); the
+	// per-selection report is served by GET /api/books/{id}/match-evidence.
+	MatchEvidence *MatchEvidence `json:"match_evidence,omitempty"`
 }
 
 // SourceASIN status values.

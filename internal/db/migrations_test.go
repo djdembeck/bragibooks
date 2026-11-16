@@ -437,6 +437,61 @@ func TestRunMigrationsV11CascadesSourceMetadata(t *testing.T) {
 	}
 }
 
+// TestRunMigrationsV14AddsInputDirectoryIndex applies the full real
+// migration set and checks the v14 additions: the source_index table with
+// its columns and modtime index, the index_state single-row table with its
+// CHECK(id=1) constraint, and the settings.indexing_enabled column.
+func TestRunMigrationsV14AddsInputDirectoryIndex(t *testing.T) {
+	db := openTestDB(t)
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	for _, col := range []string{"path", "name", "type", "size", "modtime", "payload", "indexed_at", "seen_at"} {
+		if !hasColumn(t, db, "source_index", col) {
+			t.Errorf("source_index missing column %s", col)
+		}
+	}
+
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_source_index_modtime'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("query index: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("idx_source_index_modtime count = %d, want 1", n)
+	}
+
+	for _, col := range []string{"id", "root", "entries", "last_run_at", "status", "detail", "generation"} {
+		if !hasColumn(t, db, "index_state", col) {
+			t.Errorf("index_state missing column %s", col)
+		}
+	}
+
+	// CHECK(id=1): a second id must be rejected.
+	if _, err := db.Exec(`INSERT INTO index_state (id) VALUES (2)`); err == nil {
+		t.Error("index_state accepted id=2, want CHECK(id=1) to reject it")
+	}
+
+	if !hasColumn(t, db, "settings", "indexing_enabled") {
+		t.Error("settings missing column indexing_enabled")
+	}
+
+	// Re-running the full migration set must be a no-op: v14's
+	// ALTER TABLE ... ADD COLUMN is not IF NOT EXISTS-guarded, so a
+	// regression in the migration-log gate would fail here.
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("re-run RunMigrations: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM migration_log`).Scan(&n); err != nil {
+		t.Fatalf("count migration_log: %v", err)
+	}
+	if n != len(migrations) {
+		t.Errorf("migration_log rows after re-run = %d, want %d", n, len(migrations))
+	}
+}
+
 // captureMigrations temporarily swaps the package's migration list so a
 // failing migration can be injected. Returns a restore function.
 func captureMigrations(t *testing.T) func() {

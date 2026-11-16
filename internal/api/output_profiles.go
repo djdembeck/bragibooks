@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,13 +50,18 @@ type OutputProfileRequest struct {
 // requirement, no relative-format rules); optional output_scheme under the
 // shared relative-path validator; and at least one of the two fields set.
 // Returns the cleaned values plus a 400 message ("" when valid).
+//
+// The destination check is filepath.IsAbs, platform-appropriate: the
+// binary ships per-OS, so on the Windows target C:\output and UNC roots
+// are absolute while on Unix /... is. A hardcoded "/" prefix would
+// reject every legal Windows destination on the Windows build.
 func validateProfile(name, outputDir, outputScheme string) (string, string, string, string) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return "", "", "", "name is required"
 	}
 	outputDir = strings.TrimSpace(outputDir)
-	if outputDir != "" && !strings.HasPrefix(outputDir, "/") {
+	if outputDir != "" && !filepath.IsAbs(outputDir) {
 		return "", "", "", "output directory must be an absolute path"
 	}
 	outputScheme = strings.TrimSpace(outputScheme)
