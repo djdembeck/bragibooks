@@ -200,14 +200,31 @@ func snapshotRelevantChanged(req *UpdateBookRequest) bool {
 //     snapshot row is refused at queue time with an explicit re-match and
 //     re-preview message, never run on stale data.
 func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed bool) (catalogDegraded bool, err error) {
+	// The per-book lock spans the WHOLE capture, starting with the reads:
+	// the book row, the ordered people, and the existing snapshot are all
+	// inputs to the row this capture writes, and a concurrent capture
+	// writing between a read and the upsert would let a stale generation
+	// land. It is the same lock QueueJob holds across its snapshot
+	// read→insert, so a capture and an enqueue for one book never
+	// interleave: a capture cannot prune the file a not-yet-inserted
+	// enqueue already read (its active-job count is still zero in the
+	// gap), and two captures cannot race so that one writes an
+	// unreferenced file and the other prunes it before the first's upsert
+	// references it. Holding it across the download (not just the
+	// write+prune) is what closes the second race: the file a capture
+	// writes is referenced by its own upsert before any other capture may
+	// prune.
+	if h.svc.ProcessingSvc != nil {
+		defer h.svc.ProcessingSvc.lockBookCover(bookID)()
+	}
 	var (
-		title, description, series, releaseDate string
-		adbBook, adbRelease                     sql.NullString
+		title, description, series, releaseDate, coverURL string
+		adbBook, adbRelease                               sql.NullString
 	)
 	if err := h.svc.DB.QueryRow(
-		"SELECT title, description, series, release_date, audiobookdb_book_id, audiobookdb_release_id FROM books WHERE id = ?",
+		"SELECT title, description, series, release_date, audiobookdb_book_id, audiobookdb_release_id, COALESCE(cover_image_url, '') FROM books WHERE id = ?",
 		bookID,
-	).Scan(&title, &description, &series, &releaseDate, &adbBook, &adbRelease); err == sql.ErrNoRows {
+	).Scan(&title, &description, &series, &releaseDate, &adbBook, &adbRelease, &coverURL); err == sql.ErrNoRows {
 		return false, fmt.Errorf("book %d not found", bookID)
 	} else if err != nil {
 		return false, fmt.Errorf("load book for snapshot: %w", err)
@@ -262,21 +279,6 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 		}
 	}
 
-	// The per-book lock spans the whole capture critical section: the cover
-	// download, the snapshot WRITE, and the superseded-cover PRUNE (defer
-	// releases it at function end). It is the same lock QueueJob holds across
-	// its snapshot read→insert, so a capture and an enqueue for one book never
-	// interleave: a capture cannot prune the file a not-yet-inserted enqueue
-	// already read (its active-job count is still zero in the gap), and two
-	// captures cannot race so that one writes an unreferenced file and the
-	// other prunes it before the first's upsert references it. Holding it
-	// across the download (not just the write+prune) is what closes the second
-	// race: the file a capture writes is referenced by its own upsert before
-	// any other capture may prune.
-	if h.svc.ProcessingSvc != nil {
-		defer h.svc.ProcessingSvc.lockBookCover(bookID)()
-	}
-
 	// Catalog enrichment for the SELECTED release: genres, chapters, and a
 	// locally stored cover — one GetBook feeds genres AND the cover. It is
 	// best-effort: a catalog that is down must not block a metadata save,
@@ -287,7 +289,17 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 		if book, err := h.getAudiobookDB().GetBook(ctx, snap.ADBBookID, "genres,images"); err == nil && book != nil {
 			snap.Genres = genreTitles(book.Genres)
 			if h.svc.CoversDir != "" {
-				if file, ok := h.storeCoverForBook(ctx, bookID, snap, book); ok {
+				// The artwork the capture stores is the one Match selected
+				// (the book's persisted cover_image_url, which Match fills
+				// from the chosen release's artwork), NOT the first
+				// book-level image: release artwork wins, and falling back
+				// to book.Images[0] would capture a different cover than
+				// the operator saw at Match.
+				selectedURL := coverURL
+				if selectedURL == "" && len(book.Images) > 0 {
+					selectedURL = book.Images[0].URL
+				}
+				if file, ok := h.storeCoverForBook(ctx, bookID, snap, selectedURL); ok {
 					snap.CoverFile = file
 				}
 			}
@@ -303,7 +315,17 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 			if snap.ADBReleaseID != "" {
 				if rel, err := h.getAudiobookDB().GetRelease(ctx, snap.ADBReleaseID, "chapterDetail"); err == nil && rel != nil {
 					if rel.ChapterDetail != nil {
-						snap.Chapters = chaptersFromADB(rel.ChapterDetail.Chapters)
+						if chs, ok := chaptersFromADB(rel.ChapterDetail.Chapters); ok {
+							snap.Chapters = chs
+						} else {
+							// Chapter rows existed but every row carried
+							// an invalid time: the detail is corrupt, not
+							// chapterless. Keep the retained catalog
+							// chapters — writing the empty list would
+							// freeze an explicit clear for a release that
+							// merely has bad data.
+							log.Printf("snapshot %d: release chapter detail has no usable rows; keeping previously captured chapters", bookID)
+						}
 					}
 					if own := strings.TrimSpace(rel.Subtitle); own != "" {
 						snap.Subtitle = own
@@ -318,6 +340,29 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 		} else {
 			log.Printf("snapshot %d: catalog unavailable, keeping previously captured catalog content: %v", bookID, err)
 			catalogDegraded = true
+		}
+	} else if snap.ADBBookID != "" && snap.CoverFile == "" {
+		// The catalog round trip above is skipped for unchanged local-only
+		// saves (the metadata editor's save and reset), but the run-time
+		// cover must not depend on it: a book that has never had a
+		// changed-flagged capture would carry an empty CoverFile and
+		// buildEngineJob would default to "clear" instead of embedding the
+		// catalog artwork. Backfill the cover alone (no genres/chapters/
+		// subtitle: those were already retained or captured by an earlier
+		// full enrichment). Best-effort, like the main path: a catalog
+		// failure keeps the row coverless.
+		if book, err := h.getAudiobookDB().GetBook(ctx, snap.ADBBookID, "genres,images"); err == nil && book != nil {
+			if h.svc.CoversDir != "" {
+				selectedURL := coverURL
+				if selectedURL == "" && len(book.Images) > 0 {
+					selectedURL = book.Images[0].URL
+				}
+				if file, ok := h.storeCoverForBook(ctx, bookID, snap, selectedURL); ok {
+					snap.CoverFile = file
+				}
+			}
+		} else if err != nil {
+			log.Printf("snapshot %d: cover backfill: catalog unavailable: %v", bookID, err)
 		}
 	}
 
@@ -343,15 +388,20 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 // pruned, because by the time its row exists (status queued/running) the
 // query above includes it.
 func (h *Handler) pruneSupersededCovers(bookID int64, s *BookSnapshot) {
-	if s.CoverFile == "" {
-		return
+	// A capture with NO cover file prunes with an EMPTY current-reference
+	// set: the previous capture's unreferenced covers are orphans (the
+	// active-job references below still protect anything a queued/running
+	// job names). An early return here leaked them: every capture that
+	// lost its cover left the prior capture's file behind forever.
+	keep := map[string]struct{}{}
+	if s.CoverFile != "" {
+		keep[s.CoverFile] = struct{}{}
 	}
 	// The set of cover filenames that must survive: the current snapshot's
 	// reference plus every active job's queued snapshot reference. If the
 	// active-reference scan itself fails, do NOT prune at all: deleting on an
 	// incomplete keep-set would remove a file some active job names, so on a
 	// query error the sweep is skipped (orphan covers simply accumulate).
-	keep := map[string]struct{}{s.CoverFile: {}}
 	rows, err := h.svc.DB.Query(
 		`SELECT m4b_merge_args FROM processing_jobs WHERE book_id = ? AND status IN ('queued','running')`, bookID,
 	)
@@ -492,8 +542,16 @@ func loadBookSnapshot(db *sql.DB, bookID int64) (*BookSnapshot, error) {
 	if err := json.Unmarshal([]byte(genresJSON), &s.Genres); err != nil {
 		s.Genres = []string{}
 	}
-	if err := json.Unmarshal([]byte(chaptersJSON), &s.Chapters); err != nil {
-		s.Chapters = []SnapshotChapter{}
+	// A MALFORMED chapters value is corruption, not a valid empty list: a
+	// silent [] would read as the engine's explicit "clear" at run time and
+	// wipe the source's chapters. Fail closed — the book must be re-matched
+	// (or re-saved) before it can queue — rather than clearing chapters on
+	// a corrupt row. A genuinely empty list ("[]") decodes to a non-nil
+	// empty slice with no error and is left as the explicit clear.
+	if chaptersJSON != "" {
+		if err := json.Unmarshal([]byte(chaptersJSON), &s.Chapters); err != nil {
+			return nil, fmt.Errorf("load snapshot: corrupt chapters column for book %d: %w", bookID, err)
+		}
 	}
 	return s, nil
 }
@@ -559,7 +617,7 @@ func validateWriteSelection(sel *WriteSelection) error {
 // Bragi staged into the output root for this run ("" when none was staged);
 // the caller removes that file after RunJob in every case, since the engine
 // has already copied the bytes into the output on success.
-func buildEngineJob(args jobArgs, jobID string, snap BookSnapshot, outputRoot, pathFormat string) (audio.JobFile, string, error) {
+func buildEngineJob(ctx context.Context, args jobArgs, jobID string, snap BookSnapshot, outputRoot, pathFormat string) (audio.JobFile, string, error) {
 	// The engine requires a local cover file under its asset root: create
 	// the root up front so staging cannot write into a directory that only
 	// the engine later creates (or never creates on an early failure).
@@ -651,14 +709,35 @@ func buildEngineJob(args jobArgs, jobID string, snap BookSnapshot, outputRoot, p
 	case audio.WritePolicyValuePreserve:
 		jf.Cover = json.RawMessage(`"preserve"`)
 	case "write_url":
-		// The engine's URL-embed object form; a missing URL (a pin with no
+		// A URL the ENGINE fetches at run time is not a URL Bragi can
+		// vouch for: long after the save-time guard, the engine re-resolves
+		// the host over live DNS, and a name that passed then can rebind to
+		// a private address by then. Bragi therefore never hands the engine
+		// the URL: it fetches the cover through the pinned downloader
+		// (public-HTTPS guard re-asserted on EVERY redirect hop, dialing
+		// only the validated address) into a staged file under the output
+		// root, and freezes the LOCAL file as a write cover — the same
+		// surface snapshot covers use. A URL that no longer passes (or a
+		// fetch that fails) degrades to "clear" with a log, the same way an
+		// unreadable local cover degrades: the selection's naming and
+		// chapters are the load-bearing parts. A missing URL (a pin with no
 		// value, which save-time validation prevents) degrades to the bare
 		// policy, which in supplied mode embeds nothing.
 		if sel != nil && sel.CoverURL != "" {
-			if raw, merr := json.Marshal(map[string]string{"write_url": sel.CoverURL}); merr == nil {
-				jf.Cover = raw
+			dest := filepath.Join(outputRoot, fmt.Sprintf(".bragi-cover-url-%d-%s.jpg", snap.BookID, jobID))
+			dlCtx, dlCancel := context.WithTimeout(ctx, coverDownloadTimeout)
+			derr := downloadCoverFile(dlCtx, sel.CoverURL, dest)
+			dlCancel()
+			if derr == nil {
+				if raw, merr := json.Marshal(map[string]string{"write": dest}); merr == nil {
+					jf.Cover = raw
+					stagedCover = dest
+				} else {
+					log.Printf("encode cover policy for book %d: %v", snap.BookID, merr)
+				}
 			} else {
-				jf.Cover = json.RawMessage(`"write_url"`)
+				log.Printf("book %d: run-time cover download failed for %q: %v (degrading to no cover)", snap.BookID, sel.CoverURL, derr)
+				jf.Cover = json.RawMessage(`"clear"`)
 			}
 		} else {
 			jf.Cover = json.RawMessage(`"write_url"`)
@@ -862,18 +941,34 @@ func genreTitles(genres []audiobookdb.IdTitle) []string {
 	return out
 }
 
-// chaptersFromADB converts ADB chapter details to the stored integer-millisecond
-// form the engine consumes.
-func chaptersFromADB(chs []audiobookdb.Chapter) []SnapshotChapter {
+// chaptersFromADB converts ADB chapter details to the stored
+// integer-millisecond form the engine consumes. A NEGATIVE offset or
+// duration (a catalog row with signed-int fields carrying a bad value) is
+// discarded, not converted: a negative int cast to uint64 wraps to a huge
+// value, which the engine would treat as a multi-year chapter. A chapter
+// whose times are both non-negative is kept; one with a negative start or
+// duration is dropped so a single bad row cannot poison the whole capture
+// with a wrapped timestamp.
+//
+// The boolean distinguishes a real chapter list from UNAVAILABLE one: rows
+// existed but every row was invalid means the catalog data is corrupt, not
+// that the release has no chapters. An empty-but-valid detail (no rows) is
+// a genuine empty list (ok=true, len 0); rows-existed-but-all-invalid
+// reports ok=false so the caller keeps the previously captured chapters
+// instead of freezing an explicit clear.
+func chaptersFromADB(chs []audiobookdb.Chapter) ([]SnapshotChapter, bool) {
 	out := make([]SnapshotChapter, 0, len(chs))
 	for _, c := range chs {
+		if c.StartOffsetMs < 0 || c.LengthMs < 0 {
+			continue
+		}
 		out = append(out, SnapshotChapter{
 			Title:          c.Title,
 			StartMillis:    uint64(c.StartOffsetMs),
 			DurationMillis: uint64(c.LengthMs),
 		})
 	}
-	return out
+	return out, len(out) > 0 || len(chs) == 0
 }
 
 // storeCoverForBook downloads the selected book's primary cover (already
@@ -890,15 +985,15 @@ func chaptersFromADB(chs []audiobookdb.Chapter) []SnapshotChapter {
 // captures only ever remove their own new, not-yet-referenced file.
 // Covers superseded by a new capture are pruned opportunistically in
 // upsertSnapshot (only files no queued/running job references).
-func (h *Handler) storeCoverForBook(ctx context.Context, bookID int64, s *BookSnapshot, book *audiobookdb.Book) (string, bool) {
-	if book == nil || len(book.Images) == 0 || book.Images[0].URL == "" {
+func (h *Handler) storeCoverForBook(ctx context.Context, bookID int64, s *BookSnapshot, coverURL string) (string, bool) {
+	if coverURL == "" {
 		return "", false
 	}
 	name := fmt.Sprintf("%d-%d.jpg", bookID, time.Now().UnixNano())
 	dest := filepath.Join(h.svc.CoversDir, name)
 	dlCtx, cancel := context.WithTimeout(ctx, coverDownloadTimeout)
 	defer cancel()
-	if err := downloadCoverFile(dlCtx, book.Images[0].URL, dest); err != nil {
+	if err := downloadCoverFile(dlCtx, coverURL, dest); err != nil {
 		log.Printf("snapshot %d: cover download: %v", bookID, err)
 		os.Remove(dest) // only our own new file, never one a snapshot references
 		return "", false
@@ -910,9 +1005,12 @@ func (h *Handler) storeCoverForBook(ctx context.Context, bookID int64, s *BookSn
 // not stall a save.
 const coverDownloadTimeout = 15 * time.Second
 
-// coverMaxBytes caps a snapshot cover fetch: a cover is a thumbnail, not a
-// book. A URL that streams past this is not a cover; stop.
-const coverMaxBytes = 8 << 20
+// coverMaxBytes caps a snapshot cover fetch at the PINNED engine's
+// contract (m4b-merge v2.2.0 rejects local cover art over 5 MiB), so a
+// fetched catalog cover that the engine would refuse is never staged. The
+// upload path shares the same limit (maxOverrideCoverUploadBytes); a cover
+// is a thumbnail, not a book, on both.
+const coverMaxBytes = 5 << 20
 
 // coverHop is one public, IP-pinned step of a cover fetch: the host was
 // resolved, every address was checked as public, and the connection goes
@@ -937,18 +1035,22 @@ var lookupCoverHost = func(ctx context.Context, host string) ([]string, error) {
 }
 
 // assertPublicCoverURL refuses a cover destination that is not a public
-// http(s) URL: private, loopback, link-local, multicast, unspecified, and
+// HTTPS URL: private, loopback, link-local, multicast, unspecified, and
 // carrier-grade NAT ranges are not public destinations, and a
 // catalog-provided (or redirect-hopped) cover URL must never fetch from
-// one. The host is resolved and EVERY address checked, because a name
-// resolving to mixed records must not pass on the public one. Returns the
-// pinned hop (first validated address) the fetch must connect to.
+// one. The scheme must be HTTPS, not merely http(s): the pinned engine
+// (m4b-merge v2.2.0) fetches write_url covers itself and its contract is
+// HTTPS-only, so an http:// URL that passes save-time validation would be
+// frozen into a job and only fail at run time. The host is resolved and
+// EVERY address checked, because a name resolving to mixed records must not
+// pass on the public one. Returns the pinned hop (first validated address)
+// the fetch must connect to.
 func assertPublicCoverURL(ctx context.Context, u *url.URL) (coverHop, error) {
 	if u == nil {
 		return coverHop{}, errors.New("empty cover URL")
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return coverHop{}, fmt.Errorf("cover URL scheme %q is not http(s)", u.Scheme)
+	if u.Scheme != "https" {
+		return coverHop{}, fmt.Errorf("cover URL scheme %q is not https (the engine fetches covers over HTTPS only)", u.Scheme)
 	}
 	host := u.Hostname()
 	if host == "" {

@@ -227,9 +227,19 @@ class Repository:
                          "--verify-tag", "--draft", "--title", tag, "--notes", "")
             except ReleaseError as error:
                 # The listing lagged: the record exists and the create was
-                # rejected. That is the desired outcome, not an error.
-                require("already exists" in str(error),
-                        f"Draft creation failed for {tag}: {error}")
+                # rejected. That is the desired outcome, not an error. The
+                # exact gh wording is not pinned across versions ("release
+                # v1.2.3 already exists (HTTP 422)", "already been
+                # created", "already registered", ...), so match the
+                # duplicate-create phrasing broadly, case-insensitively.
+                message = str(error).lower()
+                duplicate = (
+                    "already exists" in message
+                    or "already been created" in message
+                    or "already registered" in message
+                    or "already created" in message
+                )
+                require(duplicate, f"Draft creation failed for {tag}: {error}")
             return
         if publish and target.get("draft"):
             current = semver(tag.removeprefix("v"))

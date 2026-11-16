@@ -160,7 +160,12 @@
 				if (refreshCancelled) return; // page unmounted
 				const cur = await get<{ state: IndexState }>('/index');
 				const s = cur?.state;
-				if (s && s.generation === gen &&
+				// A terminal at a NEWER generation supersedes ours: a root
+				// change queuing a rescan while our scan runs lets its
+				// terminal land under the rescan's generation, after which
+				// our exact generation is never visible again (an exact
+				// equality here would then poll to the 30-minute timeout).
+				if (s && s.generation >= gen &&
 					['done', 'truncated', 'interrupted', 'error'].includes(s.status)) {
 					indexState = s;
 					await fetchListing(currentPath);

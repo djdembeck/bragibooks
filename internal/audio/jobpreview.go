@@ -62,11 +62,11 @@ func (p *Processor) Preview(ctx context.Context, meta SuppliedMetadata, pathForm
 	// The preview is non-mutating, so the CPU limit is irrelevant here: 0
 	// lets the engine apply its own default.
 	cmd := newEngineCommand(ctx, binary, probeFile, logLevel, 0, true)
-	tree := newProcessTree(cmd)
+	tree, err := newProcessTree(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("confine process tree: %w", err)
+	}
 	cmd.Cancel = func() error {
-		if err := tree.start(cmd); err != nil {
-			return err
-		}
 		return tree.kill()
 	}
 	cmd.WaitDelay = 5 * time.Second
@@ -74,7 +74,16 @@ func (p *Processor) Preview(ctx context.Context, meta SuppliedMetadata, pathForm
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 	if err := cmd.Start(); err != nil {
+		tree.finish()
 		return nil, fmt.Errorf("m4b-merge preview start: %s", redact(err.Error()))
+	}
+	// Constrain the child to the tree NOW, before it can spawn
+	// descendants that would escape a cancel-time assignment.
+	if err := tree.start(cmd); err != nil {
+		tree.finish()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("confine process tree: %s", redact(err.Error()))
 	}
 	waitErr := cmd.Wait()
 	tree.finish()

@@ -71,24 +71,34 @@ func TestValidatePublishedArtifactAcceptsInnerSymlink(t *testing.T) {
 	}
 }
 
-// TestRemoveStagingSiblingsScopedToEnginePID guards the B3 fix: cleanup
-// removes only this run's staging (matched by engine pid), never a
-// concurrent run's in-flight staging in the same root.
-func TestRemoveStagingSiblingsScopedToEnginePID(t *testing.T) {
+// TestRemoveStagingSiblingsScopedToRun guards the B3 fix plus the
+// recycled-pid case: cleanup removes only files this run created under its
+// engine pid (matched by pid AND absent from the pre-run snapshot), never a
+// concurrent run's in-flight staging — and never a PREVIOUS failed run's
+// recoverable staging that happens to carry a recycled pid.
+func TestRemoveStagingSiblingsScopedToRun(t *testing.T) {
 	root := t.TempDir()
-	mine := filepath.Join(root, ".m4b-merge-staging-4242-1-1.m4b")
-	theirs := filepath.Join(root, ".m4b-merge-staging-9999-1-1.m4b")
+	recycled := filepath.Join(root, ".m4b-merge-staging-4242-0-0.m4b") // previous failed run, pid now reused
+	theirs := filepath.Join(root, ".m4b-merge-staging-9999-1-1.m4b")   // concurrent run
 	userFile := filepath.Join(root, "book.m4b")
-	for _, f := range []string{mine, theirs, userFile} {
+	for _, f := range []string{recycled, theirs, userFile} {
 		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := removeStagingSiblings(root, 4242); err != nil {
+	preExisting := existingStagingSiblings(root)
+	mine := filepath.Join(root, ".m4b-merge-staging-4242-1-1.m4b") // this run's residue
+	if err := os.WriteFile(mine, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeStagingSiblings(root, 4242, preExisting); err != nil {
 		t.Fatalf("removeStagingSiblings: %v", err)
 	}
 	if _, err := os.Stat(mine); !os.IsNotExist(err) {
 		t.Fatal("this run's staging sibling was not removed")
+	}
+	if _, err := os.Stat(recycled); err != nil {
+		t.Fatal("a recycled-pid staging sibling from a previous failed run was removed")
 	}
 	if _, err := os.Stat(theirs); err != nil {
 		t.Fatal("a concurrent run's staging sibling was removed")

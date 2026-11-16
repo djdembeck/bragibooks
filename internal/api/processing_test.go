@@ -2612,8 +2612,9 @@ func TestQueueInvalidProfileID400(t *testing.T) {
 
 // TestQueueSingleBookReprocessUsesGlobals (behavioral anchor for the book
 // detail page's single-book reprocess): a /process request with one book and
-// NO profile ID uses the worker-time global destination — the exact
-// unprofiled contract the detail page relies on.
+// NO profile ID freezes the global destination at QUEUE time (the unprofiled
+// job's globals inherit into its stored args) — the exact unprofiled
+// contract the detail page relies on.
 func TestQueueSingleBookReprocessUsesGlobals(t *testing.T) {
 	fx := setupProfileSuite(t)
 	fx.svc.RunWorkers(t.Context(), 1)

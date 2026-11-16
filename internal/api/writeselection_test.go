@@ -26,7 +26,7 @@ func TestBuildEngineJobSelectionTitleOnly(t *testing.T) {
 		Year:     &year,
 	}
 	sel := &WriteSelection{Fields: []string{"title"}, Cover: audio.WritePolicyValuePreserve, Chapters: audio.ChaptersPolicyValuePreserve}
-	jf, _, err := buildEngineJob(jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{Selection: sel}}, "job-7", snap, t.TempDir(), "{title}")
+	jf, _, err := buildEngineJob(context.Background(), jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{Selection: sel}}, "job-7", snap, t.TempDir(), "{title}")
 	if err != nil {
 		t.Fatalf("buildEngineJob: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestBuildEngineJobSelectionTitleOnly(t *testing.T) {
 func TestBuildEngineJobSelectionTrimsStoredFieldNames(t *testing.T) {
 	snap := BookSnapshot{BookID: 7, Title: "T", Authors: []string{"A"}}
 	sel := &WriteSelection{Fields: []string{" title ", "authors"}, Cover: audio.WritePolicyValuePreserve, Chapters: audio.ChaptersPolicyValuePreserve}
-	jf, _, err := buildEngineJob(jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{Selection: sel}}, "job-7", snap, t.TempDir(), "{title}")
+	jf, _, err := buildEngineJob(context.Background(), jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{Selection: sel}}, "job-7", snap, t.TempDir(), "{title}")
 	if err != nil {
 		t.Fatalf("buildEngineJob: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestBuildEngineJobSelectionNoneSelected(t *testing.T) {
 	subtitle := "Sub"
 	snap := BookSnapshot{BookID: 7, Title: "T", Subtitle: subtitle, Authors: []string{"A"}, CoverFile: "ignored.jpg"}
 	sel := &WriteSelection{Fields: []string{}, Cover: audio.WritePolicyValuePreserve, Chapters: audio.ChaptersPolicyValuePreserve}
-	jf, staged, err := buildEngineJob(jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{Selection: sel}}, "job-7", snap, t.TempDir(), "{title}")
+	jf, staged, err := buildEngineJob(context.Background(), jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{Selection: sel}}, "job-7", snap, t.TempDir(), "{title}")
 	if err != nil {
 		t.Fatalf("buildEngineJob: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestBuildEngineJobSelectionSubtitleOnly(t *testing.T) {
 	subtitle := "Sub"
 	snap := BookSnapshot{BookID: 7, Title: "T", Subtitle: subtitle, Authors: []string{"A"}}
 	sel := &WriteSelection{Fields: []string{"subtitle"}, Cover: audio.WritePolicyValuePreserve, Chapters: audio.ChaptersPolicyValuePreserve}
-	jf, _, err := buildEngineJob(jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{Selection: sel}}, "job-7", snap, t.TempDir(), "{title}")
+	jf, _, err := buildEngineJob(context.Background(), jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{Selection: sel}}, "job-7", snap, t.TempDir(), "{title}")
 	if err != nil {
 		t.Fatalf("buildEngineJob: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestBuildEngineJobSelectionSubtitleOnly(t *testing.T) {
 func TestBuildEngineJobSelectionNoneHasNoDefaultBehavior(t *testing.T) {
 	subtitle := "Sub"
 	snap := BookSnapshot{BookID: 7, Title: "T", Subtitle: subtitle, Authors: []string{"A"}}
-	jf, _, err := buildEngineJob(jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{}}, "job-7", snap, t.TempDir(), "{title}")
+	jf, _, err := buildEngineJob(context.Background(), jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{}}, "job-7", snap, t.TempDir(), "{title}")
 	if err != nil {
 		t.Fatalf("buildEngineJob (default): %v", err)
 	}
@@ -202,7 +202,7 @@ func TestLoadSnapshotForQueueFreezesSelection(t *testing.T) {
 	// No saved selection: the queue-time snapshot carries NO selection
 	// (byte-identical to the pre-selection shape) and the worker derives
 	// the all-supported-available baseline.
-	snap, err := svc.loadSnapshotForQueue(bookID)
+	snap, err := svc.loadSnapshotForQueue(bookID, svc.proc.QueueSnapshot())
 	if err != nil {
 		t.Fatalf("loadSnapshotForQueue (default): %v", err)
 	}
@@ -215,7 +215,7 @@ func TestLoadSnapshotForQueueFreezesSelection(t *testing.T) {
 	// the saved chapter policy.
 	titleOnly := []string{"title"}
 	svc.proc.ApplyWriteSelection(&titleOnly, audio.ChaptersPolicyValuePreserve)
-	snap, err = svc.loadSnapshotForQueue(bookID)
+	snap, err = svc.loadSnapshotForQueue(bookID, svc.proc.QueueSnapshot())
 	if err != nil {
 		t.Fatalf("loadSnapshotForQueue (title-only): %v", err)
 	}
@@ -237,7 +237,7 @@ func TestLoadSnapshotForQueueFreezesSelection(t *testing.T) {
 	// unchanged (a fresh load, not a mutation).
 	noneSel := []string{}
 	svc.proc.ApplyWriteSelection(&noneSel, audio.ChaptersPolicyValuePreserve)
-	again, err := svc.loadSnapshotForQueue(bookID)
+	again, err := svc.loadSnapshotForQueue(bookID, svc.proc.QueueSnapshot())
 	if err != nil {
 		t.Fatalf("loadSnapshotForQueue (none): %v", err)
 	}
@@ -271,7 +271,7 @@ func TestQueueChaptersPreserveWithDefaultFields(t *testing.T) {
 
 	// Only the chapter policy is saved; the scalar selection stays nil.
 	svc.proc.ApplyWriteSelection(nil, audio.ChaptersPolicyValuePreserve)
-	snap, err := svc.loadSnapshotForQueue(bookID)
+	snap, err := svc.loadSnapshotForQueue(bookID, svc.proc.QueueSnapshot())
 	if err != nil {
 		t.Fatalf("loadSnapshotForQueue (chapters-only): %v", err)
 	}
@@ -293,7 +293,7 @@ func TestQueueChaptersPreserveWithDefaultFields(t *testing.T) {
 	// default, cover at the default write.
 	year := 2020
 	bookSnap := BookSnapshot{BookID: bookID, Title: "Book One", Subtitle: "The Sub", Authors: []string{"A"}, Year: &year, Chapters: []SnapshotChapter{{Title: "Ch 1", StartMillis: 0, DurationMillis: 1000}}}
-	jf, _, err := buildEngineJob(jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: snap}, "job-1", bookSnap, t.TempDir(), "{title}")
+	jf, _, err := buildEngineJob(context.Background(), jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: snap}, "job-1", bookSnap, t.TempDir(), "{title}")
 	if err != nil {
 		t.Fatalf("buildEngineJob (chapters-only): %v", err)
 	}

@@ -138,6 +138,88 @@ func ValidateRelativePathFormat(template string) error {
 	return ValidatePathFormat(template)
 }
 
+// ValidatePathFormatForRegistry runs the same rules as ValidatePathFormat
+// against a SPECIFIC token registry (usually a candidate engine's
+// capabilities) instead of the live registry. A save that re-points the
+// engine binary uses it to revalidate every effective scheme against the
+// CANDIDATE's token set before committing the swap: a scheme the old engine
+// accepted that the new one rejects must refuse the save, not start failing
+// jobs at run time.
+func ValidatePathFormatForRegistry(template string, reg map[string]struct{}) error {
+	// E0: brace-delimited tokens the engine does not know are rejected by
+	// the engine's parser (PathResolutionError::UnknownToken), so a stored
+	// format containing one must fail validation HERE, before save — the
+	// legacy literal pass-through applied only to an UNCLOSED brace, which
+	// a closing brace is not. An engine-version capability gap (registry
+	// empty) is not a user typo: the boot gate already refused to start in
+	// that state.
+	if len(reg) > 0 {
+		for i := 0; i < len(template); i++ {
+			if template[i] != '{' {
+				continue
+			}
+			if end := strings.IndexByte(template[i+1:], '}'); end >= 0 {
+				name := template[i+1 : i+1+end]
+				if !isPathFormatToken(reg, name) {
+					return fmt.Errorf("path format contains unsupported token {%s}", name)
+				}
+				i += end
+			}
+		}
+	}
+
+	segs := parsePathFormatFor(template, reg)
+
+	plainSegs := make([]string, 0, len(segs))
+	anyElement := false
+	for _, s := range segs {
+		trimmed := strings.TrimSpace(s.text)
+		if trimmed != "" || s.hasToken {
+			anyElement = true
+		}
+		if !s.hasToken && trimmed != "" {
+			plainSegs = append(plainSegs, trimmed)
+		}
+	}
+	// E1: no path elements after trimming.
+	if !anyElement {
+		return fmt.Errorf("format produces no path elements")
+	}
+
+	// E2: forbidden characters in literal text (first offender wins).
+	for _, s := range segs {
+		for _, c := range s.text {
+			if c < 0x20 || c == 0x7f {
+				return fmt.Errorf("path text cannot contain U+%04X", c)
+			}
+			if strings.ContainsRune(pathFormatIllegalChars, c) {
+				return fmt.Errorf("path text cannot contain %q", string(c))
+			}
+		}
+	}
+
+	// E3: reserved Windows device name as a static (token-free) segment.
+	for _, seg := range plainSegs {
+		base := seg
+		if dot := strings.IndexByte(seg, '.'); dot >= 0 {
+			base = strings.TrimSpace(seg[:dot])
+		}
+		if _, ok := pathFormatReservedNames[strings.ToLower(base)]; ok {
+			return fmt.Errorf("segment %q is a reserved device name on Windows", strings.ToLower(base))
+		}
+	}
+
+	// E4: at least one placeholder from the engine's substitution token
+	// set. Tokens only exist in the exact "{key}" spelling, so a raw scan
+	// is equivalent to scanning parsed parts.
+	for t := range reg {
+		if strings.Contains(template, "{"+t+"}") {
+			return nil
+		}
+	}
+	return fmt.Errorf("format must include at least one placeholder such as {title}")
+}
+
 // ValidatePathFormat checks a m4b-merge -p template against the
 // Linux+Windows character union (output roots are commonly foreign-OS
 // mounts). Mirrors the web scheme rules so live UI feedback and saved

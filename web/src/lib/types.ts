@@ -295,6 +295,9 @@ export interface AudiobookDBBook {
 	 * payloads include. Both fields are optional in practice.
 	 */
 	image?: { url: string; width: number; height: number; blurdata?: string } | null;
+	/** The book's own subtitle; the server capture's fallback after the
+	 *  selected release's own subtitle (subtitleFromCatalog precedence). */
+	subtitle: string | null;
 	disambiguation: string | null;
 	type?: string;
 	originallyPublishedAt?: string;
@@ -315,6 +318,9 @@ export interface AudiobookDBRelease {
 	runtimeLengthSec: number;
 	isbn: string | null;
 	releaseDate: string | null;
+	/** The release's own subtitle; it wins over the book-level value in
+	 *  the server capture (subtitleFromCatalog precedence). */
+	subtitle: string;
 	chapterDetail?: {
 		chapters: { title: string; ordinal: number; startOffsetMs: number; lengthMs: number; lengthString: string }[];
 	};

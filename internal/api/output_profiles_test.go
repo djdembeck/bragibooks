@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -165,6 +166,24 @@ func TestCreateOutputProfileValidationErrors(t *testing.T) {
 				t.Errorf("body = %q; want it to contain %q", w.Body.String(), tc.blob)
 			}
 		})
+	}
+}
+
+// TestValidateProfileAbsoluteDirIsPlatformAppropriate guards the
+// Windows target: the destination-root check is filepath.IsAbs, so a
+// Windows-style absolute path (volume letter + backslash) is accepted
+// there, while a bare relative name is refused everywhere.
+func TestValidateProfileAbsoluteDirIsPlatformAppropriate(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows absolute-path shape only exists on Windows")
+	}
+	_, _, _, msg := validateProfile("N", "C:\\output", "{author}/{title}")
+	if msg != "" {
+		t.Fatalf("Windows absolute destination refused: %s", msg)
+	}
+	_, _, _, msg = validateProfile("N", "output", "{author}/{title}")
+	if msg == "" {
+		t.Fatal("relative destination accepted")
 	}
 }
 

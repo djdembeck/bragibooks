@@ -92,11 +92,11 @@ func (p *Processor) ProbeCapabilitiesFor(ctx context.Context, binary string) (*C
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binary, "--capabilities")
-	tree := newProcessTree(cmd)
+	tree, err := newProcessTree(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("confine process tree: %w", err)
+	}
 	cmd.Cancel = func() error {
-		if err := tree.start(cmd); err != nil {
-			return err
-		}
 		return tree.kill()
 	}
 	cmd.WaitDelay = 5 * time.Second
@@ -105,7 +105,16 @@ func (p *Processor) ProbeCapabilitiesFor(ctx context.Context, binary string) (*C
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 	if err := cmd.Start(); err != nil {
+		tree.finish()
 		return nil, fmt.Errorf("m4b-merge --capabilities start: %w", err)
+	}
+	// Constrain the child to the tree NOW, before it can spawn
+	// descendants that would escape a cancel-time assignment.
+	if err := tree.start(cmd); err != nil {
+		tree.finish()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("confine process tree: %w", err)
 	}
 	waitErr := cmd.Wait()
 	tree.finish()
@@ -162,6 +171,15 @@ func (p *Processor) validateCapabilities(caps *Capabilities) (*Capabilities, err
 	if caps.SchemaVersion != AcceptedEngineSchemaVersion {
 		return nil, fmt.Errorf("engine schema_version %d is unsupported, need %d", caps.SchemaVersion, AcceptedEngineSchemaVersion)
 	}
+	// The resolver identity is part of the protocol: an empty (missing)
+	// resolver_version decodes as "" and would pass every identity
+	// comparison against a job captured under a later resolver, so the
+	// gate must require the pinned identity explicitly. A mismatch means
+	// the binary speaks different naming semantics than the snapshots
+	// already in the queue — refuse startup, do not guess.
+	if caps.ResolverVersion != PinnedEngineResolverVersion {
+		return nil, fmt.Errorf("engine resolver_version %q is unsupported, need %q", caps.ResolverVersion, PinnedEngineResolverVersion)
+	}
 	tokens := caps.pathTokenSet()
 	if !tokens["book_id"] {
 		return nil, fmt.Errorf("engine capabilities lack the {book_id} token; an m4b-merge >= 2.2.0 is required for the canonical book-id naming token in supplied mode")
@@ -177,6 +195,18 @@ func (p *Processor) validateCapabilities(caps *Capabilities) (*Capabilities, err
 	// is the same regression: a selection could not be honored.
 	if len(caps.FieldPolicies.ScalarFields) == 0 {
 		return nil, fmt.Errorf("engine capabilities carry no scalar_fields; an m4b-merge >= 2.2.0 is required for the per-field metadata write selection")
+	}
+	// The scalar policy vocabulary must include every value Bragi emits
+	// into a job's write policies: write (selected fields with values),
+	// preserve (deselected / unavailable), and clear (the per-book
+	// editor's explicit clears). Listing scalar fields alone is not
+	// enough: an engine that advertised the fields but dropped one of
+	// these values would pass this gate and only reject the job at run
+	// time.
+	for _, v := range []string{WritePolicyValueWrite, WritePolicyValuePreserve, WritePolicyValueClear} {
+		if !policyVariant(caps.FieldPolicies.Values, v) {
+			return nil, fmt.Errorf("engine field_policies do not advertise %q; a job with that write policy cannot be honored (field policy values: %s)", v, strings.Join(caps.FieldPolicies.Values, ", "))
+		}
 	}
 	for _, f := range SupportedWriteFields {
 		found := false
@@ -199,6 +229,13 @@ func (p *Processor) validateCapabilities(caps *Capabilities) (*Capabilities, err
 	// only reject every preserve job at run time.
 	if !policyVariant(caps.CoverPolicies.Variants, WritePolicyValuePreserve) {
 		return nil, fmt.Errorf("engine cover_policies do not advertise %q; an unselected field or preserved cover cannot be honored (cover variants: %s)", WritePolicyValuePreserve, strings.Join(caps.CoverPolicies.Variants, ", "))
+	}
+	// "clear" is the bare policy Bragi emits for an explicit cover clear
+	// (the per-book editor's pin) with no staged file: an engine that
+	// dropped it would pass boot and reject every cleared-cover job at
+	// run time.
+	if !policyVariant(caps.CoverPolicies.Variants, WritePolicyValueClear) {
+		return nil, fmt.Errorf("engine cover_policies do not advertise %q; a cleared cover cannot be honored (cover variants: %s)", WritePolicyValueClear, strings.Join(caps.CoverPolicies.Variants, ", "))
 	}
 	if !policyVariant(caps.ChapterPolicies.Variants, WritePolicyValuePreserve) {
 		return nil, fmt.Errorf("engine chapter_policies do not advertise %q; a preserved chapter list cannot be honored (chapter variants: %s)", WritePolicyValuePreserve, strings.Join(caps.ChapterPolicies.Variants, ", "))

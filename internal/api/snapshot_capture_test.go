@@ -136,7 +136,7 @@ func TestCaptureSnapshotCaptureSpecificCoverName(t *testing.T) {
 	if ok, _ := mustFile(filepath.Join(covers, "1-111.jpg")); !ok {
 		t.Fatalf("active cover file removed by pruning")
 	}
-	if ok, _ := mustFile(filepath.Join(covers, "1-old.jpg")); ok {
+	if ok, _ := mustFile(filepath.Join(covers, "1-snapshot.jpg")); ok {
 		t.Fatalf("legacy shared cover file (1-snapshot.jpg) must be pruned once superseded")
 	}
 
@@ -152,16 +152,16 @@ func TestCaptureSnapshotCaptureSpecificCoverName(t *testing.T) {
 
 	// storeCoverForBook names captures uniquely: two captures of the same
 	// book produce different filenames, so a later capture can never write
-	// over (or delete on failure) an earlier capture's file.
-	book := &audiobookdb.Book{ID: "42"}
-	n1, ok1 := h.storeCoverForBook(t.Context(), 1, &BookSnapshot{BookID: 1}, book) // no image: fail path
+	// over (or delete on failure) an earlier capture's file. It takes the
+	// SELECTED artwork's URL (the persisted cover_image_url), not a Book:
+	// an empty URL is the no-cover case.
+	n1, ok1 := h.storeCoverForBook(t.Context(), 1, &BookSnapshot{BookID: 1}, "") // no cover: fail path
 	if ok1 || n1 != "" {
-		t.Fatalf("no-image cover store = (%q, %v); want (false, \"\")", n1, ok1)
+		t.Fatalf("no-cover store = (%q, %v); want (false, \"\")", n1, ok1)
 	}
 	// A failing download with a cover present must remove only its own new
 	// file; the referenced one stays.
-	book2 := &audiobookdb.Book{ID: "42", Images: []audiobookdb.Image{{URL: "http://127.0.0.1:1/x.jpg"}}}
-	if _, ok := h.storeCoverForBook(t.Context(), 1, &BookSnapshot{BookID: 1}, book2); ok {
+	if _, ok := h.storeCoverForBook(t.Context(), 1, &BookSnapshot{BookID: 1}, "http://127.0.0.1:1/x.jpg"); ok {
 		t.Fatalf("loopback cover download must fail the capture, not write a file")
 	}
 	if ok, _ := mustFile(filepath.Join(covers, "1-111.jpg")); !ok {

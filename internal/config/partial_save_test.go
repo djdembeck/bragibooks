@@ -204,6 +204,55 @@ func TestLoadEnvPriorityOverFile(t *testing.T) {
 	}
 }
 
+// TestLoadMetadataFieldsMalformedReadsAsUnset guards the sanitize pass: a
+// present-but-malformed processing.metadata_fields (null, a scalar, or a
+// list with a non-string member) must read as "the file did not set the
+// selection" so the durable stored row is honored — never silently
+// collapsed to the default (nil) that a later save would overwrite.
+func TestLoadMetadataFieldsMalformedReadsAsUnset(t *testing.T) {
+	cases := map[string]string{
+		"null":       "processing:\n  metadata_fields: null\n",
+		"scalar":     "processing:\n  metadata_fields: title\n",
+		"mixed list": "processing:\n  metadata_fields: [title, 7]\n",
+	}
+	for name, seed := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, _, err := loadWith(path)
+			if err != nil {
+				t.Fatalf("loadWith: %v", err)
+			}
+			if cfg.Processing.MetadataFields != nil {
+				t.Errorf("malformed metadata_fields = %v, want nil (treated as unset)", *cfg.Processing.MetadataFields)
+			}
+			if _, present := yamlKeysFromFile(path)["processing.metadata_fields"]; present {
+				t.Errorf("malformed key still present in the key set; it must be dropped so the row is honored")
+			}
+		})
+	}
+	// An explicit EMPTY list is valid (the "write nothing" selection) and
+	// stays a non-nil empty slice, distinct from nil.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("processing:\n  metadata_fields: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := loadWith(path)
+	if err != nil {
+		t.Fatalf("loadWith: %v", err)
+	}
+	if cfg.Processing.MetadataFields == nil || len(*cfg.Processing.MetadataFields) != 0 {
+		t.Errorf("explicit empty list = %v, want a non-nil empty slice", cfg.Processing.MetadataFields)
+	}
+	if _, present := yamlKeysFromFile(path)["processing.metadata_fields"]; !present {
+		t.Errorf("explicit empty list dropped from the key set; it must stay present")
+	}
+}
+
 // TestLoadParseErrorIsNotSilent covers row 23: a genuine parse error must
 // propagate from loadWith, while a purely missing file is the silent
 // "no file" case (defaults, no error).

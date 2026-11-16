@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
@@ -49,7 +50,7 @@ func TestBuildEngineJobEmptyAuthorsSerializeAsArray(t *testing.T) {
 		Title:   "No Author Book",
 		Authors: []string{},
 	}
-	jf, staged, err := buildEngineJob(jobArgs{SrcPaths: []string{"/tmp/in.m4a"}}, "job-7", snap, t.TempDir(), "{title}")
+	jf, staged, err := buildEngineJob(context.Background(), jobArgs{SrcPaths: []string{"/tmp/in.m4a"}}, "job-7", snap, t.TempDir(), "{title}")
 	if err != nil {
 		t.Fatalf("buildEngineJob: %v", err)
 	}
@@ -84,7 +85,7 @@ func TestBuildEngineJobEmptyAuthorsSerializeAsArray(t *testing.T) {
 func TestBuildEngineJobBlankTitlePreserves(t *testing.T) {
 	for _, title := range []string{"", "   "} {
 		snap := BookSnapshot{BookID: 1, Title: title}
-		jf, _, err := buildEngineJob(jobArgs{SrcPaths: []string{"/tmp/in.m4a"}}, "job-1", snap, t.TempDir(), "{title}")
+		jf, _, err := buildEngineJob(context.Background(), jobArgs{SrcPaths: []string{"/tmp/in.m4a"}}, "job-1", snap, t.TempDir(), "{title}")
 		if err != nil {
 			t.Fatalf("buildEngineJob(%q): %v", title, err)
 		}
@@ -94,7 +95,7 @@ func TestBuildEngineJobBlankTitlePreserves(t *testing.T) {
 	}
 	// A non-blank title keeps "write": the fix is only for the blank case.
 	snap := BookSnapshot{BookID: 1, Title: "Named"}
-	jf, _, err := buildEngineJob(jobArgs{SrcPaths: []string{"/tmp/in.m4a"}}, "job-1", snap, t.TempDir(), "{title}")
+	jf, _, err := buildEngineJob(context.Background(), jobArgs{SrcPaths: []string{"/tmp/in.m4a"}}, "job-1", snap, t.TempDir(), "{title}")
 	if err != nil {
 		t.Fatalf("buildEngineJob: %v", err)
 	}
@@ -119,7 +120,7 @@ func TestBuildEngineJobStagedCoverIsJobScoped(t *testing.T) {
 
 	root := filepath.Join(t.TempDir(), "not-yet-created")
 	snap := BookSnapshot{BookID: 7, Title: "Covered", CoverFile: coverName}
-	jf, staged, err := buildEngineJob(jobArgs{SrcPaths: []string{"/tmp/in.m4a"}}, "job-7", snap, root, "{title}")
+	jf, staged, err := buildEngineJob(context.Background(), jobArgs{SrcPaths: []string{"/tmp/in.m4a"}}, "job-7", snap, root, "{title}")
 	if err != nil {
 		t.Fatalf("buildEngineJob: %v", err)
 	}

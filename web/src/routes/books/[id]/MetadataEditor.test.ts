@@ -17,7 +17,8 @@ type SetBookId = (id: number) => void;
 
 let getImpl: ((url: string) => Promise<unknown>) | null = null;
 let postImpl: ((url: string, body: unknown) => Promise<unknown>) | null = null;
-const calls: { method: 'get' | 'post'; url: string; body?: unknown }[] = [];
+let putImpl: ((url: string, body: unknown) => Promise<unknown>) | null = null;
+const calls: { method: 'get' | 'post' | 'put'; url: string; body?: unknown }[] = [];
 
 vi.mock('#lib/api.js', () => ({
 	get: (url: string) => {
@@ -30,7 +31,11 @@ vi.mock('#lib/api.js', () => ({
 		if (!postImpl) throw new Error('test did not provide a post implementation');
 		return postImpl(url, body);
 	},
-	put: vi.fn(),
+	put: (url: string, body: unknown) => {
+		calls.push({ method: 'put', url, body });
+		if (!putImpl) throw new Error('test did not provide a put implementation');
+		return putImpl(url, body);
+	},
 	ApiError: class ApiError extends Error {}
 }));
 
@@ -91,6 +96,7 @@ afterEach(() => {
 	calls.length = 0;
 	getImpl = null;
 	postImpl = null;
+	putImpl = null;
 	vi.useRealTimers();
 });
 
@@ -132,6 +138,98 @@ describe('MetadataEditor book-ID navigation isolation', () => {
 		await settle();
 		expect(target.textContent).toContain('Book B');
 		expect(target.textContent).not.toContain('Book A');
+
+		unmount(comp);
+		target.remove();
+	});
+});
+
+describe('MetadataEditor save/reset races', () => {
+	it('discards a save that outlives the book-ID navigation', async () => {
+		const { promise: nav, resolve: releaseNav } = Promise.withResolvers<BookMetadataResponse>();
+		const { promise: b2, resolve: resolveB2 } = Promise.withResolvers<BookMetadataResponse>();
+		const { promise: saveA, resolve: releaseSaveA } = Promise.withResolvers<BookMetadataResponse>();
+		getImpl = (url) => {
+			if (url === '/books/1/metadata') return nav;
+			if (url === '/books/2/metadata') return b2;
+			throw new Error(`unexpected GET ${url}`);
+		};
+		putImpl = (url) => {
+			if (url === '/books/1/metadata') return saveA;
+			throw new Error(`unexpected PUT ${url}`);
+		};
+		let setBookId: SetBookId = () => {};
+		let onSavedCalls = 0;
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mount(NavHarness as Component, {
+			target,
+			props: {
+				onInit: (set: SetBookId) => (setBookId = set),
+				onSaved: () => onSavedCalls++
+			}
+		});
+		flushSync();
+		// Book 1 loaded; start a save and navigate away BEFORE it resolves.
+		releaseNav(resA);
+		await settle();
+		const saveBtn = Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find(
+			(b) => b.textContent?.includes('Save manual metadata')
+		);
+		expect(saveBtn, 'save button not found').toBeDefined();
+		saveBtn!.click();
+		flushSync();
+		setBookId(2);
+		flushSync();
+		resolveB2(resB);
+		await settle();
+		// The LATE book-1 save resolves: it must not paint book A's
+		// response into book B's state, must not fire book A's onSaved on
+		// B, and must not leave a stuck saving flag behind.
+		releaseSaveA(resA);
+		await settle();
+		expect(target.textContent).toContain('Book B');
+		expect(onSavedCalls).toBe(0);
+		const stillSaving = Array.from(target.querySelectorAll<HTMLButtonElement>('button'))
+			.find((b) => b.textContent?.includes('Save manual metadata'));
+		expect(stillSaving?.disabled).not.toBe(true);
+
+		unmount(comp);
+		target.remove();
+	});
+
+	it('blocks reset while a save is pending', async () => {
+		getImpl = (url) =>
+			url === '/books/1/metadata' ? Promise.resolve(resA) : Promise.reject(new Error(`unexpected GET ${url}`));
+		const { promise: save, resolve: releaseSave } = Promise.withResolvers<BookMetadataResponse>();
+		putImpl = (url) => {
+			if (url === '/books/1/metadata') return save;
+			throw new Error(`unexpected PUT ${url}`);
+		};
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, null);
+		flushSync();
+		await settle();
+
+		const saveBtn = Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find(
+			(b) => b.textContent?.includes('Save manual metadata')
+		);
+		saveBtn!.click();
+		flushSync();
+		// While the save is in flight, the reset entry point is disabled:
+		// committing a reset under a pending save would resurrect the
+		// save's edits on its resolution.
+		const resetBtn = Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find(
+			(b) => b.textContent?.includes('Reset to catalog')
+		);
+		expect(resetBtn, 'reset button not found').toBeDefined();
+		expect(resetBtn!.disabled).toBe(true);
+
+		// Resolving the save re-enables it.
+		releaseSave(resA);
+		await settle();
+		expect(resetBtn!.disabled).toBe(false);
 
 		unmount(comp);
 		target.remove();

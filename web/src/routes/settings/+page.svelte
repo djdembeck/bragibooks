@@ -3,7 +3,7 @@
 	import { Pencil, Trash2 } from '@lucide/svelte';
 	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker, Modal, PathFormatBuilder } from '#lib/components/index.js';
 	import { parseParts, validateScheme, trimSegment } from '#lib/scheme.js';
-	import { getEngineCapabilities } from '#lib/engineCapabilities.js';
+	import { getEngineCapabilities, refreshEngineCapabilities } from '#lib/engineCapabilities.js';
 	import type { Settings, OutputProfile, IndexStatus, IndexState } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
@@ -95,7 +95,12 @@
 					const cur = await get<IndexStatus>('/index');
 					if (cancelled) return;
 					indexStatus = cur;
-					if (cur.state.generation === gen &&
+					// A terminal at a NEWER generation supersedes ours (a
+					// root-change rescan republishes the mirror under its
+					// own generation, after which ours is never visible
+					// again): accept it, or "Refresh now" stays spinning
+					// past its scan.
+					if (cur.state.generation >= gen &&
 						!['queued', 'running'].includes(cur.state.status)) {
 						indexRefreshing = false;
 						return;
@@ -288,6 +293,11 @@
 		if (!settings) return;
 		if (!runValidation()) return;
 
+		// Capture the pre-save binary so a successful swap is detectable:
+		// the new engine's token vocabulary is what the builder validates
+		// against, so the capabilities registry must be re-fetched when the
+		// binary changes.
+		const prevBinary = settings.m4b_merge_binary;
 		saving = true;
 		saved = false;
 		saveError = null;
@@ -299,6 +309,12 @@
 			}
 			// The server's response is the saved truth, not the draft.
 			indexingSaved = (updated ?? settings).indexing_enabled === true;
+			const binary = (updated ?? settings).m4b_merge_binary;
+			if (binary !== prevBinary) {
+				// Fire and forget: a failed refresh keeps the last good
+				// registry (server-validated save stands).
+				void refreshEngineCapabilities();
+			}
 			saved = true;
 			setTimeout(() => (saved = false), 3000);
 		} catch (e) {

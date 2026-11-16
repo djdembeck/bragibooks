@@ -311,6 +311,16 @@ func (s *IndexService) scan(ctx context.Context) {
 	s.last.Detail = ""
 	s.last.Extracted = 0
 	s.last.Total = 0
+	// Re-establish the accepted root for the coalescing branch: the PRIOR
+	// scan's setTerminal cleared activeRoot (its worker was done), and a
+	// root change that queued THIS rescan then found an empty activeRoot —
+	// a same-root refresh landing while the rescan runs would miss the
+	// "running on the same root" coalesce and queue a full extra
+	// generation. Setting it here, under the same lock as the running
+	// status, closes that gap for the whole walk.
+	if r := s.resolveScanRoot(); r != "" {
+		s.activeRoot = r
+	}
 	s.persistLocked()
 	s.mu.Unlock()
 
@@ -360,7 +370,15 @@ func (s *IndexService) scan(ctx context.Context) {
 	// stored-incomplete — degraded rows re-attempt on every refresh).
 	// Added counts the extract set's genuinely new paths (no stored row
 	// before this walk), so a refresh that finds nothing new reads 0.
-	unchanged, extract, added := s.classify(rows, root)
+	// A query failure here means the stored table is unreadable: the
+	// table is left exactly as-is (no re-extraction, no pruning) and the
+	// scan goes terminal — re-probing the whole tree would overwrite
+	// complete rows with degraded metadata on budget exhaustion.
+	unchanged, extract, added, cerr := s.classify(rows, root)
+	if cerr != nil {
+		s.setTerminal(gen, "error", fmt.Sprintf("classify: %v", cerr), 0, s.last.Root)
+		return
+	}
 
 	// Extraction is the slow phase (one ffprobe per path, up to a 30-minute
 	// budget); the walk that just finished is fast. Publish the totals so the
@@ -416,7 +434,20 @@ func (s *IndexService) scan(ctx context.Context) {
 			// Keep the pre-set empty snapshot; never run ffprobe on it.
 		case r.Type == "file":
 			if parent, ok := snapshotByParent[filepath.Dir(r.Path)]; ok {
-				r.Payload = mustJSON(audio.FileSnapshotFromFolder(parent, r.Path))
+				derived := audio.FileSnapshotFromFolder(parent, r.Path)
+				if !derived.Degraded {
+					r.Payload = mustJSON(derived)
+					break
+				}
+				// The parent folder's discovery includes only regular
+				// files: an audio SYMLINK under the indexed dir is walked
+				// as an audio file but has no entry in the folder
+				// snapshot, so the derivation above degrades it. Probe
+				// the link itself (ffprobe follows it) instead of
+				// storing the degraded marker — without this the row
+				// re-extracts and re-degrades on every refresh, and the
+				// folder snapshot stays permanently incomplete for it.
+				r.Payload = mustJSON(s.extractOne(ctx, r.Path))
 			} else {
 				r.Payload = mustJSON(s.extractOne(ctx, r.Path))
 			}
@@ -443,17 +474,23 @@ func (s *IndexService) scan(ctx context.Context) {
 		}
 	}
 
-	// A persistence failure is terminal "error": the walk's rows are NOT
-	// stored, so publishing done would claim an index the table does not
-	// have (and the attempted root must not become authoritative). The
-	// failure may have left the table PARTIALLY written — upsertAll commits
-	// in bounded batches, so an earlier batch can land while a later one
-	// fails. Record the root so the listing guard keeps serving the
-	// filesystem (and not the half-written table) until the next scan
-	// completes cleanly.
+	// The partial-write guard is persisted BEFORE the first batch commits:
+	// upsertAll commits in bounded batches, so a crash (or a process kill)
+	// after an early batch leaves the table half-written, and the persisted
+	// guard — not the in-memory one — is what makes a restarted process
+	// keep serving the filesystem (not the half-written table) until the
+	// next clean scan. A clean done/truncated terminal on this root
+	// releases it (below, in setTerminal); an error terminal keeps it.
+	s.mu.Lock()
+	if s.writeFailedRoot != root {
+		s.writeFailedRoot = root
+		s.persistLocked()
+	}
+	s.mu.Unlock()
 	if err := s.upsertAll(append(unchanged, extract...)); err != nil {
 		s.mu.Lock()
 		s.writeFailedRoot = root
+		s.persistLocked()
 		s.mu.Unlock()
 		s.setTerminal(gen, "error", fmt.Sprintf("persist index: %v", err), 0, s.last.Root)
 		return
@@ -661,6 +698,14 @@ func (s *IndexService) pruneVanished(walked map[string]bool) error {
 			vanished = append(vanished, p)
 		}
 	}
+	// A late read error (a scan that stopped partway through the table)
+	// would read as "everything past here vanished": pruning on an
+	// incomplete walked-comparison set deletes live rows. Propagate the
+	// iterator error so the scan goes terminal instead of pruning blind.
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	rows.Close()
 	for start := 0; start < len(vanished); start += indexWriteBatch {
 		end := min(start+indexWriteBatch, len(vanished))
@@ -694,32 +739,49 @@ func (s *IndexService) pruneVanished(walked map[string]bool) error {
 // with the walked rows sorted the same way: one ordered index scan for the
 // whole tree, never a per-batch IN-list lookup (which would scan the table
 // per batch).
-func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extract []indexRow, added int) {
-	dbRows, err := s.db.Query(`SELECT path, size, modtime, payload FROM source_index ORDER BY path`)
+func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extract []indexRow, added int, err error) {
+	dbRows, err := s.db.Query(`SELECT path, size, modtime, payload, type FROM source_index ORDER BY path`)
 	if err != nil {
+		// The stored half of the merge is unreadable: treating every walked
+		// path as "no stored row" would make the whole tree an extract
+		// candidate, and budget exhaustion would then overwrite previously
+		// COMPLETE rows with degraded metadata (re-probing every refresh
+		// after that). Refuse to classify; the caller goes terminal and
+		// leaves the table exactly as it was.
 		log.Printf("index: classify query: %v", err)
-		return nil, rows, 0
+		return nil, nil, 0, err
 	}
 	defer dbRows.Close()
 	type stored struct {
 		Size    int64
 		ModTime string
 		Payload string
+		Type    string
 	}
 	var nextStored *stored
 	var nextPath string
-	// load advances the stored cursor; on exhaustion or a scan error it
-	// CLEARS nextStored — a stale cursor would pin the merge loop on a
-	// walked path that sorts after the last stored row (vanished-row
-	// infinite loop).
+	// load advances the stored cursor; on exhaustion it CLEARS nextStored —
+	// a stale cursor would pin the merge loop on a walked path that sorts
+	// after the last stored row (vanished-row infinite loop). A Scan error
+	// or a late iterator error at EOF (rows.Err) is recorded: continuing
+	// would classify rows against an INCOMPLETE stored table and the
+	// resulting upserts would overwrite complete rows — the caller returns
+	// the error before anything is written.
+	var iterErr error
 	load := func() {
 		if !dbRows.Next() {
+			if iterErr == nil {
+				iterErr = dbRows.Err()
+			}
 			nextStored = nil
 			return
 		}
 		var st stored
-		if err := dbRows.Scan(&nextPath, &st.Size, &st.ModTime, &st.Payload); err != nil {
+		if err := dbRows.Scan(&nextPath, &st.Size, &st.ModTime, &st.Payload, &st.Type); err != nil {
 			log.Printf("index: classify scan: %v", err)
+			if iterErr == nil {
+				iterErr = fmt.Errorf("classify: scan stored row: %w", err)
+			}
 			nextStored = nil
 			return
 		}
@@ -783,11 +845,27 @@ func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extrac
 	markDirty := func(path string) {
 		prefix := indexChildPrefix(path)
 		for d := filepath.Dir(prefix); d != prefix && d != root; d = filepath.Dir(d) {
+			// Bound the walk to the scan root's branch: a stored path OUTSIDE
+			// root (a row left behind by a root change) has no ancestor under
+			// root, and walking further would reach "/" where
+			// filepath.Dir("/") == "/" would spin forever with no context
+			// check (scanner spin, shutdown blocked). Stop at the first
+			// ancestor that is not under the root; it and everything above
+			// are not this scan's directories.
+			if !strings.HasPrefix(d, indexChildPrefix(root)) {
+				break
+			}
 			dirDirty[d] = true
 		}
 	}
+	// Type is part of the change signals: a directory replaced in place by
+	// a file of the same size and mtime (or the reverse) matches the two
+	// value signals, and the merge would then classify the stored row as
+	// unchanged — the stored type (and its folder snapshot payload) would
+	// stay authoritative for the new kind forever. A type change requires
+	// an upsert, same as a size or mtime change.
 	signalsMatch := func(r indexRow, st *stored) bool {
-		return st.Size == r.Size && st.ModTime == r.ModTime
+		return st.Size == r.Size && st.ModTime == r.ModTime && st.Type == r.Type
 	}
 	for i := 0; i < len(walked) || nextStored != nil; {
 		switch {
@@ -875,7 +953,11 @@ func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extrac
 		}
 		unchanged = kept
 	}
-	return unchanged, extract, added
+	if iterErr != nil {
+		log.Printf("index: classify stored-table read incomplete: %v", iterErr)
+		return nil, nil, 0, iterErr
+	}
+	return unchanged, extract, added, nil
 }
 
 // extractOne runs the existing extractor (or the degraded cause-string
@@ -940,8 +1022,8 @@ func (s *IndexService) loadState() error {
 	var st IndexState
 	var gen int64
 	var lastRunAt sql.NullString
-	err := s.db.QueryRow(`SELECT root, entries, last_run_at, status, detail, generation FROM index_state WHERE id = 1`).
-		Scan(&st.Root, &st.Entries, &lastRunAt, &st.Status, &st.Detail, &gen)
+	err := s.db.QueryRow(`SELECT root, entries, last_run_at, status, detail, generation, write_failed_root FROM index_state WHERE id = 1`).
+		Scan(&st.Root, &st.Entries, &lastRunAt, &st.Status, &st.Detail, &gen, &s.writeFailedRoot)
 	if err == sql.ErrNoRows {
 		s.persistLocked()
 		return nil
@@ -971,16 +1053,17 @@ func (s *IndexService) loadState() error {
 // persistLocked writes the mirror to index_state. Must hold s.mu.
 func (s *IndexService) persistLocked() {
 	_, err := s.db.Exec(`
-		INSERT INTO index_state (id, root, entries, last_run_at, status, detail, generation)
-		VALUES (1, ?, ?, ?, ?, ?, ?)
+		INSERT INTO index_state (id, root, entries, last_run_at, status, detail, generation, write_failed_root)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			root = excluded.root,
 			entries = excluded.entries,
 			last_run_at = COALESCE(NULLIF(excluded.last_run_at, ''), index_state.last_run_at),
 			status = excluded.status,
 			detail = excluded.detail,
-			generation = excluded.generation`,
-		s.last.Root, s.last.Entries, nullableString(s.last.LastRunAt), s.last.Status, s.last.Detail, s.last.Generation)
+			generation = excluded.generation,
+			write_failed_root = excluded.write_failed_root`,
+		s.last.Root, s.last.Entries, nullableString(s.last.LastRunAt), s.last.Status, s.last.Detail, s.last.Generation, s.writeFailedRoot)
 	if err != nil {
 		log.Printf("index: persist state: %v", err)
 	}
@@ -998,21 +1081,31 @@ func canonicalRoot(p string) string {
 }
 
 // indexChildPrefix is the LIKE prefix for a directory's children:
-// dir + separator, without doubling at the filesystem root ("//" never).
+// dir + separator, without doubling at the filesystem root ("//" never)
+// or a Windows volume root ("D:////" never). A volume root canonicalizes
+// with a trailing separator (D:\), so a naive dir+sep would build a
+// prefix that matches no stored row (stored rows are D:\x, never D:\\x).
+// Trailing separators are deduped on every platform, which makes the
+// Unix root case (a cleaned root never carries one) a no-op.
 func indexChildPrefix(dir string) string {
-	if dir == string(os.PathSeparator) {
+	sep := string(os.PathSeparator)
+	if strings.HasSuffix(dir, sep) {
 		return dir
 	}
-	return dir + string(os.PathSeparator)
+	return dir + sep
 }
 
 // indexImmediateChild reports whether candidate sits directly under dir.
+// dir may carry a trailing separator (a Windows volume root, D:\); the
+// containment prefix is built through indexChildPrefix so the separator is
+// never doubled.
 func indexImmediateChild(dir, candidate string) bool {
 	sep := string(os.PathSeparator)
 	if dir == sep {
 		return strings.HasPrefix(candidate, sep) && !strings.Contains(candidate[1:], sep)
 	}
-	return strings.HasPrefix(candidate, dir+sep) && !strings.Contains(candidate[len(dir)+1:], sep)
+	prefix := indexChildPrefix(dir)
+	return strings.HasPrefix(candidate, prefix) && !strings.Contains(candidate[len(prefix):], sep)
 }
 
 // rebaseUnder remaps p, a path known to sit strictly under from, onto to.
@@ -1175,6 +1268,12 @@ func (h *Handler) listIndexedChildren(dir string) ([]IndexedDirectoryEntry, bool
 		}
 		ie.Evidence = ev
 		out = append(out, ie)
+	}
+	// A late read error reads as "the directory has only these rows": a
+	// partially read table served as a complete listing hides entries from
+	// the operator. Propagate it like the sibling listing paths do.
+	if err := rows.Err(); err != nil {
+		return nil, false, err
 	}
 	if decodeFail > 0 {
 		log.Printf("index: %d entries with undecodable payloads in %s", decodeFail, dir)

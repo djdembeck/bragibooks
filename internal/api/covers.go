@@ -31,10 +31,13 @@ func CoverHandler(dir string) http.Handler {
 }
 
 // validCoverName reports whether name is a legal covers-directory asset:
-// the `<book id>.jpg` files written by CreateBooks, OR a manual-override
-// cover asset (`ovr-<book id>-<hex>.jpg`, the metadata editor's uploaded
-// artwork). Requiring the exact shapes rejects path separators, parent
-// references, and stray assets in the shared covers directory.
+// the `<book id>.jpg` files written by CreateBooks, the snapshot captures
+// (`<book id>-<unixnano>.jpg` and the legacy `<book id>-snapshot.jpg`,
+// written by the metadata capture and staged into a run by buildEngineJob),
+// OR a manual-override cover asset (`ovr-<book id>-<hex>.jpg`, the
+// metadata editor's uploaded artwork). Requiring the exact shapes rejects
+// path separators, parent references, and stray assets in the shared
+// covers directory.
 func validCoverName(name string) bool {
 	if len(name) < 5 || name[len(name)-4:] != ".jpg" {
 		return false
@@ -42,7 +45,26 @@ func validCoverName(name string) bool {
 	if strings.HasPrefix(name, "ovr-") {
 		return overrideCoverName(name)
 	}
-	for _, c := range name[:len(name)-4] {
+	// The book id is digits; after a "-" the snapshot class carries either
+	// the legacy "snapshot" marker or the unix-nano digits. Anything else
+	// is not a covers-directory asset this handler may serve.
+	id := name[:len(name)-4]
+	dash := strings.IndexByte(id, '-')
+	if dash < 0 {
+		return allDigitsLen(id)
+	}
+	if !allDigitsLen(id[:dash]) {
+		return false
+	}
+	suffix := id[dash+1:]
+	return suffix == "snapshot" || allDigitsLen(suffix)
+}
+
+func allDigitsLen(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
 		if c < '0' || c > '9' {
 			return false
 		}

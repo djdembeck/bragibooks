@@ -257,6 +257,64 @@ func TestSettingsAPIEndpointRegenerateInvalidatesPreviousKey(t *testing.T) {
 	}
 }
 
+// TestSettingsAPIEndpointStateKeepsPinnedSelection guards the full-row
+// write paths (enable/disable/regenerate and their DB rollbacks): they
+// replace the WHOLE settings row, so a pinned PROCESSING_METADATA_FIELDS
+// value must be frozen to the stored row's selection before the write,
+// exactly like UpdateSettings. Without the freeze, the live config's nil
+// selection would ride into the durable row and a later save would
+// overwrite the operator's pinned choice with the default.
+func TestSettingsAPIEndpointStateKeepsPinnedSelection(t *testing.T) {
+	t.Setenv("PROCESSING_METADATA_FIELDS", "title")
+	db := newSettingsTestDB(t)
+	h := newSettingsTestService(t, db)
+
+	const stored = `["title","cover"]`
+	if _, err := db.Exec("INSERT INTO settings (id, api_enabled, api_key_digest, metadata_fields, metadata_chapters) VALUES (1, 1, ?, ?, 'write')", keyDigestOf("bk_"+strings.Repeat("ab", 32)), stored); err != nil {
+		t.Fatal(err)
+	}
+	h.svc.Config.SetAPIEndpointState(true, keyDigestOf("bk_"+strings.Repeat("ab", 32)))
+
+	code, got := settingsRoundTrip(t, h, http.MethodPost, "/api/settings/api-endpoint/regenerate")
+	if code != http.StatusOK {
+		t.Fatalf("regenerate = %d, want 200 (%v)", code, got)
+	}
+	var fields, chapters string
+	if err := db.QueryRow("SELECT metadata_fields, metadata_chapters FROM settings WHERE id = 1").Scan(&fields, &chapters); err != nil {
+		t.Fatal(err)
+	}
+	if fields != stored {
+		t.Errorf("metadata_fields after endpoint-state write = %q, want the stored %q (the pin must not ride into the row)", fields, stored)
+	}
+	if chapters != "write" {
+		t.Errorf("metadata_chapters after endpoint-state write = %q, want write", chapters)
+	}
+}
+
+// TestSettingsAPIEndpointStateAbortsOnUnreadableRow guards the sibling
+// rule: with a metadata pin active, the stored row is the fallback for the
+// frozen value. A row that CANNOT be read (a real query failure, distinct
+// from a missing row) must abort the endpoint-state write rather than
+// replace the durable selection with the default.
+func TestSettingsAPIEndpointStateAbortsOnUnreadableRow(t *testing.T) {
+	t.Setenv("PROCESSING_METADATA_FIELDS", "title")
+	db := newSettingsTestDB(t)
+	h := newSettingsTestService(t, db)
+	if _, err := db.Exec("INSERT INTO settings (id, api_enabled, api_key_digest, metadata_fields) VALUES (1, 1, ?, ?)", keyDigestOf("bk_"+strings.Repeat("ab", 32)), `["title"]`); err != nil {
+		t.Fatal(err)
+	}
+	h.svc.Config.SetAPIEndpointState(true, keyDigestOf("bk_"+strings.Repeat("ab", 32)))
+	// A real query failure, not a missing row: the table is gone.
+	if _, err := db.Exec("DROP TABLE settings"); err != nil {
+		t.Fatal(err)
+	}
+
+	code, got := settingsRoundTrip(t, h, http.MethodPost, "/api/settings/api-endpoint/regenerate")
+	if code != http.StatusInternalServerError {
+		t.Fatalf("regenerate with an unreadable row = %d, want 500 (%v)", code, got)
+	}
+}
+
 // TestSettingsAPIEndpointEnvManaged pins the deployment-managed rule:
 // enable and disable are refused, but GET reports env_managed.
 func TestSettingsAPIEndpointEnvManaged(t *testing.T) {
@@ -942,4 +1000,71 @@ func TestUpdateSettingsIndexingEnabledTriggersScan(t *testing.T) {
 			t.Fatalf("generation = %d, want %d (no scan must be queued)", st.Generation, genBefore)
 		}
 	})
+}
+
+// TestSettingsBinarySwapRevalidatesSchemesAgainstCandidate guards the swap
+// gate: after accepting a candidate engine binary, EVERY effective scheme
+// (the global output scheme and each saved output-profile scheme) must be
+// revalidated against the CANDIDATE's token vocabulary — a scheme the old
+// engine accepted that the new one rejects must refuse the save, not
+// become a run-time failure for every job that resolves through it.
+func TestSettingsBinarySwapRevalidatesSchemesAgainstCandidate(t *testing.T) {
+	db := newSettingsTestDB(t)
+	h := newSettingsTestService(t, db)
+	if _, err := db.Exec(`CREATE TABLE output_profiles (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+		output_dir TEXT NOT NULL DEFAULT '',
+		output_scheme TEXT NOT NULL DEFAULT '',
+		created_at TEXT DEFAULT (datetime('now')),
+		updated_at TEXT DEFAULT (datetime('now'))
+	)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// A candidate engine: version floor passes, and its capability
+	// vocabulary covers the global {author}/{title} scheme — but NOT
+	// {series_position}, which the stored profile scheme uses.
+	candidate := filepath.Join(t.TempDir(), "candidate-engine")
+	script := `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "m4b-merge 2.2.0"; exit 0; fi
+if [ "$1" = "--capabilities" ]; then
+  echo '{"schema_version":1,"resolver_version":"1","default_path_format":"{title}","path_tokens":[{"name":"book_id","value":"b","example":"B"},{"name":"authors","value":"a","example":"A"},{"name":"narrators","value":"n","example":"N"},{"name":"author","value":"a","example":"A"},{"name":"title","value":"t","example":"T"}],"field_policies":{"values":["write","preserve","clear"],"scalar_fields":["title","subtitle","authors","narrators","series","description","genres","year"]},"cover_policies":{"constraint":"str","variants":["write","preserve","clear"]},"chapter_policies":{"constraint":"str","variants":["write","preserve","clear"]}}'
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(candidate, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO output_profiles (name, output_dir, output_scheme) VALUES ('Wide', '', '{series_position}/{title}')"); err != nil {
+		t.Fatal(err)
+	}
+
+	putBinary := func() (int, string) {
+		req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"m4b_merge_binary":"`+candidate+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		buildSettingsRouter(h).ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+
+	// The profile scheme uses a token the candidate does not advertise:
+	// the swap must be refused, naming the profile.
+	code, body := putBinary()
+	if code != http.StatusBadRequest {
+		t.Fatalf("swap with an unsupported profile scheme = %d, want 400 — %s", code, body)
+	}
+	if !strings.Contains(body, "Wide") || !strings.Contains(body, "series_position") {
+		t.Fatalf("rejection must name the profile and the token: %s", body)
+	}
+
+	// With no profile schemes to revalidate, the same swap succeeds.
+	if _, err := db.Exec("DELETE FROM output_profiles"); err != nil {
+		t.Fatal(err)
+	}
+	code, body = putBinary()
+	if code != http.StatusOK {
+		t.Fatalf("swap with only supported schemes = %d, want 200 — %s", code, body)
+	}
 }

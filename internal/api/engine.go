@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/bragibooks/bragibooks/internal/audio"
@@ -38,9 +39,21 @@ type enginePreviewRequest struct {
 // the exact sanitized relative output path and the effective metadata the
 // engine resolved. The preview path is truth about NAMING only — it does not
 // publish files, reserve names, or create directories.
+// maxEnginePreviewBodyBytes bounds a preview request: the payload is one
+// normalized snapshot (a handful of metadata arrays) — an unbounded body
+// decoded before any validation would turn the preview endpoint into a
+// memory amplifier.
+const maxEnginePreviewBodyBytes = 1 << 20
+
 func (h *Handler) EnginePreview(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxEnginePreviewBodyBytes)
 	var req enginePreviewRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var mbErr *http.MaxBytesError
+		if errors.As(err, &mbErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "preview request body exceeds the limit")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid preview request: "+err.Error())
 		return
 	}
