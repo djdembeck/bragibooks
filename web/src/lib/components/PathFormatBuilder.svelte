@@ -27,15 +27,22 @@
 	// them; Bragi no longer resolves a sample book locally). Debounced, and
 	// stale responses are discarded so a slow preview can never paint over a
 	// newer edit.
-	let example = $state('');
+	let exampleRel = $state('');
 	let exampleLoading = $state(false);
 	let exampleError = $state<string | null>(null);
 	let previewSeq = 0;
+	// The preview resolves the RELATIVE path; the root is derived from the
+	// CURRENT outputDir so a directory change after the response lands
+	// re-renders immediately (a callback-only read is not a tracked
+	// dependency and would keep showing the stale root).
+	const example = $derived(
+		exampleRel ? (outputDir ? `${outputDir.replace(/\/+$/, '')}/${exampleRel}` : exampleRel) : ''
+	);
 
 	$effect(() => {
 		const format = serializeParts(parts);
 		if (!format) {
-			example = '';
+			exampleRel = '';
 			exampleError = null;
 			exampleLoading = false;
 			return;
@@ -51,10 +58,10 @@
 					path_format: format
 				});
 				if (seq !== previewSeq) return; // a newer edit superseded this one
-				example = outputDir ? `${outputDir.replace(/\/+$/, '')}/${resp.relative_path}` : resp.relative_path;
+				exampleRel = resp.relative_path;
 			} catch (e) {
 				if (seq !== previewSeq) return;
-				example = '';
+				exampleRel = '';
 				exampleError = toCleanedError(e).message;
 			} finally {
 				if (seq === previewSeq) exampleLoading = false;

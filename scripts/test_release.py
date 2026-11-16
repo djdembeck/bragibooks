@@ -336,6 +336,19 @@ class ReleaseLifecycleBehavior(LifecycleFixture):
         # still lags when outputs re-runs release(), the create is rejected
         # with "already exists" and that must be the desired outcome, not an
         # error that strands the already-published image.
+        self._tolerates_duplicate_rejection("gh release create: release v1.0.0 already exists")
+
+    def test_release_creation_tolerates_real_gh_wording(self):
+        # Real `gh release create` stderr is not pinned across versions:
+        # gh 2.20+ reports the HTTP error verbatim. The duplicate check
+        # must absorb that wording (and case variants) exactly like the
+        # test-double phrasing.
+        self._tolerates_duplicate_rejection(
+            "release v1.0.0 already exists (HTTP 422)")
+        self._tolerates_duplicate_rejection(
+            "Gh Release Create: Release v1.0.0 Already Been Created")
+
+    def _tolerates_duplicate_rejection(self, rejected_with):
         initial = self.git("rev-parse", "v1.0.0")
         self.repo.releases.append({"tag_name": "v1.0.0", "draft": True,
                                    "prerelease": False, "assets": []})
@@ -346,7 +359,7 @@ class ReleaseLifecycleBehavior(LifecycleFixture):
         def create_rejected(*args, **kwargs):
             if len(args) >= 4 and args[:3] == ("gh", "release", "create"):
                 attempts.append(args)
-                raise release.ReleaseError("gh release create: release v1.0.0 already exists")
+                raise release.ReleaseError(rejected_with)
             return original_run(*args, **kwargs)
 
         self.repo.run = create_rejected

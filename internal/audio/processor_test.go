@@ -15,6 +15,32 @@ import (
 	"github.com/bragibooks/bragibooks/internal/config"
 )
 
+// TestCheckVersionForUsesCandidatesOwnReport guards the candidate gate: the
+// version under test is the one the CANDIDATE path reports, never the live
+// cached version (which belongs to p.Binary). A re-pointed engine older
+// than the floor must be refused even when the live binary is current, and
+// a current candidate must pass even when the live binary is too old.
+func TestCheckVersionForUsesCandidatesOwnReport(t *testing.T) {
+	t.Parallel()
+	// One dir per fake: writeVersionFake names its script by version, so a
+	// shared dir would let the last write win for every path.
+	live := writeVersionFake(t, t.TempDir(), "2.4.1")
+	oldCandidate := writeVersionFake(t, t.TempDir(), "1.0.0")
+	newCandidate := writeVersionFake(t, t.TempDir(), "2.2.0")
+	proc := NewProcessor(live, "", "", 1, "{author}/{title}", "info")
+
+	// Candidate below the floor, live binary current: the live cache must
+	// not rescue the candidate.
+	if _, err := proc.CheckVersionFor(t.Context(), oldCandidate); err == nil {
+		t.Fatal("candidate below the version floor accepted while the live binary is current")
+	}
+	// Candidate at the floor, live binary too old: the candidate's own
+	// report must be the one gated.
+	if _, err := proc.CheckVersionFor(t.Context(), newCandidate); err != nil {
+		t.Fatalf("candidate at the floor rejected: %v", err)
+	}
+}
+
 func TestCheckSemver(t *testing.T) {
 	tests := []struct {
 		got, want string

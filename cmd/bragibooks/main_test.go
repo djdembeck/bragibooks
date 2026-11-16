@@ -557,6 +557,42 @@ func TestLoadSettingsFromDBIndexingEnabledGate(t *testing.T) {
 	}
 }
 
+// TestLoadSettingsFromDBMetadataFieldsNullKeepsDefault guards the corrupt-
+// row rule in loadSettingsFromDB: a stored `null` unmarshals to a nil
+// slice WITHOUT a JSON error, and taking its address would make it a
+// non-nil pointer — the "explicit write-nothing" selection — collapsing a
+// corrupt row into a durable preserve-everything default. `null` must be
+// rejected like invalid JSON: the default selection stands.
+func TestLoadSettingsFromDBMetadataFieldsNullKeepsDefault(t *testing.T) {
+	for name, stored := range map[string]string{
+		"json null":      "null",
+		"invalid json":   "not-json",
+		"explicit empty": "[]",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dbh, cm := newStartupTestEnv(t)
+			if _, err := dbh.Exec("UPDATE settings SET metadata_fields = ? WHERE id = 1", stored); err != nil {
+				t.Fatal(err)
+			}
+			loadSettingsFromDB(dbh, cm)
+			got := cm.Config().Processing.MetadataFields
+			switch name {
+			case "explicit empty":
+				// A valid `[]` IS the explicit write-nothing selection.
+				if got == nil || len(*got) != 0 {
+					t.Fatalf("MetadataFields = %v, want a non-nil empty slice", got)
+				}
+			default:
+				// `null` and invalid JSON keep the default (nil =
+				// all-supported-available), never a non-nil slice.
+				if got != nil {
+					t.Fatalf("MetadataFields = %v, want nil (the default)", *got)
+				}
+			}
+		})
+	}
+}
+
 // TestLegacyTokenMigrationFreshSeedWriteFailure pins the fresh-path fail-
 // closed rule (the read-only failure subtest for the observation path,
 // extended to the seed): with the legacy var set and the settings row in

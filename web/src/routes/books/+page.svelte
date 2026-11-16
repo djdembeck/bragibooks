@@ -287,6 +287,11 @@
 		bulkActing = 'requeue';
 		bulkError = null;
 		bulkSuccess = null;
+		// Criteria generation: the captured ids belong to the filter/search
+		// state at dispatch time. If a request outlives that state (a
+		// filter/search change cleared the selection mid-flight), the
+		// dispatch must be discarded, not applied to stale ids.
+		const requestedCriteria = { filter, q };
 		try {
 			const ids = effectiveSelectedIds();
 			// Snapshot with the ids: clearSelection() (filter/search change)
@@ -297,6 +302,10 @@
 			// Capped at 16 in flight (fetchInChunks preserves input order,
 			// which the parallel src_dirs require).
 			const books = await fetchInChunks(ids.map((id) => () => get<BookWithPeople>(`/books/${id}`)), 16);
+			// A criteria change mid-fetch cleared the visible selection: the
+			// captured ids no longer represent what the user sees, so the
+			// batch must not be dispatched.
+			if (criteriaChanged(requestedCriteria, { filter, q })) return;
 			const payload: { book_ids: number[]; src_dirs: string[]; output_profile_id?: number } = {
 				book_ids: ids,
 				src_dirs: books.map((b) => b.src_path),
@@ -327,8 +336,16 @@
 		const requestedQ = q;
 		let failed: CleanedAdbError | null = null;
 		let done = 0;
+		// True once a filter/search change lands between PUTs: the captured
+		// ids belong to the previous criteria, so no further book may be
+		// marked done.
+		let stale = false;
 		try {
 			for (const id of ids) {
+				if (criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) {
+					stale = true;
+					break;
+				}
 				try {
 					await put(`/books/${id}`, { status: 'done' });
 					done++;
@@ -341,7 +358,7 @@
 				// counts and washes move one row at a time.
 				selection.pruneSelectionId(id);
 			}
-			if (!criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) {
+			if (!stale && !criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) {
 				// Per-book PUTs do not refresh the list response: pull the
 				// catalog again so status badges, totals, and pagination match
 				// (partial success included — the re-fetch sees what landed).
@@ -430,8 +447,16 @@
 		let failed: CleanedAdbError | null = null;
 		let done = 0;
 		let survivors: BookWithPeople[] = [];
+		// True once a filter/search change lands between deletes: the
+		// captured list belongs to the previous criteria, so no further
+		// book may be removed.
+		let stale = false;
 		try {
 			for (const book of removeList) {
+				if (criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) {
+					stale = true;
+					break;
+				}
 				try {
 					await del(`/books/${book.id}`);
 					done++;
@@ -448,7 +473,7 @@
 			confirmRemoveOpen = false;
 			removeList = failed ? survivors : [];
 			removeSkipped = [];
-			if (!criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) {
+			if (!stale && !criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) {
 				// The list response still shows the deleted rows: pull the
 				// catalog again so rows, totals, and pagination match
 				// (partial success included — the re-fetch sees what landed).

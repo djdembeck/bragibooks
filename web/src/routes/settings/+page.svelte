@@ -3,7 +3,7 @@
 	import { Pencil, Trash2 } from '@lucide/svelte';
 	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker, Modal, PathFormatBuilder } from '#lib/components/index.js';
 	import { parseParts, validateScheme, trimSegment } from '#lib/scheme.js';
-	import { getEngineCapabilities } from '#lib/engineCapabilities.js';
+	import { getEngineCapabilities, refreshEngineCapabilities } from '#lib/engineCapabilities.js';
 	import type { Settings, OutputProfile, IndexStatus, IndexState } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
@@ -45,11 +45,19 @@
 	let saving = $state(false);
 	let saved = $state(false);
 	let saveError = $state<CleanedAdbError | null>(null);
+	// The last binary value the SERVER confirmed. Initialized from the
+	// loaded settings and updated only from successful saves: the draft
+	// (settings.m4b_merge_binary) is mutated by the input before the save,
+	// so comparing the response against it can never detect a swap.
+	let serverConfirmedBinary = $state('');
 
 	async function load() {
 		await dl.run(async () => {
 			settings = await get<Settings>('/settings', {});
 			indexingSaved = settings.indexing_enabled === true;
+			// Seed the swap-detection baseline from the server's confirmed
+			// value (see serverConfirmedBinary below).
+			serverConfirmedBinary = settings.m4b_merge_binary;
 		});
 	}
 
@@ -95,7 +103,12 @@
 					const cur = await get<IndexStatus>('/index');
 					if (cancelled) return;
 					indexStatus = cur;
-					if (cur.state.generation === gen &&
+					// A terminal at a NEWER generation supersedes ours (a
+					// root-change rescan republishes the mirror under its
+					// own generation, after which ours is never visible
+					// again): accept it, or "Refresh now" stays spinning
+					// past its scan.
+					if (cur.state.generation >= gen &&
 						!['queued', 'running'].includes(cur.state.status)) {
 						indexRefreshing = false;
 						return;
@@ -299,6 +312,19 @@
 			}
 			// The server's response is the saved truth, not the draft.
 			indexingSaved = (updated ?? settings).indexing_enabled === true;
+			const binary = (updated ?? settings).m4b_merge_binary;
+			// A swap is detectable only against the last SERVER-CONFIRMED
+			// binary: the draft was already mutated by the input before
+			// this save ran, so a draft-to-draft comparison is always
+			// false. A new engine's token vocabulary is what the builder
+			// validates against, so the registry re-fetches on a real
+			// swap.
+			if (binary !== serverConfirmedBinary) {
+				// Fire and forget: a failed refresh keeps the last good
+				// registry (server-validated save stands).
+				void refreshEngineCapabilities();
+			}
+			serverConfirmedBinary = binary;
 			saved = true;
 			setTimeout(() => (saved = false), 3000);
 		} catch (e) {

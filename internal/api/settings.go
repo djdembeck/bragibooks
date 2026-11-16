@@ -130,7 +130,14 @@ func (h *Handler) persistAPIEndpointState(w http.ResponseWriter, enabled bool, k
 		writeError(w, http.StatusBadRequest, "enable the external API first")
 		return false
 	}
+	// Full-row write: run the same pin-freeze UpdateSettings applies, so a
+	// re-asserted metadata env pin never rides into the durable row
+	// (forward write AND the DB rollback below).
 	snap := *prev
+	if ferr := h.freezePinnedMetadata(&snap); ferr != nil {
+		writeError(w, http.StatusInternalServerError, ferr.Error())
+		return false
+	}
 	snap.Server.APIEndpoint = config.APIEndpointConfig{
 		Enabled:   enabled,
 		KeyDigest: keyDigest,
@@ -151,7 +158,15 @@ func (h *Handler) persistAPIEndpointState(w http.ResponseWriter, enabled bool, k
 	//    the only flows the env guard blocks), and once the pin is removed
 	//    the file flag matches the pin that governed the write.
 	if err := h.svc.Config.SaveKeys(map[string]any{"server": map[string]any{"api_endpoint": map[string]any{"enabled": enabled}}}); err != nil {
-		if rbErr := h.saveSettingsToDB(prev); rbErr != nil {
+		rbSnap := *prev
+		if ferr := h.freezePinnedMetadata(&rbSnap); ferr != nil {
+			// Rollback lost: the pin is unreadable, so the row cannot be
+			// restored without persisting the pin. Report both failures.
+			log.Printf("Warning: external API state file save failed and DB rollback also failed (pin freeze: %v; file error: %v)", ferr, err)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("save external API state: %v", err))
+			return false
+		}
+		if rbErr := h.saveSettingsToDB(&rbSnap); rbErr != nil {
 			// Both stores now disagree and the rollback lost: report both,
 			// keep the live process on the previous state (it and the DB
 			// revert together on the next successful action), do NOT swap.
@@ -372,89 +387,14 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	prev := h.svc.Config.Config()
 	snap := *prev
-	// Freeze deployment-pinned metadata keys to their STORED values before
-	// the DB/YAML writes: after an earlier save, the live config carries
-	// the re-asserted env values, and letting them ride along in snap
-	// would leak the pin into the durable stores (env must outrank, never
-	// overwrite, the settings stores — a pinned operator who later edits
-	// an unrelated setting would otherwise persist the pin as if it were
-	// a user selection). The durable file is read, not the live config,
-	// because the live config is exactly the contaminated copy. Pinned
-	// keys were dropped from req above, so they are never in changed and
-	// never reach the file save.
-	if f, c := h.svc.Config.MetadataEnvManaged(); f || c {
-		storedFields, storedChapters, fieldsOK, chaptersOK := h.svc.Config.StoredMetadataSelection()
-		fileFieldsPresent, fileChaptersPresent := h.svc.Config.StoredMetadataKeyPresent()
-		// The freeze, per pinned key, writes back the DURABLE value so the
-		// env pin never rides into a freshly written row. The durable value
-		// for a key follows the documented startup precedence — the file is
-		// primary, the settings row is the fallback the file falls back to:
-		//
-		//   * file carries a VALID value for the key (present + OK) -> the
-		//     file is authoritative; freeze its value.
-		//   * file is SILENT on the key (absent: not present, and absent
-		//     counts as OK so it is not treated as unreadable) -> the row is
-		//     where the effective value comes from; freeze the row, so a
-		//     DB-only selection survives an unrelated save. A MISSING row
-		//     is not corruption: with nothing stored, the documented
-		//     default (nil fields / "write" chapters) IS the durable value,
-		//     and the ordinary first save proceeds.
-		//   * file carries a MALFORMED value (present, not OK) -> the typed
-		//     loader discarded it, so the row (the documented DB fallback)
-		//     is the truth; freeze the row. A malformed file with no row at
-		//     all has nothing to fall back to: abort (a fresh INSERT would
-		//     persist the pin).
-		//
-		// Presence is tracked PER KEY: a file that sets only
-		// metadata_chapters is silent on metadata_fields and vice versa.
-		// A row the freeze falls back to must be readable before any write,
-		// or the save aborts.
-		needRow := (f && (!fieldsOK || !fileFieldsPresent)) || (c && (!chaptersOK || !fileChaptersPresent))
-		var rowFields *[]string
-		rowChapters := ""   // '' = the documented default (write)
-		rowCorrupt := false // the stored selection cannot be trusted (a
-		// corrupt column or a failed read)
-		if needRow {
-			var fieldsValid, chaptersValid, queryOK bool
-			rowFields, rowChapters, fieldsValid, chaptersValid, queryOK = h.storedMetadataRow()
-			// The reader returns the VALID sibling column and drops only
-			// the corrupt one, so a corrupt fields column keeps a good
-			// chapters value (and vice versa). Corruption is: a real query
-			// failure, or a row in which at least one column holds an
-			// invalid value. An empty column is the documented default
-			// for its key and counts as valid; a missing row is the valid
-			// empty state (both columns at their defaults).
-			if !queryOK || !fieldsValid || !chaptersValid {
-				rowCorrupt = true
-			}
-		}
-		if rowCorrupt && ((f && !fieldsOK) || (c && !chaptersOK)) {
-			// A pinned key's durable file value is unreadable AND the row
-			// that is supposed to be the fallback is corrupt: there is no
-			// trustworthy durable value to write back. The live config
-			// carries the pin, so any store write would persist the pin.
-			// Abort instead of guessing. (A missing row is NOT corruption —
-			// the documented default is the durable value there.)
-			writeError(w, http.StatusInternalServerError,
-				"cannot save while a metadata write pin is set: the stored selection is unreadable (corrupt settings row or malformed config value); resolve the corruption, then retry")
-			return
-		}
-		if f {
-			switch {
-			case !fieldsOK || !fileFieldsPresent:
-				snap.Processing.MetadataFields = rowFields
-			default:
-				snap.Processing.MetadataFields = storedFields
-			}
-		}
-		if c {
-			switch {
-			case !chaptersOK || !fileChaptersPresent:
-				snap.Processing.MetadataChapters = rowChapters
-			default:
-				snap.Processing.MetadataChapters = storedChapters
-			}
-		}
+	// Every FULL-ROW settings write — the form save, the external-API
+	// state flow, and every DB rollback below — must run the same
+	// pin-freeze before it touches the stores, or the re-asserted env
+	// pin rides into the durable row and stops looking like a pin once
+	// it is removed.
+	if ferr := h.freezePinnedMetadata(&snap); ferr != nil {
+		writeError(w, http.StatusInternalServerError, ferr.Error())
+		return
 	}
 	changed := make(map[string]any)
 	if h.svc.SettingsPersistDelay != nil {
@@ -480,11 +420,62 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			// server's cwd the same way the launch will. The verified
 			// capabilities are retained: step 3 publishes them together
 			// with the binary swap (no second probe after the swap).
-			if caps, err := h.svc.Processor.CheckCapabilitiesFor(r.Context(), *req.M4bMergeBinary); err != nil {
+			caps, err := h.svc.Processor.CheckCapabilitiesFor(r.Context(), *req.M4bMergeBinary)
+			if err != nil {
 				writeError(w, http.StatusBadRequest, "engine check failed for "+*req.M4bMergeBinary+": "+err.Error())
 				return
-			} else {
-				newBinaryCapsChecked = caps
+			}
+			newBinaryCapsChecked = caps
+			// The swap is not complete until EVERY effective scheme is
+			// revalidated against the CANDIDATE's token set: the global
+			// output scheme and each saved output-profile scheme were
+			// validated against the CURRENT engine, and a scheme the old
+			// engine accepted that the new one rejects must refuse the
+			// save — not become a run-time failure for every job that
+			// resolves through it. Validation runs BEFORE req.OutputScheme
+			// is merged into snap below, so the effective global scheme
+			// is the request's own value when it supplies one (it already
+			// passed the candidate-independent structural rules above),
+			// falling back to snap's persisted value.
+			candReg := make(map[string]struct{}, len(caps.PathTokens))
+			for _, t := range caps.PathTokens {
+				candReg[t.Name] = struct{}{}
+			}
+			effectiveScheme := snap.Processing.PathFormat
+			if req.OutputScheme != nil {
+				effectiveScheme = *req.OutputScheme
+			}
+			if effectiveScheme != "" {
+				if verr := audio.ValidatePathFormatForRegistry(effectiveScheme, candReg); verr != nil {
+					writeError(w, http.StatusBadRequest, "output scheme: "+verr.Error())
+					return
+				}
+			}
+			prows, perr := h.svc.DB.Query("SELECT name, output_scheme FROM output_profiles WHERE output_scheme != ''")
+			if perr != nil {
+				writeError(w, http.StatusInternalServerError, "list output profiles: "+perr.Error())
+				return
+			}
+			for prows.Next() {
+				var name, scheme string
+				if sErr := prows.Scan(&name, &scheme); sErr != nil {
+					prows.Close()
+					writeError(w, http.StatusInternalServerError, "list output profiles: "+sErr.Error())
+					return
+				}
+				if verr := audio.ValidatePathFormatForRegistry(scheme, candReg); verr != nil {
+					prows.Close()
+					writeError(w, http.StatusBadRequest, fmt.Sprintf("output profile %q scheme is not valid for the new engine: %v", name, verr))
+					return
+				}
+			}
+			if cerr := prows.Close(); cerr != nil {
+				writeError(w, http.StatusInternalServerError, "list output profiles: "+cerr.Error())
+				return
+			}
+			if rowsErr := prows.Err(); rowsErr != nil {
+				writeError(w, http.StatusInternalServerError, "list output profiles: "+rowsErr.Error())
+				return
 			}
 		}
 		snap.M4bMerge.Binary = *req.M4bMergeBinary
@@ -543,7 +534,13 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	//    so DB and file agree again.
 	if len(changed) > 0 {
 		if err := h.svc.Config.SaveKeys(changed); err != nil {
-			if rbErr := h.saveSettingsToDB(prev); rbErr != nil {
+			// Full-row write: the rollback runs the same pin-freeze as
+			// the forward write, so the restored row cannot carry the
+			// re-asserted pin.
+			rbSnap := *prev
+			if ferr := h.freezePinnedMetadata(&rbSnap); ferr != nil {
+				log.Printf("Warning: settings file save failed and DB rollback also failed (pin freeze: %v)", ferr)
+			} else if rbErr := h.saveSettingsToDB(&rbSnap); rbErr != nil {
 				log.Printf("Warning: settings file save failed and DB rollback also failed: %v", rbErr)
 			}
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("save config: %v", err))
@@ -600,11 +597,12 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		audio.SetPathFormatTokens(tokenNames)
 	}
-	h.svc.Processor.ApplyConfig(h.svc.Config.Config())
-	// The per-field write selection feeds queue-time job snapshots, so it
-	// refreshes with the live config exactly like the CLI settings: queued
-	// jobs keep their frozen policy, new jobs pick up the saved selection.
-	h.svc.Processor.ApplyWriteSelection(live.Processing.MetadataFields, live.Processing.MetadataChapters)
+	// The mutable settings AND the write selection refresh under ONE
+	// processor lock: the save changes both, and a queue snapshot taken
+	// between two separate applies would freeze a mixed generation into
+	// the job args. Queued jobs keep their frozen policy; new jobs pick
+	// up the complete saved state.
+	h.svc.Processor.ApplyConfigAndSelection(h.svc.Config.Config())
 	h.svc.AudiobookDB.Store(audiobookdb.NewClient(live.APIKey.APIKey, live.APIKey.BaseURL))
 
 	// Scan trigger: turning the index on, or re-pointing the input root
@@ -686,6 +684,110 @@ func changedDottedKeys(changed map[string]any) []string {
 func validateAudiobookdbBaseURL(raw string) error {
 	_, err := audiobookdb.TrustedBaseURL(raw)
 	return err
+}
+
+// freezePinnedMetadata applies the durable-value freeze to a settings copy
+// before it is written to ANY full-row store (the form save, the
+// external-API state flow, and every DB rollback): after an earlier save,
+// the live config carries the re-asserted env values, and letting them ride
+// along would leak the pin into the durable stores (env must outrank, never
+// overwrite, the settings stores — a pinned operator who later edits an
+// unrelated setting would otherwise persist the pin as if it were a user
+// selection). The durable file is read, not the live config, because the
+// live config is exactly the contaminated copy.
+//
+// The freeze, per pinned key, writes back the DURABLE value so the env pin
+// never rides into a freshly written row. The durable value for a key
+// follows the documented startup precedence — the file is primary, the
+// settings row is the fallback the file falls back to:
+//
+//   - file carries a VALID value for the key (present + OK) -> the file is
+//     authoritative; freeze its value.
+//   - file is SILENT on the key (absent: not present, and absent counts as
+//     OK so it is not treated as unreadable) -> the row is where the
+//     effective value comes from; freeze the row, so a DB-only selection
+//     survives an unrelated save. A MISSING row is not corruption: with
+//     nothing stored, the documented default (nil fields / "write"
+//     chapters) IS the durable value, and the ordinary first save
+//     proceeds.
+//   - file carries a MALFORMED value (present, not OK) -> the typed loader
+//     discarded it, so the row (the documented DB fallback) is the truth;
+//     freeze the row.
+//
+// Presence is tracked PER KEY: a file that sets only metadata_chapters is
+// silent on metadata_fields and vice versa.
+//
+// Abort conditions (per key, for the pinned keys):
+//   - the row read fails (a real query error) -> the fallback is unknown,
+//     and writing would replace the durable selection with the default or
+//     persist the pin into a fresh row;
+//   - the file MANAGES the key (present, MALFORMED value: the typed loader
+//     discarded it, so the file said something it will not honor) and no
+//     settings row exists -> there is no durable row to fall back to, and
+//     a first save would persist the pin (or default-overwrite the file's
+//     intent).
+//
+// A MISSING row with the file SILENT on the key is NOT an abort: with
+// nothing stored and no file intent, the documented default IS the durable
+// value and the ordinary first save proceeds. A corrupt COLUMN of an
+// existing row is not an abort either: the full-row save writes the live
+// (default) value for that column, which REPAIRS the row to the documented
+// default, while the sibling's valid stored value is preserved.
+func (h *Handler) freezePinnedMetadata(snap *config.Config) error {
+	f, c := h.svc.Config.MetadataEnvManaged()
+	if !f && !c {
+		return nil
+	}
+	storedFields, storedChapters, fieldsOK, chaptersOK := h.svc.Config.StoredMetadataSelection()
+	fileFieldsPresent, fileChaptersPresent := h.svc.Config.StoredMetadataKeyPresent()
+	fieldsCorrupt := f && !fieldsOK && fileFieldsPresent
+	chaptersCorrupt := c && !chaptersOK && fileChaptersPresent
+	needRow := fieldsCorrupt || chaptersCorrupt ||
+		(f && !fileFieldsPresent) || (c && !fileChaptersPresent)
+	var rowFields *[]string
+	rowChapters := "" // '' = the documented default (write)
+	if needRow {
+		// The reader returns the VALID sibling column and drops only the
+		// corrupt one (a corrupt column falls back to the documented
+		// default above), so a corrupt fields column keeps a good
+		// chapters value and vice versa. queryOK is false ONLY on a real
+		// query failure; a missing row and a corrupt column are both
+		// readable states (rowExists is false only when there is no row).
+		var fieldsValid, chaptersValid, queryOK bool
+		rowFields, rowChapters, fieldsValid, chaptersValid, queryOK = h.storedMetadataRow()
+		rowExists := queryOK && (fieldsValid || chaptersValid)
+		if !queryOK {
+			// The row is the fallback for a pinned key and it cannot be
+			// read: writing would replace the durable selection with the
+			// default (or persist the pin into a fresh row). Abort
+			// instead of guessing.
+			return fmt.Errorf("cannot save while a metadata write pin is set: the stored selection is unreadable (settings row query failed); resolve the failure, then retry")
+		}
+		if !rowExists && (fieldsCorrupt || chaptersCorrupt) {
+			// The file manages a pinned key with a value the loader will
+			// not honor, and there is no durable row to fall back to: a
+			// first save would persist the pin (or default-overwrite the
+			// file's intent). Abort before any store write.
+			return fmt.Errorf("cannot save while a metadata write pin is set: the stored selection is unreadable (malformed config value and no stored row); resolve the config, then retry")
+		}
+	}
+	if f {
+		switch {
+		case !fieldsOK || !fileFieldsPresent:
+			snap.Processing.MetadataFields = rowFields
+		default:
+			snap.Processing.MetadataFields = storedFields
+		}
+	}
+	if c {
+		switch {
+		case !chaptersOK || !fileChaptersPresent:
+			snap.Processing.MetadataChapters = rowChapters
+		default:
+			snap.Processing.MetadataChapters = storedChapters
+		}
+	}
+	return nil
 }
 
 // storedMetadataRow reads the settings row's metadata selection columns

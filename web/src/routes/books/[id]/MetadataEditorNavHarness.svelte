@@ -2,7 +2,10 @@
 	import MetadataEditor from './MetadataEditor.svelte';
 
 	/** Test harness: lets a test drive `bookId` like a route change. */
-	let { onInit }: { onInit: (setBookId: (id: number) => void) => void } = $props();
+	let { onInit, onSaved }: {
+		onInit: (setBookId: (id: number) => void) => void;
+		onSaved?: () => void;
+	} = $props();
 	let bookId = $state(1);
 	// Read the handler inside the effect body so the prop is tracked
 	// reactively (registering it at the top level would capture its
@@ -13,4 +16,4 @@
 	});
 </script>
 
-<MetadataEditor {bookId} pathFormat={null} />
+<MetadataEditor {bookId} pathFormat={null} {onSaved} />

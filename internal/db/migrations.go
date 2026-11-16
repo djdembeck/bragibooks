@@ -345,6 +345,20 @@ CREATE TABLE IF NOT EXISTS book_metadata_overrides (
 );
 `,
 	},
+	{
+		// v18: persist the index partial-write guard. A scan that fails
+		// mid-upsert leaves source_index partially written (bounded batches
+		// commit independently); listings must fall back to the filesystem
+		// on that root until a clean scan completes. The guard was
+		// in-memory only, so a restart dropped it and the partial table was
+		// served as authoritative until an operator triggered a clean scan.
+		// Persisting it (root string, '' = clean) makes the guard survive a
+		// restart; a clean terminal on the root clears it, same as before.
+		version: 18,
+		sql: `
+ALTER TABLE index_state ADD COLUMN write_failed_root TEXT NOT NULL DEFAULT '';
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

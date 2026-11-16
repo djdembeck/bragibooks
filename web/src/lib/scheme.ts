@@ -275,17 +275,23 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 	// the serialized template, not individual parts: serialization
 	// round-trips exactly, and a spelling split across parts (e.g. `{` +
 	// `{title}` from `{{title}`) is one closed expression on the wire.
+	// An EMPTY registry is a capability gap (the fetch has not landed yet),
+	// not a user typo — the Go twin (ValidatePathFormat) guards on
+	// `len(reg) > 0` for exactly this: a format the engine accepts must not
+	// be rejected while the registry is still loading.
 	const raw = serializeParts(parts);
-	for (let i = 0; i < raw.length; i++) {
-		if (raw[i] !== '{') continue;
-		const close = raw.indexOf('}', i + 1);
-		if (close !== -1) {
-			const key = raw.slice(i + 1, close);
-			if (!keys.has(key)) {
-				errors.push(`Path format contains unsupported token {${key}}.`);
-				return { errors, warnings };
+	if (keys.size > 0) {
+		for (let i = 0; i < raw.length; i++) {
+			if (raw[i] !== '{') continue;
+			const close = raw.indexOf('}', i + 1);
+			if (close !== -1) {
+				const key = raw.slice(i + 1, close);
+				if (!keys.has(key)) {
+					errors.push(`Path format contains unsupported token {${key}}.`);
+					return { errors, warnings };
+				}
+				i = close;
 			}
-			i = close;
 		}
 	}
 
@@ -339,6 +345,25 @@ export function validateScheme(parts: Part[]): { errors: string[]; warnings: str
 		}
 	}
 	if (!hasToken) {
+		// A token spelling can span adjacent parts (e.g. "{tit" + "le}"):
+		// the engine parses the SERIALIZED template, where that is one
+		// closed expression, so scan it the same way E0 does.
+		for (let i = 0; i < raw.length; i++) {
+			if (raw[i] !== '{') continue;
+			const close = raw.indexOf('}', i + 1);
+			if (close === -1) break;
+			if (keys.has(raw.slice(i + 1, close))) {
+				hasToken = true;
+				break;
+			}
+			i = close;
+		}
+	}
+	if (!hasToken && keys.size > 0) {
+		// An EMPTY registry is a capability gap (E0 above is gated on the
+		// same condition), not a missing placeholder: every non-empty
+		// format would otherwise be rejected while the registry is still
+		// loading.
 		errors.push('Add at least one placeholder such as {title}.');
 	}
 

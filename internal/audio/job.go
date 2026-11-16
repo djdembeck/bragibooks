@@ -21,6 +21,13 @@ const JobSchemaVersion = 1
 // a published result to report.
 const AcceptedEngineSchemaVersion = 1
 
+// PinnedEngineResolverVersion is the resolver_version the boot capability
+// gate requires: the identity every queued snapshot was captured under. An
+// engine reporting anything else (including an empty/missing value, which
+// decodes as "") speaks different naming semantics and must not be started
+// with existing jobs in the queue.
+const PinnedEngineResolverVersion = "1"
+
 // EngineIdentity is the schema/resolver pair that names the naming semantics
 // a job was captured under. It is snapshotted at queue time and re-checked
 // against the live engine before execution: a changed resolver must never

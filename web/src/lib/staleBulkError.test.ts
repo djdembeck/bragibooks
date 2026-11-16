@@ -4,7 +4,10 @@ import { bulkErrorRetryDispatch, type BulkErrorAction } from '#lib/staleBulkErro
 describe('bulkErrorRetryDispatch', () => {
 	it.each([
 		['select', 0, 'select'],
-		['confirm', 0, 'confirm'],
+		// A failed confirm is stale once the selection is empty: the row that
+		// failed is deselected, so there is nothing to confirm — a re-dispatch
+		// would be a no-op and leave the alert stuck.
+		['confirm', 0, 'clear'],
 		['requeue', 0, 'clear'],
 		['done', 0, 'clear'],
 		['remove', 0, 'clear'],

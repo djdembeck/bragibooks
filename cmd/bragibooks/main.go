@@ -763,10 +763,18 @@ func loadSettingsFromDB(database *sql.DB, cfgMgr *config.ConfigManager) {
 	if !yamlKeys["processing.metadata_fields"] && os.Getenv("PROCESSING_METADATA_FIELDS") == "" {
 		if metadataFields != "" {
 			var list []string
-			if err := json.Unmarshal([]byte(metadataFields), &list); err == nil {
+			// A nil slice is corrupt here: JSON `null` unmarshals to nil
+			// without error, and taking its address would make it a
+			// non-nil pointer — the "explicit empty (write nothing)"
+			// selection — collapsing a corrupt row into a durable
+			// preserve-everything default. Reject nil and keep the
+			// default, like the invalid-JSON branch.
+			if err := json.Unmarshal([]byte(metadataFields), &list); err == nil && list != nil {
 				cfg.Processing.MetadataFields = &list
-			} else {
+			} else if err != nil {
 				log.Printf("Warning: settings.metadata_fields holds invalid JSON (%q); keeping the default all-supported-available write selection: %v", metadataFields, err)
+			} else {
+				log.Printf("Warning: settings.metadata_fields holds JSON null (%q); keeping the default all-supported-available write selection", metadataFields)
 			}
 		}
 	}

@@ -99,6 +99,51 @@ func (p *Processor) SettingsSnapshot() (outputDir, completedDir, pathFormat stri
 	return
 }
 
+// QueueSnapshot is the ONE atomic read the queue freezes a job from: the
+// per-field write selection AND the destination/path-format globals from a
+// single locked read. Taking the two halves from separate reads would let a
+// settings save change one between the reads and freeze a mixed generation
+// into the job args; a job must observe one consistent settings instant.
+type QueueSnapshot struct {
+	// Fields is the write selection at that instant (nil = the default
+	// all-supported-available behavior; non-nil, possibly empty, = the
+	// explicit selection). A copy, never a live reference.
+	Fields *[]string
+	// Chapters is the chapter write policy ("" normalized to the
+	// documented "write" default).
+	Chapters string
+	// OutputDir/CompletedDir/PathFormat are the effective destination
+	// globals (a blank override resolves against these).
+	OutputDir    string
+	CompletedDir string
+	PathFormat   string
+}
+
+// QueueSnapshot takes the single atomic read described above.
+func (p *Processor) QueueSnapshot() QueueSnapshot {
+	// One RLock for every field (no re-entrant snapshot() call: a
+	// re-acquired read lock would deadlock behind a pending writer).
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	f := p.metadataFields
+	if f != nil {
+		cp := make([]string, len(*f))
+		copy(cp, *f)
+		f = &cp
+	}
+	c := p.metadataChapters
+	if c == "" {
+		c = ChaptersPolicyValueWrite // blank is the documented default
+	}
+	return QueueSnapshot{
+		Fields:       f,
+		Chapters:     c,
+		OutputDir:    p.OutputDir,
+		CompletedDir: p.CompletedDir,
+		PathFormat:   p.PathFormat,
+	}
+}
+
 // ApplyConfig refreshes the mutable m4b-merge settings (binary, output and
 // completed directories, CPU count, output scheme, log level) from the live
 // config so the next job run uses the new values without a restart. Called
@@ -136,6 +181,25 @@ func (p *Processor) ApplyWriteSelection(fields *[]string, chapters string) {
 	defer p.mu.Unlock()
 	p.metadataFields = fields
 	p.metadataChapters = chapters
+}
+
+// ApplyConfigAndSelection refreshes the mutable settings AND the write
+// selection under ONE lock: a settings save changes both, and a queue
+// snapshot taken between two separate applies would freeze a mixed
+// generation into the job args (the new selection with the old
+// destination, or vice versa). QueueSnapshot must observe complete old
+// or complete new state, never the in-between.
+func (p *Processor) ApplyConfigAndSelection(cfg *config.Config) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Binary = cfg.M4bMerge.Binary
+	p.OutputDir = cfg.Directories.OutputDir
+	p.CompletedDir = cfg.Directories.CompletedDir
+	p.NumCPUs = cfg.Processing.NumCPUs
+	p.PathFormat = cfg.Processing.PathFormat
+	p.LogLevel = cfg.Processing.LogLevel
+	p.metadataFields = cfg.Processing.MetadataFields
+	p.metadataChapters = cfg.Processing.MetadataChapters
 }
 
 // stripEscapeSequences removes ANSI/VT100 escape sequences from s so the
@@ -319,7 +383,10 @@ func (p *Processor) CheckVersionFor(ctx context.Context, binary string) (string,
 	if binary == "" {
 		return "", errors.New("m4b-merge binary is not set")
 	}
-	reported := p.probeVersion(ctx, binary)
+	// The CANDIDATE's own reported version is the one under test: the live
+	// cached version (what probeVersion stores) belongs to p.Binary and is
+	// meaningless when the candidate differs.
+	reported := p.probeVersionReport(ctx, binary)
 	if reported == "unknown" {
 		return "", fmt.Errorf("m4b-merge %s cannot report a version", binary)
 	}
@@ -333,9 +400,18 @@ func (p *Processor) CheckVersionFor(ctx context.Context, binary string) (string,
 // without spawning anything) and stores the result only when binary is the
 // live config binary.
 func (p *Processor) probeVersion(ctx context.Context, binary string) string {
+	reported := p.probeVersionReport(ctx, binary)
+	return p.storeLinkedVersion(binary, reported)
+}
+
+// probeVersionReport runs the --version probe against binary and returns the
+// version the probe itself reported, WITHOUT storing it: callers validating
+// a candidate binary must gate on the candidate's own report, not the live
+// cache entry that belongs to p.Binary.
+func (p *Processor) probeVersionReport(ctx context.Context, binary string) string {
 	if binary == "" {
 		// Nothing to execute; never spawn the bare "" command.
-		return p.storeLinkedVersion(binary, "unknown")
+		return "unknown"
 	}
 	ctx, cancel := context.WithTimeout(ctx, versionProbeTimeout)
 	defer cancel()
@@ -362,11 +438,12 @@ func (p *Processor) probeVersion(ctx context.Context, binary string) string {
 		// wrapper; a grandchild that inherits the stdout pipe would
 		// otherwise hold the probe open long after the child itself is
 		// killed, stalling the settings request past the deadline.
-		tree := newProcessTree(cmd)
+		tree, terr := newProcessTree(cmd)
+		if terr != nil {
+			log.Printf("Warning: m4b-merge version probe for binary %s failed: %v", binary, terr)
+			break
+		}
 		cmd.Cancel = func() error {
-			if err := tree.start(cmd); err != nil {
-				return err
-			}
 			return tree.kill()
 		}
 		// Guard against any writer we could not kill: force Wait to
@@ -382,7 +459,18 @@ func (p *Processor) probeVersion(ctx context.Context, binary string) string {
 		cmd.Stdout = &stdoutBuf
 		cmd.Stderr = &stderrBuf
 
-		err := cmd.Run()
+		err := cmd.Start()
+		if err == nil {
+			// Constrain the child to the tree NOW, before it can spawn
+			// descendants that would escape a cancel-time assignment.
+			if serr := tree.start(cmd); serr != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				err = serr
+			} else {
+				err = cmd.Wait()
+			}
+		}
 		tree.finish()
 		switch {
 		case err == nil:
@@ -404,7 +492,7 @@ func (p *Processor) probeVersion(ctx context.Context, binary string) string {
 	if reported == "" {
 		reported = "unknown"
 	}
-	return p.storeLinkedVersion(binary, reported)
+	return reported
 }
 
 // formattedStderr appends the child's stderr as a suffix to a log line.

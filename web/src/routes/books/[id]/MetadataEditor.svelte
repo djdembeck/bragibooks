@@ -71,6 +71,11 @@
 		// `finally` (the generation guard skips it); a new generation owns
 		// a fresh flag so the new book never inherits a stuck loading state.
 		uploading = false;
+		// The same contract covers save and reset: their generation guards
+		// skip the `finally` clear once the book has changed, so the new
+		// book never inherits a stuck saving/resetting flag.
+		saving = false;
+		resetting = false;
 		get<BookMetadataResponse>(`/books/${id}/metadata`)
 			.then((resp) => {
 				if (gen !== bookFetchSeq) return;
@@ -409,35 +414,52 @@
 	async function save() {
 		if (!draft || saving || uploading) return; // the server sweep races an in-flight upload
 		if (chapterErrors.length) return; // diagnostics already visible
+		// Capture the generation the save belongs to: SvelteKit reuses this
+		// component when navigating /books/A -> /books/B, and a response
+		// that outlives the navigation must not paint book A's result into
+		// book B's state (meta, saved note) or fire A's onSaved on B.
+		const startBook = bookId;
+		const startGen = bookFetchSeq;
 		saving = true;
 		saveError = null;
 		savedNote = false;
 		try {
-			const resp = await put<BookMetadataResponse>(`/books/${bookId}/metadata`, draft);
+			const resp = await put<BookMetadataResponse>(`/books/${startBook}/metadata`, draft);
+			if (bookId !== startBook || bookFetchSeq !== startGen) return;
 			meta = resp;
 			onSaved?.();
 			savedNote = true;
 		} catch (e) {
+			if (bookId !== startBook || bookFetchSeq !== startGen) return;
 			saveError = toCleanedError(e);
 		} finally {
-			saving = false;
+			if (bookId === startBook && bookFetchSeq === startGen) saving = false;
 		}
 	}
 
 	async function doReset() {
-		if (resetting || uploading) return; // the server sweep races an in-flight upload
+		if (resetting || uploading || saving) return; // a pending save would resurrect its edits
+		// Same generation guard as save: the component is reused across
+		// /books/A -> /books/B, and a reset response that outlives the
+		// navigation must not run its continuation on book B (clear B's
+		// confirm state, reload B, fire B's onSaved) nor clear a resetting
+		// flag B set.
+		const startBook = bookId;
+		const startGen = bookFetchSeq;
 		resetting = true;
 		saveError = null;
 		try {
-			await post(`/books/${bookId}/metadata/reset`, {});
+			await post(`/books/${startBook}/metadata/reset`, {});
+			if (bookId !== startBook || bookFetchSeq !== startGen) return;
 			confirmingReset = false;
 			reload();
 			onSaved?.();
 		} catch (e) {
+			if (bookId !== startBook || bookFetchSeq !== startGen) return;
 			saveError = toCleanedError(e);
 			confirmingReset = false;
 		} finally {
-			resetting = false;
+			if (bookId === startBook && bookFetchSeq === startGen) resetting = false;
 		}
 	}
 </script>
@@ -984,7 +1006,7 @@
 		{#if confirmingReset}
 			<div class="meditor__confirm">
 				<span>Discard all manual edits and use the catalog values again? (Your chosen release is kept.)</span>
-				<Button variant="danger" loading={resetting} disabled={uploading} onclick={doReset}>Yes, reset</Button>
+				<Button variant="danger" loading={resetting} disabled={uploading || saving} onclick={doReset}>Yes, reset</Button>
 				<Button variant="ghost" onclick={() => (confirmingReset = false)}>Cancel</Button>
 			</div>
 		{:else}
@@ -1000,7 +1022,7 @@
 				>
 					Save manual metadata
 				</Button>
-				<Button variant="ghost" disabled={uploading} onclick={() => (confirmingReset = true)}>
+				<Button variant="ghost" disabled={uploading || saving} onclick={() => (confirmingReset = true)}>
 					Reset to catalog
 				</Button>
 			</div>

@@ -135,9 +135,12 @@ func normalizeClearedFields(cleared []string, chapters []SnapshotChapter) []stri
 	return out
 }
 
-// maxOverrideCoverUploadBytes caps a manual cover upload: a cover is a
-// thumbnail, not a book (same order as catalog cover fetches).
-const maxOverrideCoverUploadBytes = 8 << 20
+// maxOverrideCoverUploadBytes caps a manual cover upload at the PINNED
+// engine's contract: m4b-merge v2.2.0 rejects local cover art over 5 MiB,
+// so accepting 8 MiB here would stage a run that fails only at run time.
+// The catalog capture path shares the same limit (coverMaxBytes) — a cover
+// is a thumbnail, not a book, on both paths.
+const maxOverrideCoverUploadBytes = 5 << 20
 
 // maxOverrideUploadBodyBytes caps the WHOLE multipart request body (the
 // file limit plus headroom for the form framing and the non-file field cap)
@@ -521,7 +524,11 @@ func applyMetadataOverride(snap *BookSnapshot, o *MetadataOverride) (BookSnapsho
 		// This is the ONE unconditional pin — it overrides a saved
 		// chapter-write policy, because removing the tags is an explicit
 		// operator operation, not a side effect of a settings checkbox.
-		eff.Chapters = nil
+		// The effective value is a NON-NIL empty list, the documented
+		// override-list form: nil means "no override, the catalog
+		// chapters apply", so an explicit clear must never read back as
+		// the catalog.
+		eff.Chapters = []SnapshotChapter{}
 		pinned.Chapters = new("clear")
 	} else if o.Chapters != nil && len(o.Chapters) > 0 {
 		// A non-empty edited list is effective METADATA (the engine names
@@ -598,6 +605,24 @@ type bookMetadataResponse struct {
 	EffectiveChapters []SnapshotChapter `json:"effective_chapters"`
 }
 
+// ovChapterOverride reports whether the override pins the chapter list at
+// all: an explicit list (o.Chapters, possibly the empty clear list) or the
+// normalized clear marker in o.Cleared. It is the SAME test
+// applyMetadataOverride uses to decide the effective chapters, so the
+// response's EffectiveChapters can never disagree with what a queued job
+// runs under.
+func ovChapterOverride(o *MetadataOverride) bool {
+	if o.Chapters != nil {
+		return true
+	}
+	for _, c := range o.Cleared {
+		if c == "chapters" {
+			return true
+		}
+	}
+	return false
+}
+
 // bookMetadataResponse builds the editor state (snapshot + overrides +
 // effective) for one book.
 func (h *Handler) bookMetadataResponse(bookID int64) (*bookMetadataResponse, error) {
@@ -613,7 +638,20 @@ func (h *Handler) bookMetadataResponse(bookID int64) (*bookMetadataResponse, err
 	if snap != nil {
 		eff, _ := applyMetadataOverride(snap, ov)
 		resp.Effective = &eff
-		resp.EffectiveChapters = eff.Chapters
+		// Chapters follow the documented contract: nil = the catalog
+		// chapters apply, non-nil = the override list (possibly empty =
+		// clear). The EFFECTIVE snapshot's Chapters is the catalog slice
+		// whenever no chapter override exists, so the response field is
+		// derived from the OVERRIDE, not the effective value — otherwise
+		// a no-override book would report a non-nil list and read as a
+		// catalog-applies state inverted. A cleared:["chapters"] pin is an
+		// override too (ov.Chapters stays nil, the clear rides in
+		// ClearedFields): it must report the non-nil empty effective list,
+		// not nil, or the response claims the catalog chapters apply while
+		// the queued job is pinned to clear.
+		if ov != nil && ovChapterOverride(ov) {
+			resp.EffectiveChapters = eff.Chapters
+		}
 	}
 	return resp, nil
 }
@@ -852,11 +890,22 @@ func (h *Handler) UploadBookMetadataCover(w http.ResponseWriter, r *http.Request
 	}
 	// The draft save that will reference this asset has not happened yet:
 	// register it so a prune sweep (save/reset of the same book) running in
-	// that window keeps the file (finding: pending upload vs prune).
+	// that window keeps the file (finding: pending upload vs prune). The
+	// register AND the rename are one critical section under the per-book
+	// cover lock — the same lock every prune holds — because the sweep
+	// snapshots the pending set BEFORE its ReadDir: a register that landed
+	// after the snapshot and a rename before the read would be an unkept,
+	// visible file, deleted out from under a not-yet-saved draft.
+	unlock := h.svc.ProcessingSvc.lockBookCover(bookID)
 	h.svc.recordPendingCover(name)
-	if err := os.Rename(tmpName, filepath.Join(h.svc.CoversDir, name)); err != nil {
+	renameErr := func() error {
+		err := os.Rename(tmpName, filepath.Join(h.svc.CoversDir, name))
+		unlock()
+		return err
+	}()
+	if renameErr != nil {
 		os.Remove(tmpName)
-		writeError(w, http.StatusInternalServerError, "store cover file: "+err.Error())
+		writeError(w, http.StatusInternalServerError, "store cover file: "+renameErr.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"cover_file": name})
@@ -1191,8 +1240,13 @@ func validateMetadataOverride(ctx context.Context, o *MetadataOverride) error {
 			return errors.New("a URL cover requires cover_url")
 		}
 		u, err := url.Parse(o.CoverURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
-			return fmt.Errorf("cover_url must be an absolute http(s) URL: %q", o.CoverURL)
+		// HTTPS only: the pinned engine fetches write_url covers with an
+		// HTTPS-only transport, so an http:// URL would pass save-time
+		// validation and only fail at run time (the job runs, then the
+		// cover write fails). Accepted values must match the engine
+		// contract, so the gate refuses non-HTTPS here.
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+			return fmt.Errorf("cover_url must be an absolute https URL: %q", o.CoverURL)
 		}
 		// The URL is queued as a write_url cover the ENGINE fetches at run
 		// time, so it must pass the SAME public-destination guard the catalog

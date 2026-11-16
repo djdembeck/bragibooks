@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSuppliedMetadata, parseParts, setEngineTokens, trimSegment, validateScheme } from '../scheme';
+import { buildSuppliedMetadata, parseParts, serializeParts, setEngineTokens, trimSegment, validateScheme } from '../scheme';
 
 const tokens = [
 	{ name: 'author', value: 'author', example: 'A. Author' },
@@ -39,6 +39,33 @@ describe('validateScheme', () => {
 		const { errors } = validateScheme(parseParts('{title}/vol {'));
 		// No E0: an unclosed brace is literal text, not a token expression.
 		expect(errors).not.toContain('Path format contains unsupported token {vol}.');
+	});
+
+	it('skips the token checks while the registry is empty (capability not loaded)', () => {
+		setEngineTokens([]);
+		// Same closed brace expression a loaded registry rejects; an empty
+		// registry is a capability gap, not a user typo (the Go twin guards
+		// on len(reg) > 0). Neither the unknown-token scan nor the
+		// placeholder requirement may fire while the registry is still
+		// loading: the format is clean, not a missing placeholder.
+		const { errors } = validateScheme(parseParts('{author}/{isbn}/{title}'));
+		expect(errors).not.toContain('Path format contains unsupported token {author}.');
+		expect(errors).not.toContain('Path format contains unsupported token {isbn}.');
+		expect(errors).toEqual([]);
+	});
+
+	it('recognizes a token split across adjacent parts ({tit + le})', () => {
+		setEngineTokens(tokens);
+		// A UI part boundary inside a token spelling: the two parts
+		// serialize to the closed expression {title}, which the engine
+		// accepts. The E0 scan must see the serialized string, so no
+		// unsupported-token error.
+		const parts = parseParts('{tit');
+		parts.push({ kind: 'text', value: 'le}' });
+		expect(serializeParts(parts)).toBe('{title}');
+		const { errors } = validateScheme(parts);
+		expect(errors).not.toContain('Path format contains unsupported token {tit.');
+		expect(errors).toEqual([]);
 	});
 
 	it('rejects an unknown expression split across parts ({{title})', () => {

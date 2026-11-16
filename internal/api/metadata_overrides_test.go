@@ -279,7 +279,7 @@ func TestMetadataOverrideScalarClearKeepsValueForNaming(t *testing.T) {
 	if sel.ScalarPins["title"] != "clear" || sel.ScalarPins["series"] != "clear" || sel.ScalarPins["year"] != "clear" {
 		t.Fatalf("scalar pins = %v, want title/series/year pinned to clear", sel.ScalarPins)
 	}
-	jf, _, err := buildEngineJob(jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{Snapshot: *state.Effective, Selection: sel}}, "job-clear", *state.Effective, t.TempDir(), "{title}")
+	jf, _, err := buildEngineJob(context.Background(), jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{Snapshot: *state.Effective, Selection: sel}}, "job-clear", *state.Effective, t.TempDir(), "{title}")
 	if err != nil {
 		t.Fatalf("buildEngineJob: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestMetadataOverrideEditedChaptersHonorPreserve(t *testing.T) {
 		t.Fatalf("chapter policy = %+v, want preserve (saved selection, not a forced pin)", sel)
 	}
 	// The engine job honors preserve: no chapter embed, no sidecar.
-	jf, _, err := buildEngineJob(args, id, args.Snapshot.Snapshot, t.TempDir(), args.OutputScheme)
+	jf, _, err := buildEngineJob(context.Background(), args, id, args.Snapshot.Snapshot, t.TempDir(), args.OutputScheme)
 	if err != nil {
 		t.Fatalf("buildEngineJob: %v", err)
 	}
@@ -455,7 +455,7 @@ func TestMetadataOverrideBuildEngineJobPolicies(t *testing.T) {
 		ScalarPins: map[string]string{"subtitle": "clear"},
 	}
 	args := jobArgs{SrcPaths: []string{"/tmp/in.m4a"}, Snapshot: &snapshotJSON{Snapshot: snap, Selection: sel}}
-	jf, staged, err := buildEngineJob(args, "job-7", snap, t.TempDir(), "{title}")
+	jf, staged, err := buildEngineJob(context.Background(), args, "job-7", snap, t.TempDir(), "{title}")
 	if err != nil {
 		t.Fatalf("buildEngineJob: %v", err)
 	}
@@ -477,7 +477,7 @@ func TestMetadataOverrideBuildEngineJobPolicies(t *testing.T) {
 	}
 	// An explicit EMPTY chapter list is the engine's clear shape.
 	sel.Chapters = "clear"
-	jf, _, err = buildEngineJob(args, "job-7", snap, t.TempDir(), "{title}")
+	jf, _, err = buildEngineJob(context.Background(), args, "job-7", snap, t.TempDir(), "{title}")
 	if err != nil {
 		t.Fatalf("buildEngineJob: %v", err)
 	}
@@ -532,27 +532,33 @@ func TestMetadataOverrideWriteURLCover(t *testing.T) {
 		t.Fatal(err)
 	}
 	sel := args.Snapshot.Selection
-	if sel == nil || sel.Cover != "write_url" {
+	if sel := args.Snapshot.Selection; sel == nil || sel.Cover != "write_url" {
 		t.Fatalf("cover policy = %+v, want write_url", sel)
 	}
 	if sel.CoverURL != "https://covers.example/1.jpg" {
 		t.Fatalf("frozen cover url = %q", sel.CoverURL)
 	}
-	// The URL cover is NOT staged as a local asset (offline file covers are
-	// distinct from the remote URL path).
-	if strings.Contains(stored, "ovr-") {
-		t.Fatalf("url cover must not reference a local asset: %s", stored)
-	}
-	// The engine job itself must serialize the URL-cover object form: a
-	// regression that drops or mis-serializes the URL at the engine boundary
-	// (the frozen selection alone would not catch it) is a real loss of the
-	// operator's cover. buildEngineJob is the authoritative serializer.
-	jf, _, err := buildEngineJob(args, id, args.Snapshot.Snapshot, t.TempDir(), args.OutputScheme)
+	// buildEngineJob is the authoritative serializer: it fetches the cover
+	// through the pinned downloader into a local staged file (a "write"
+	// cover) or degrades to "clear". The ENGINE JOB must never carry the
+	// raw URL: the engine would re-resolve the host over live DNS, and a
+	// name that passed the save-time guard can rebind to a private address
+	// by run time. The stubbed host (203.0.113.10, TEST-NET) is
+	// unroutable, so the fetch fails and the job degrades — the key
+	// contract is that the write_url form is gone from the engine
+	// boundary.
+	jf, _, err := buildEngineJob(context.Background(), args, id, args.Snapshot.Snapshot, t.TempDir(), args.OutputScheme)
 	if err != nil {
 		t.Fatalf("buildEngineJob: %v", err)
 	}
-	if got := string(jf.Cover); got != `{"write_url":"https://covers.example/1.jpg"}` {
-		t.Fatalf("engine job cover = %s, want the write_url object form with the operator's URL", got)
+	got := string(jf.Cover)
+	if strings.Contains(got, "write_url") || strings.Contains(got, "http") {
+		t.Fatalf("engine job cover = %s, must not embed the URL for the engine to fetch (want a local staged write cover or the degraded clear)", got)
+	}
+	if got != `"clear"` && got != `"preserve"` {
+		// The "write" object form names a local file under the output
+		// root — the only other acceptable shape.
+		t.Fatalf("engine job cover = %s, want a write object with a local path, clear, or preserve", got)
 	}
 }
 
@@ -592,6 +598,11 @@ func TestMetadataOverrideValidationRejects(t *testing.T) {
 		{"cleared cover with file", `{"cover_source":"clear","cover_file":"ovr-1-abc12345.jpg"}`},
 		{"loopback cover url", `{"cover_source":"url","cover_url":"http://127.0.0.1:8080/cover.jpg"}`},
 		{"private-range cover url", `{"cover_source":"url","cover_url":"http://10.0.0.5/cover.jpg"}`},
+		// A PUBLIC host over http:// must be refused for the same reason as
+		// the private-range cases: the pinned engine fetches write_url
+		// covers over an HTTPS-only transport, so a public http URL would
+		// pass save-time and only fail at run time.
+		{"public http cover url", `{"cover_source":"url","cover_url":"http://covers.example/cover.jpg"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -636,6 +647,34 @@ func TestMetadataOverrideCoverUploadStoresImmutableAsset(t *testing.T) {
 	}
 	if !validCoverName(resp["cover_file"]) {
 		t.Fatalf("covers gate rejects the asset name %q", resp["cover_file"])
+	}
+}
+
+// TestMetadataOverrideCoverUploadEnforcesPinnedEngineLimit guards the
+// 5 MiB cap: the pinned engine (m4b-merge v2.2.0) refuses local covers
+// above 5 MiB, so the server must refuse the upload with a 413 naming the
+// limit rather than stage an asset that can never be written. The body
+// (5 MiB JPEG + framing) is large enough to trip the transport cap before
+// multipart parsing.
+func TestMetadataOverrideCoverUploadEnforcesPinnedEngineLimit(t *testing.T) {
+	t.Parallel()
+	h := newOverrideTestHandler(t)
+	h.svc.CoversDir = t.TempDir()
+	oversize := append(testJPEG1x1, make([]byte, (5<<20)+1)...)
+	body, ct := multipartBody(t, "file", "big.jpg", oversize)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Keys = []string{"id"}
+	rctx.URLParams.Values = []string{"1"}
+	req := httptest.NewRequest("POST", "/api/books/1/metadata/cover", body)
+	req.Header.Set("Content-Type", ct)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	h.UploadBookMetadataCover(w, req)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("upload = %d, want 413 — %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "5 MB limit") {
+		t.Fatalf("body does not name the limit: %s", w.Body.String())
 	}
 }
 

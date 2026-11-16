@@ -384,10 +384,10 @@ type queueDestination struct {
 }
 
 // jobArgs is the typed payload stored in a job's m4b_merge_args. The
-// optional destination fields are a fully-resolved queue-time snapshot of
-// the selected output profile (effective directory + format, blank fields
-// inherited from the globals at queue time); zero (omitted) for unprofiled
-// jobs that run with the worker-time global settings.
+// destination fields are a fully-resolved queue-time snapshot for EVERY job
+// (profile-backed, explicitly overridden, AND plain global jobs: effective
+// directory + format + completed directory, blank overrides inherited from
+// the globals at queue time) — no job runs on worker-time global settings.
 type jobArgs struct {
 	SrcPaths []string `json:"src_paths"`
 	// OutputDir is the effective absolute output root FROZEN AT ENQUEUE
@@ -426,7 +426,14 @@ const snapshotVersionCurrent = 1
 // and the gate the worker re-checks before execution. A missing engine
 // identity (capabilities not verified) is a hard error: a job captured under
 // an unknown resolver must not queue.
-func (s *ProcessingService) loadSnapshotForQueue(bookID int64) (*snapshotJSON, error) {
+//
+// The write-selection half of the freeze comes from que, the caller's ONE
+// atomic settings read (write selection AND destination globals): freezing
+// the two halves from separate reads would let a settings save land between
+// them and tear the job into a mixed generation. The caller (QueueJob)
+// takes the single read and uses it for BOTH the selection freeze here and
+// the destination freeze in the job args.
+func (s *ProcessingService) loadSnapshotForQueue(bookID int64, que audio.QueueSnapshot) (*snapshotJSON, error) {
 	caps := s.proc.Capabilities()
 	if caps == nil {
 		return nil, errors.New("engine capabilities not verified; cannot capture a job snapshot")
@@ -459,40 +466,55 @@ func (s *ProcessingService) loadSnapshotForQueue(bookID int64) (*snapshotJSON, e
 	// picks up the new selection. A nil (default) selection is omitted so
 	// legacy and default jobs stay byte-identical to the pre-selection
 	// shape, and the worker derives the all-supported-available baseline.
-	fields, chapters := s.proc.WriteSelectionSnapshot()
+	// The selection AND the destination globals both come from the ONE
+	// atomic read above (que): freezing the two halves from separate
+	// reads would let a settings save tear the pair into a mixed
+	// generation.
+	fields, chapters := que.Fields, que.Chapters
 	out := &snapshotJSON{
 		Version:  snapshotVersionCurrent,
 		Engine:   audio.EngineIdentity{SchemaVersion: caps.SchemaVersion, ResolverVersion: caps.ResolverVersion},
 		Snapshot: *snap,
 	}
 	if fields != nil {
+		// The frozen list is NORMALIZED (trimmed, blank entries dropped,
+		// de-duped) BEFORE the none-selected and cover derivations: a
+		// legacy or hand-written row with padded names (" title ") or an
+		// all-blank list would otherwise freeze the wrong policy, while
+		// the worker's buildEngineJob normalizes again and honors the
+		// trimmed names. Normalizing here keeps queue-time policy and
+		// run-time policy derived from the same effective list.
+		frozen, nerr := audio.NormalizeSelectableFields(*fields)
+		if nerr != nil {
+			return nil, nerr
+		}
 		// Cover and chapters follow the frozen selection: an explicit
 		// selection is the operator's per-field decision, and a none
 		// selection (empty list) means NO embedded tag/cover/chapter
 		// mutation — preserve on both non-scalar paths, no generated
 		// chapter sidecar. Naming is unaffected: the engine always
 		// resolves the effective metadata for the path.
-		noneSelected := len(*fields) == 0
+		noneSelected := len(frozen) == 0
 		cover := audio.WritePolicyValueWrite
-		if noneSelected || !slicesContains(*fields, audio.FieldCover) {
+		if noneSelected || !slicesContains(frozen, audio.FieldCover) {
 			cover = audio.WritePolicyValuePreserve
 		}
 		jobChapters := chapters
 		if noneSelected {
 			jobChapters = audio.ChaptersPolicyValuePreserve
 		}
-		// Fields is a COPY so a later mutation of the live selection cannot
-		// reach the frozen job, and it must stay NON-NIL for the none-selected
-		// case: the empty selection ("write nothing") is load-bearing, and
-		// append([]string(nil)) of an empty source yields a nil slice that
-		// marshals to JSON null — which the worker then reads back as the
-		// default all-supported-available baseline, silently writing every
-		// field. A fresh empty slice marshals to [] and round-trips as the
-		// explicit none-selected policy.
-		frozen := make([]string, 0, len(*fields))
-		frozen = append(frozen, *fields...)
+		// frozen must stay NON-NIL for the none-selected case: the empty
+		// selection ("write nothing") is load-bearing, and
+		// append([]string(nil)) of an empty source yields a nil slice
+		// that marshals to JSON null — which the worker then reads back
+		// as the default all-supported-available baseline, silently
+		// writing every field. NormalizeSelectableFields returns a fresh
+		// (non-nil, possibly empty) slice, and the copy below keeps a
+		// later mutation of the live selection away from the frozen job.
+		frozenCopy := make([]string, len(frozen))
+		copy(frozenCopy, frozen)
 		out.Selection = &WriteSelection{
-			Fields:   frozen,
+			Fields:   frozenCopy,
 			Cover:    cover,
 			Chapters: jobChapters,
 		}
@@ -599,6 +621,12 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	// the new flow) is refused here with an explicit re-match/re-preview
 	// path — never guessed, never silently run under a guessed schema.
 	var snap *snapshotJSON
+	// queueQue is the ONE atomic settings read (write selection +
+	// destination globals) the job freezes from: both halves must come
+	// from the same instant, so a settings save landing between two
+	// separate reads can never tear the frozen pair into a mixed
+	// generation.
+	queueQue := s.proc.QueueSnapshot()
 	if bookID > 0 {
 		// Per-book lock held across the read→insert critical section (defer
 		// runs at function end, past the atomic INSERT below): a capture's
@@ -606,7 +634,7 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 		// or it could delete the cover file this job is about to name while
 		// the active-job count is still zero (finding: prune vs enqueue).
 		defer s.lockBookCover(bookID)()
-		captured, err := s.loadSnapshotForQueue(bookID)
+		captured, err := s.loadSnapshotForQueue(bookID, queueQue)
 		if err != nil {
 			return "", fmt.Errorf("load snapshot for queue: %w", err)
 		}
@@ -644,11 +672,12 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	// that is already in the queue. An empty effective destination is a
 	// misconfiguration the operator must fix, so it is refused here with a
 	// clear message instead of surfacing deep in a worker.
-	liveOut, liveCompleted, liveFormat := s.proc.SettingsSnapshot()
+	// The globals come from the SAME atomic read (queueQue) that froze the
+	// write selection: one settings instant for the whole job.
 	args := jobArgs{SrcPaths: srcPaths, Snapshot: snap}
 	effRoot := strings.TrimSpace(opts.OutputDirOverride)
 	if effRoot == "" {
-		effRoot = strings.TrimSpace(liveOut)
+		effRoot = strings.TrimSpace(queueQue.OutputDir)
 	}
 	if effRoot == "" {
 		return "", errors.New("output directory is not set (set the global output directory)")
@@ -658,7 +687,7 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	}
 	effFormat := strings.TrimSpace(opts.PathFormatOverride)
 	if effFormat == "" {
-		effFormat = strings.TrimSpace(liveFormat)
+		effFormat = strings.TrimSpace(queueQue.PathFormat)
 	}
 	if effFormat == "" {
 		return "", errors.New("output path format is not set (set the global path format)")
@@ -671,7 +700,7 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 	}
 	args.OutputDir = effRoot
 	args.OutputScheme = effFormat
-	args.CompletedDir = strings.TrimSpace(liveCompleted)
+	args.CompletedDir = strings.TrimSpace(queueQue.CompletedDir)
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
 		return "", fmt.Errorf("serialize job args: %w", err)
@@ -1322,7 +1351,10 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		return
 	}
 
-	jf, stagedCover, err := buildEngineJob(args, job.ID, args.Snapshot.Snapshot, effRoot, effFormat)
+	// runCtx (the per-job cancellation context, not the worker's): the
+	// write_url cover fetch is the only network step in the build, and a
+	// cancel must stop it — the worker context outlives every job.
+	jf, stagedCover, err := buildEngineJob(runCtx, args, job.ID, args.Snapshot.Snapshot, effRoot, effFormat)
 	// The staged cover is Bragi's own input staging: the engine copies its
 	// bytes into the output on success, so it is residue after RunJob in
 	// every case (success, failure, cancellation). Removed best-effort in a
@@ -1647,8 +1679,10 @@ func (h *Handler) resolveDestination(w http.ResponseWriter, profileID *int64, ov
 			// An explicit dir is a destination root and must be absolute,
 			// mirroring validateProfile's save-time rule (the queue page and
 			// the record-page dialog copy it too). Empty dir is "inherit the
-			// global", not an override.
-			if !strings.HasPrefix(dir, "/") {
+			// global", not an override. filepath.IsAbs is
+			// platform-appropriate: C:\output and UNC roots on the Windows
+			// build, /... on Unix.
+			if !filepath.IsAbs(dir) {
 				writeError(w, http.StatusBadRequest, "output directory must be an absolute path")
 				return queueDestination{}, false
 			}

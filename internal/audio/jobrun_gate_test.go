@@ -185,3 +185,41 @@ func TestProbeCapabilitiesAppliesOwnTimeout(t *testing.T) {
 		t.Fatal("ProbeCapabilitiesFor succeeded; want the probe timeout to kill the hanging binary")
 	}
 }
+
+// TestRunJobRefusesPreexistingJobFileSymlink guards the O_EXCL create: a
+// pre-existing SYMLINK at the predictable job-file path must make the open
+// fail (the link is left untouched, and no write follows it to a target
+// outside the claim root) instead of the job payload being written through
+// the link.
+func TestRunJobRefusesPreexistingJobFileSymlink(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeJobProtocolBinary(t, dir, "1")
+	proc := NewProcessor(bin, t.TempDir(), "", 1, "{author}/{title}", "info")
+	root := t.TempDir()
+
+	outside := t.TempDir()
+	target := filepath.Join(outside, "jobfile-target.json")
+	if err := os.Symlink(target, filepath.Join(root, ".bragi-job-sym1.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := proc.RunJob(context.Background(), "sym1", jobFileForRunTest(), JobRunOptions{
+		OutputRoot: root,
+		Identity:   EngineIdentity{SchemaVersion: 1, ResolverVersion: "1"},
+	})
+	if res != nil {
+		t.Fatalf("RunJob returned result %v on a pre-existing job-file symlink", res)
+	}
+	if err == nil {
+		t.Fatal("RunJob succeeded despite the job-file path being a symlink")
+	}
+	// The write must not have followed the link: the target stays absent.
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("job payload written through the symlink into %s", target)
+	}
+	// The link itself is preserved (cleanup removes only files Bragi
+	// created).
+	if _, statErr := os.Lstat(filepath.Join(root, ".bragi-job-sym1.json")); statErr != nil {
+		t.Fatalf("pre-existing job-file symlink was removed: %v", statErr)
+	}
+}

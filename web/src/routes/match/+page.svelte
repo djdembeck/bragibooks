@@ -34,6 +34,7 @@
 	} from '#lib/matchEvidence.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { trimSegment } from '#lib/scheme.js';
+	import { newPreviewBatchState, plan, settle } from '#lib/previewBatch.js';
 
 	type ReviewMode = 'batch' | 'focused';
 
@@ -1116,34 +1117,63 @@
 	// series, genres) — so the name shown here is the name the job will
 	// publish. No local token substitution: the engine owns the resolver.
 	let outputPreviews = $state<Record<number, string>>({});
-	let outputPreviewSeq = 0;
-
-	const focusedCandidate = $derived(candidates.find((c) => c.bookId === activeId) ?? null);
+	// Bounded concurrency for batch mode: every row previews its own capture
+	// payload (batch mode shows one row per source, so a focused-only
+	// request left every other row without a name). The bookkeeping (what
+	// stands, what is requeued, what a response may change) lives in the
+	// pure #lib/previewBatch module.
+	const PREVIEW_CONCURRENCY = 3;
+	const batch = newPreviewBatchState();
+	// Version counter that wakes the effect below. A $state Set is NOT a
+	// working wake: Svelte 5 proxies plain objects and arrays, not native
+	// Sets, so an in-place clear()/add() creates no dependency and a
+	// settling request would never re-run the effect (batches past the
+	// cap stalled at "Resolving…"). Reassigning this counter on every
+	// settle is an explicit reactive write: the effect re-runs, plan()
+	// skips the slots that still stand (unchanged payload), and dispatches
+	// the next queued rows.
+	let previewBatchVersion = $state(0);
 
 	$effect(() => {
-		const candidate = focusedCandidate;
-		const book = candidate?.details.book;
-		const format = outputScheme;
-		if (!candidate || !book || !format) {
-			if (candidate) delete outputPreviews[candidate.bookId];
-			return;
-		}
-		const seq = ++outputPreviewSeq;
-		outputPreviews[candidate.bookId] = '';
-		const timer = setTimeout(async () => {
-			try {
-				const resp = await post<{ relative_path: string }>('/engine/preview', {
-					metadata: captureMetadata(book, candidate.details.release),
-					path_format: format
-				});
-				if (seq !== outputPreviewSeq) return; // a newer source/scheme superseded it
-				outputPreviews[candidate.bookId] = resp.relative_path;
-			} catch {
-				if (seq !== outputPreviewSeq) return;
-				outputPreviews[candidate.bookId] = '';
+		void previewBatchVersion;
+		const wanted = new Map<number, string>();
+		for (const c of candidates) {
+			if (c.details.book && outputScheme) {
+				wanted.set(
+					c.bookId,
+					JSON.stringify({
+						metadata: captureMetadata(c.details.book, c.details.release),
+						path_format: outputScheme
+					})
+				);
 			}
-		}, 250);
-		return () => clearTimeout(timer);
+		}
+		const dispatched = plan(batch, wanted, PREVIEW_CONCURRENCY);
+		for (const d of dispatched) {
+			outputPreviews[d.id] = '';
+			setTimeout(async () => {
+				let ok = false;
+				let value = '';
+				try {
+					const body = JSON.parse(d.payload);
+					const resp = await post<{ relative_path: string }>('/engine/preview', body);
+					ok = true;
+					value = resp.relative_path;
+				} catch {
+					// ok stays false: the slot is dropped and the id
+					// requeues (a failed fetch retries, never pins a
+					// permanent pending row).
+				} finally {
+					settle(batch, d.id, d.payload, d.gen, { ok, value });
+					// Sync the render state: settled values and pending
+					// slots both live in the module's bookkeeping now.
+					outputPreviews = { ...batch.previews };
+					// Wake the effect so the freed slot advances the
+					// queue (plan() skips the slots that stand).
+					previewBatchVersion++;
+				}
+			}, 250);
+		}
 	});
 
 	/** The snapshot shape a save captures for this selection — ordered
@@ -1155,6 +1185,16 @@
 			authors: rolePeople(book, release, 'author').map((p) => p.name),
 			narrators: rolePeople(book, release, 'narrator').map((p) => p.name)
 		};
+		// Subtitle with the SAME precedence the server capture uses
+		// (subtitleFromCatalog): the selected release's own subtitle when
+		// present, then the book's, then the book's disambiguation. Without
+		// it, a {subtitle} scheme resolves a different path in the preview
+		// than in the queued job (the snapshot carries the value, the
+		// preview payload did not).
+		const subtitle = [release?.subtitle, book.subtitle, book.disambiguation]
+			.map((v) => (v ?? '').trim())
+			.find((v) => v !== '');
+		if (subtitle) meta.subtitle = subtitle;
 		if (book.id) meta.book_id = book.id;
 		const year = Number(yearOf(releaseDate));
 		if (Number.isFinite(year) && year > 0) meta.year = year;
@@ -1739,7 +1779,10 @@
 		{:else if proposedRelativeName(c)}
 			<code>{proposedRelativeName(c)}</code>
 		{:else}
-			<span>Output scheme is empty</span>
+			<!-- Scheme set, record selected, name not settled: the preview
+			     is queued, in flight, or retrying — all pending, never an
+			     empty scheme. -->
+			<span>Resolving…</span>
 		{/if}
 		</div>
 		<details class="match__fullpath"><summary>Output path and naming details</summary><p>Preview only; the processor reports the final output path.</p><code>{fullOutputPath(c)}</code></details>

@@ -143,20 +143,43 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 		return nil, fmt.Errorf("serialize job: %w", err)
 	}
 
+	// Baseline of staging that pre-dates THIS run (any pid): the engine
+	// names its staging siblings with its own process pid, which the OS
+	// recycles, so cleanup must not treat a recycled pid's name as this
+	// run's residue (see removeStagingSiblings).
+	preExisting := existingStagingSiblings(absRoot)
+
 	// Job-owned job file inside the claim root: the job's own tree, no
-	// shared /tmp naming. Removed in a defer on every path.
+	// shared /tmp naming. Removed in a defer on every path. O_EXCL on the
+	// create is the symlink guard: a pre-existing path at this name
+	// (regular file OR symlink) makes the open fail instead of letting a
+	// write follow the link to a target outside the claim root — 0o600
+	// only protects a file Bragi itself created.
 	jobFile := filepath.Join(absRoot, ".bragi-job-"+jobID+".json")
-	if err := os.WriteFile(jobFile, data, 0o600); err != nil {
+	jobFileHandle, err := os.OpenFile(jobFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
 		return nil, fmt.Errorf("write job file: %w", err)
+	}
+	if _, werr := jobFileHandle.Write(data); werr != nil {
+		jobFileHandle.Close()
+		os.Remove(jobFile)
+		return nil, fmt.Errorf("write job file: %w", werr)
+	}
+	if cerr := jobFileHandle.Close(); cerr != nil {
+		os.Remove(jobFile)
+		return nil, fmt.Errorf("write job file: %w", cerr)
 	}
 	defer os.Remove(jobFile)
 
 	cmd := newEngineCommand(ctx, binary, jobFile, logLevel, numCPUs, false)
-	tree := newProcessTree(cmd)
+	tree, err := newProcessTree(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("confine process tree: %w", err)
+	}
+	// Cancel only kills: the child is confined to the tree the moment
+	// Start returns (below), so by cancel time the whole tree is already
+	// inside it.
 	cmd.Cancel = func() error {
-		if err := tree.start(cmd); err != nil {
-			return err
-		}
 		return tree.kill()
 	}
 	cmd.WaitDelay = 5 * time.Second
@@ -175,7 +198,18 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	}
 
 	if err := cmd.Start(); err != nil {
+		tree.finish()
 		return nil, fmt.Errorf("m4b-merge start: %w", err)
+	}
+	// Constrain the child to the tree NOW, before it can spawn
+	// descendants that would escape a cancel-time assignment. A failed
+	// confinement aborts the run: an unconfined m4b-merge tree must not
+	// run.
+	if err := tree.start(cmd); err != nil {
+		tree.finish()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("confine process tree: %w", err)
 	}
 	waitErr := cmd.Wait()
 	tree.finish()
@@ -205,15 +239,16 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	if perr != nil {
 		return result, fmt.Errorf("m4b-merge exited %d with an unreadable machine result: %w", result.ExitCode, perr)
 	}
-	// Staging siblings are named with THIS engine process's pid; the pid is
-	// what scopes cleanup to this run (see removeStagingSiblings).
+	// Staging siblings are named with THIS engine process's pid; the pid
+	// plus the pre-run snapshot (preExisting) are what scope cleanup to
+	// this run (see removeStagingSiblings).
 	engPID := cmd.Process.Pid
-	return p.finishJobRun(result, doc, opts, absRoot, engPID)
+	return p.finishJobRun(result, doc, opts, absRoot, engPID, preExisting)
 }
 
 // finishJobRun validates a parsed machine document and reports the outcome.
 // It never deletes recoverable staging on a non-success.
-func (p *Processor) finishJobRun(result *JobRunResult, doc machineResult, opts JobRunOptions, root string, engPID int) (*JobRunResult, error) {
+func (p *Processor) finishJobRun(result *JobRunResult, doc machineResult, opts JobRunOptions, root string, engPID int, preExisting map[string]bool) (*JobRunResult, error) {
 	result.Status = doc.Status
 	for _, g := range doc.Groups {
 		if g.Error != nil && *g.Error != "" {
@@ -272,7 +307,7 @@ func (p *Processor) finishJobRun(result *JobRunResult, doc machineResult, opts J
 	// pid in the name is what separates this run's residue from a
 	// concurrently running job's in-flight staging in the same root.
 	// Best-effort, Bragi's own claim root only.
-	if err := removeStagingSiblings(root, engPID); err != nil {
+	if err := removeStagingSiblings(root, engPID, preExisting); err != nil {
 		// Cleanup failure after a validated success is logged, not fatal:
 		// the output is already published and correct.
 		log.Printf("remove staging siblings under %s: %v", root, err)
@@ -372,16 +407,45 @@ func withinRoot(canonicalRoot, resolved string) bool {
 
 // stagingSiblingPrefix matches the engine's per-run staging siblings
 // (.m4b-merge-staging-<pid>-<nanos>-<n>.<ext>) left in the output tree. The
-// pid is the engine process's own; scoping cleanup to one run's pid keeps a
-// concurrent job's in-flight staging in the same root untouched.
+// pid is the engine process's own.
 const stagingSiblingPrefix = ".m4b-merge-staging-"
+
+// existingStagingSiblings records every staging-prefix file already under
+// root (any pid): the set that pre-dates this run. The engine names staging
+// with its own process pid, which the OS recycles — without this baseline,
+// a fresh run whose pid was reused would destroy a previously FAILED run's
+// recoverable staging in the same root during its success cleanup.
+func existingStagingSiblings(root string) map[string]bool {
+	existing := make(map[string]bool)
+	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		// A walk error (e.g. a permission failure on a subdirectory)
+		// leaves the baseline INCOMPLETE: log it so an under-counted
+		// baseline — which cleanup later treats as "not pre-existing" —
+		// is observable rather than silently destructive.
+		if err != nil {
+			log.Printf("audio: staging baseline walk under %s: %v", root, err)
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), stagingSiblingPrefix) {
+			existing[path] = true
+		}
+		return nil
+	})
+	return existing
+}
 
 // removeStagingSiblings walks root (the job's claim root, never the source
 // tree) and removes this run's leftover staging siblings: files named with
-// the engine prefix followed by the run's engine pid. It only touches
-// files matching this run's own prefix, so a user's real output — and a
-// concurrent run's staging — can never be removed by cleanup.
-func removeStagingSiblings(root string, engPID int) error {
+// the engine prefix followed by this run's engine pid AND absent from
+// preExisting (the pre-run snapshot). The pid match keeps a concurrent
+// run's in-flight staging untouched; the pre-run snapshot keeps a
+// recycled-pid name from destroying an earlier failed run's recoverable
+// staging in the same root. It only touches files matching this run's own
+// prefix, so a user's real output can never be removed by cleanup.
+func removeStagingSiblings(root string, engPID int, preExisting map[string]bool) error {
 	prefix := stagingSiblingPrefix + strconv.Itoa(engPID) + "-"
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -390,7 +454,7 @@ func removeStagingSiblings(root string, engPID int) error {
 		if d.IsDir() {
 			return nil
 		}
-		if strings.HasPrefix(d.Name(), prefix) {
+		if strings.HasPrefix(d.Name(), prefix) && !preExisting[path] {
 			return os.Remove(path)
 		}
 		return nil

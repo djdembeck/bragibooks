@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
@@ -192,6 +193,44 @@ func loadWith(explicitPath string) (Config, string, error) {
 		}
 	}
 
+	// A present-but-MALFORMED processing.metadata_fields (null, a scalar,
+	// a list with a non-string member) would fail the typed decode for
+	// the WHOLE file, collapsing every other pin into defaults and
+	// aborting startup. Sanitize the file bytes ONCE, before ANY decode
+	// (Viper's Unmarshal, the yamlOnly override decode, and the key-set
+	// pass all read the same bytes), so the malformed value reads as
+	// "the file did not set the selection": the DB row (the durable
+	// selection) is honored, and the pin-freeze keeps the durable row's
+	// value instead of silently converting it. An explicit empty list is
+	// a valid value and stays.
+	var rawFileBytes []byte
+	if !configFileNotFound {
+		// A failed read must not leave a possibly-truncated buffer in
+		// rawFileBytes: the yamlOnly override decode below reuses it, and
+		// a nil buffer there triggers the loud re-read error path that
+		// this one would bypass.
+		var readErr error
+		rawFileBytes, readErr = os.ReadFile(v.ConfigFileUsed())
+		if readErr != nil {
+			rawFileBytes = nil
+		}
+		var rawMap map[string]any
+		if rawFileBytes != nil && yaml.Unmarshal(rawFileBytes, &rawMap) == nil {
+			if proc, ok := rawMap["processing"].(map[string]any); ok {
+				if val, present := proc["metadata_fields"]; present {
+					if _, listOK := yamlStringListValue(val); !listOK {
+						delete(proc, "metadata_fields")
+						if cleaned, cleanErr := yaml.Marshal(rawMap); cleanErr == nil {
+							rawFileBytes = cleaned
+							_ = v.ReadConfig(bytes.NewReader(cleaned))
+							log.Printf("Warning: config processing.metadata_fields is not a string list (%v); treating the key as unset so the saved write selection is honored", val)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// DIRECTORIES_INDEXING_ENABLED is on-only and exact: a non-exact
 	// value ("false", "TRUE", "1", "on", ...) must never override the
 	// YAML/default preference, and an unparseable value ("on", "yes")
@@ -218,10 +257,18 @@ func loadWith(explicitPath string) (Config, string, error) {
 	if !configFileNotFound {
 		configPath = v.ConfigFileUsed()
 
-		raw, err := os.ReadFile(configPath)
-		if err != nil {
-			setLoadError(fmt.Errorf("failed to re-read config file for overrides: %w", err))
-			return Config{}, "", fmt.Errorf("failed to re-read config file for overrides: %w", err)
+		// The SAME bytes the sanitize pass saw (or the file itself when
+		// no sanitization was needed): decoding the original here would
+		// let a malformed metadata_fields abort the typed decode that the
+		// Viper pass just survived.
+		raw := rawFileBytes
+		if raw == nil {
+			var readErr error
+			raw, readErr = os.ReadFile(configPath)
+			if readErr != nil {
+				setLoadError(fmt.Errorf("failed to re-read config file for overrides: %w", readErr))
+				return Config{}, "", fmt.Errorf("failed to re-read config file for overrides: %w", readErr)
+			}
 		}
 		var yamlOnly Config
 		if err := yaml.Unmarshal(raw, &yamlOnly); err != nil {
@@ -265,6 +312,14 @@ func Load() (Config, string, error) {
 
 // yamlKeysFromFile returns the set of dotted keys present in the YAML file
 // at path (empty map for a missing/unreadable file).
+//
+// `processing.metadata_fields` is special: it is dropped from the set when
+// its value is present but NOT a valid string list (null, a scalar, or a
+// list with a non-string member). A present-but-malformed value must read as
+// "the file did not authoritatively set the selection" so the DB row (the
+// durable stored selection) is honored at startup and by the pin-freeze —
+// never silently collapsed to the default. An explicit empty list IS valid
+// (the "write nothing" selection) and stays present.
 func yamlKeysFromFile(configPath string) map[string]bool {
 	yamlKeys := make(map[string]bool)
 	if configPath == "" {
@@ -275,6 +330,13 @@ func yamlKeysFromFile(configPath string) map[string]bool {
 		if yaml.Unmarshal(raw, &rawMap) == nil {
 			for _, k := range flattenYAMLKeys(rawMap, "") {
 				yamlKeys[k] = true
+			}
+			if proc, ok := rawMap["processing"].(map[string]any); ok {
+				if v, present := proc["metadata_fields"]; present {
+					if _, listOK := yamlStringListValue(v); !listOK {
+						delete(yamlKeys, "processing.metadata_fields")
+					}
+				}
 			}
 		}
 	}
@@ -413,9 +475,12 @@ func mustReadFile(path string) []byte {
 }
 
 // yamlStringListValue converts a parsed-YAML list value to a string slice.
-// The second return reports that the value was a list (a present empty
-// list is valid and yields an empty slice); a non-list value is not valid
-// and yields ok=false.
+// The second return reports that the value was a fully valid list (a
+// present empty list is valid and yields an empty slice); a non-list value
+// and a list with ANY non-string member are not valid and yield ok=false.
+// A silently dropped member would make a mixed list like [title, 7] read
+// as the authoritative [title], and the pin-freeze would freeze exactly
+// that truncated selection.
 func yamlStringListValue(v any) ([]string, bool) {
 	l, ok := v.([]any)
 	if !ok {
@@ -423,9 +488,11 @@ func yamlStringListValue(v any) ([]string, bool) {
 	}
 	out := make([]string, 0, len(l))
 	for _, item := range l {
-		if s, ok := item.(string); ok {
-			out = append(out, s)
+		s, ok := item.(string)
+		if !ok {
+			return nil, false
 		}
+		out = append(out, s)
 	}
 	return out, true
 }

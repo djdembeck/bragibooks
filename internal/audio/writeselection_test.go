@@ -126,9 +126,12 @@ func TestValidateCapabilitiesRejectsMissingScalarFields(t *testing.T) {
 	p := &Processor{}
 	good := &Capabilities{
 		SchemaVersion:   AcceptedEngineSchemaVersion,
-		ResolverVersion: "test",
+		ResolverVersion: PinnedEngineResolverVersion,
 		PathTokens:      []PathToken{{Name: "book_id"}, {Name: "authors"}, {Name: "narrators"}},
-		FieldPolicies:   FieldPolicies{ScalarFields: SupportedWriteFields},
+		FieldPolicies: FieldPolicies{
+			Values:       []string{WritePolicyValueWrite, WritePolicyValuePreserve, WritePolicyValueClear},
+			ScalarFields: SupportedWriteFields,
+		},
 		CoverPolicies:   PolicyVariantSet{Variants: []string{"write", "preserve", "clear"}},
 		ChapterPolicies: PolicyVariantSet{Variants: []string{"write", "preserve", "clear"}},
 	}
@@ -152,5 +155,21 @@ func TestValidateCapabilitiesRejectsMissingScalarFields(t *testing.T) {
 	noChapterPreserve.ChapterPolicies.Variants = []string{"write", "clear"}
 	if _, err := p.validateCapabilities(&noChapterPreserve); err == nil {
 		t.Fatal("engine without chapter preserve accepted; a preserved chapter list would fail at job time")
+	}
+	// An engine that lists every scalar field but drops one of the policy
+	// VALUES Bragi emits passes the field checks and only rejects the job
+	// at run time: the gate must name the missing value at startup.
+	noFieldValues := *good
+	noFieldValues.FieldPolicies.Values = []string{WritePolicyValueWrite, WritePolicyValuePreserve}
+	if _, err := p.validateCapabilities(&noFieldValues); err == nil {
+		t.Fatal("engine without the clear field-policy value accepted; a cleared field would fail at job time")
+	}
+	// A missing resolver_version decodes as "" and must be refused at the
+	// gate: it would pass every later identity comparison against a job
+	// captured under a newer resolver.
+	emptyResolver := *good
+	emptyResolver.ResolverVersion = ""
+	if _, err := p.validateCapabilities(&emptyResolver); err == nil {
+		t.Fatal("engine with a missing resolver_version accepted; the identity comparison would be meaningless")
 	}
 }
