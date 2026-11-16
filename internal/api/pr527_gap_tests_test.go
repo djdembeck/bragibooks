@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -951,5 +952,93 @@ exit 0
 	code, respBody = putSwap("{author}/{title}")
 	if code != http.StatusOK {
 		t.Fatalf("swap with a matching request scheme = %d, want 200 — %s", code, respBody)
+	}
+}
+
+// ── T7: a first capture enriches the catalog, not just the cover ──
+
+// TestFirstCaptureViaEditorEnrichesCatalog pins the book-2213 regression:
+// the metadata editor's first-time row creation is a changed=false capture
+// on a book with NO existing snapshot row. The row it writes is the first,
+// so the FULL catalog enrichment (genres, chapters, subtitle) must run —
+// the cover-only backfill branch (existing rows only) would leave the row
+// with genres=null, which every later save retains and which crashes the
+// editor's genres join with a SvelteKit 500.
+func TestFirstCaptureViaEditorEnrichesCatalog(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	t.Setenv("BRAGIBOOKS_ALLOW_LOCAL_ADB", "1")
+	var mu sync.Mutex
+	bookHits, releaseHits := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		switch r.URL.Path {
+		case "/books/42":
+			bookHits++
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"id":"42","title":"Seed Book","genres":[{"id":"g1","title":"Science Fiction"},{"id":"g2","title":"Humor & Comedy"}]}`)
+			return
+		case "/releases/5":
+			releaseHits++
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"id":"5","title":"Seed Book","subtitle":"Release Sub","chapterDetail":{"chapters":[{"title":"Ch 1","startOffsetMs":0,"lengthMs":60000}]}}`)
+			return
+		default:
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	av := &syncValue{}
+	av.Store(audiobookdb.NewClient("k", srv.URL))
+	h.svc.AudiobookDB = av
+	h.svc.CoversDir = t.TempDir()
+
+	// The book is catalog-linked; its snapshot row does NOT exist yet
+	// (a historical book, first editor visit).
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status, audiobookdb_book_id, audiobookdb_release_id) VALUES (1, 'Seed Book', 'matched', '42', '5')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO people (book_id, name, role) VALUES (1, 'First Author', 'author'), (1, 'The Narrator', 'narrator')",
+	); err != nil {
+		t.Fatalf("seed people: %v", err)
+	}
+
+	// The editor's save: a non-empty field is required, and it changes
+	// nothing snapshot-relevant — the first-time capture runs with
+	// changed=false (overrides.go), exactly the production path.
+	body := `{"title":"Seed Book"}`
+	req := routeReq(t, "PUT", "/api/books/1/metadata", 1, bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	h.UpdateBookMetadata(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("editor save = %d; want 200 — %s", w.Code, w.Body.String())
+	}
+
+	s, err := h.loadSnapshot(1)
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	if len(s.Genres) != 2 || s.Genres[0] != "Science Fiction" || s.Genres[1] != "Humor & Comedy" {
+		t.Fatalf("genres = %v; want the catalog's [Science Fiction Humor & Comedy] (a first capture must enrich the catalog, not store null)", s.Genres)
+	}
+	if len(s.Chapters) != 1 || s.Chapters[0].Title != "Ch 1" {
+		t.Errorf("chapters = %+v; want the release's captured chapter", s.Chapters)
+	}
+	if s.Subtitle != "Release Sub" {
+		t.Errorf("subtitle = %q; want the release's own subtitle \"Release Sub\"", s.Subtitle)
+	}
+	mu.Lock()
+	bh, rh := bookHits, releaseHits
+	mu.Unlock()
+	if bh == 0 {
+		t.Errorf("the first capture never fetched the book; want the full enrichment")
+	}
+	if rh == 0 {
+		t.Errorf("the first capture never fetched the release; want the release chapters/subtitle")
 	}
 }

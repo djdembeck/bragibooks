@@ -285,7 +285,15 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 	// so on failure the row is refreshed with the new LOCAL fields while
 	// retaining the previously captured catalog content (the values
 	// pre-loaded above), and the degradation is reported to the caller.
-	if changed && snap.ADBBookID != "" {
+	// A FIRST capture (existing == nil) always runs the full catalog round
+	// trip, even with changed=false: the editor's first-time row creation
+	// (save/reset on a historical book) and a match save both reach this
+	// point without a prior row to retain, so the row this capture writes
+	// IS the first — its catalog content cannot come from anywhere else.
+	// Without the existing==nil term, a first capture ran the cover-only
+	// backfill below and stored a row with genres=null, which every later
+	// save then retained (a page that then crashed on the null join).
+	if (changed || existing == nil) && snap.ADBBookID != "" {
 		if book, err := h.getAudiobookDB().GetBook(ctx, snap.ADBBookID, "genres,images"); err == nil && book != nil {
 			snap.Genres = genreTitles(book.Genres)
 			if h.svc.CoversDir != "" {
@@ -342,15 +350,15 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 			catalogDegraded = true
 		}
 	} else if snap.ADBBookID != "" && snap.CoverFile == "" {
-		// The catalog round trip above is skipped for unchanged local-only
-		// saves (the metadata editor's save and reset), but the run-time
-		// cover must not depend on it: a book that has never had a
-		// changed-flagged capture would carry an empty CoverFile and
+		// An EXISTING row with no cover: the catalog round trip above is
+		// skipped for unchanged local-only saves (the metadata editor's
+		// save and reset), but the run-time cover must not depend on it —
 		// buildEngineJob would default to "clear" instead of embedding the
 		// catalog artwork. Backfill the cover alone (no genres/chapters/
-		// subtitle: those were already retained or captured by an earlier
-		// full enrichment). Best-effort, like the main path: a catalog
-		// failure keeps the row coverless.
+		// subtitle: the row exists, so those were retained from, or captured
+		// by, an earlier full enrichment — a first capture took the branch
+		// above). Best-effort, like the main path: a catalog failure keeps
+		// the row coverless.
 		if book, err := h.getAudiobookDB().GetBook(ctx, snap.ADBBookID, "genres,images"); err == nil && book != nil {
 			if h.svc.CoversDir != "" {
 				selectedURL := coverURL
