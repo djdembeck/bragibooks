@@ -1,5 +1,5 @@
 # Stage 0: Build SvelteKit frontend
-FROM oven/bun:1@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS frontend
+FROM oven/bun:1@sha256:3aa040e5445efa09d75bb428a64ba50db13e2b3ac9b6b0c7f145615f62b2ee18 AS frontend
 WORKDIR /app/web
 COPY web/package.json web/bun.lock ./
 RUN bun install --frozen-lockfile
@@ -7,7 +7,7 @@ COPY web/ ./
 RUN bun run build
 
 # Stage 1: Build Go backend with embedded frontend
-FROM golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS builder
+FROM golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS builder
 RUN apk add --no-cache git
 WORKDIR /build
 COPY go.mod go.sum ./
@@ -19,7 +19,7 @@ RUN VERSION="${VERSION#v}" && CGO_ENABLED=0 go build -tags webui -ldflags="-s -w
 
 
 # Stage 2: Runtime
-FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ffmpeg ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
