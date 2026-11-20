@@ -1,12 +1,16 @@
 /**
  * Batch rollup for the queue page's completion banner.
  *
- * A batch is a maximal run of merge jobs with consecutive `queue_order`
- * values: the queue endpoint inserts one row per book in a single request,
- * so a batch is contiguous, and interleaved audit rows (imports, metadata
- * saves) break the run. The LATEST merge run is always the banner's subject
- * — an older finished batch is superseded once a newer run exists. A run
- * with no terminal job yet reports an in-flight rollup, not completion.
+ * A batch is one queue request: all of its jobs share `batch_id`, so a run
+ * breaks when the request id changes. Requests enqueued back to back are
+ * contiguous in `queue_order` (queue_seq is max+1 per insert, completed
+ * rows are never pruned), so adjacency alone cannot separate them. Rows
+ * without a batch id (pre-batch history, audit-only) fall back to the old
+ * rule: a run breaks at a queue-order gap, and interleaved audit rows
+ * (imports, metadata saves) break it. The LATEST merge run is always the
+ * banner's subject — an older finished batch is superseded once a newer
+ * run exists. A run with no terminal job yet reports an in-flight rollup,
+ * not completion.
  *
  * `queue_order` is the durable enqueue counter (SQLite `created_at` is only
  * second-precision, so it cannot order a batch); pre-dispatcher rows carry
@@ -23,6 +27,10 @@ export interface BatchJob {
 	cancelRequested?: boolean;
 	/** Null actions predate the column; those rows were merges. */
 	action: string | null;
+	/** The queue request that created the job; every job of one request
+	 *  shares it. Null for pre-batch rows, which group by queue-order
+	 *  adjacency instead. */
+	batchId?: string | null;
 	queueOrder: number;
 	startedAt: string | null;
 	completedAt: string | null;
@@ -120,11 +128,23 @@ export function summarizeLatestBatch(jobs: BatchJob[]): BatchSummary | null {
 		.sort((a, b) => a.queueOrder - b.queueOrder);
 	let run: BatchJob[] = [];
 	for (const job of mergeJobs) {
-		if (run.length > 0 && job.queueOrder === run[run.length - 1].queueOrder + 1) {
-			run.push(job);
-		} else {
-			run = [job];
+		if (run.length > 0) {
+			const prev = run[run.length - 1];
+			// One queue request is one run: its rows share batchId, and the
+			// NEXT request's rows are contiguous in queue order anyway
+			// (queue_seq is max+1 per insert, completed rows are never
+			// pruned), so adjacency alone cannot separate back-to-back
+			// requests. Rows without an identity (pre-batch history) keep
+			// the adjacency rule.
+			const sameBatch = prev.batchId != null && prev.batchId === job.batchId;
+			const adjacent =
+				prev.batchId == null && job.batchId == null && job.queueOrder === prev.queueOrder + 1;
+			if (sameBatch || adjacent) {
+				run.push(job);
+				continue;
+			}
 		}
+		run = [job];
 	}
 	return run.length > 0 ? buildSummary(run) : null;
 }

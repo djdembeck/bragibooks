@@ -169,6 +169,67 @@ describe('summarizeLatestBatch', () => {
 		expect(summary?.startedAt).toBe('2026-07-01 11:59:00');
 	});
 
+	it('keeps back-to-back queue requests apart even when their queue orders are contiguous', () => {
+		// queue_seq is MAX+1 per insert and completed rows are never pruned,
+		// so request two's rows sit directly behind request one's. Only the
+		// batch id separates them: the banner must report request two
+		// alone, not the 4-job aggregate.
+		const summary = summarizeLatestBatch([
+			job({ id: 'b1-a', queueOrder: 1, batchId: 'req-1' }),
+			job({ id: 'b1-b', queueOrder: 2, batchId: 'req-1' }),
+			job({ id: 'b2-a', queueOrder: 3, batchId: 'req-2' }),
+			job({ id: 'b2-b', queueOrder: 4, batchId: 'req-2' }),
+		]);
+		expect(summary?.jobIds).toEqual(['b2-a', 'b2-b']);
+		expect(summary?.total).toBe(2);
+		expect(summary?.isBatch).toBe(true);
+	});
+
+	it('groups a request that is interrupted by an audit row as one run', () => {
+		// An import landing between a request's own rows must not split the
+		// request: its jobs still share the batch id.
+		const summary = summarizeLatestBatch([
+			job({ id: 'b1-a', queueOrder: 1, batchId: 'req-1' }),
+			job({ id: 'a1', queueOrder: 2, action: 'import' }),
+			job({ id: 'b1-b', queueOrder: 3, batchId: 'req-1' }),
+		]);
+		expect(summary?.jobIds).toEqual(['b1-a', 'b1-b']);
+	});
+
+	it('breaks a run when the batch id changes even at a queue-order gap', () => {
+		const summary = summarizeLatestBatch([
+			job({ id: 'b1-a', queueOrder: 1, batchId: 'req-1' }),
+			job({ id: 'b2-a', queueOrder: 9, batchId: 'req-2' }),
+		]);
+		expect(summary?.jobIds).toEqual(['b2-a']);
+	});
+
+	it('keeps pre-batch history grouping by queue-order adjacency', () => {
+		// Rows without a batch id (queued before the column existed) fall
+		// back to the adjacency rule, so old consecutive runs still roll up
+		// and an old gap still breaks one.
+		const batched = summarizeLatestBatch([
+			job({ id: 'm1', queueOrder: 1 }),
+			job({ id: 'm2', queueOrder: 2 }),
+		]);
+		expect(batched?.jobIds).toEqual(['m1', 'm2']);
+
+		const gapped = summarizeLatestBatch([
+			job({ id: 'm1', queueOrder: 1 }),
+			job({ id: 'm2', queueOrder: 3 }),
+		]);
+		expect(gapped?.jobIds).toEqual(['m2']);
+
+		// A legacy row adjacent to a batched one starts a new run, and the
+		// LATEST run wins: the single legacy job after the batched one.
+		const mixed = summarizeLatestBatch([
+			job({ id: 'm1', queueOrder: 1 }),
+			job({ id: 'b1', queueOrder: 2, batchId: 'req-1' }),
+			job({ id: 'm3', queueOrder: 3 }),
+		]);
+		expect(mixed?.jobIds).toEqual(['m3']);
+	});
+
 	it('derives a stable dismissal identity from the run window', () => {
 		const first = summarizeLatestBatch([job({ id: 'm1', queueOrder: 1 }), job({ id: 'm2', queueOrder: 2 })]);
 		const sameRun = summarizeLatestBatch([job({ id: 'm1', queueOrder: 1 }), job({ id: 'm2', queueOrder: 2 })]);

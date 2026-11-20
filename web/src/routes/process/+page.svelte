@@ -26,6 +26,8 @@
 		createdAt: string | null;
 		/** Explicit FIFO position; SQLite's second-precision timestamps can tie. */
 		queueOrder: number;
+		/** The queue request that created the job; the banner groups runs by it. */
+		batchId: string | null;
 		/** Local cancellation in flight: badge is optimistic until the backend terminal state lands. */
 		cancelRequested: boolean;
 		/** Final .m4b reported by the API once the job finishes. */
@@ -42,6 +44,14 @@
 		outputScheme?: string;
 	}
 
+	/** How many history rows Recent activity renders and hydrates by
+	 *  default: the jobs fetch is wide so the banner's run stays whole,
+	 *  but the list does not pay one book fetch and JobRecord subtree per
+	 *  history row. The banner's visible run's rows always render (the
+	 *  Review-failures action scrolls to one of them), and the banner
+	 *  reads only fields the jobs fetch already carries, so the bound does
+	 *  not change what the banner summarizes. */
+	const HISTORY_RENDER_LIMIT = 20;
 	let books: BookWithPeople[] = $state([]);
 	let selectedIds = $state<Set<number>>(new Set());
 	let profiles = $state<OutputProfile[]>([]);
@@ -146,6 +156,19 @@
 
 		const items: JobItem[] = [];
 		const bookRequests = new Map<number, Promise<BookWithPeople>>();
+		const hydrateBook = (item: JobItem) => {
+			if (item.bookId === null) return;
+			let request = bookRequests.get(item.bookId);
+			if (!request) {
+				request = get<BookWithPeople>(`/books/${item.bookId}`);
+				bookRequests.set(item.bookId, request);
+			}
+			void request
+				.then((book) => applyJobBook(item, book))
+				.catch(() => {
+					// Deleted or temporarily unavailable books retain the ID fallback.
+				});
+		};
 		// Use the API's durable enqueue order; fall back to API position for
 		// legacy rows so tied second-level timestamps cannot reverse a batch.
 		queueSequence = Math.max(0, ...jobList.map((j) => j.queue_order ?? 0), jobList.length);
@@ -168,27 +191,39 @@
 				completedAt: j.completed_at,
 				createdAt: j.created_at ?? null,
 				queueOrder: j.queue_order ?? (jobList.length - index),
+				batchId: j.batch_id ?? null,
 				cancelRequested: false,
 				outputDir: j.output_dir,
 				outputScheme: j.output_scheme,
 			});
 			items.push(item);
-			// Active jobs need the book's cover and author even though the book
-			// has already left the matched/pending lists. History only fetches
-			// when the job row arrived without a title.
-			if (item.bookId !== null && !known && (isActiveJob(item) || !item.bookTitle)) {
-				let request = bookRequests.get(item.bookId);
-				if (!request) {
-					request = get<BookWithPeople>(`/books/${item.bookId}`);
-					bookRequests.set(item.bookId, request);
-				}
-				void request
-					.then((book) => applyJobBook(item, book))
-					.catch(() => {
-						// Deleted or temporarily unavailable books retain the ID fallback.
-					});
-			}
 			if (isActiveJob(item)) connectSSE(item);
+		}
+		// Active jobs need the book's cover and author even though the book
+		// has already left the matched/pending lists. History fetches only
+		// for the rows Recent activity renders (newest HISTORY_RENDER_LIMIT
+		// plus the banner's visible run — the Review-failures action scrolls
+		// to one of those rows), so the wide jobs fetch stops widening into
+		// one book fetch per history row.
+		const past = items.filter((job) => !isActiveJob(job));
+		const run = summarizeLatestBatch(
+			items.map((job) => ({
+				id: job.id,
+				status: job.status,
+				cancelRequested: job.cancelRequested,
+				action: job.action,
+				batchId: job.batchId,
+				queueOrder: job.queueOrder,
+				startedAt: job.startedAt,
+				completedAt: job.completedAt,
+				createdAt: job.createdAt,
+			}))
+		);
+		const renderIds = new Set(past.slice(0, HISTORY_RENDER_LIMIT).map((job) => job.id));
+		if (run) for (const job of past) if (run.jobIds.includes(job.id)) renderIds.add(job.id);
+		for (const item of items) {
+			const known = item.bookId !== null ? books.find((book) => book.id === item.bookId) : undefined;
+			if (!known && (isActiveJob(item) || renderIds.has(item.id))) hydrateBook(item);
 		}
 		jobs = items;
 	}
@@ -395,6 +430,7 @@
 					completedAt: null,
 					createdAt: null,
 					queueOrder: ++queueSequence,
+					batchId: response.batch_id ?? null,
 					cancelRequested: false,
 					outputDir: response.output_dir,
 					outputScheme: response.output_scheme,
@@ -448,6 +484,16 @@
 	});
 	const pendingBooks = $derived(books.filter((b) => b.status === 'pending'));
 	const pastJobs = $derived(jobs.filter((job) => !isActiveJob(job)));
+	/** The history rows Recent activity renders: the newest
+	 *  HISTORY_RENDER_LIMIT, plus the banner's run's rows so the
+	 *  Review-failures action always has a row to land on. */
+	const renderedHistory = $derived.by(() => {
+		const past = pastJobs;
+		if (past.length <= HISTORY_RENDER_LIMIT) return past;
+		const ids = new Set(past.slice(0, HISTORY_RENDER_LIMIT).map((job) => job.id));
+		if (batchSummary) for (const id of batchSummary.jobIds) ids.add(id);
+		return past.filter((job) => ids.has(job.id));
+	});
 	const clock = liveNow(() => activeJobs.length > 0);
 	const failedJobs = $derived(pastJobs.filter((job) => job.status === 'error' || job.status === 'failed').length);
 	const runningJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'running').length);
@@ -467,6 +513,7 @@
 				// terminal row lands.
 				cancelRequested: job.cancelRequested,
 				action: job.action,
+				batchId: job.batchId,
 				queueOrder: job.queueOrder,
 				startedAt: job.startedAt,
 				completedAt: job.completedAt,
@@ -525,7 +572,10 @@
 			const cancelledNote = batch.cancelled > 0 ? `, ${batch.cancelled} cancelled` : '';
 			return `Batch complete — ${batch.done} of ${batch.total} processed${cancelledNote}`;
 		}
-		if (batch.tone === 'error') return `${kind} failed — none of the ${batch.total} processed`;
+		if (batch.tone === 'error') {
+			if (!batch.isBatch) return 'Book failed — nothing processed';
+			return `Batch failed — none of the ${batch.total} processed`;
+		}
 		if (batch.tone === 'warning') {
 			return `${kind} ended with ${batch.failed} ${batch.failed === 1 ? 'failure' : 'failures'}`;
 		}
@@ -758,7 +808,7 @@
 					<section class="queue-idle"><Clock size={21} aria-hidden="true" /><h2 id="activity-title">Nothing processing</h2><p>Ready books stay in the list until you start a batch.</p></section>
 				{/if}
 				{#if pastJobs.length > 0}
-					<details class="job-history" bind:this={historyDetails}><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each pastJobs as job (job.id)}{@render JobRecord(job, false)}{/each}</details>
+					<details class="job-history" bind:this={historyDetails}><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each renderedHistory as job (job.id)}{@render JobRecord(job, false)}{/each}</details>
 				{/if}
 			</aside>
 		</div>

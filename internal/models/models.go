@@ -91,6 +91,12 @@ type ProcessingJob struct {
 	// QueueSeq is the durable enqueue order. SQLite's created_at is only
 	// second-precision, so a batch would otherwise have no stable FIFO tie.
 	QueueSeq int64 `db:"queue_seq" json:"queue_seq"`
+	// BatchID is the queue request that created the job, shared by every
+	// job one request enqueues. The queue page's completion banner reports
+	// per request, so back-to-back requests never merge into one batch.
+	// NULL for pre-v15 rows, which the banner groups by queue_seq
+	// adjacency; the jobs API omits the field for those.
+	BatchID *string `db:"batch_id" json:"-"`
 	// BookPreStatus is the book's status at queue time; cancelling a running
 	// job restores the book to this (not a hard-coded 'matched'), so a
 	// reprocessed 'done' book is not demoted and a 'pending' one is not

@@ -241,6 +241,19 @@ CREATE TABLE IF NOT EXISTS index_state (
 ALTER TABLE settings ADD COLUMN indexing_enabled BOOLEAN NOT NULL DEFAULT 0;
 `,
 	},
+	{
+		// v15: the queue request that created the job (a per-request UUID
+		// shared by every job the request enqueued). The queue page's
+		// completion banner reports per request: queue_seq alone cannot
+		// separate two requests enqueued back to back, because queue_seq
+		// is MAX+1 per insert and completed rows are never pruned, so their
+		// sequences stay contiguous. Audit rows and pre-v15 rows stay NULL
+		// — the banner groups those by queue_seq adjacency as before.
+		version: 15,
+		sql: `
+ALTER TABLE processing_jobs ADD COLUMN batch_id TEXT;
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

@@ -372,7 +372,11 @@ type jobArgs struct {
 // QueueJob creates a processing job, persists it to the DB, and enqueues it.
 // opts carries the resolved destination snapshot for profile-backed
 // requests; the zero value preserves the global-settings behavior.
-func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths []string, opts audio.RunOptions) (string, error) {
+// batchID is the queue request's identity ("" for callers that enqueue
+// without one, e.g. pre-batch tests): every job one request enqueues
+// shares it, so the queue page can report one request's outcome as one
+// batch even when the next request lands before this one's rows separate.
+func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths []string, opts audio.RunOptions, batchID string) (string, error) {
 	// Queue-time validation: m4b-merge only accepts .mp3/.m4a/.m4b. The
 	// broader IsAudioFile set (covers, discovery, browsing) must not feed a
 	// job the engine would reject mid-run, so unsupported containers are
@@ -425,18 +429,21 @@ func (s *ProcessingService) QueueJob(ctx context.Context, bookID int64, srcPaths
 		CompletedAt:   nil,
 		BookPreStatus: bookPreStatus,
 	}
+	if batchID != "" {
+		job.BatchID = &batchID
+	}
 
 	// Atomic enqueue: the INSERT only lands when the book has no queued/
 	// running job (finding: F5). RowsAffected()==0 means a concurrent
 	// enqueue won the race — translate the losing write to the same 409 the
 	// fast path returns, so the HTTP contract is identical.
 	res, err := s.db.Exec(
-		`INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action, book_pre_status, queue_seq)
-		 SELECT ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(queue_seq), 0) + 1 FROM processing_jobs)
+		`INSERT INTO processing_jobs (id, book_id, m4b_merge_args, status, action, book_pre_status, batch_id, queue_seq)
+		 SELECT ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(queue_seq), 0) + 1 FROM processing_jobs)
 		 WHERE ? = 0 OR NOT EXISTS (
 		     SELECT 1 FROM processing_jobs
 		     WHERE book_id = ? AND status IN (?, ?))`,
-		job.ID, job.BookID.Int64, job.M4bMergeArgs, job.Status, job.Action, job.BookPreStatus,
+		job.ID, job.BookID.Int64, job.M4bMergeArgs, job.Status, job.Action, job.BookPreStatus, job.BatchID,
 		bookID, job.BookID.Int64, jobStatusQueued, jobStatusRunning,
 	)
 	if err != nil {
@@ -1124,13 +1131,16 @@ type ProcessingJobCreated struct {
 }
 
 // StartProcessingResponse is the JSON shape returned by StartProcessing:
-// the created jobs plus the effective destination pair the batch was
-// snapshotted under at queue time (both omitted for global-settings
-// batches). The web derives each fresh job's Destination line from this
-// pair instead of a client-cached profile, which may have been edited
-// since the page loaded.
+// the created jobs, the request's batch identity, and the effective
+// destination pair the batch was snapshotted under at queue time (both
+// omitted for global-settings batches). The web derives each fresh job's
+// Destination line from this pair instead of a client-cached profile,
+// which may have been edited since the page loaded; it also stamps the
+// fresh jobs with BatchID so the completion banner groups them as one
+// run from the first paint.
 type StartProcessingResponse struct {
 	Jobs         []ProcessingJobCreated `json:"jobs"`
+	BatchID      string                 `json:"batch_id"`
 	OutputDir    string                 `json:"output_dir,omitempty"`
 	OutputScheme string                 `json:"output_scheme,omitempty"`
 }
@@ -1153,6 +1163,11 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "src_dirs is required")
 		return
 	}
+
+	// One identity per request, shared by every job it enqueues: the queue
+	// page's completion banner reports per request, and queue_seq alone
+	// cannot separate two requests that land back to back.
+	batchID := uuid.New().String()
 
 	// Resolve the selected output profile (if any) ONCE, before any job is
 	// created, against exactly one config snapshot: blank fields inherit
@@ -1198,7 +1213,7 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		jobID, err := h.svc.ProcessingSvc.QueueJob(r.Context(), bookID, inputPaths, runOpts)
+		jobID, err := h.svc.ProcessingSvc.QueueJob(r.Context(), bookID, inputPaths, runOpts, batchID)
 		switch {
 		case errors.Is(err, errActiveJobForBook):
 			// The book already has a queued/running job: re-queuing would
@@ -1218,6 +1233,7 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, StartProcessingResponse{
 		Jobs:         jobs,
+		BatchID:      batchID,
 		OutputDir:    runOpts.OutputDirOverride,
 		OutputScheme: runOpts.PathFormatOverride,
 	})
@@ -1578,13 +1594,13 @@ func (h *Handler) StartReprocess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobID, err := h.svc.ProcessingSvc.QueueJob(r.Context(), req.BookID, resolved, runOpts)
+	jobID, err := h.svc.ProcessingSvc.QueueJob(r.Context(), req.BookID, resolved, runOpts, uuid.New().String())
 	switch {
 	case errors.Is(err, errActiveJobForBook):
 		writeError(w, http.StatusConflict, fmt.Sprintf("book %d already has an active processing job", req.BookID))
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("queue job: %v", err))
+		writeError(w, http.StatusInternalServerError, "latest merge job: "+err.Error())
 		return
 	}
 
@@ -1629,6 +1645,11 @@ func jobResp(job models.ProcessingJob) map[string]any {
 		"created_at":   job.CreatedAt,
 		"queue_order":  job.QueueSeq,
 	}
+	// Present only for v15+ rows: pre-batch history has no request
+	// identity, and the banner groups those by queue_seq adjacency.
+	if job.BatchID != nil {
+		resp["batch_id"] = *job.BatchID
+	}
 	if job.BookID.Valid {
 		resp["book_id"] = job.BookID.Int64
 	}
@@ -1663,7 +1684,7 @@ func jobResp(job models.ProcessingJob) map[string]any {
 	return resp
 }
 
-const jobsColumns = "id, book_id, status, action, detail, output, error, output_file, started_at, completed_at, created_at, m4b_merge_args, COALESCE(queue_seq, rowid) AS queue_seq"
+const jobsColumns = "id, book_id, status, action, detail, output, error, output_file, started_at, completed_at, created_at, m4b_merge_args, batch_id, COALESCE(queue_seq, rowid) AS queue_seq"
 
 // ListJobs handles GET /api/jobs?limit=N&book_id=B.
 // Returns recent jobs newest-first with clean JSON matching the single-job contract.
@@ -1749,12 +1770,16 @@ func (h *Handler) queryJobs(query string, args []any) ([]models.ProcessingJob, e
 	for rows.Next() {
 		var job models.ProcessingJob
 		var mergeArgs sql.NullString
+		var batchID sql.NullString
 		err := rows.Scan(&job.ID, &job.BookID, &job.Status, &job.Action, &job.Detail,
-			&job.Output, &job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt, &mergeArgs, &job.QueueSeq)
+			&job.Output, &job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt, &mergeArgs, &batchID, &job.QueueSeq)
 		if err != nil {
 			continue
 		}
 		job.M4bMergeArgs = mergeArgs.String
+		if batchID.Valid {
+			job.BatchID = &batchID.String
+		}
 		jobs = append(jobs, job)
 	}
 	return jobs, nil
@@ -1765,13 +1790,14 @@ func (h *Handler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chiURLParam(r, "id")
 
 	row := h.svc.DB.QueryRow(
-		"SELECT id, book_id, m4b_merge_args, status, action, detail, output, error, output_file, started_at, completed_at, created_at, COALESCE(queue_seq, rowid) FROM processing_jobs WHERE id = ?",
+		"SELECT id, book_id, m4b_merge_args, status, action, detail, output, error, output_file, started_at, completed_at, created_at, batch_id, COALESCE(queue_seq, rowid) FROM processing_jobs WHERE id = ?",
 		jobID,
 	)
 	var job models.ProcessingJob
 	var jobArgs sql.NullString // audit rows have no m4b-merge args (details live in the detail column)
+	var batchID sql.NullString
 	err := row.Scan(&job.ID, &job.BookID, &jobArgs, &job.Status, &job.Action, &job.Detail,
-		&job.Output, &job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt, &job.QueueSeq)
+		&job.Output, &job.Error, &job.OutputFile, &job.StartedAt, &job.CompletedAt, &job.CreatedAt, &batchID, &job.QueueSeq)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "job not found")
 		return
@@ -1781,6 +1807,9 @@ func (h *Handler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	job.M4bMergeArgs = jobArgs.String
+	if batchID.Valid {
+		job.BatchID = &batchID.String
+	}
 	// Clean JSON shared with the list endpoints (jobResp unwraps the
 	// sql.NullXxx fields that would serialize as objects).
 	writeJSON(w, http.StatusOK, jobResp(job))
