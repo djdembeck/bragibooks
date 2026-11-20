@@ -495,6 +495,7 @@
 		const list = ensureChapters();
 		const target = index + dir;
 		if (target < 0 || target >= list.length) return;
+		if (!chaptersExpanded && target >= 5) chaptersExpanded = true;
 		const [item] = list.splice(index, 1);
 		list.splice(target, 0, item);
 		draft.chapters = [...list];
@@ -504,6 +505,7 @@
 		if (!draft || from === to) return;
 		const list = ensureChapters();
 		if (from < 0 || to < 0 || from >= list.length || to >= list.length) return;
+		if (!chaptersExpanded && to >= 5) chaptersExpanded = true;
 		const [item] = list.splice(from, 1);
 		list.splice(to, 0, item);
 		draft.chapters = [...list];
@@ -522,8 +524,9 @@
 	function handleGlobalKeydown(event: KeyboardEvent) {
 		if (event.isComposing) return;
 		if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return;
+		if (confirmingReset || confirmingDiscard) return;
 		event.preventDefault();
-		if (saving || uploading || resetting || confirmingReset || confirmingDiscard) return;
+		if (saving || uploading || resetting) return;
 		if (!dirty || chapterErrors.length > 0) return;
 		void save();
 	}
@@ -576,18 +579,6 @@
 		}
 		return problems;
 	});
-
-	/** "1h 02m 03s" from whole milliseconds, for the human-readable
-	 *  time readout beside each integer-millisecond field. */
-	function millisHuman(millis: number): string {
-		const total = Math.max(0, Math.floor(millis / 1000));
-		const h = Math.floor(total / 3600);
-		const m = Math.floor((total % 3600) / 60);
-		const s = total % 60;
-		if (h) return `${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
-		if (m) return `${m}m ${String(s).padStart(2, '0')}s`;
-		return `${s}s`;
-	}
 
 	/** h:mm:ss(.ms) from whole milliseconds for the timing inputs. */
 	function formatChapterTime(millis: number): string {
@@ -819,6 +810,7 @@
 		<!-- ── Sticky commit row ───────────────────────────────────
 		 * Visible before any scrolling and pinned under the nav while the
 		 * form is in view. The status is text, not a colour-only dot. -->
+		<div class="meditor__commit">
 		<div class="meditor__toolbar">
 			{#if confirmingDiscard}
 				<div class="meditor__confirm" role="group" aria-label="Discard unsaved changes">
@@ -856,8 +848,6 @@
 					>
 						{statusText}
 					</span>
-					{@render outputPreview()}
-					{@render tagPolicy()}
 				</div>
 				<div class="meditor__actions">
 					<Button
@@ -904,6 +894,13 @@
 					</Alert>
 				</div>
 			{/if}
+		</div>
+		{#if !confirmingDiscard && !confirmingReset}
+			<div class="meditor__preview">
+				{@render outputPreview()}
+				{@render tagPolicy()}
+			</div>
+		{/if}
 		</div>
 
 		<!-- ── Catalog provenance and save contract ─────────────── -->
@@ -1469,22 +1466,36 @@
 		color: var(--text-muted);
 	}
 
-	/* ── Sticky commit toolbar ─────────────────────────────────── */
-	.meditor__toolbar {
+	/* ── Sticky commit block ───────────────────────────────────── */
+	.meditor__commit {
 		position: sticky;
 		top: calc(var(--nav-height) + 0.5rem);
 		z-index: 5;
+		background: var(--bg-panel);
+	}
+
+	.meditor__toolbar {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.75rem 1rem;
 		flex-wrap: wrap;
 		padding: 0.75rem;
-		margin-bottom: 0.875rem;
+		margin-bottom: 0;
 		background: var(--bg-panel);
 		border: 0;
 		border-bottom: 1px solid var(--border);
 		border-radius: 0;
+	}
+
+	.meditor__preview {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		padding: 0 0.75rem 0.75rem;
+		margin-bottom: 0.875rem;
+		background: var(--bg-panel);
+		border-bottom: 1px solid var(--border);
 	}
 
 	.meditor__statuswrap {
@@ -2291,13 +2302,23 @@
 	}
 
 	@media (max-width: 720px) {
+		.meditor__commit {
+			position: static;
+		}
+
 		.meditor__toolbar {
+			position: sticky;
 			top: calc(var(--nav-height) + 0.25rem);
+			z-index: 5;
 			display: grid;
 			grid-template-columns: minmax(0, 1fr) auto;
 			align-items: center;
 			gap: 0.25rem 0.5rem;
 			padding: 0.5rem 0.625rem;
+		}
+
+		.meditor__preview {
+			padding: 0.5rem 0.625rem 0.75rem;
 		}
 
 		.meditor__statuswrap {
@@ -2309,16 +2330,6 @@
 			grid-row: 1;
 			font-size: 13px;
 			line-height: 1.3;
-		}
-
-		.meditor__output {
-			grid-column: 1 / -1;
-			grid-row: 2;
-		}
-
-		.meditor__tagpolicy--toolbar {
-			grid-column: 1 / -1;
-			grid-row: 3;
 		}
 
 		.meditor__actions {

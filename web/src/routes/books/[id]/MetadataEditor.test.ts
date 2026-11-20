@@ -634,6 +634,46 @@ describe('MetadataEditor chapter keyboard reorder', () => {
 		unmount(comp);
 		target.remove();
 	});
+
+	it('expands the window when a chapter moves past the fifth row', async () => {
+		const resSix = {
+			...BASE,
+			snapshot: snap({
+				chapters: [
+					{ title: 'Chapter One', start_millis: 0, duration_millis: 1000 },
+					{ title: 'Chapter Two', start_millis: 1000, duration_millis: 1000 },
+					{ title: 'Chapter Three', start_millis: 2000, duration_millis: 1000 },
+					{ title: 'Chapter Four', start_millis: 3000, duration_millis: 1000 },
+					{ title: 'Chapter Five', start_millis: 4000, duration_millis: 1000 },
+					{ title: 'Chapter Six', start_millis: 5000, duration_millis: 1000 }
+				]
+			})
+		} as BookMetadataResponse;
+		getImpl = (url) =>
+			url === '/books/1/metadata' ? Promise.resolve(resSix) : Promise.reject(new Error(`GET ${url}`));
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, null);
+		flushSync();
+		await settle();
+
+		const grip = target.querySelector<HTMLButtonElement>('[data-chapter-grip="4"]');
+		expect(grip, 'fifth chapter drag handle not rendered').not.toBeNull();
+		grip!.dispatchEvent(
+			new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true, cancelable: true })
+		);
+		await settle();
+		const titles = Array.from(target.querySelectorAll<HTMLInputElement>('.meditor__chapter-title')).map(
+			(input) => input.value
+		);
+		expect(titles).toHaveLength(6);
+		expect(titles[5]).toBe('Chapter Five');
+		expect(target.textContent).toContain('Show first 5 chapters');
+		expect(document.activeElement).toBe(target.querySelector('[data-chapter-grip="5"]'));
+
+		unmount(comp);
+		target.remove();
+	});
 });
 
 describe('MetadataEditor genre add control', () => {
