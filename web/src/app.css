@@ -380,8 +380,22 @@
 
 	.btn:disabled,
 	.btn[aria-disabled='true'] {
-		opacity: 0.45;
 		cursor: not-allowed;
+	}
+
+	.btn-primary:disabled,
+	.btn-primary[aria-disabled='true'] {
+		background: var(--surface);
+		color: var(--text-muted);
+		border-color: var(--border);
+		opacity: 0.55;
+	}
+
+	.btn-secondary:disabled,
+	.btn-secondary[aria-disabled='true'],
+	.btn-ghost:disabled,
+	.btn-ghost[aria-disabled='true'] {
+		opacity: 0.55;
 	}
 
 	.btn-secondary {

@@ -222,7 +222,7 @@ Rounding runs on four steps by role: 6px (`sm`) for buttons, inputs, checkboxes,
 - **Secondary:** `#f8f8f6` fill, `#d7d7d0` border; hover darkens the fill and strengthens the border to `#92928a`.
 - **Ghost:** transparent, secondary ink; surface fill on hover.
 - **Danger:** red-wash fill, red ink, 2px red border.
-- **Disabled:** every variant drops to 0.45 opacity with a not-allowed cursor; labels stay visible.
+- **Disabled:** every variant drops to 0.55 opacity with a not-allowed cursor; the primary additionally takes the neutral surface, muted text, and border so it cannot be mistaken for an enabled secondary. Labels stay visible.
 - **Focus:** 3px `#705413` outline, 3px offset; loading swaps in a spinner with `aria-busy`, label stays visible.
 
 ### Navigation
@@ -241,6 +241,18 @@ Overview reports state and offers one move. A four-cell `<dl>` (Import · Match 
 - **Style:** `#f8f8f6` fill, 1px `#92928a` border, 6px radius, 44px min-height.
 - **Focus:** border to `#292923`, 3px `#705413` focus outline; hover border `#65655a`; placeholder `#727267`.
 - **Checkboxes / radios:** 16px, 6px-corner squares (circles for radios); the checked checkbox is solid dark gold `#705413` with a white tick, while the checked radio keeps a white face with a dark-gold border and dot — dark controls deliberately distinct from gold primary actions; indeterminate is a white dash on the dark-gold field.
+
+### Manual Metadata Editor
+The per-book override layer lives in a bordered record card under a 17px/700 section title. At wide desktop (≥1180px) the three groups form two working columns: **Book details** wide left; **People** and **Artwork** stacked right. Below 1180px they stack in one column. The card never nests a card inside the card; group separation is spacing and hairlines, with a 15.5px/700 group heading and 13.5px/600 field labels. Every field is a label above its control, prefilled with the current effective value; no second catalog line appears. Title and subtitle are full width. Series name, series position, and year share a 2fr/1fr/1fr row that collapses to one column at 720px. **Chapters** is a full-width section below the group grid.
+
+- **Commit row:** A sticky toolbar under the nav (`top: calc(var(--nav-height) + 0.5rem)`) carries a text status — **All changes saved**, **Unsaved changes**, **Saving…**, **Resetting…** — plus the gold **Save manual metadata**, a conditional **Discard changes**, and **Reset to catalog**. Cmd+S or Ctrl+S saves a dirty draft. Save is disabled while clean; Reset is disabled when no override row exists. Discard and Reset confirm in place, never in a modal. Save errors render in the toolbar. On phones the actions shorten to **Save / Discard / Reset** in one 44px row; the accessible names stay full.
+- **Values, not evidence:** One AbDB provenance line introduces the form. Every scalar opens with the current effective value inside its control; there is no `Title · Catalog of Shadows` line, no excerpt above the description, and no per-field `aria-describedby` baseline. People and genres are always editable, prefilled from the catalog; an empty list shows a plain empty line and its add control. Description lives only in the textarea, capped at 65ch. Clearing a tag adds a quiet **Tag omitted** annotation beside that field's label.
+- **Cover state:** The summary distinguishes **Catalog cover** from **No catalog cover** from actual catalog-art availability; the catalog radio reads **Catalog cover (none)** when no art exists. Uploaded artwork, Cover from URL, and No cover in output keep their states.
+- **Tag removal:** A single **Tag removal** disclosure sits in the sticky commit row beside **Output preview**, with its count on the same line. The panel opens to four grouped columns on wide desktops (2 on tablets, 1 on phones) and scrolls within a 14rem cap. Only affected field labels carry a quiet **Tag omitted** annotation; unaffected fields stay free of tag chrome. Chapter removal is disabled while a non-empty custom chapter list exists, with the Chapters section's **Remove chapter tags** as the recovery.
+- **Output preview:** On desktop the engine-backed path sits in the sticky commit row under the status, labeled **Output preview** and not in a live region. On phones the status and commit actions stay sticky while the full, wrapping output preview moves into normal flow immediately below them. **Cover** is a 3rem art thumbnail with a summary and a **Change cover** disclosure.
+- **Chapters:** Always editable, not a disclosure. The first five rows render below a compact **# / Title / Start / Duration** header; **Show N more chapters** expands the list and **Show first 5 chapters** collapses it. Each desktop row is one line: order, title, start, duration, and a right-aligned up/down/remove group. The order number is the drag handle; Alt+ArrowUp and Alt+ArrowDown move the focused chapter one position. **Offset all** applies a signed h:mm:ss or millisecond shift to every start, with starts clamped at zero. **Use catalog chapters** appears only when a chapter edit is staged. On phones the row becomes three lines: full-width title, start and duration, then the action group on the right.
+- **Entry points:** Ready queue rows and the focused match source header carry an **Edit metadata** link to `#manual-metadata`. The queue is post-save; the match link opens a new tab so unsaved match choices survive. The hash opens the collapsed disclosure and offsets it below the sticky nav.
+- **Mobile:** One column; labels above full-width controls; the series/year row stacks; the **Tag removal** disclosure sits in the commit row with the output preview and opens to a two-column checkbox grid; chapter rows become three lines with the action group on the last; the sticky status/commit bar stays under the fixed nav while the output preview scrolls.
 
 ### Status Badge
 11px 600, 0.05em uppercase, 1.5px border, 6px corner (`rounded-sm`), 12px icon + word, never color alone: pending (graphite) · processing (amber) · done (green) · error (red) · ready (gold wash + strong border). A job row carries exactly one chip: the status.
@@ -297,6 +309,10 @@ Square always: 3rem row thumbnails (6px corner) and the 16rem record-page hero (
 - **Do** state a ready row's save exclusion in words ("Excluded from save") and keep the bar's ready/included count visible; dimming alone is never the state.
 - **Do** offer the AudiobookDB add handoff only with validated, unambiguous source evidence; when no single ASIN is available, say so and open the bare add page.
 - **Do** keep the source ASIN separate from the matched catalog ASIN; a missing-release handoff never changes what processing receives.
+- **Do** keep controls honest: disable Save while clean and Reset when no override row exists, and keep the saved/unsaved status visible in the commit row.
+- **Do** keep the catalog baseline on every manual-metadata field, including phones, and give each tag-removal checkbox a field-specific accessible name.
+- **Do** name the omitted fields in the **Tag removal** summary and annotate only affected field groups; leave unaffected rows free of tag chrome.
+- **Do** distinguish **Catalog cover** from **No catalog cover**, and keep only status and commit sticky on phones while the output preview scrolls in flow.
 - **Do** disable the removal dialog's close control while deletes run — no visible control may be dead.
 
 ### Don't:
@@ -308,3 +324,6 @@ Square always: 3rem row thumbnails (6px corner) and the 16rem record-page hero (
 - **Don't** render raw JSON in operator-facing errors — the sentence walks the payload; the raw data stays under the ErrorDetail expander.
 - **Don't** claim a failed title search proves a book is missing; ask, hand off the known ASIN, and let AudiobookDB resolve duplicates.
 - **Don't** hide the AudiobookDB add handoff behind a hover-only tooltip or prefill an ambiguous/incomplete ASIN.
+- **Don't** use a colour-only “Clear tag” button or repeated unlabeled tag actions; the checked mark and field-specific label carry the state.
+- **Don't** reduce omission state to a count alone or repeat a tag control beside every field; name the fields and annotate only what is affected.
+- **Don't** wrap record sections in nested bordered cards; the record card is the only container.
