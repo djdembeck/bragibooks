@@ -381,6 +381,7 @@
 	.btn:disabled,
 	.btn[aria-disabled='true'] {
 		cursor: not-allowed;
+		opacity: 0.55;
 	}
 
 	.btn-primary:disabled,
@@ -803,6 +804,16 @@
 
 	.app-shell--workspace .btn-primary:active {
 		border-color: #705413;
+	}
+
+	/* The disabled state must beat the workspace gold border: this rule
+	   is (0,3,0), one class above the workspace rule's (0,2,0), and comes
+	   after it. A disabled primary in the workspace gets the neutral
+	   surface/border from the base disabled-primary rule above. */
+	.app-shell--workspace .btn-primary:disabled,
+	.app-shell--workspace .btn-primary[aria-disabled='true'] {
+		border-color: var(--border);
+		box-shadow: none;
 	}
 
 	.app-shell--workspace .btn-secondary {

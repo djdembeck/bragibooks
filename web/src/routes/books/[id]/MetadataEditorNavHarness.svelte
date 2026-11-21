@@ -16,4 +16,4 @@
 	});
 </script>
 
-<MetadataEditor {bookId} pathFormat={null} {onSaved} />
+<MetadataEditor {bookId} pathFormat={null} open {onSaved} />

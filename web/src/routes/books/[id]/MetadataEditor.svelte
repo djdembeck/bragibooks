@@ -17,11 +17,15 @@
 		bookId: number;
 		/** Global path format for the naming preview; null while loading. */
 		pathFormat: string | null;
+		/** The parent's <details> shell open state: the Ctrl/Cmd+S save
+		 *  shortcut is page-wide, so it must fire only while the editor
+		 *  is on screen. */
+		open?: boolean;
 		/** Set when a save completed, so the caller can note the state. */
 		onSaved?: () => void;
 	}
 
-	let { bookId, pathFormat, onSaved }: Props = $props();
+	let { bookId, pathFormat, open = false, onSaved }: Props = $props();
 
 	/* ── State ───────────────────────────────────────────────────
 	 * The editor works on the server-computed override draft: every
@@ -36,8 +40,10 @@
 	let confirmingReset = $state(false);
 	let confirmingDiscard = $state(false);
 	let resetting = $state(false);
-	/** Fingerprint of the last loaded/saved draft; drives the saved status. */
-	let baseline = $state('');
+	/** Snapshot of the last loaded/saved draft; drives the saved status
+	 *  and the partial-save payload (F5: only fields that differ from
+	 *  this baseline are sent as edits; the rest are zero values). */
+	let baseline = $state<BookMetadataDraft | null>(null);
 	/** Cover options start collapsed unless the book already has a custom cover. */
 	let coverOpen = $state(false);
 	let chaptersExpanded = $state(false);
@@ -77,7 +83,7 @@
 		loadError = null;
 		meta = null;
 		draft = null;
-		baseline = '';
+		baseline = null;
 		coverOpen = false;
 		confirmingReset = false;
 		confirmingDiscard = false;
@@ -97,7 +103,7 @@
 				meta = resp;
 				const next = draftFrom(resp);
 				draft = next;
-				baseline = draftFingerprint(next);
+				baseline = snapshotOf(next);
 				coverOpen = next.cover_source !== '' || next.cleared.includes('cover');
 			})
 			.catch((e) => {
@@ -115,17 +121,25 @@
 
 	function draftFrom(resp: BookMetadataResponse): BookMetadataDraft {
 		const ov = resp.overrides;
-		const snap = resp.snapshot;
+		// Scalars, lists and year prefill from the server-computed
+		// EFFECTIVE state (catalog with the override layer applied): the
+		// stored row's "no override" zero values ("" / null) are not
+		// blanks, so an override row with an empty scalar must not pin
+		// the field to blank over the catalog value. The snapshot is the
+		// fallback only when there is no capture (effective is null then).
+		// Cleared / cover / chapters keep the OVERRIDE's tri-state: the
+		// effective state cannot express "no override" for them.
+		const source = resp.effective ?? resp.snapshot;
 		return {
-			title: ov?.title ?? snap?.title ?? '',
-			subtitle: ov?.subtitle ?? snap?.subtitle ?? '',
-			authors: ov?.authors ?? [...(snap?.authors ?? [])],
-			narrators: ov?.narrators ?? [...(snap?.narrators ?? [])],
-			series_name: ov?.series_name ?? snap?.series_name ?? '',
-			series_position: ov?.series_position ?? snap?.series_position ?? '',
-			description: ov?.description ?? snap?.description ?? '',
-			genres: ov?.genres ?? [...(snap?.genres ?? [])],
-			year: ov?.year ?? snap?.year ?? null,
+			title: source?.title ?? '',
+			subtitle: source?.subtitle ?? '',
+			authors: [...(source?.authors ?? [])],
+			narrators: [...(source?.narrators ?? [])],
+			series_name: source?.series_name ?? '',
+			series_position: source?.series_position ?? '',
+			description: source?.description ?? '',
+			genres: [...(source?.genres ?? [])],
+			year: source?.year ?? null,
 			cleared: ov?.cleared ?? [],
 			cover_source: ov?.cover_source ?? '',
 			cover_file: ov?.cover_file ?? '',
@@ -134,29 +148,62 @@
 		};
 	}
 
-	/** Stable comparison of the whole draft. The cleared list is order-
-	 *  insensitive; every other field is compared by value. */
-	function draftFingerprint(d: BookMetadataDraft): string {
-		return JSON.stringify({
+	/** Deep copy of a draft for stable comparison and the partial-save
+	 *  baseline. The cleared list is sorted so it is order-insensitive. */
+	function snapshotOf(d: BookMetadataDraft): BookMetadataDraft {
+		return {
 			title: d.title,
 			subtitle: d.subtitle,
-			authors: d.authors,
-			narrators: d.narrators,
+			authors: d.authors ? [...d.authors] : null,
+			narrators: d.narrators ? [...d.narrators] : null,
 			series_name: d.series_name,
 			series_position: d.series_position,
 			description: d.description,
-			genres: d.genres,
+			genres: d.genres ? [...d.genres] : null,
 			year: d.year,
 			cleared: [...d.cleared].sort(),
 			cover_source: d.cover_source,
 			cover_file: d.cover_file,
 			cover_url: d.cover_url,
-			chapters: d.chapters
-		});
+			chapters: d.chapters ? d.chapters.map((c) => ({ ...c })) : null
+		};
+	}
+
+	const draftEquals = (a: BookMetadataDraft, b: BookMetadataDraft) =>
+		JSON.stringify(snapshotOf(a)) === JSON.stringify(snapshotOf(b));
+
+	/** PUT body. A field that differs from the saved baseline carries the
+	 *  draft value; an UNCHANGED field carries the stored row's value (the
+	 *  zero value when there is no row). Sending the effective value for an
+	 *  untouched field would pin the catalog value as an override, so a
+	 *  re-capture would no longer update it — the tri-state must round-trip
+	 *  the row, not the post-override state. */
+	function savePayload(): BookMetadataDraft {
+		const d = snapshotOf(draft!);
+		const b = snapshotOf(baseline!);
+		const ov = meta?.overrides;
+		const keep = <K extends keyof BookMetadataDraft>(k: K, stored: BookMetadataDraft[K]) =>
+			JSON.stringify(d[k]) === JSON.stringify(b[k]) ? stored : d[k];
+		return {
+			title: keep('title', ov?.title ?? ''),
+			subtitle: keep('subtitle', ov?.subtitle ?? ''),
+			authors: keep('authors', ov?.authors ?? null),
+			narrators: keep('narrators', ov?.narrators ?? null),
+			series_name: keep('series_name', ov?.series_name ?? ''),
+			series_position: keep('series_position', ov?.series_position ?? ''),
+			description: keep('description', ov?.description ?? ''),
+			genres: keep('genres', ov?.genres ?? null),
+			year: keep('year', ov?.year ?? null),
+			cleared: keep('cleared', ov?.cleared ?? []),
+			cover_source: keep('cover_source', ov?.cover_source ?? ''),
+			cover_file: keep('cover_file', ov?.cover_file ?? ''),
+			cover_url: keep('cover_url', ov?.cover_url ?? ''),
+			chapters: keep('chapters', ov?.chapters ?? null)
+		};
 	}
 
 	const snapshot = $derived(meta?.snapshot ?? null);
-	const dirty = $derived(!!draft && baseline !== '' && draftFingerprint(draft) !== baseline);
+	const dirty = $derived(!!draft && !!baseline && !draftEquals(draft, baseline));
 	const hasSavedOverrides = $derived(!!meta?.overrides);
 	const statusText = $derived(
 		saving
@@ -524,6 +571,9 @@
 	function handleGlobalKeydown(event: KeyboardEvent) {
 		if (event.isComposing) return;
 		if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return;
+		// The listener is page-wide; the shortcut belongs to the editor,
+		// so it must not swallow a keystroke while the shell is closed.
+		if (!open) return;
 		if (confirmingReset || confirmingDiscard) return;
 		event.preventDefault();
 		if (saving || uploading || resetting) return;
@@ -635,10 +685,10 @@
 		saveError = null;
 		confirmingDiscard = false;
 		try {
-			const resp = await put<BookMetadataResponse>(`/books/${startBook}/metadata`, draft);
+			const resp = await put<BookMetadataResponse>(`/books/${startBook}/metadata`, savePayload());
 			if (bookId !== startBook || bookFetchSeq !== startGen) return;
 			meta = resp;
-			baseline = draftFingerprint(draft);
+			baseline = snapshotOf(draft);
 			onSaved?.();
 		} catch (e) {
 			if (bookId !== startBook || bookFetchSeq !== startGen) return;
@@ -653,7 +703,7 @@
 		if (!meta || !dirty || saving || resetting || uploading) return;
 		const next = draftFrom(meta);
 		draft = next;
-		baseline = draftFingerprint(next);
+		baseline = snapshotOf(next);
 		confirmingDiscard = false;
 		saveError = null;
 		coverOpen = next.cover_source !== '' || next.cleared.includes('cover');

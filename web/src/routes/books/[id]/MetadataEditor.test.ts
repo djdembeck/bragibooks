@@ -101,8 +101,10 @@ function tagCheckbox(el: HTMLElement, label: string): HTMLInputElement {
 	return input;
 }
 
-function mountEditor(target: HTMLElement, bookId: number, pathFormat: string | null) {
-	return mount(MetadataEditor as Component, { target, props: { bookId, pathFormat } });
+/** Mount the editor; `open` defaults to true (the parent shell is open)
+ *  so the existing Ctrl+S tests keep their shortcut available. */
+function mountEditor(target: HTMLElement, bookId: number, pathFormat: string | null, open = true) {
+	return mount(MetadataEditor as Component, { target, props: { bookId, pathFormat, open } });
 }
 
 /** Flush pending microtasks so resolved fetches reach their .then. */
@@ -304,6 +306,120 @@ describe('MetadataEditor save/reset races', () => {
 		expect(calls.filter((c) => c.method === 'put' && c.url === '/books/1/metadata').length).toBe(1);
 		releaseSave(resA);
 		await settle();
+		unmount(comp);
+		target.remove();
+	});
+});
+
+describe('MetadataEditor prefill and partial save', () => {
+	// A stored override row whose scalar is EMPTY: the "no override" zero
+	// value (Go marshals it as "" with no omitempty). The editor must
+	// prefill the CATALOG value from the server-computed effective state,
+	// not a blank (finding: prefill falls through to blank).
+	const resEmptyScalarOverride = {
+		...resA,
+		overrides: {
+			title: '',
+			subtitle: '',
+			authors: null,
+			narrators: null,
+			series_name: '',
+			series_position: '',
+			description: '',
+			genres: null,
+			year: null,
+			cleared: [],
+			cover_source: '' as const,
+			cover_file: '',
+			cover_url: '',
+			chapters: null,
+			updated_at: '2026-01-01T00:00:00Z'
+		},
+		effective: snap({ book_id: 1, title: 'Book A', authors: ['Auth A'] })
+	} satisfies BookMetadataResponse;
+
+	it('prefills catalog values over an override row with empty scalars', async () => {
+		getImpl = (url) =>
+			url === '/books/1/metadata'
+				? Promise.resolve(resEmptyScalarOverride)
+				: Promise.reject(new Error(`unexpected GET ${url}`));
+		const { promise: save, resolve: releaseSave } = Promise.withResolvers<BookMetadataResponse>();
+		putImpl = (url) => {
+			if (url === '/books/1/metadata') return save;
+			throw new Error(`unexpected PUT ${url}`);
+		};
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, null);
+		flushSync();
+		await settle();
+		// The empty-scalar override row must not pin the field to blank:
+		// the catalog title is shown, and the authors list carries the
+		// catalog's one author (not the "No authors yet." empty state).
+		expect(titleInput(target).value).toBe('Book A');
+		const authorInput = target.querySelector<HTMLInputElement>('.meditor__input--person');
+		expect(authorInput, 'author input not rendered').not.toBeNull();
+		expect(authorInput!.value).toBe('Auth A');
+		expect(target.textContent).toContain('All changes saved');
+
+		// The save payload keeps the STORED row's values for every field
+		// the operator did not touch — the effective (catalog) value must
+		// not be pinned as an override, or a re-capture would no longer
+		// update that field (finding: first save pins the whole capture).
+		const input = titleInput(target);
+		input.value = 'New Title';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		const saveBtn = Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find(
+			(b) => b.textContent?.includes('Save manual metadata')
+		);
+		saveBtn!.click();
+		flushSync();
+		const puts = calls.filter((c) => c.method === 'put' && c.url === '/books/1/metadata');
+		expect(puts.length).toBe(1);
+		const body = puts[0].body as Record<string, unknown>;
+		expect(body.title).toBe('New Title'); // the edited field
+		expect(body.authors).toBeNull(); // unchanged list: stored value (no override)
+		expect(body.year).toBeNull(); // unchanged year: no override
+		expect(body.series_name).toBe(''); // unchanged scalar: stored value
+		expect(body.cover_source).toBe(''); // unchanged cover: stored value
+		releaseSave(resEmptyScalarOverride);
+		await settle();
+
+		unmount(comp);
+		target.remove();
+	});
+});
+
+describe('MetadataEditor Ctrl+S shell gating', () => {
+	it('ignores Ctrl+S while the parent shell is closed', async () => {
+		getImpl = (url) =>
+			url === '/books/1/metadata' ? Promise.resolve(resA) : Promise.reject(new Error(`unexpected GET ${url}`));
+		const { promise: save, resolve: releaseSave } = Promise.withResolvers<BookMetadataResponse>();
+		putImpl = (url) => {
+			if (url === '/books/1/metadata') return save;
+			throw new Error(`unexpected PUT ${url}`);
+		};
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		// open=false: the parent <details> shell is closed, so the
+		// page-wide listener must not fire (and must not swallow the
+		// keystroke) even though the draft is dirty.
+		const comp = mountEditor(target, 1, null, false);
+		flushSync();
+		await settle();
+		const input = titleInput(target);
+		input.value = 'Dirty while closed';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		window.dispatchEvent(
+			new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true })
+		);
+		flushSync();
+		expect(calls.filter((c) => c.method === 'put' && c.url === '/books/1/metadata').length).toBe(0);
+		releaseSave(resA);
+		await settle();
+
 		unmount(comp);
 		target.remove();
 	});

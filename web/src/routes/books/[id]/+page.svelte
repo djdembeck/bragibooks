@@ -777,6 +777,7 @@
 		<MetadataEditor
 			bookId={book.id}
 			pathFormat={globalPathFormat}
+			open={manualMetadataOpen}
 			onSaved={() => void refreshAll()}
 		/>
 	</details>

@@ -238,7 +238,7 @@ func loadBookMetadataOverride(db *sql.DB, bookID int64) (*MetadataOverride, erro
 // explicit empty list). A decode failure is surfaced, NOT folded into an
 // empty slice: '[]' is the explicit-empty ("clear the tags") state, so a
 // corrupted column must never masquerade as an operator's explicit clear —
-// that would silently replace captured people/genres with nothing.
+// it would silently replace captured people/genres with nothing.
 func jsonStrings(raw string) ([]string, error) {
 	if raw == "" {
 		return nil, nil
@@ -710,6 +710,12 @@ func (h *Handler) UpdateBookMetadata(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid metadata request: "+err.Error())
 		return
 	}
+	// The PUT is PARTIAL: the editor sends the stored row's value for every
+	// field it did not change (the zero value when there is no row) and the
+	// edited value for the rest, so the request IS the new row — no server
+	// merge is needed. The client's savePayload() guarantees that an
+	// unchanged field carries the stored value (not the effective value),
+	// so a re-capture still updates untouched fields.
 	o := &MetadataOverride{
 		BookID: bookID, Title: req.Title, Subtitle: req.Subtitle,
 		Authors: req.Authors, Narrators: req.Narrators,
