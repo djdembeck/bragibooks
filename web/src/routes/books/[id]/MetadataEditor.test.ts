@@ -65,14 +65,46 @@ const resA = { ...BASE, snapshot: snap({ book_id: 1, title: 'Book A' }) } satisf
 const resB = { ...BASE, snapshot: snap({ book_id: 2, title: 'Book B' }) } satisfies BookMetadataResponse;
 const resNoSnap = { ...BASE, snapshot: null } satisfies BookMetadataResponse;
 
+/** A book with a persisted manual edit, so Reset has something to delete. */
+const resAWithOverrides = {
+	...resA,
+	overrides: {
+		title: 'Saved title',
+		subtitle: '',
+		authors: null,
+		narrators: null,
+		series_name: '',
+		series_position: '',
+		description: '',
+		genres: null,
+		year: null,
+		cleared: [],
+		cover_source: '' as const,
+		cover_file: '',
+		cover_url: '',
+		chapters: null,
+		updated_at: '2026-01-01T00:00:00Z'
+	}
+} satisfies BookMetadataResponse;
+
 function titleInput(el: HTMLElement): HTMLInputElement {
 	const input = el.querySelector<HTMLInputElement>('#meditor-title');
 	if (!input) throw new Error('title input not rendered');
 	return input;
 }
 
-function mountEditor(target: HTMLElement, bookId: number, pathFormat: string | null) {
-	return mount(MetadataEditor as Component, { target, props: { bookId, pathFormat } });
+function tagCheckbox(el: HTMLElement, label: string): HTMLInputElement {
+	const input = el.querySelector<HTMLInputElement>(
+		`.meditor__tagpolicy-row input[aria-label="${label}"]`
+	);
+	if (!input) throw new Error('tag-policy checkbox not rendered');
+	return input;
+}
+
+/** Mount the editor; `open` defaults to true (the parent shell is open)
+ *  so the existing Ctrl+S tests keep their shortcut available. */
+function mountEditor(target: HTMLElement, bookId: number, pathFormat: string | null, open = true) {
+	return mount(MetadataEditor as Component, { target, props: { bookId, pathFormat, open } });
 }
 
 /** Flush pending microtasks so resolved fetches reach their .then. */
@@ -136,7 +168,7 @@ describe('MetadataEditor book-ID navigation isolation', () => {
 		// Book 2's own response populates the state.
 		resolveB2(resB);
 		await settle();
-		expect(target.textContent).toContain('Book B');
+		expect(titleInput(target).value).toBe('Book B');
 		expect(target.textContent).not.toContain('Book A');
 
 		unmount(comp);
@@ -170,9 +202,14 @@ describe('MetadataEditor save/reset races', () => {
 			}
 		});
 		flushSync();
-		// Book 1 loaded; start a save and navigate away BEFORE it resolves.
+		// Book 1 loaded; dirty the draft, start a save, and navigate away
+		// BEFORE the save resolves. Save is intentionally disabled while clean.
 		releaseNav(resA);
 		await settle();
+		const input = titleInput(target);
+		input.value = 'Dirty A';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
 		const saveBtn = Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find(
 			(b) => b.textContent?.includes('Save manual metadata')
 		);
@@ -188,17 +225,64 @@ describe('MetadataEditor save/reset races', () => {
 		// B, and must not leave a stuck saving flag behind.
 		releaseSaveA(resA);
 		await settle();
-		expect(target.textContent).toContain('Book B');
+		expect(titleInput(target).value).toBe('Book B');
 		expect(onSavedCalls).toBe(0);
 		const stillSaving = Array.from(target.querySelectorAll<HTMLButtonElement>('button'))
 			.find((b) => b.textContent?.includes('Save manual metadata'));
-		expect(stillSaving?.disabled).not.toBe(true);
+		expect(stillSaving?.getAttribute('aria-busy')).not.toBe('true');
+		expect(target.textContent).toContain('No saved edits yet');
 
 		unmount(comp);
 		target.remove();
 	});
 
 	it('blocks reset while a save is pending', async () => {
+		getImpl = (url) =>
+			url === '/books/1/metadata'
+				? Promise.resolve(resAWithOverrides)
+				: Promise.reject(new Error(`unexpected GET ${url}`));
+		const { promise: save, resolve: releaseSave } = Promise.withResolvers<BookMetadataResponse>();
+		putImpl = (url) => {
+			if (url === '/books/1/metadata') return save;
+			throw new Error(`unexpected PUT ${url}`);
+		};
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, null);
+		flushSync();
+		await settle();
+
+		const resetBtn = Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find(
+			(b) => b.textContent?.includes('Reset to catalog')
+		);
+		expect(resetBtn, 'reset button not found').toBeDefined();
+		expect(resetBtn!.disabled).toBe(false);
+
+		// Save is intentionally disabled while clean; dirty the draft first.
+		const input = titleInput(target);
+		input.value = 'Dirty A';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		const saveBtn = Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find(
+			(b) => b.textContent?.includes('Save manual metadata')
+		);
+		saveBtn!.click();
+		flushSync();
+		// While the save is in flight, the reset entry point is disabled:
+		// committing a reset under a pending save would resurrect the
+		// save's edits on its resolution.
+		expect(resetBtn!.disabled).toBe(true);
+
+		// Resolving the save re-enables it.
+		releaseSave(resAWithOverrides);
+		await settle();
+		expect(resetBtn!.disabled).toBe(false);
+
+		unmount(comp);
+		target.remove();
+	});
+
+	it('saves with Ctrl+S while the draft is dirty', async () => {
 		getImpl = (url) =>
 			url === '/books/1/metadata' ? Promise.resolve(resA) : Promise.reject(new Error(`unexpected GET ${url}`));
 		const { promise: save, resolve: releaseSave } = Promise.withResolvers<BookMetadataResponse>();
@@ -211,25 +295,130 @@ describe('MetadataEditor save/reset races', () => {
 		const comp = mountEditor(target, 1, null);
 		flushSync();
 		await settle();
+		const input = titleInput(target);
+		input.value = 'Dirty via shortcut';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		window.dispatchEvent(
+			new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true })
+		);
+		flushSync();
+		expect(calls.filter((c) => c.method === 'put' && c.url === '/books/1/metadata').length).toBe(1);
+		releaseSave(resA);
+		await settle();
+		unmount(comp);
+		target.remove();
+	});
+});
 
+describe('MetadataEditor prefill and partial save', () => {
+	// A stored override row whose scalar is EMPTY: the "no override" zero
+	// value (Go marshals it as "" with no omitempty). The editor must
+	// prefill the CATALOG value from the server-computed effective state,
+	// not a blank (finding: prefill falls through to blank).
+	const resEmptyScalarOverride = {
+		...resA,
+		overrides: {
+			title: '',
+			subtitle: '',
+			authors: null,
+			narrators: null,
+			series_name: '',
+			series_position: '',
+			description: '',
+			genres: null,
+			year: null,
+			cleared: [],
+			cover_source: '' as const,
+			cover_file: '',
+			cover_url: '',
+			chapters: null,
+			updated_at: '2026-01-01T00:00:00Z'
+		},
+		effective: snap({ book_id: 1, title: 'Book A', authors: ['Auth A'] })
+	} satisfies BookMetadataResponse;
+
+	it('prefills catalog values over an override row with empty scalars', async () => {
+		getImpl = (url) =>
+			url === '/books/1/metadata'
+				? Promise.resolve(resEmptyScalarOverride)
+				: Promise.reject(new Error(`unexpected GET ${url}`));
+		const { promise: save, resolve: releaseSave } = Promise.withResolvers<BookMetadataResponse>();
+		putImpl = (url) => {
+			if (url === '/books/1/metadata') return save;
+			throw new Error(`unexpected PUT ${url}`);
+		};
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, null);
+		flushSync();
+		await settle();
+		// The empty-scalar override row must not pin the field to blank:
+		// the catalog title is shown, and the authors list carries the
+		// catalog's one author (not the "No authors yet." empty state).
+		expect(titleInput(target).value).toBe('Book A');
+		const authorInput = target.querySelector<HTMLInputElement>('.meditor__input--person');
+		expect(authorInput, 'author input not rendered').not.toBeNull();
+		expect(authorInput!.value).toBe('Auth A');
+		expect(target.textContent).toContain('All changes saved');
+
+		// The save payload keeps the STORED row's values for every field
+		// the operator did not touch — the effective (catalog) value must
+		// not be pinned as an override, or a re-capture would no longer
+		// update that field (finding: first save pins the whole capture).
+		const input = titleInput(target);
+		input.value = 'New Title';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
 		const saveBtn = Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find(
 			(b) => b.textContent?.includes('Save manual metadata')
 		);
 		saveBtn!.click();
 		flushSync();
-		// While the save is in flight, the reset entry point is disabled:
-		// committing a reset under a pending save would resurrect the
-		// save's edits on its resolution.
-		const resetBtn = Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find(
-			(b) => b.textContent?.includes('Reset to catalog')
-		);
-		expect(resetBtn, 'reset button not found').toBeDefined();
-		expect(resetBtn!.disabled).toBe(true);
+		const puts = calls.filter((c) => c.method === 'put' && c.url === '/books/1/metadata');
+		expect(puts.length).toBe(1);
+		const body = puts[0].body as Record<string, unknown>;
+		expect(body.title).toBe('New Title'); // the edited field
+		expect(body.authors).toBeNull(); // unchanged list: stored value (no override)
+		expect(body.year).toBeNull(); // unchanged year: no override
+		expect(body.series_name).toBe(''); // unchanged scalar: stored value
+		expect(body.cover_source).toBe(''); // unchanged cover: stored value
+		releaseSave(resEmptyScalarOverride);
+		await settle();
 
-		// Resolving the save re-enables it.
+		unmount(comp);
+		target.remove();
+	});
+});
+
+describe('MetadataEditor Ctrl+S shell gating', () => {
+	it('ignores Ctrl+S while the parent shell is closed', async () => {
+		getImpl = (url) =>
+			url === '/books/1/metadata' ? Promise.resolve(resA) : Promise.reject(new Error(`unexpected GET ${url}`));
+		const { promise: save, resolve: releaseSave } = Promise.withResolvers<BookMetadataResponse>();
+		putImpl = (url) => {
+			if (url === '/books/1/metadata') return save;
+			throw new Error(`unexpected PUT ${url}`);
+		};
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		// open=false: the parent <details> shell is closed, so the
+		// page-wide listener must not fire (and must not swallow the
+		// keystroke) even though the draft is dirty.
+		const comp = mountEditor(target, 1, null, false);
+		flushSync();
+		await settle();
+		const input = titleInput(target);
+		input.value = 'Dirty while closed';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		window.dispatchEvent(
+			new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true })
+		);
+		flushSync();
+		expect(calls.filter((c) => c.method === 'put' && c.url === '/books/1/metadata').length).toBe(0);
 		releaseSave(resA);
 		await settle();
-		expect(resetBtn!.disabled).toBe(false);
 
 		unmount(comp);
 		target.remove();
@@ -251,7 +440,7 @@ describe('MetadataEditor naming preview payload', () => {
 		const comp = mountEditor(target, 1, '{title}');
 		flushSync();
 		await settle();
-		expect(titleInput(target).value).toBe(''); // catalog title is the snapshot default
+		expect(titleInput(target).value).toBe('Book A'); // catalog title is the snapshot default
 
 		// Catalog-state preview: the first debounced POST carries the
 		// effective (catalog) payload.
@@ -276,21 +465,13 @@ describe('MetadataEditor naming preview payload', () => {
 
 		// Clear the authors tag: the preview must blank the people list,
 		// matching the server's applyMetadataOverride effective state.
-		const fieldsets = Array.from(target.querySelectorAll<HTMLFieldSetElement>('fieldset'));
-		const authorsBlock = fieldsets.find((f) => f.querySelector('.meditor__block-title')?.textContent?.trim() === 'Authors');
-		expect(authorsBlock, 'authors section not found').toBeDefined();
-		// An unedited list shows only "Edit list": reveal the list (which
-		// seeds it from the catalog) to expose the Clear tag button.
-		const editBtn = Array.from(authorsBlock!.querySelectorAll<HTMLButtonElement>('button')).find((b) =>
-			b.textContent?.includes('Edit list')
-		);
-		expect(editBtn, 'authors "Edit list" button not found').toBeDefined();
-		editBtn!.click();
+		// The tag policy lives in one disclosure; the checkbox does not
+		// require entering list edit mode.
+		const clearBox = tagCheckbox(target, 'Remove author tags from output');
+		expect(clearBox.checked).toBe(false);
+		clearBox.click();
 		flushSync();
-		const clearBtn = authorsBlock!.querySelector<HTMLButtonElement>('.meditor__clearbtn');
-		expect(clearBtn, 'authors clear button not found').toBeDefined();
-		clearBtn!.click();
-		flushSync();
+		expect(clearBox.checked).toBe(true);
 		await vi.advanceTimersByTimeAsync(250);
 		flushSync();
 		const clearedBodies = previewBodies();
@@ -311,7 +492,7 @@ describe('MetadataEditor naming preview payload', () => {
 	});
 });
 
-describe('MetadataEditor clear-tag on unedited scalars', () => {
+describe('MetadataEditor tag-removal toggle on unedited scalars', () => {
 	it('lets the operator clear a catalog scalar with no edited value', async () => {
 		getImpl = (url) =>
 			url === '/books/1/metadata' ? Promise.resolve(resA) : Promise.reject(new Error(`GET ${url}`));
@@ -323,29 +504,79 @@ describe('MetadataEditor clear-tag on unedited scalars', () => {
 		flushSync();
 		await settle();
 
-		// The title is unedited (blank). The Clear tag button must still be
-		// usable: clearing the catalog value is a distinct operator intent
-		// from editing, so the button is never gated on an edited value.
-		const titleBlock = Array.from(target.querySelectorAll<HTMLFieldSetElement>('fieldset')).find(
-			(f) => f.querySelector('.meditor__block-title')?.textContent?.trim() === 'Title'
-		) as HTMLFieldSetElement;
-		const btn = titleBlock.querySelector<HTMLButtonElement>('.meditor__clearbtn');
-		expect(btn, 'title clear button not found').toBeDefined();
-		expect(btn!.disabled).toBe(false);
+		// The title is unedited (blank). The tag-policy checkbox must still
+		// be usable: clearing the catalog value is a distinct operator intent
+		// from editing, so it is never gated on an edited value.
+		const toggle = tagCheckbox(target, 'Remove title tag from output');
+		const policyCount = () =>
+			target.querySelector('.meditor__tagpolicy-count')?.textContent?.trim();
+		expect(toggle.disabled).toBe(false);
+		expect(toggle.checked).toBe(false);
+		expect(toggle.getAttribute('aria-label')).toBe('Remove title tag from output');
+		expect(toggle.closest('label')?.textContent).toContain('Title');
+		expect(policyCount()).toBe('None omitted');
 
-		// Toggling on marks the clear intent (is-on); the payload keeps the
-		// effective catalog value for naming (the server clears the atom).
-		btn!.click();
+		// Ticking marks the clear intent; the payload keeps the effective
+		// catalog value for naming (the server clears the atom).
+		toggle.click();
 		flushSync();
-		expect(btn!.className).toContain('is-on');
+		expect(toggle.checked).toBe(true);
+		expect(policyCount()).toBe('Title');
 		await vi.advanceTimersByTimeAsync(250);
 		flushSync();
 		const last = previewBodies()[previewBodies().length - 1];
 		expect(last.title).toBe('Book A');
-		// Toggling off removes the intent.
-		btn!.click();
+		// Unticking removes the intent.
+		toggle.click();
 		flushSync();
-		expect(btn!.className).not.toContain('is-on');
+		expect(toggle.checked).toBe(false);
+		expect(policyCount()).toBe('None omitted');
+
+		unmount(comp);
+		target.remove();
+	});
+});
+
+describe('MetadataEditor saved status and discard', () => {
+	it('marks the draft dirty and restores the saved values without a save', async () => {
+		getImpl = (url) =>
+			url === '/books/1/metadata' ? Promise.resolve(resA) : Promise.reject(new Error(`GET ${url}`));
+		postImpl = (url) =>
+			url === '/engine/preview' ? Promise.resolve({ relative_path: 'x' }) : Promise.reject(new Error(`POST ${url}`));
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, '{title}');
+		flushSync();
+		await settle();
+
+		const findButton = (text: string) =>
+			Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find((b) =>
+				b.textContent?.includes(text)
+			);
+		const saveBtn = findButton('Save manual metadata');
+		const resetBtn = findButton('Reset to catalog');
+		expect(saveBtn, 'save button not found').toBeDefined();
+		expect(resetBtn, 'reset button not found').toBeDefined();
+		expect(saveBtn!.disabled).toBe(true);
+		expect(resetBtn!.disabled).toBe(true); // no saved overrides to reset
+		expect(target.textContent).toContain('No saved edits yet');
+
+		const input = titleInput(target);
+		input.value = 'Dirty A';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		expect(target.textContent).toContain('Unsaved changes');
+		expect(saveBtn!.disabled).toBe(false);
+
+		findButton('Discard changes')!.click();
+		flushSync();
+		expect(target.textContent).toContain('Discard unsaved changes');
+		findButton('Yes, discard')!.click();
+		flushSync();
+		expect(titleInput(target).value).toBe('Book A');
+		expect(target.textContent).toContain('No saved edits yet');
+		const saveAfterDiscard = findButton('Save manual metadata');
+		expect(saveAfterDiscard!.disabled).toBe(true);
 
 		unmount(comp);
 		target.remove();
@@ -354,10 +585,10 @@ describe('MetadataEditor clear-tag on unedited scalars', () => {
 
 describe('MetadataEditor genreless snapshot', () => {
 	// The server used to serve snapshot.genres as JSON null for a catalog
-	// book with NO genres; the editor's "Catalog: …" line called
+	// book with NO genres; the editor's catalog line called
 	// snap.genres.join(', ') and the whole book page died with a SvelteKit
 	// 500. The genre block must render its empty state instead.
-	it('renders the catalog-genres empty state when the snapshot has no genres', async () => {
+	it('renders an editable empty state when the snapshot has no genres', async () => {
 		const resNoGenres = {
 			...BASE,
 			snapshot: snap({ genres: null as unknown as string[] })
@@ -372,12 +603,10 @@ describe('MetadataEditor genreless snapshot', () => {
 		flushSync();
 		await settle();
 
-		const genresBlock = Array.from(target.querySelectorAll<HTMLFieldSetElement>('fieldset')).find(
-			(f) => f.querySelector('.meditor__block-title')?.textContent?.trim() === 'Genres'
-		);
+		const genresBlock = target.querySelector('#meditor-genres-label')?.closest('fieldset');
 		expect(genresBlock, 'genres section not found').toBeDefined();
-		expect(genresBlock!.textContent).toContain('Catalog:');
-		expect(genresBlock!.textContent).toContain('—');
+		expect(genresBlock!.textContent).toContain('No genres yet.');
+		expect(genresBlock!.textContent).toContain('Add genre');
 
 		unmount(comp);
 		target.remove();
@@ -440,6 +669,186 @@ describe('MetadataEditor no-capture (snapshot null) state', () => {
 		input.dispatchEvent(new Event('input', { bubbles: true }));
 		flushSync();
 		expect(titleInput(target).value).toBe('Typed Title');
+
+		unmount(comp);
+		target.remove();
+	});
+});
+
+describe('MetadataEditor chapter time inputs', () => {
+	it('accepts h:mm:ss and shows the parsed time', async () => {
+		getImpl = (url) =>
+			url === '/books/1/metadata' ? Promise.resolve(resA) : Promise.reject(new Error(`GET ${url}`));
+		postImpl = (url) =>
+			url === '/engine/preview'
+				? Promise.resolve({ relative_path: 'x' })
+				: Promise.reject(new Error(`POST ${url}`));
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, '{title}');
+		flushSync();
+		await settle();
+		const findButton = (text: string) =>
+			Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find((b) =>
+				b.textContent?.includes(text)
+			);
+		findButton('Add chapter')!.click();
+		flushSync();
+		const start = target.querySelector<HTMLInputElement>('.meditor__chapter-start');
+		expect(start, 'chapter start input not rendered').not.toBeNull();
+		expect(start!.value).toBe('0:00');
+		start!.value = '0:04:12';
+		start!.dispatchEvent(new Event('change', { bubbles: true }));
+		flushSync();
+		const startAfter = target.querySelector<HTMLInputElement>('.meditor__chapter-start');
+		expect(startAfter!.value).toBe('4:12');
+		const offset = target.querySelector<HTMLInputElement>('#meditor-chapter-offset');
+		expect(offset, 'chapter offset input not rendered').not.toBeNull();
+		offset!.value = '-0:01:00';
+		offset!.dispatchEvent(new Event('input', { bubbles: true }));
+		findButton('Apply')!.click();
+		flushSync();
+		expect(target.querySelector<HTMLInputElement>('.meditor__chapter-start')!.value).toBe('3:12');
+
+		unmount(comp);
+		target.remove();
+	});
+});
+
+describe('MetadataEditor chapter keyboard reorder', () => {
+	it('moves a chapter with Alt+Arrow on its drag handle', async () => {
+		const resChapters = {
+			...BASE,
+			snapshot: snap({
+				chapters: [
+					{ title: 'Chapter One', start_millis: 0, duration_millis: 1000 },
+					{ title: 'Chapter Two', start_millis: 1000, duration_millis: 1000 },
+					{ title: 'Chapter Three', start_millis: 2000, duration_millis: 1000 }
+				]
+			})
+		} as BookMetadataResponse;
+		getImpl = (url) =>
+			url === '/books/1/metadata' ? Promise.resolve(resChapters) : Promise.reject(new Error(`GET ${url}`));
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, null);
+		flushSync();
+		await settle();
+
+		const grip = target.querySelector<HTMLButtonElement>('[data-chapter-grip="0"]');
+		expect(grip, 'chapter drag handle not rendered').not.toBeNull();
+		grip!.dispatchEvent(
+			new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true, cancelable: true })
+		);
+		await settle();
+		const titles = Array.from(target.querySelectorAll<HTMLInputElement>('.meditor__chapter-title')).map(
+			(input) => input.value
+		);
+		expect(titles.slice(0, 3)).toEqual(['Chapter Two', 'Chapter One', 'Chapter Three']);
+		expect(document.activeElement).toBe(target.querySelector('[data-chapter-grip="1"]'));
+
+		unmount(comp);
+		target.remove();
+	});
+
+	it('expands the window when a chapter moves past the fifth row', async () => {
+		const resSix = {
+			...BASE,
+			snapshot: snap({
+				chapters: [
+					{ title: 'Chapter One', start_millis: 0, duration_millis: 1000 },
+					{ title: 'Chapter Two', start_millis: 1000, duration_millis: 1000 },
+					{ title: 'Chapter Three', start_millis: 2000, duration_millis: 1000 },
+					{ title: 'Chapter Four', start_millis: 3000, duration_millis: 1000 },
+					{ title: 'Chapter Five', start_millis: 4000, duration_millis: 1000 },
+					{ title: 'Chapter Six', start_millis: 5000, duration_millis: 1000 }
+				]
+			})
+		} as BookMetadataResponse;
+		getImpl = (url) =>
+			url === '/books/1/metadata' ? Promise.resolve(resSix) : Promise.reject(new Error(`GET ${url}`));
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, null);
+		flushSync();
+		await settle();
+
+		const grip = target.querySelector<HTMLButtonElement>('[data-chapter-grip="4"]');
+		expect(grip, 'fifth chapter drag handle not rendered').not.toBeNull();
+		grip!.dispatchEvent(
+			new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true, cancelable: true })
+		);
+		await settle();
+		const titles = Array.from(target.querySelectorAll<HTMLInputElement>('.meditor__chapter-title')).map(
+			(input) => input.value
+		);
+		expect(titles).toHaveLength(6);
+		expect(titles[5]).toBe('Chapter Five');
+		expect(target.textContent).toContain('Show first 5 chapters');
+		expect(document.activeElement).toBe(target.querySelector('[data-chapter-grip="5"]'));
+
+		unmount(comp);
+		target.remove();
+	});
+});
+
+describe('MetadataEditor genre add control', () => {
+	it('adds a genre from the visible button', async () => {
+		getImpl = (url) =>
+			url === '/books/1/metadata' ? Promise.resolve(resA) : Promise.reject(new Error(`GET ${url}`));
+		postImpl = (url) =>
+			url === '/engine/preview'
+				? Promise.resolve({ relative_path: 'x' })
+				: Promise.reject(new Error(`POST ${url}`));
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, '{title}');
+		flushSync();
+		await settle();
+		const findButton = (text: string) =>
+			Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find((b) =>
+				b.textContent?.includes(text)
+			);
+		const add = target.querySelector<HTMLInputElement>('.meditor__input--add');
+		expect(add, 'genre add input not rendered').not.toBeNull();
+		add!.value = 'Space Opera';
+		findButton('Add genre')!.click();
+		flushSync();
+		expect(target.textContent).toContain('Space Opera');
+		expect(add!.value).toBe('');
+
+		unmount(comp);
+		target.remove();
+	});
+});
+
+describe('MetadataEditor omission summary', () => {
+	it('names every omitted field past three', async () => {
+		getImpl = (url) =>
+			url === '/books/1/metadata' ? Promise.resolve(resA) : Promise.reject(new Error(`GET ${url}`));
+		postImpl = (url) =>
+			url === '/engine/preview'
+				? Promise.resolve({ relative_path: 'x' })
+				: Promise.reject(new Error(`POST ${url}`));
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, '{title}');
+		flushSync();
+		await settle();
+		for (const label of [
+			'Remove title tag from output',
+			'Remove subtitle tag from output',
+			'Remove author tags from output',
+			'Remove narrator tags from output'
+		]) {
+			tagCheckbox(target, label).click();
+			flushSync();
+		}
+		expect(target.querySelector('.meditor__tagpolicy-count')?.textContent?.trim()).toBe(
+			'Title, Subtitle, Authors, Narrators'
+		);
+		expect(target.querySelector('label[for="meditor-title"]')?.textContent).toContain('Tag omitted');
+		expect(target.querySelector('label[for="meditor-subtitle"]')?.textContent).toContain('Tag omitted');
 
 		unmount(comp);
 		target.remove();

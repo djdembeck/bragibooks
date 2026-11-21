@@ -13,17 +13,24 @@
 	let { url, title, size = 'sm' }: Props = $props();
 
 	const variant = $derived(size === 'xl' ? 'large' : 'small');
+	let failed = $state(false);
+
+	$effect(() => {
+		url;
+		failed = false;
+	});
 </script>
 
 <!-- Square art, one grammar everywhere: cover always square, bench always knows
      when there is none — the placeholder spine stands in, never a stretched image. -->
-{#if url}
+{#if url && !failed}
 	<img
 		src={bookCoverUrl(url, variant)}
 		alt={title ? `${title} — cover art` : ''}
 		loading="lazy"
 		decoding="async"
 		class="cover cover--{size}"
+		onerror={() => (failed = true)}
 	/>
 {:else}
 	<span class="cover cover--{size} cover--placeholder" aria-hidden="true">

@@ -2194,6 +2194,14 @@
 							<div class="match__source-copy">
 								<h2 class="match__comparison-label">Source</h2>
 								<p class="match__source-name">{sourceBase(c)}</p>
+								<a
+									class="match__source-edit"
+									href={`/books/${c.bookId}#manual-metadata`}
+									target="_blank"
+									rel="noopener"
+								>
+									Edit metadata<span class="sr-only"> (opens in a new tab)</span>
+								</a>
 								{@render sourceDetails(c)}
 							</div>
 						</div>
@@ -2364,7 +2372,7 @@
 					{/if}
 						{#key c.bookId}
 						<details class="match__change" open={!c.details.book || !!c.error || !!c.releaseError} ontoggle={(e) => { if (!e.currentTarget.open) closePicker(); }}>
-							<summary>Change book or edition</summary>
+							<summary>Change catalog match or edition</summary>
 							{#if c.releaseError}
 								<div class="match__edition-error" role="alert">
 									<span>Edition failed to load: {c.releaseError.message}</span>
@@ -3786,6 +3794,19 @@
 	.match-picker__field {
 		display: flex;
 		flex-direction: column;
+	}
+
+	.match__source-edit {
+		display: inline-block;
+		margin-top: 0.25rem;
+		color: var(--text-muted);
+		font-size: 0.8125rem;
+		text-decoration: underline;
+		text-underline-offset: 2px;
+	}
+
+	.match__source-edit:hover {
+		color: var(--text);
 	}
 
 	.match-picker__trigger {
