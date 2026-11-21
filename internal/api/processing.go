@@ -1600,7 +1600,7 @@ func (h *Handler) StartReprocess(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, fmt.Sprintf("book %d already has an active processing job", req.BookID))
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "latest merge job: "+err.Error())
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("queue job: %v", err))
 		return
 	}
 
