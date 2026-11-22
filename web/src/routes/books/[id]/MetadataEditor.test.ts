@@ -461,10 +461,18 @@ describe('MetadataEditor prefill and partial save', () => {
 		expect(body.authors).toEqual(['Auth B']); // stored list, not null
 		expect(body.series_name).toBe(''); // unchanged scalar: stored value
 
-		// The save resolves with a response matching the stored state;
-		// the editor must end clean.
-		releaseSave(resOverrideOnly);
+		// The endpoint stores the request first, so the resolved response
+		// carries the submitted subtitle. If it dropped the field, the
+		// rebuilt draft would blank it and the assertion below would catch
+		// that.
+		const resSaved = {
+			...resOverrideOnly,
+			overrides: { ...resOverrideOnly.overrides!, subtitle: 'Edited sub' }
+		} satisfies BookMetadataResponse;
+		releaseSave(resSaved);
 		await settle();
+		// A save must not silently lose the submitted edit.
+		expect(sub!.value).toBe('Edited sub');
 		expect(target.textContent).toContain('All changes saved');
 		expect(target.textContent).not.toContain('Unsaved changes');
 		expect(saveBtn!.disabled).toBe(true);
