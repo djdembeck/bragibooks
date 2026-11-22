@@ -334,6 +334,19 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A missing book is a 400/404, not a later 500: the UPDATE below would
+	// match zero rows silently, and the snapshot capture would then fail
+	// with a not-found that the caller cannot distinguish from a real DB
+	// error.
+	var exists int64
+	if err := h.svc.DB.QueryRow("SELECT 1 FROM books WHERE id = ?", bookID).Scan(&exists); err == sql.ErrNoRows {
+		writeError(w, http.StatusNotFound, "book not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "book lookup: "+err.Error())
+		return
+	}
+
 	setters := []string{}
 	args := []interface{}{}
 
@@ -425,9 +438,60 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 
 	if req.Authors != nil || req.Narrators != nil {
 		if err := replacePeople(h.svc.DB, bookID, req.Authors, req.Narrators); err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("replace people: %v", err))
+			// The scalar UPDATE above has ALREADY committed: a failed
+			// people replace leaves the book's row and its people
+			// disagreeing with the saved selection, and the existing
+			// snapshot is stale with respect to both. Fail closed on the
+			// early return path the same way a hard capture failure does:
+			// invalidate the snapshot under the per-book lock so the book
+			// can never run on the stale row.
+			if derr := h.invalidateBookSnapshot(bookID); derr != nil {
+				log.Printf("update book %d: replace people failed (%v) AND invalidation failed: %v", bookID, err, derr)
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+					"people update failed (%v) and the old snapshot could not be invalidated (%v): the book's metadata is in an unknown state — do not process it until a fresh save/re-preview succeeds", err, derr))
+				return
+			}
+			log.Printf("update book %d: replace people failed (%v) — invalidated snapshot row", bookID, err)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+				"people update failed: %v — the old snapshot was invalidated; re-preview the book to restore it", err))
 			return
 		}
+	}
+
+	// Re-capture the authoritative snapshot now that the book row and its
+	// people are the operator's current selection. A catalog-linked book is
+	// what a processing job will run on, so its capture must track this
+	// save; for a non-catalog book the capture still records the local
+	// fields (title, people, series, year) that the job will name from.
+	// The catalog round trip is skipped for pipeline-only updates.
+	//
+	// On a hard capture failure (a DB error, not a catalog one) the book
+	// update above has ALREADY committed, so the save cannot be undone:
+	// the row is invalidated (deleted) and the save reports 500, leaving
+	// the book with no authoritative snapshot. A book with no snapshot row
+	// is refused at queue time with an explicit re-match and re-preview
+	// message — it can never run on stale data.
+	//
+	// On catalog unavailability the capture degrades: the row is refreshed
+	// with the new local fields while retaining the previously captured
+	// catalog content (genres/chapters/cover), and the save succeeds.
+	if _, cerr := h.captureSnapshot(r.Context(), bookID, snapshotRelevantChanged(&req)); cerr != nil {
+		// Fail closed: the stale row MUST be invalidated so the book can never
+		// later run on it. If the invalidation itself fails, do NOT report a
+		// clean 503 — the book's state is now unknown (a row that may be
+		// stale and loadable), so report 500 and say the snapshot is in an
+		// unknown state, never "re-preview to restore it" (finding: ignored
+		// invalidation DELETE).
+		if derr := h.invalidateBookSnapshot(bookID); derr != nil {
+			log.Printf("capture snapshot for book %d: %v — AND invalidation failed: %v", bookID, cerr, derr)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+				"book saved, but its processing snapshot capture failed (%v) and the old snapshot could not be invalidated (%v): the book's metadata is in an unknown state — do not process it until a fresh save/re-preview succeeds", cerr, derr))
+			return
+		}
+		log.Printf("capture snapshot for book %d: %v — invalidated snapshot row", bookID, cerr)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+			"book saved, but its processing snapshot capture failed: %v — re-preview the book to restore it", cerr))
+		return
 	}
 
 	book, err := h.getBook(bookID)
@@ -468,6 +532,19 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, bookWithPeople)
+}
+
+// invalidateBookSnapshot deletes the book's snapshot row under the per-book
+// cover lock, the same lock QueueJob holds across its snapshot read→insert
+// and captureSnapshot holds across the whole capture. Deleting without it
+// could remove the very file a concurrent enqueue already read and is about
+// to name in the job's frozen args.
+func (h *Handler) invalidateBookSnapshot(bookID int64) error {
+	if h.svc.ProcessingSvc != nil {
+		defer h.svc.ProcessingSvc.lockBookCover(bookID)()
+	}
+	_, err := h.svc.DB.Exec("DELETE FROM book_snapshots WHERE book_id = ?", bookID)
+	return err
 }
 
 // CreateBooks handles POST /api/books, creating a batch of pending books from source paths.
@@ -632,10 +709,34 @@ func (h *Handler) attachSourceMetadata(ctx context.Context, bookID int64, srcPat
 // caller paths (trailing separators, ./ segments, relative forms) still
 // hit the row.
 func (h *Handler) storedIndexMetadata(srcPath string) *audio.SourceMetadata {
-	var payload, modtime string
+	// Index rows are stored under the SYMLINK-RESOLVED root (the scan
+	// resolves the configured input dir, and every walked path hangs off
+	// the resolved form). An intake path under a symlinked root is LEXICAL,
+	// so a direct lookup by canonicalRoot misses every row for such a root
+	// and every intake falls through to a live ffprobe. Rebase the lookup
+	// (and the descendant freshness queries below) onto the resolved root
+	// the same way listIndexedChildren does; when the root is not a symlink
+	// the two forms are equal and the rebase is a no-op.
+	stored := canonicalRoot(srcPath)
+	// The resolved root comes from the index service (it owns the scan-root
+	// resolution); the lexical root from the config. Without either there is
+	// no resolved root to rebase onto and the canonical form is the lookup.
+	if h.svc.IndexSvc != nil && h.svc.Config != nil {
+		if root := h.svc.IndexSvc.CurrentRoot(); root != "" {
+			if lexicalRoot := canonicalRoot(h.svc.Config.Config().Directories.InputDir); lexicalRoot != "" && lexicalRoot != root {
+				switch {
+				case stored == lexicalRoot:
+					stored = root
+				case strings.HasPrefix(stored, indexChildPrefix(lexicalRoot)):
+					stored = rebaseUnder(stored, lexicalRoot, root)
+				}
+			}
+		}
+	}
+	var payload, modtime, rowType string
 	var size int64
-	if err := h.svc.DB.QueryRow(`SELECT payload, size, modtime FROM source_index WHERE path = ?`,
-		canonicalRoot(srcPath)).Scan(&payload, &size, &modtime); err != nil {
+	if err := h.svc.DB.QueryRow(`SELECT payload, size, modtime, type FROM source_index WHERE path = ?`,
+		stored).Scan(&payload, &size, &modtime, &rowType); err != nil {
 		return nil
 	}
 	info, err := os.Stat(srcPath)
@@ -643,7 +744,17 @@ func (h *Handler) storedIndexMetadata(srcPath string) *audio.SourceMetadata {
 		info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z") != modtime {
 		return nil // source missing, or changed since the last scan
 	}
-	if info.IsDir() && !h.indexedChildrenFresh(canonicalRoot(srcPath)) {
+	// Type is part of freshness: a directory replaced in place by a file of
+	// the SAME size and mtime (or the reverse) matches the two signals
+	// above, and the current info.IsDir() checks would then classify the
+	// STORED folder snapshot as a file snapshot (or keep a folder snapshot
+	// for a file). Compare the stored entry's type with the current one and
+	// force a re-probe on a mismatch.
+	storedDir := rowType == "dir"
+	if storedDir != info.IsDir() {
+		return nil // the source's kind changed since the last scan
+	}
+	if info.IsDir() && !h.indexedChildrenFresh(stored) {
 		return nil // a stored descendant changed in place; the dir's own signals can't see it
 	}
 	var snap audio.SourceMetadata
@@ -651,7 +762,7 @@ func (h *Handler) storedIndexMetadata(srcPath string) *audio.SourceMetadata {
 		log.Printf("stored index metadata for %s: decode: %v", srcPath, err)
 		return nil
 	}
-	if info.IsDir() && !h.folderPayloadFilesStored(canonicalRoot(srcPath), snap.Files) {
+	if info.IsDir() && !h.folderPayloadFilesStored(stored, snap.Files) {
 		return nil // a payload-named file has no stored row: its scan was cap-truncated
 	}
 	if !sourceMetadataComplete(&snap) {
@@ -966,13 +1077,54 @@ func (h *Handler) DeleteBook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// The extracted cover is keyed by book ID; leaving it behind would leak
-	// an orphan and let a later book reuse the slot's art.
+	// Every cover class the book owns is keyed by book ID; leaving any
+	// behind would leak an orphan (the per-book sweeps — override prune,
+	// snapshot prune — are unreachable once the book row is gone, so the
+	// deletion is the only thing that reclaims them).
 	if h.svc.CoversDir != "" {
-		os.Remove(filepath.Join(h.svc.CoversDir, strconv.FormatInt(bookID, 10)+".jpg"))
+		h.removeBookOwnedCovers(bookID)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// removeBookOwnedCovers best-effort removes every cover file this book's id
+// owns: the legacy extracted cover (<id>.jpg), the override assets
+// (ovr-<id>-*.jpg), and the snapshot captures (<id>-<unixnano>.jpg plus the
+// legacy <id>-snapshot.jpg). Runs only after the active-job guard, so no
+// queued/running job can still reference a file being removed.
+func (h *Handler) removeBookOwnedCovers(bookID int64) {
+	id := strconv.FormatInt(bookID, 10)
+	legacy := id + ".jpg"
+	legacySnapshot := id + "-snapshot.jpg"
+	overridePrefix := "ovr-" + id + "-"
+	entries, err := os.ReadDir(h.svc.CoversDir)
+	if err != nil {
+		log.Printf("delete book %d: read covers dir: %v (skipping cover cleanup)", bookID, err)
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		// The snapshot class is <id>-<digits>.jpg; require the dot and all
+		// digits after it so a sibling book's <idX>-... files never match.
+		isSnapshot := name == legacySnapshot ||
+			(strings.HasPrefix(name, id+"-") && strings.HasSuffix(name, ".jpg") && name != legacy)
+		if !isSnapshot && name != legacy && !strings.HasPrefix(name, overridePrefix) {
+			continue
+		}
+		if isSnapshot && name != legacySnapshot {
+			suffix := name[len(id)+1 : len(name)-len(".jpg")]
+			if !allDigitsLen(suffix) {
+				continue
+			}
+		}
+		if err := os.Remove(filepath.Join(h.svc.CoversDir, name)); err != nil && !os.IsNotExist(err) {
+			log.Printf("delete book %d: remove cover %s: %v", bookID, name, err)
+		}
+	}
 }
 
 // activeJobCount returns the number of queued or running processing jobs

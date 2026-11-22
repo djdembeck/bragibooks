@@ -33,6 +33,27 @@ vi.mock('#lib/components/index.js', () => ({
 	PathFormatBuilder: () => null
 }));
 
+// The real capabilities module caches app-wide (one load per app). The
+// tests need a KNOWN, resettable state — including the failure shape the
+// real module produces when the fetch fails (null) — so stub it with a
+// settable holder.
+const engineCaps = vi.hoisted(() => {
+	const holder: { value: unknown } = { value: null };
+	return {
+		holder,
+		set: (c: unknown) => {
+			holder.value = c;
+		},
+		reset: () => {
+			holder.value = null;
+		}
+	};
+});
+vi.mock('#lib/engineCapabilities.js', () => ({
+	getEngineCapabilities: () => engineCaps.holder.value,
+	loadEngineCapabilities: async () => {}
+}));
+
 import SettingsPage from './+page.svelte';
 
 function settingsFixture(): Settings {
@@ -228,5 +249,162 @@ describe('settings index in-flight poll', () => {
 		expect(target.textContent).toContain('Last index was interrupted');
 		expect(target.textContent).toContain('Use Refresh to finish');
 		expect(target.textContent).not.toContain('Not indexed yet');
+	});
+});
+
+// The metadata write selection (#518) must distinguish the three states the
+// server round-trips: null (never saved = default, every supported field
+// written), a present list (write exactly those), and [] (write nothing).
+// The checkboxes are the only visible representation of that distinction.
+describe('settings metadata write selection rendering', () => {
+	let target: HTMLElement;
+	let component: Record<string, any>;
+	const ALL_FIELDS = [
+		'title', 'subtitle', 'authors', 'narrators',
+		'series', 'description', 'genres', 'year', 'cover'
+	];
+
+	beforeEach(async () => {
+		vi.useFakeTimers();
+		getMock.mockReset();
+		target = document.createElement('div');
+		document.body.appendChild(target);
+		// The capabilities stub is reset per test: a stock install
+		// reports every scalar field the app knows about (cover is
+		// policy-only, not a scalar field).
+		engineCaps.set({
+			field_policies: { scalar_fields: ALL_FIELDS.filter((f) => f !== 'cover') },
+			path_tokens: [{ name: 'title', value: 'title', example: 'The Book' }]
+		});
+		getMock.mockImplementation(async (path: string) => {
+			if (path === '/index')
+				return indexState('never', 0);
+			if (path === '/output-profiles')
+				return { profiles: [] };
+			return settingsFixture();
+		});
+	});
+
+	afterEach(() => {
+		unmount(component);
+		target.remove();
+		vi.useRealTimers();
+	});
+
+	async function mountWith(fields: unknown, overrides: Record<string, unknown> = {}) {
+		// Re-aim the /settings response at the selection under test
+		// (the capabilities stub from beforeEach stays in effect).
+		getMock.mockImplementation(async (path: string) => {
+			if (path === '/settings')
+				return { ...settingsFixture(), metadata_fields: fields, metadata_chapters: 'write', ...overrides };
+			if (path === '/index')
+				return indexState('never', 0);
+			if (path === '/output-profiles')
+				return { profiles: [] };
+			return settingsFixture();
+		});
+		component = mount(SettingsPage, { target });
+		flushSync();
+		await vi.advanceTimersByTimeAsync(250); // delayedLoad
+	}
+
+	function checkedIds(): Set<string> {
+		return new Set(
+			[...target.querySelectorAll<HTMLInputElement>('.metadata-field-grid input[type=checkbox]')]
+				.filter((c) => c.checked)
+				.map((c) => c.id.replace('meta_field_', ''))
+		);
+	}
+
+	it('renders every field checked for the null (default) selection', async () => {
+		await mountWith(null);
+		expect(checkedIds().size).toBe(ALL_FIELDS.length);
+		expect(checkedIds().has('title')).toBe(true);
+		expect(checkedIds().has('cover')).toBe(true);
+		// The "nothing is selected" banner must NOT appear for the default.
+		expect(target.textContent).not.toContain('Nothing is selected');
+	});
+
+	it('renders exactly the selected fields for an explicit list', async () => {
+		await mountWith(['title']);
+		const ids = checkedIds();
+		expect(ids.size).toBe(1);
+		expect(ids.has('title')).toBe(true);
+		expect(ids.has('subtitle')).toBe(false);
+	});
+
+	it('reflects cover in the saved list (not filtered out of the checkbox state)', async () => {
+		await mountWith(['title', 'cover']);
+		const ids = checkedIds();
+		expect(ids.size).toBe(2);
+		expect(ids.has('title')).toBe(true);
+		expect(ids.has('cover')).toBe(true);
+	});
+
+	it('renders no fields checked and the banner for an empty selection', async () => {
+		await mountWith([]);
+		expect(checkedIds().size).toBe(0);
+		expect(target.textContent).toContain('Nothing is selected');
+	});
+
+	it('materializes the full default on the first checkbox edit from null', async () => {
+		await mountWith(null);
+		// Unchecking ONE field from the default must leave every OTHER
+		// field checked — not the empty selection (which would disable
+		// all metadata writes on save).
+		const title = target.querySelector<HTMLInputElement>('#meta_field_title');
+		expect(title).not.toBeNull();
+		title!.checked = false;
+		title!.dispatchEvent(new Event('change', { bubbles: true }));
+		flushSync();
+		const ids = checkedIds();
+		expect(ids.size).toBe(ALL_FIELDS.length - 1);
+		expect(ids.has('title')).toBe(false);
+		for (const f of ALL_FIELDS)
+			if (f !== 'title')
+				expect(ids.has(f), `${f} must stay checked`).toBe(true);
+	});
+
+	it('unchecking every field from the default yields the empty (none-selected) selection', async () => {
+		await mountWith(null);
+		for (const f of ALL_FIELDS) {
+			const input = target.querySelector<HTMLInputElement>(`#meta_field_${f}`);
+			expect(input, f).not.toBeNull();
+			input!.checked = false;
+			input!.dispatchEvent(new Event('change', { bubbles: true }));
+		}
+		flushSync();
+		expect(checkedIds().size).toBe(0);
+		expect(target.textContent).toContain('Nothing is selected');
+	});
+
+	it('shows the capability-missing notice (not a Cover-only grid) when the engine reports no scalar fields', async () => {
+		// The failure shape the real module produces when the fetch
+		// fails: getEngineCapabilities() is null for the session.
+		engineCaps.reset();
+		await mountWith(null);
+		expect(target.textContent).toContain('does not report per-field write support');
+		expect(target.querySelectorAll('.metadata-field-grid input[type=checkbox]').length).toBe(0);
+	});
+
+	it('renders the pinned controls read-only with a deployment hint', async () => {
+		await mountWith(['title'], {
+			metadata_fields_pinned: true,
+			metadata_chapters_pinned: true
+		});
+		// The pinned value is still shown (checked), but the controls are
+		// disabled so a save cannot be made to look like an edit.
+		expect(checkedIds().size).toBe(1);
+		expect(checkedIds().has('title')).toBe(true);
+		const checkboxes = [...target.querySelectorAll<HTMLInputElement>('.metadata-field-grid input[type=checkbox]')];
+		expect(checkboxes.length).toBe(ALL_FIELDS.length);
+		for (const c of checkboxes)
+			expect(c.disabled).toBe(true);
+		const radios = [...target.querySelectorAll<HTMLInputElement>('input[name=chapters_policy]')];
+		expect(radios.length).toBe(2);
+		for (const r of radios)
+			expect(r.disabled).toBe(true);
+		expect(target.textContent).toContain('PROCESSING_METADATA_FIELDS');
+		expect(target.textContent).toContain('PROCESSING_METADATA_CHAPTERS');
 	});
 });

@@ -12,7 +12,8 @@ export default defineConfig({
 		// cannot resolve them, so they alias to a static stub (tests that
 		// exercise navigation mock the module themselves).
 		alias: {
-			'$app/navigation': fileURLToPath(new URL('./src/test/app-navigation.ts', import.meta.url))
+			'$app/navigation': fileURLToPath(new URL('./src/test/app-navigation.ts', import.meta.url)),
+			'$app/state': fileURLToPath(new URL('./src/test/app-state.ts', import.meta.url))
 		}
 	},
 	test: {

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick, untrack } from 'svelte';
-	import { get, put, del } from '#lib/api.js';
+	import { get, post, put, del } from '#lib/api.js';
 	import { goto } from '$app/navigation';
 	import type {
 		BookWithPeople,
@@ -23,7 +23,6 @@
 	} from '#lib/types.js';
 	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, Modal } from '#lib/components/index.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
-	import { resolveScheme } from '#lib/scheme.js';
 	import { showBlockNudge, showEditorNudge, showPanelNudge } from '#lib/missingRelease.js';
 	import SourceEvidence from './SourceEvidence.svelte';
 	import RuntimeComparison from './RuntimeComparison.svelte';
@@ -34,6 +33,8 @@
 		type EvidenceField, type MatchEvidenceReport
 	} from '#lib/matchEvidence.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
+	import { trimSegment } from '#lib/scheme.js';
+	import { newPreviewBatchState, plan, settle } from '#lib/previewBatch.js';
 
 	type ReviewMode = 'batch' | 'focused';
 
@@ -981,6 +982,24 @@
 		return typeof value === 'string' ? value.trim() : '';
 	}
 
+	/** Mirror of the server's splitSeries (internal/api/snapshot.go): the
+	 *  stored books.series string is "Name #N" (or several, comma-joined);
+	 *  the last " #" separates name from position, a leading "#N" with no
+	 *  name is an empty name. Keeping the preview's re-parse identical to
+	 *  capture is what guarantees the previewed name matches the saved
+	 *  snapshot's name. Trimming uses Go's unicode.IsSpace set (trimSegment)
+	 *  rather than String.prototype.trim — the server trims with
+	 *  strings.TrimSpace, and the two disagree on U+0085, which would let a
+	 *  series name carry into the saved snapshot while vanishing from the
+	 *  previewed one (or vice versa). */
+	function splitSeries(series: string): [string, string] {
+		series = trimSegment(series);
+		if (!series) return ['', ''];
+		const i = series.lastIndexOf(' #');
+		if (i >= 0) return [trimSegment(series.slice(0, i)), trimSegment(series.slice(i + 2))];
+		return [series, ''];
+	}
+
 	/** Upstream sends series positions as a number, a string, or an object
 	 *  carrying `value`/`label`. Accept those forms, never invent one. */
 	function seriesPositionValue(series: unknown): string {
@@ -1092,34 +1111,117 @@
 		return parent ? `${sourceBase(candidate)} in ${parent}` : sourceBase(candidate);
 	}
 
-	// ── Proposed output naming ─────────────────────────────────
-	// Preview only: the processor writes ASIN + scheme and reports the actual
-	// final path. Resolved through the shared scheme resolver, so this
-	// preview agrees with the Settings example (Go segment rules, no
-	// double `.m4b`). As with that resolver, unknown placeholders stay
-	// visible (unrecognized spellings are literal), and `{asin}` stays
-	// literal — m4b-merge does not substitute it (engine parity).
+	// ── Output naming preview (engine-backed) ──────────────────
+	// The engine's non-mutating job preview over the EXACT capture payload a
+	// save records (ordered people, canonical ADB book id, release year,
+	// series, genres) — so the name shown here is the name the job will
+	// publish. No local token substitution: the engine owns the resolver.
+	let outputPreviews = $state<Record<number, string>>({});
+	// Bounded concurrency for batch mode: every row previews its own capture
+	// payload (batch mode shows one row per source, so a focused-only
+	// request left every other row without a name). The bookkeeping (what
+	// stands, what is requeued, what a response may change) lives in the
+	// pure #lib/previewBatch module.
+	const PREVIEW_CONCURRENCY = 3;
+	const batch = newPreviewBatchState();
+	// Version counter that wakes the effect below. A $state Set is NOT a
+	// working wake: Svelte 5 proxies plain objects and arrays, not native
+	// Sets, so an in-place clear()/add() creates no dependency and a
+	// settling request would never re-run the effect (batches past the
+	// cap stalled at "Resolving…"). Reassigning this counter on every
+	// settle is an explicit reactive write: the effect re-runs, plan()
+	// skips the slots that still stand (unchanged payload), and dispatches
+	// the next queued rows.
+	let previewBatchVersion = $state(0);
 
-	function schemeValues(candidate: MatchCandidate): Record<string, string> {
-		const book = candidate.details.book;
-		const release = candidate.details.release;
-		const series = book?.series?.[0];
-		const releaseDate = release?.releaseDate || book?.originallyPublishedAt || '';
-		return {
-			author: roleNames(book, release, 'author'),
-			narrator: roleNames(book, release, 'narrator'),
-			series_name: seriesRecordName(series),
-			series_position: seriesPositionValue(series),
-			subtitle: valueFor(release, 'subtitle') || valueFor(book, 'subtitle'),
-			title: release?.title || book?.title || '',
-			year: yearOf(releaseDate)
+	$effect(() => {
+		void previewBatchVersion;
+		const wanted = new Map<number, string>();
+		for (const c of candidates) {
+			if (c.details.book && outputScheme) {
+				wanted.set(
+					c.bookId,
+					JSON.stringify({
+						metadata: captureMetadata(c.details.book, c.details.release),
+						path_format: outputScheme
+					})
+				);
+			}
+		}
+		const dispatched = plan(batch, wanted, PREVIEW_CONCURRENCY);
+		for (const d of dispatched) {
+			outputPreviews[d.id] = '';
+			setTimeout(async () => {
+				let ok = false;
+				let value = '';
+				try {
+					const body = JSON.parse(d.payload);
+					const resp = await post<{ relative_path: string }>('/engine/preview', body);
+					ok = true;
+					value = resp.relative_path;
+				} catch {
+					// ok stays false: the slot is dropped and the id
+					// requeues (a failed fetch retries, never pins a
+					// permanent pending row).
+				} finally {
+					settle(batch, d.id, d.payload, d.gen, { ok, value });
+					// Sync the render state: settled values and pending
+					// slots both live in the module's bookkeeping now.
+					outputPreviews = { ...batch.previews };
+					// Wake the effect so the freed slot advances the
+					// queue (plan() skips the slots that stand).
+					previewBatchVersion++;
+				}
+			}, 250);
+		}
+	});
+
+	/** The snapshot shape a save captures for this selection — ordered
+	 *  people arrays, canonical ADB book id (#480), release year. */
+	function captureMetadata(book: AudiobookDBBook, release: AudiobookDBRelease | null): Record<string, unknown> {
+		const releaseDate = release?.releaseDate || book.originallyPublishedAt || '';
+		const meta: Record<string, unknown> = {
+			title: release?.title || book.title || '',
+			authors: rolePeople(book, release, 'author').map((p) => p.name),
+			narrators: rolePeople(book, release, 'narrator').map((p) => p.name)
 		};
+		// Subtitle with the SAME precedence the server capture uses
+		// (subtitleFromCatalog): the selected release's own subtitle when
+		// present, then the book's, then the book's disambiguation. Without
+		// it, a {subtitle} scheme resolves a different path in the preview
+		// than in the queued job (the snapshot carries the value, the
+		// preview payload did not).
+		const subtitle = [release?.subtitle, book.subtitle, book.disambiguation]
+			.map((v) => (v ?? '').trim())
+			.find((v) => v !== '');
+		if (subtitle) meta.subtitle = subtitle;
+		if (book.id) meta.book_id = book.id;
+		const year = Number(yearOf(releaseDate));
+		if (Number.isFinite(year) && year > 0) meta.year = year;
+		// Same series normalization the save captures: the stored books.series
+		// field is ALL named series entries comma-joined as "Name #N", and
+		// capture re-parses that string. A preview on only the first entry
+		// would diverge from the saved snapshot whenever a book has more
+		// than one named series.
+		const seriesName = (book.series ?? [])
+			.map((entry) => {
+				const name = seriesRecordName(entry);
+				if (!name) return '';
+				const position = seriesPositionValue(entry);
+				return [name, position ? `#${position}` : ''].filter(Boolean).join(' ');
+			})
+			.filter(Boolean)
+			.join(', ');
+		const [firstSeriesName, firstSeriesPosition] = splitSeries(seriesName);
+		if (firstSeriesName) meta.series_name = firstSeriesName;
+		if (firstSeriesPosition) meta.series_position = firstSeriesPosition;
+		const genre = (book.genres ?? [])[0]?.title;
+		if (genre) meta.genres = [genre];
+		return meta;
 	}
 
-	// ── Output naming preview (global Settings) ───────────────
 	function proposedRelativeName(candidate: MatchCandidate): string {
-		if (!outputScheme || !candidate.details.book) return '';
-		return resolveScheme(outputScheme, schemeValues(candidate));
+		return outputPreviews[candidate.bookId] ?? '';
 	}
 
 	function fullOutputPath(candidate: MatchCandidate): string {
@@ -1539,7 +1641,7 @@
 			release_date: releaseDate,
 			series: series || undefined,
 			publisher: release?.publisher?.name || undefined,
-			language: release?.language?.title || undefined,
+			language: release?.language?.name || undefined,
 			runtime_length_minutes: runtimeMs ? Math.round(runtimeMs / 60000) : undefined,
 			cover_image_url: selectedCover(candidate),
 			status: 'matched',
@@ -1677,7 +1779,10 @@
 		{:else if proposedRelativeName(c)}
 			<code>{proposedRelativeName(c)}</code>
 		{:else}
-			<span>Output scheme is empty</span>
+			<!-- Scheme set, record selected, name not settled: the preview
+			     is queued, in flight, or retrying — all pending, never an
+			     empty scheme. -->
+			<span>Resolving…</span>
 		{/if}
 		</div>
 		<details class="match__fullpath"><summary>Output path and naming details</summary><p>Preview only; the processor reports the final output path.</p><code>{fullOutputPath(c)}</code></details>
@@ -1924,7 +2029,7 @@
 										<p class="batch__author">{@render fieldEvidence(c, 'author', selectedAuthors(c))}</p>
 										<p class="batch__evidence batch__evidence--primary"><span class="batch__evidence-label">Narrator</span> <strong>{@render fieldEvidence(c, 'narrator', selectedNarrators(c) || 'Unavailable')}</strong> · <span class="batch__evidence-label">Runtime</span> <strong class="batch__runtime-value">{@render fieldEvidence(c, 'runtime', runtimeLabel(releaseRuntimeMs(c.details.release)) || 'Unavailable')}</strong></p>
 										<p class="batch__evidence batch__evidence--release"><span class="batch__evidence-label">Released</span> {@render fieldEvidence(c, 'date', dateLabel(c.details.release?.releaseDate) || 'Unavailable')}</p>
-										<p class="batch__evidence"><span class="batch__evidence-label">Publisher</span> {@render fieldEvidence(c, 'publisher', c.details.release?.publisher?.name || 'Unavailable')} · <span class="batch__evidence-label">Language</span> {@render fieldEvidence(c, 'language', c.details.release?.language?.title || 'Unavailable')}</p>
+										<p class="batch__evidence"><span class="batch__evidence-label">Publisher</span> {@render fieldEvidence(c, 'publisher', c.details.release?.publisher?.name || 'Unavailable')} · <span class="batch__evidence-label">Language</span> {@render fieldEvidence(c, 'language', c.details.release?.language?.name || 'Unavailable')}</p>
 										{#if edition}<p class="batch__edition">{edition}</p>{/if}
 										<div class="batch__state">{@render provenance(selected.id)}</div>
 									</div>
@@ -2170,7 +2275,7 @@
 										<div class="match__meta-primary"><dt>Runtime</dt><dd>{@render fieldEvidence(c, 'runtime', runtimeLabel(releaseRuntimeMs(release)) || 'Unavailable')}</dd></div>
 										<div class="match__meta-release"><dt>Released</dt><dd>{@render fieldEvidence(c, 'date', dateLabel(release?.releaseDate) || 'Unavailable')}</dd></div>
 										<div><dt>Publisher</dt><dd>{@render fieldEvidence(c, 'publisher', release?.publisher?.name || 'Unavailable')}</dd></div>
-										<div><dt>Language</dt><dd>{@render fieldEvidence(c, 'language', release?.language?.title || 'Unavailable')}</dd></div>
+										<div><dt>Language</dt><dd>{@render fieldEvidence(c, 'language', release?.language?.name || 'Unavailable')}</dd></div>
 									</dl>
 									{#if description}
 										<div class="match__description">

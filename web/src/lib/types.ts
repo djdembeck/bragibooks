@@ -188,6 +188,14 @@ export interface Settings {
 	api_endpoint_env_managed?: boolean;
 	/** Opt-in input-directory index (pre-extracted ASIN/title evidence). */
 	indexing_enabled?: boolean;
+	/** Per-field embedded-metadata write selection (#518); absent = all supported. */
+	metadata_fields?: string[];
+	/** Chapter write policy for the engine's chapter path (#518): write | preserve. */
+	metadata_chapters?: string;
+	/** True while PROCESSING_METADATA_FIELDS pins the selection deployment-side. */
+	metadata_fields_pinned?: boolean;
+	/** True while PROCESSING_METADATA_CHAPTERS pins the policy deployment-side. */
+	metadata_chapters_pinned?: boolean;
 	created_at?: string;
 	updated_at?: string;
 	bragibooks_version?: string;
@@ -289,6 +297,9 @@ export interface AudiobookDBBook {
 	 * payloads include. Both fields are optional in practice.
 	 */
 	image?: { url: string; width: number; height: number; blurdata?: string } | null;
+	/** The book's own subtitle; the server capture's fallback after the
+	 *  selected release's own subtitle (subtitleFromCatalog precedence). */
+	subtitle: string | null;
 	disambiguation: string | null;
 	type?: string;
 	originallyPublishedAt?: string;
@@ -309,12 +320,15 @@ export interface AudiobookDBRelease {
 	runtimeLengthSec: number;
 	isbn: string | null;
 	releaseDate: string | null;
+	/** The release's own subtitle; it wins over the book-level value in
+	 *  the server capture (subtitleFromCatalog precedence). */
+	subtitle: string;
 	chapterDetail?: {
 		chapters: { title: string; ordinal: number; startOffsetMs: number; lengthMs: number; lengthString: string }[];
 	};
 	people: AudiobookDBPersonRole[];
 	publisher: { id: string; name: string };
-	language: { id: string; title: string };
+	language: { name: string };
 	images: AudiobookDBImage[];
 }
 
@@ -354,6 +368,87 @@ export interface ReprocessRequest {
 	output_profile_id?: number;
 	output_dir?: string;
 	path_format?: string;
+}
+
+/** Wire shape of GET /api/books/{id}/metadata (the manual editor state). */
+export interface SnapshotChapter {
+	title: string;
+	start_millis: number;
+	duration_millis: number;
+}
+
+export interface BookMetadataSnapshot {
+	book_id: number;
+	audiobookdb_book_id: string;
+	audiobookdb_release_id: string;
+	title: string;
+	subtitle: string;
+	authors: string[];
+	narrators: string[];
+	series_name: string;
+	series_position: string;
+	description: string;
+	genres: string[];
+	year: number | null;
+	cover_file: string;
+	chapters: SnapshotChapter[] | null;
+	captured_at: string;
+}
+
+/** The stored manual override layer. Absent (null) = no overrides saved. */
+export interface BookMetadataOverrides {
+	title: string;
+	subtitle: string;
+	authors: string[] | null;
+	narrators: string[] | null;
+	series_name: string;
+	series_position: string;
+	description: string;
+	genres: string[] | null;
+	year: number | null;
+	cleared: string[];
+	cover_source: '' | 'clear' | 'file' | 'url';
+	cover_file: string;
+	cover_url: string;
+	chapters: SnapshotChapter[] | null;
+	updated_at: string;
+}
+
+/** PUT /api/books/{id}/metadata body: the editor's full override draft.
+ *  Field conventions: '' = no scalar override; null array = no array
+ *  override; null year = no year override; cleared = explicit tag removal. */
+export interface BookMetadataDraft {
+	title: string;
+	subtitle: string;
+	authors: string[] | null;
+	narrators: string[] | null;
+	series_name: string;
+	series_position: string;
+	description: string;
+	genres: string[] | null;
+	year: number | null;
+	cleared: string[];
+	cover_source: '' | 'clear' | 'file' | 'url';
+	cover_file: string;
+	cover_url: string;
+	chapters: SnapshotChapter[] | null;
+}
+
+export interface BookMetadataResponse {
+	snapshot: BookMetadataSnapshot | null;
+	overrides: BookMetadataOverrides | null;
+	effective: BookMetadataSnapshot | null;
+	effective_chapters: SnapshotChapter[] | null;
+}
+
+/** Wire shape of POST /api/engine/preview. */
+export interface EnginePreviewResponse {
+	relative_path: string;
+}
+
+/** Wire shape of POST /api/books/{id}/metadata/cover. */
+export interface CoverUploadResponse {
+	cover_file: string;
 }
 
 /** Wire shape of models.OutputProfile. */

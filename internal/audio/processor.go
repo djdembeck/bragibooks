@@ -5,12 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"log"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,6 +29,37 @@ type Processor struct {
 	PathFormat   string
 	LogLevel     string
 	version      string
+	// capabilities is the engine's --capabilities document, verified at
+	// startup and refreshed after any settings change that swaps the binary.
+	// Every token/policy decision the API makes (preview validation, the
+	// Settings picker, save-time format checks) derives from this — Bragi owns
+	// no token registry of its own.
+	capabilities *Capabilities
+	// metadataFields is the saved per-field metadata write selection (#518),
+	// refreshed by ApplyConfig after a settings update and snapshotted under
+	// the same lock so every run observes one consistent value. Nil is the
+	// default all-supported-available behavior; a non-nil (possibly empty)
+	// slice is the explicit selection.
+	metadataFields *[]string
+	// metadataChapters is the saved chapter write policy ("write" default,
+	// "preserve").
+	metadataChapters string
+}
+
+// Capabilities returns the verified engine capabilities, or nil before the
+// startup probe has run. Callers on the request path should treat nil as "not
+// verified" and refuse, never as a fallback to a local token table.
+func (p *Processor) Capabilities() *Capabilities {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.capabilities
+}
+
+// StoreCapabilities records the verified capabilities for the current binary.
+func (p *Processor) StoreCapabilities(c *Capabilities) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.capabilities = c
 }
 
 // snapshot returns a consistent copy of the mutable CLI settings (see the
@@ -41,6 +68,80 @@ func (p *Processor) snapshot() (binary, outputDir, completedDir, pathFormat, log
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.Binary, p.OutputDir, p.CompletedDir, p.PathFormat, p.LogLevel, p.NumCPUs
+}
+
+// WriteSelectionSnapshot returns a consistent copy of the saved per-field
+// metadata write selection (nil = default all-supported-available; non-nil
+// = the explicit selection, possibly empty) and the chapter write policy.
+func (p *Processor) WriteSelectionSnapshot() (fields *[]string, chapters string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	f := p.metadataFields
+	if f != nil {
+		cp := make([]string, len(*f))
+		copy(cp, *f)
+		f = &cp
+	}
+	c := p.metadataChapters
+	if c == "" {
+		c = ChaptersPolicyValueWrite // blank is the documented default
+	}
+	return f, c
+}
+
+// SettingsSnapshot returns a consistent copy of the effective destination
+// and path-format settings for the worker: the output root the job's
+// artifacts are published under, the completed directory (empty when
+// disabled), and the global relative path format. A blank override in the
+// caller's queue-time destination pair resolves to these live values.
+func (p *Processor) SettingsSnapshot() (outputDir, completedDir, pathFormat string) {
+	_, outputDir, completedDir, pathFormat, _, _ = p.snapshot()
+	return
+}
+
+// QueueSnapshot is the ONE atomic read the queue freezes a job from: the
+// per-field write selection AND the destination/path-format globals from a
+// single locked read. Taking the two halves from separate reads would let a
+// settings save change one between the reads and freeze a mixed generation
+// into the job args; a job must observe one consistent settings instant.
+type QueueSnapshot struct {
+	// Fields is the write selection at that instant (nil = the default
+	// all-supported-available behavior; non-nil, possibly empty, = the
+	// explicit selection). A copy, never a live reference.
+	Fields *[]string
+	// Chapters is the chapter write policy ("" normalized to the
+	// documented "write" default).
+	Chapters string
+	// OutputDir/CompletedDir/PathFormat are the effective destination
+	// globals (a blank override resolves against these).
+	OutputDir    string
+	CompletedDir string
+	PathFormat   string
+}
+
+// QueueSnapshot takes the single atomic read described above.
+func (p *Processor) QueueSnapshot() QueueSnapshot {
+	// One RLock for every field (no re-entrant snapshot() call: a
+	// re-acquired read lock would deadlock behind a pending writer).
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	f := p.metadataFields
+	if f != nil {
+		cp := make([]string, len(*f))
+		copy(cp, *f)
+		f = &cp
+	}
+	c := p.metadataChapters
+	if c == "" {
+		c = ChaptersPolicyValueWrite // blank is the documented default
+	}
+	return QueueSnapshot{
+		Fields:       f,
+		Chapters:     c,
+		OutputDir:    p.OutputDir,
+		CompletedDir: p.CompletedDir,
+		PathFormat:   p.PathFormat,
+	}
 }
 
 // ApplyConfig refreshes the mutable m4b-merge settings (binary, output and
@@ -70,12 +171,35 @@ func NewProcessor(binary, outputDir, completedDir string, numCPUs int, pathForma
 	}
 }
 
-// ProcessResult holds the output of a single m4b-merge run.
-type ProcessResult struct {
-	OutputFile    string
-	Stdout        string
-	Stderr        string
-	OutputWarning string
+// ApplyWriteSelection refreshes the saved per-field metadata write selection
+// (nil = default all-supported-available) and chapter write policy from the
+// loaded config. Like ApplyConfig it runs under the write lock; main calls it
+// after the database settings load, and the settings handler calls it after
+// each successful save.
+func (p *Processor) ApplyWriteSelection(fields *[]string, chapters string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.metadataFields = fields
+	p.metadataChapters = chapters
+}
+
+// ApplyConfigAndSelection refreshes the mutable settings AND the write
+// selection under ONE lock: a settings save changes both, and a queue
+// snapshot taken between two separate applies would freeze a mixed
+// generation into the job args (the new selection with the old
+// destination, or vice versa). QueueSnapshot must observe complete old
+// or complete new state, never the in-between.
+func (p *Processor) ApplyConfigAndSelection(cfg *config.Config) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Binary = cfg.M4bMerge.Binary
+	p.OutputDir = cfg.Directories.OutputDir
+	p.CompletedDir = cfg.Directories.CompletedDir
+	p.NumCPUs = cfg.Processing.NumCPUs
+	p.PathFormat = cfg.Processing.PathFormat
+	p.LogLevel = cfg.Processing.LogLevel
+	p.metadataFields = cfg.Processing.MetadataFields
+	p.metadataChapters = cfg.Processing.MetadataChapters
 }
 
 // stripEscapeSequences removes ANSI/VT100 escape sequences from s so the
@@ -137,19 +261,6 @@ func escapeSequenceEnd(s string, i int) int {
 	}
 }
 
-// RunOptions carries per-run destination overrides. A non-empty (after
-// trimming) value takes precedence over the live Processor settings;
-// empty inherits the snapshot value.
-type RunOptions struct {
-	OutputDirOverride  string
-	PathFormatOverride string
-	// OnOutput receives complete stdout lines as m4b-merge writes them,
-	// with ANSI/VT100 sequences stripped. It runs on the goroutine draining
-	// the child's stdout, so it must not block for long; nil disables live
-	// streaming while leaving the captured result intact.
-	OnOutput func(line string)
-}
-
 // lineStreamWriter buffers stdout until a complete line is available, strips
 // escape sequences, and hands each line to onLine. Buffering by line is safe
 // for escape sequences: none contain a newline, so a sequence split across
@@ -188,236 +299,13 @@ func (w *lineStreamWriter) emit(line []byte) {
 	}
 }
 
-// Run executes m4b-merge with the given input file paths.
-// Returns the output .m4b file path, or an error.
-//
-// jobID scopes output discovery to this run: m4b-merge writes its result
-// under -o using a -p path scheme (no per-run output dir flag, and the
-// scheme tree is shared across concurrent workers), so discovering "the
-// newest .m4b in OutputDir" misattributes other workers' outputs. We
-// therefore write each job into its own subtree, OutputDir/<jobID>.tmp/
-// (reusing the -p scheme tree inside it), and only on success move the
-// discovered file to its final location under OutputDir. This uses the
-// existing m4b-merge flags only; no CLI surface is changed.
-func (p *Processor) Run(ctx context.Context, jobID string, inputPaths []string, asin string, opts RunOptions) (*ProcessResult, error) {
-	binary, outputRoot, completedDir, pathFormat, logLevel, numCPUs := p.snapshot()
-
-	// A relative output root (a valid dev configuration) must be
-	// absolutized before discovery and the final move: findNewestM4B
-	// returns absolute paths, so with a relative root filepath.Rel fails,
-	// OutputFile stays empty, and the per-job cleanup below deletes the
-	// produced .m4b. Empty stays empty.
-	if outputRoot != "" {
-		outputRoot, _ = filepath.Abs(outputRoot)
-	}
-
-	// Per-run destination overrides win over the snapshot values. The
-	// directory override is validated absolute at write time, so it joins
-	// byte-identically with the Match preview's effective-dir join.
-	if od := strings.TrimSpace(opts.OutputDirOverride); od != "" {
-		if abs, err := filepath.Abs(od); err == nil {
-			outputRoot = abs
-		}
-	}
-	effFormat := pathFormat
-	if f := strings.TrimSpace(opts.PathFormatOverride); f != "" {
-		effFormat = f
-	}
-
-	// Probe the completed directory before touching the filesystem or
-	// spawning the child. m4b-merge runs its own create_dir_all on
-	// --completed-directory at startup and only reports
-	// "Completed directory is not writable: <io error>" — no path — which
-	// the web then could only render as a generic permission sentence.
-	// Failing here names the setting before the per-job subtree exists.
-	if completedDir != "" {
-		if err := CheckDirWritable(completedDir); err != nil {
-			return nil, fmt.Errorf("completed directory %w", err)
-		}
-	}
-
-	outputDir := outputRoot
-	workDir := ""
-	// An empty output root (misconfiguration or a test processor) would put
-	// the per-job subtree in cwd; in that case fall back to unscoped
-	// discovery as before.
-	if jobID != "" && outputRoot != "" {
-		workDir = filepath.Join(outputRoot, jobID+".tmp")
-		if err := os.MkdirAll(workDir, 0o755); err != nil {
-			return nil, fmt.Errorf("create job output dir %s: %w", workDir, err)
-		}
-		outputDir = workDir
-	}
-
-	args := []string{
-		"-o", outputDir,
-		"-p", effFormat,
-		"--num-cpus", strconv.Itoa(numCPUs),
-		"--log-level", logLevel,
-	}
-	if completedDir != "" {
-		args = append(args, "--completed-directory", completedDir)
-	}
-	if asin != "" {
-		args = append(args, "-a", asin)
-	}
-	// m4b-merge (clap) requires one -i per input; a single -i with multiple
-	// values errors with "unexpected argument".
-	for _, in := range inputPaths {
-		args = append(args, "-i", in)
-	}
-
-	cmd := exec.CommandContext(ctx, binary, args...)
-	// The whole tree: ctx cancellation must kill the spawned process and
-	// everything it spawned (see processTree), not just the direct child.
-	tree := newProcessTree(cmd)
-	cmd.Cancel = func() error {
-		if err := tree.start(cmd); err != nil {
-			return err
-		}
-		return tree.kill()
-	}
-	// Guard against any writer we could not kill: force Wait to return
-	// shortly after cancel instead of blocking on inherited pipes.
-	cmd.WaitDelay = 5 * time.Second
-
-	// os/exec owns the drain: with buffers wired directly as the child's
-	// stdout/stderr, exec internally reads both streams concurrently and
-	// guarantees they are fully drained (and the buffers valid) once
-	// Wait returns. Manual StdoutPipe/StderrPipe + io.Copy goroutines
-	// raced with Wait closing the read ends and lost large stderr output.
-	var stdoutBuf, stderrBuf bytes.Buffer
-	var stream *lineStreamWriter
-	if opts.OnOutput != nil {
-		stream = &lineStreamWriter{onLine: opts.OnOutput}
-		cmd.Stdout = io.MultiWriter(&stdoutBuf, stream)
-	} else {
-		cmd.Stdout = &stdoutBuf
-	}
-	cmd.Stderr = &stderrBuf
-
-	start := time.Now()
-	if err := cmd.Start(); err != nil {
-		if workDir != "" {
-			_ = os.RemoveAll(workDir)
-		}
-		return nil, fmt.Errorf("m4b-merge start: %w", err)
-	}
-
-	waitErr := cmd.Wait()
-	tree.finish()
-	if stream != nil {
-		stream.Flush()
-	}
-
-	// m4b-merge colorizes its tracing output unconditionally (no TTY check,
-	// no --no-color flag), so the pipes receive ANSI SGR sequences. Strip
-	// them here, at the single point both streams enter the app: processJob
-	// persists Stdout as processing_jobs.output (rendered verbatim in the
-	// job-log <pre>) and embeds Stderr in the persisted error message.
-	result := &ProcessResult{
-		Stdout: stripEscapeSequences(stdoutBuf.String()),
-		Stderr: stripEscapeSequences(stderrBuf.String()),
-	}
-
-	if waitErr != nil {
-		// No output was produced: the per-job subtree is garbage and safe
-		// to drop. (A relocation failure, by contrast, keeps the subtree —
-		// there the .m4b is the only completed artifact; see below.)
-		if workDir != "" {
-			_ = os.RemoveAll(workDir)
-		}
-		return result, fmt.Errorf("m4b-merge: %w: %s", waitErr, result.Stderr)
-	}
-
-	// m4b-merge writes its output under -o using a path scheme; discovery is
-	// scoped to this job's subtree. The 1s margin absorbs clock granularity
-	// between start and mtime.
-	if out, err := findNewestM4B(outputDir, start.Add(-time.Second)); err != nil {
-		result.OutputWarning = "output file discovery failed: " + err.Error()
-	} else if out == "" {
-		result.OutputWarning = "no output .m4b found in output directory"
-	} else if workDir != "" {
-		// Relocate into the shared output tree, keeping the scheme-relative
-		// path (e.g. Author/Title.m4b under {author}/{title}). The .m4b was
-		// found only inside the per-job subtree: on relocation failure the
-		// subtree is kept (recovery possible) and the run reports a real
-		// failure instead of succeeding with no output file.
-		rel, err := filepath.Rel(workDir, out)
-		if err != nil {
-			return result, fmt.Errorf("resolve output file %s relative to job dir %s: %w", out, workDir, err)
-		}
-		finalPath := filepath.Join(outputRoot, rel)
-		if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
-			return result, fmt.Errorf("create output path for %s: %w", finalPath, err)
-		}
-		if err := os.Rename(out, finalPath); err != nil {
-			if err2 := os.MkdirAll(filepath.Dir(finalPath), 0o755); err2 == nil {
-				// Cross-device rename: copy then delete.
-				if data, rdErr := os.ReadFile(out); rdErr == nil {
-					err = os.WriteFile(finalPath, data, 0o644)
-					if err == nil {
-						os.Remove(out)
-					}
-				} else {
-					err = rdErr
-				}
-			}
-			if err != nil {
-				return result, fmt.Errorf("move output to final location %s: %w (job output kept at %s)", finalPath, err, workDir)
-			}
-		}
-		result.OutputFile, _ = filepath.Abs(finalPath)
-	} else {
-		result.OutputFile = out
-	}
-
-	// Publication succeeded: the .m4b is at its final location, so the
-	// per-job subtree is garbage to clean up.
-	if workDir != "" {
-		_ = os.RemoveAll(workDir)
-	}
-
-	return result, nil
-}
-
-// findNewestM4B walks dir recursively for *.m4b files and returns the absolute
-// path of the newest one by mtime, ignoring files older than since. Returns
-// "" (no error) when no qualifying file exists.
-func findNewestM4B(dir string, since time.Time) (string, error) {
-	var newest string
-	var newestMtime time.Time
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".m4b") {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if info.ModTime().Before(since) {
-			return nil
-		}
-		if newest == "" || info.ModTime().After(newestMtime) {
-			newest = path
-			newestMtime = info.ModTime()
-		}
-		return nil
-	})
-	if err != nil {
-		return "", fmt.Errorf("walk %s: %w", dir, err)
-	}
-	if newest == "" {
-		return "", nil
-	}
-	return filepath.Abs(newest)
-}
-
-// MinimumM4bMergeVersion is the minimum required m4b-merge version.
-const MinimumM4bMergeVersion = "1.0.0"
+// MinimumM4bMergeVersion is the minimum required m4b-merge version. 2.2.0 is
+// the first release with the full protocol Bragi's authoritative snapshot
+// cutover runs on: schema_version 1 jobs with the plural people tokens AND
+// a supplied-mode canonical book id that feeds the {book_id} naming token
+// (#480). The capabilities probe is the authoritative protocol gate and
+// this is the coarse floor reported in messages.
+const MinimumM4bMergeVersion = "2.2.0"
 
 // Version runs the m4b-merge binary with --version and returns the last
 // whitespace-separated token of its output as the reported version.
@@ -480,12 +368,52 @@ func (p *Processor) UpdateVersion() string {
 	p.mu.RLock()
 	binary := p.Binary
 	p.mu.RUnlock()
+	return p.probeVersion(context.Background(), binary)
+}
 
+// CheckVersionFor reports the version of the EXACT binary named and errors
+// when it is missing, unreportable, or below MinimumM4bMergeVersion. Unlike
+// CheckVersion it does not read p.Binary, so a caller that captured a
+// binary snapshot can gate on the precise executable it is about to launch
+// (the per-run pre-launch gate). The probe runs under the caller's context,
+// so a cancelled run dies with the probe's process tree instead of stalling
+// the gate. The probe never stores the result: the display version stays
+// tied to the live config binary.
+func (p *Processor) CheckVersionFor(ctx context.Context, binary string) (string, error) {
+	if binary == "" {
+		return "", errors.New("m4b-merge binary is not set")
+	}
+	// The CANDIDATE's own reported version is the one under test: the live
+	// cached version (what probeVersion stores) belongs to p.Binary and is
+	// meaningless when the candidate differs.
+	reported := p.probeVersionReport(ctx, binary)
+	if reported == "unknown" {
+		return "", fmt.Errorf("m4b-merge %s cannot report a version", binary)
+	}
+	if err := checkSemver(reported, MinimumM4bMergeVersion); err != nil {
+		return "", fmt.Errorf("m4b-merge version %s is too old, need >= %s", reported, MinimumM4bMergeVersion)
+	}
+	return reported, nil
+}
+
+// probeVersion runs the --version probe against binary ("" yields "unknown"
+// without spawning anything) and stores the result only when binary is the
+// live config binary.
+func (p *Processor) probeVersion(ctx context.Context, binary string) string {
+	reported := p.probeVersionReport(ctx, binary)
+	return p.storeLinkedVersion(binary, reported)
+}
+
+// probeVersionReport runs the --version probe against binary and returns the
+// version the probe itself reported, WITHOUT storing it: callers validating
+// a candidate binary must gate on the candidate's own report, not the live
+// cache entry that belongs to p.Binary.
+func (p *Processor) probeVersionReport(ctx context.Context, binary string) string {
 	if binary == "" {
 		// Nothing to execute; never spawn the bare "" command.
-		return p.storeLinkedVersion(binary, "unknown")
+		return "unknown"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), versionProbeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, versionProbeTimeout)
 	defer cancel()
 
 	// Execute, retrying the transient ETXTBSY: Linux refuses to exec a
@@ -510,11 +438,12 @@ func (p *Processor) UpdateVersion() string {
 		// wrapper; a grandchild that inherits the stdout pipe would
 		// otherwise hold the probe open long after the child itself is
 		// killed, stalling the settings request past the deadline.
-		tree := newProcessTree(cmd)
+		tree, terr := newProcessTree(cmd)
+		if terr != nil {
+			log.Printf("Warning: m4b-merge version probe for binary %s failed: %v", binary, terr)
+			break
+		}
 		cmd.Cancel = func() error {
-			if err := tree.start(cmd); err != nil {
-				return err
-			}
 			return tree.kill()
 		}
 		// Guard against any writer we could not kill: force Wait to
@@ -530,7 +459,18 @@ func (p *Processor) UpdateVersion() string {
 		cmd.Stdout = &stdoutBuf
 		cmd.Stderr = &stderrBuf
 
-		err := cmd.Run()
+		err := cmd.Start()
+		if err == nil {
+			// Constrain the child to the tree NOW, before it can spawn
+			// descendants that would escape a cancel-time assignment.
+			if serr := tree.start(cmd); serr != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				err = serr
+			} else {
+				err = cmd.Wait()
+			}
+		}
 		tree.finish()
 		switch {
 		case err == nil:
@@ -552,7 +492,7 @@ func (p *Processor) UpdateVersion() string {
 	if reported == "" {
 		reported = "unknown"
 	}
-	return p.storeLinkedVersion(binary, reported)
+	return reported
 }
 
 // formattedStderr appends the child's stderr as a suffix to a log line.

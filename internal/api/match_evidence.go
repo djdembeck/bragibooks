@@ -582,7 +582,7 @@ func catalogTextValue(key string, catalog *matchCatalog) string {
 		return ""
 	case audio.FieldLanguage:
 		if release != nil {
-			return strings.TrimSpace(release.Language.Title)
+			return strings.TrimSpace(release.Language.Name)
 		}
 		return ""
 	}

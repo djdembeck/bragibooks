@@ -242,14 +242,132 @@ ALTER TABLE settings ADD COLUMN indexing_enabled BOOLEAN NOT NULL DEFAULT 0;
 `,
 	},
 	{
-		// v15: the queue request that created the job (a per-request UUID
+		// v15: authoritative processing snapshots. book_snapshots stores the
+		// operator's SELECTED catalog record per book, captured at Match
+		// save / metadata edit: the effective metadata (title, ordered
+		// authors/narrators — array order is the path/author order — series,
+		// description, genres, year), the canonical AudiobookDB book id
+		// ({book_id} token), the selected release id, an integer-millisecond
+		// chapter list, and a local cover filename under the covers
+		// directory (immutable artwork reference, staged into the job's own
+		// staging root at run time). A job's m4b_merge_args now embeds a
+		// copy of its book's snapshot (snapshot_version >= 1); jobs captured
+		// before this column (snapshot_version = 0) are legacy and are
+		// resolved explicitly at queue time, never guessed.
+		version: 15,
+		sql: `
+CREATE TABLE IF NOT EXISTS book_snapshots (
+    book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    audiobookdb_book_id TEXT NOT NULL DEFAULT '',
+    audiobookdb_release_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    authors TEXT NOT NULL DEFAULT '[]',
+    narrators TEXT NOT NULL DEFAULT '[]',
+    series_name TEXT NOT NULL DEFAULT '',
+    series_position TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    genres TEXT NOT NULL DEFAULT '[]',
+    year INTEGER,
+    cover_file TEXT NOT NULL DEFAULT '',
+    chapters TEXT NOT NULL DEFAULT '[]',
+    captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+ALTER TABLE processing_jobs ADD COLUMN snapshot_version INTEGER NOT NULL DEFAULT 0;
+`,
+	},
+	{
+		// v16: per-field metadata write selection (#518) and the subtitle
+		// capture. settings.metadata_fields stores the explicit selection as
+		// a JSON array ("[]" = write nothing); an EMPTY string means "not
+		// set" and the all-supported-available default applies — the same
+		// nil-vs-explicit distinction the Go config uses. book_snapshots
+		// gains subtitle so the title and subtitle write selections are
+		// backed by independently captured values (the engine's independent
+		// title/subtitle component policies, M1, need the subtitle value to
+		// write it and to preserve it across a title write).
+		version: 16,
+		sql: `
+ALTER TABLE settings ADD COLUMN metadata_fields TEXT NOT NULL DEFAULT '';
+ALTER TABLE settings ADD COLUMN metadata_chapters TEXT NOT NULL DEFAULT 'write';
+ALTER TABLE book_snapshots ADD COLUMN subtitle TEXT NOT NULL DEFAULT '';
+`,
+	},
+	{
+		// v17: manual metadata overrides. One durable per-book override row,
+		// separate from the book_snapshots catalog capture: the capture
+		// records the selected catalog record (and re-takes it on every
+		// match/save), while this row records the OPERATOR'S explicit
+		// per-field intent on top of it — an edited value, an explicit clear
+		// (remove the embedded tag), or no opinion (the catalog value
+		// applies). Effective metadata = catalog capture with the override
+		// layer applied, and only the effective values name the output and
+		// feed the selected writes. Storage conventions per field:
+		//   - scalar text (title, subtitle, series, description): '' = no
+		//     override (the field's own "clear" lives in the cleared list,
+		//     because a blank value is a legal catalog state);
+		//   - people arrays (authors, narrators, genres): '' = no override,
+		//     '[]' = explicitly empty;
+		//   - year: NULL = no override, a value = the edited year; an
+		//     explicit clear is the 'year' entry in cleared (the column
+		//     alone cannot carry all three states);
+		//   - cleared: JSON array of field names the operator explicitly
+		//     cleared (remove the embedded tag from the output), distinct
+		//     from resetting to the catalog value;
+		//   - cover: cover_source '' = no override (the catalog cover
+		//     applies), 'clear' = remove the cover from the output, 'file'
+		//     = the operator's own artwork (cover_file, an immutable local
+		//     asset under the covers directory);
+		//   - chapters: '' = no override (the selected release's chapters
+		//     and the chapter write policy apply), a JSON array (possibly
+		//     empty = remove chapters) = the operator's explicit list.
+		// A queued job embeds a copy of the row in its snapshot, so later
+		// edits change future jobs only.
+		version: 17,
+		sql: `
+CREATE TABLE IF NOT EXISTS book_metadata_overrides (
+    book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    title TEXT NOT NULL DEFAULT '',
+    subtitle TEXT NOT NULL DEFAULT '',
+    authors TEXT NOT NULL DEFAULT '',
+    narrators TEXT NOT NULL DEFAULT '',
+    series_name TEXT NOT NULL DEFAULT '',
+    series_position TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    genres TEXT NOT NULL DEFAULT '',
+    year INTEGER,
+    cleared TEXT NOT NULL DEFAULT '[]',
+    cover_source TEXT NOT NULL DEFAULT '',
+    cover_file TEXT NOT NULL DEFAULT '',
+    cover_url TEXT NOT NULL DEFAULT '',
+    chapters TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`,
+	},
+	{
+		// v18: persist the index partial-write guard. A scan that fails
+		// mid-upsert leaves source_index partially written (bounded batches
+		// commit independently); listings must fall back to the filesystem
+		// on that root until a clean scan completes. The guard was
+		// in-memory only, so a restart dropped it and the partial table was
+		// served as authoritative until an operator triggered a clean scan.
+		// Persisting it (root string, '' = clean) makes the guard survive a
+		// restart; a clean terminal on the root clears it, same as before.
+		version: 18,
+		sql: `
+ALTER TABLE index_state ADD COLUMN write_failed_root TEXT NOT NULL DEFAULT '';
+`,
+	},
+	{
+		// v19: the queue request that created the job (a per-request UUID
 		// shared by every job the request enqueued). The queue page's
 		// completion banner reports per request: queue_seq alone cannot
 		// separate two requests enqueued back to back, because queue_seq
 		// is MAX+1 per insert and completed rows are never pruned, so their
-		// sequences stay contiguous. Audit rows and pre-v15 rows stay NULL
+		// sequences stay contiguous. Audit rows and pre-v19 rows stay NULL
 		// — the banner groups those by queue_seq adjacency as before.
-		version: 15,
+		version: 19,
 		sql: `
 ALTER TABLE processing_jobs ADD COLUMN batch_id TEXT;
 `,
