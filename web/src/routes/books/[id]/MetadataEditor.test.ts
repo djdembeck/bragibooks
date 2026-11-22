@@ -389,6 +389,254 @@ describe('MetadataEditor prefill and partial save', () => {
 		unmount(comp);
 		target.remove();
 	});
+
+	// Both the capture row AND the server-computed effective state are
+	// gone, but a stored override row survives (an update can delete the
+	// snapshot while the override outlives it). The prefill's last-resort
+	// fallback must take the override row, or the next save would replace
+	// the hidden stored lists with the empty ones.
+	const resOverrideOnly = {
+		...BASE,
+		snapshot: null,
+		overrides: {
+			title: 'Overridden title',
+			subtitle: '',
+			authors: ['Auth B'],
+			narrators: null,
+			series_name: '',
+			series_position: '',
+			description: '',
+			genres: null,
+			year: null,
+			cleared: [],
+			cover_source: '' as const,
+			cover_file: '',
+			cover_url: '',
+			chapters: null,
+			updated_at: '2026-01-01T00:00:00Z'
+		}
+	} satisfies BookMetadataResponse;
+
+	it('prefills the override row when effective and snapshot are both null, and a partial save keeps the stored lists', async () => {
+		getImpl = (url) =>
+			url === '/books/1/metadata'
+				? Promise.resolve(resOverrideOnly)
+				: Promise.reject(new Error(`unexpected GET ${url}`));
+		const { promise: save, resolve: releaseSave } = Promise.withResolvers<BookMetadataResponse>();
+		putImpl = (url) => {
+			if (url === '/books/1/metadata') return save;
+			throw new Error(`unexpected PUT ${url}`);
+		};
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, null);
+		flushSync();
+		await settle();
+		// The override row is the last-resort prefill source: its values,
+		// not blanks, are shown.
+		expect(titleInput(target).value).toBe('Overridden title');
+		const authorInput = target.querySelector<HTMLInputElement>('.meditor__input--person');
+		expect(authorInput, 'author input not rendered').not.toBeNull();
+		expect(authorInput!.value).toBe('Auth B');
+
+		// A partial save of ONE field must carry the STORED row's values
+		// for every untouched field: if the prefill had blanked them, the
+		// payload would send ''/null and the server would replace the
+		// hidden stored title and list.
+		const sub = target.querySelector<HTMLInputElement>('#meditor-subtitle');
+		expect(sub, 'subtitle input not rendered').not.toBeNull();
+		sub!.value = 'Edited sub';
+		sub!.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		const saveBtn = Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find(
+			(b) => b.textContent?.includes('Save manual metadata')
+		);
+		saveBtn!.click();
+		flushSync();
+		const puts = calls.filter((c) => c.method === 'put' && c.url === '/books/1/metadata');
+		expect(puts.length).toBe(1);
+		const body = puts[0].body as Record<string, unknown>;
+		expect(body.subtitle).toBe('Edited sub'); // the only edited field
+		expect(body.title).toBe('Overridden title'); // stored value, not blanked
+		expect(body.authors).toEqual(['Auth B']); // stored list, not null
+		expect(body.series_name).toBe(''); // unchanged scalar: stored value
+
+		// The save resolves with a response matching the stored state;
+		// the editor must end clean.
+		releaseSave(resOverrideOnly);
+		await settle();
+		expect(target.textContent).toContain('All changes saved');
+		expect(target.textContent).not.toContain('Unsaved changes');
+		expect(saveBtn!.disabled).toBe(true);
+
+		unmount(comp);
+		target.remove();
+	});
+});
+
+describe('MetadataEditor response-authoritative save and in-flight edits', () => {
+	// The server is authoritative on save: the draft and baseline are
+	// rebuilt from the RESPONSE (not the submitted draft), and edits made
+	// while the PUT is in flight are overlaid on top of the
+	// response-based baseline, where they stay dirty for the next save.
+	it('adopts the response values over the submitted draft and ends clean', async () => {
+		const resResponse = {
+			...resA,
+			overrides: resAWithOverrides.overrides!,
+			effective: snap({ book_id: 1, title: 'Saved title', authors: ['Auth B'] })
+		} satisfies BookMetadataResponse;
+		getImpl = (url) =>
+			url === '/books/1/metadata'
+				? Promise.resolve(resA)
+				: Promise.reject(new Error(`unexpected GET ${url}`));
+		const { promise: save, resolve: releaseSave } = Promise.withResolvers<BookMetadataResponse>();
+		putImpl = (url) => {
+			if (url === '/books/1/metadata') return save;
+			throw new Error(`unexpected PUT ${url}`);
+		};
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, null);
+		flushSync();
+		await settle();
+		expect(titleInput(target).value).toBe('Book A');
+
+		// Dirty the draft and submit; the server returns values the
+		// submitted draft never had (the stored title/list).
+		const input = titleInput(target);
+		input.value = 'Edited A';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		const saveBtn = Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find(
+			(b) => b.textContent?.includes('Save manual metadata')
+		);
+		saveBtn!.click();
+		flushSync();
+		const body = calls.filter((c) => c.method === 'put' && c.url === '/books/1/metadata')[0]
+			.body as Record<string, unknown>;
+		expect(body.title).toBe('Edited A');
+
+		releaseSave(resResponse);
+		await settle();
+		// The response-derived draft is adopted: the stored title and
+		// author list are shown, not the submitted values.
+		expect(titleInput(target).value).toBe('Saved title');
+		const authorInput = target.querySelector<HTMLInputElement>('.meditor__input--person');
+		expect(authorInput, 'author input not rendered').not.toBeNull();
+		expect(authorInput!.value).toBe('Auth B');
+		// The baseline is the response-derived draft: with no post-submit
+		// edits the draft is clean and the save is disabled again.
+		expect(target.textContent).toContain('All changes saved');
+		expect(target.textContent).not.toContain('Unsaved changes');
+		expect(saveBtn!.disabled).toBe(true);
+
+		unmount(comp);
+		target.remove();
+	});
+
+	it('keeps an in-flight edit dirty over the response baseline and sends it in the next partial save', async () => {
+		// The save response is the stored state the server computed:
+		// effective carries the override layer, so the response-derived
+		// draft shows the stored title and list.
+		const resSaved = {
+			...resAWithOverrides,
+			overrides: { ...resAWithOverrides.overrides!, authors: ['Auth B'] },
+			effective: snap({ book_id: 1, title: 'Saved title', authors: ['Auth B'] })
+		} satisfies BookMetadataResponse;
+		getImpl = (url) =>
+			url === '/books/1/metadata'
+				? Promise.resolve(resAWithOverrides)
+				: Promise.reject(new Error(`unexpected GET ${url}`));
+		const { promise: save, resolve: releaseSave } = Promise.withResolvers<BookMetadataResponse>();
+		const { promise: save2, resolve: releaseSave2 } = Promise.withResolvers<BookMetadataResponse>();
+		let putCount = 0;
+		putImpl = (url) => {
+			if (url !== '/books/1/metadata') throw new Error(`unexpected PUT ${url}`);
+			putCount++;
+			return putCount === 1 ? save : save2;
+		};
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, null);
+		flushSync();
+		await settle();
+		// effective is null, so the prefill is the SNAPSHOT's value — the
+		// stored override title is NOT displayed (that is the tri-state
+		// contract the partial save must round-trip).
+		expect(titleInput(target).value).toBe('Book A');
+
+		// Submit a save of the title, then edit the SUBTITLE while the
+		// PUT is still in flight (inputs stay enabled during a save).
+		const title = titleInput(target);
+		title.value = 'Edited title';
+		title.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		const saveBtn = Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find(
+			(b) => b.textContent?.includes('Save manual metadata')
+		);
+		saveBtn!.click();
+		flushSync();
+		const firstBody = calls.filter((c) => c.method === 'put' && c.url === '/books/1/metadata')[0]
+			.body as Record<string, unknown>;
+		expect(firstBody.title).toBe('Edited title');
+		expect(firstBody.subtitle).toBe(''); // not yet edited at submission
+
+		const subtitle = target.querySelector<HTMLInputElement>('#meditor-subtitle');
+		expect(subtitle, 'subtitle input not rendered').not.toBeNull();
+		subtitle!.value = 'In-flight sub';
+		subtitle!.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+
+		// The LATE response (which predates the in-flight edit) resolves:
+		// the in-flight edit survives as a dirty field on top of the
+		// response-based baseline; untouched fields take the response.
+		releaseSave(resSaved);
+		await settle();
+		expect(titleInput(target).value).toBe('Saved title'); // response value
+		expect(subtitle!.value).toBe('In-flight sub'); // carried over
+		expect(target.textContent).toContain('Unsaved changes');
+		expect(saveBtn!.disabled).toBe(false);
+
+		// The next partial save's payload MUST include the carried-over
+		// in-flight edit: a baseline taken from the overlaid result (or
+		// the pre-save live draft) would mark it as persisted and omit it.
+		const year = target.querySelector<HTMLInputElement>('#meditor-year');
+		expect(year, 'year input not rendered').not.toBeNull();
+		year!.value = '2024';
+		year!.dispatchEvent(new Event('change', { bubbles: true }));
+		flushSync();
+		saveBtn!.click();
+		flushSync();
+		const secondBody = calls
+			.filter((c) => c.method === 'put' && c.url === '/books/1/metadata')[1].body as Record<
+			string,
+			unknown
+		>;
+		expect(secondBody.subtitle).toBe('In-flight sub'); // the carried-over edit
+		expect(secondBody.year).toBe(2024); // the newly edited field
+		expect(secondBody.title).toBe('Saved title'); // stored value, unchanged
+		expect(secondBody.authors).toEqual(['Auth B']); // stored list, unchanged
+
+		// The second save resolves: the editor ends clean again.
+		const resAfterSecond = {
+			...resSaved,
+			overrides: { ...resSaved.overrides!, subtitle: 'In-flight sub', year: 2024 },
+			effective: snap({
+				book_id: 1,
+				title: 'Saved title',
+				subtitle: 'In-flight sub',
+				authors: ['Auth B'],
+				year: 2024
+			})
+		} satisfies BookMetadataResponse;
+		releaseSave2(resAfterSecond);
+		await settle();
+		expect(target.textContent).toContain('All changes saved');
+		expect(saveBtn!.disabled).toBe(true);
+
+		unmount(comp);
+		target.remove();
+	});
 });
 
 describe('MetadataEditor Ctrl+S shell gating', () => {

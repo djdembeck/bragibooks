@@ -126,10 +126,15 @@
 		// stored row's "no override" zero values ("" / null) are not
 		// blanks, so an override row with an empty scalar must not pin
 		// the field to blank over the catalog value. The snapshot is the
-		// fallback only when there is no capture (effective is null then).
+		// fallback when there is no capture (effective is null then),
+		// and the OVERRIDE ROW the last resort: an update can delete the
+		// snapshot row while a stored override survives, and blanking
+		// the prefill here would make the next save replace the hidden
+		// stored lists with the empty ones. The override row stores the
+		// same scalar/list fields, so it composes as a source.
 		// Cleared / cover / chapters keep the OVERRIDE's tri-state: the
 		// effective state cannot express "no override" for them.
-		const source = resp.effective ?? resp.snapshot;
+		const source = resp.effective ?? resp.snapshot ?? ov;
 		return {
 			title: source?.title ?? '',
 			subtitle: source?.subtitle ?? '',
@@ -672,6 +677,39 @@
 	}
 
 	// ── Save / discard / reset ───────────────────────────────────
+	/** Overlay the edits made AFTER a save was submitted onto the
+	 *  response-based draft: a field is taken from the live draft only
+	 *  when it differs from the pre-submission snapshot, so in-flight
+	 *  edits (inputs stay enabled while saving) survive the save and
+	 *  untouched fields take the server's returned state. Comparison
+	 *  goes through snapshotOf, so cleared is sorted (order-insensitive)
+	 *  and the chapters null vs [] tri-state compares verbatim. */
+	function overlayPostSubmitEdits(
+		base: BookMetadataDraft,
+		live: BookMetadataDraft,
+		submitted: BookMetadataDraft
+	): BookMetadataDraft {
+		const l = snapshotOf(live);
+		const changed = <K extends keyof BookMetadataDraft>(k: K) =>
+			JSON.stringify(l[k]) !== JSON.stringify(submitted[k]);
+		return {
+			title: changed('title') ? l.title : base.title,
+			subtitle: changed('subtitle') ? l.subtitle : base.subtitle,
+			authors: changed('authors') ? l.authors : base.authors,
+			narrators: changed('narrators') ? l.narrators : base.narrators,
+			series_name: changed('series_name') ? l.series_name : base.series_name,
+			series_position: changed('series_position') ? l.series_position : base.series_position,
+			description: changed('description') ? l.description : base.description,
+			genres: changed('genres') ? l.genres : base.genres,
+			year: changed('year') ? l.year : base.year,
+			cleared: changed('cleared') ? l.cleared : base.cleared,
+			cover_source: changed('cover_source') ? l.cover_source : base.cover_source,
+			cover_file: changed('cover_file') ? l.cover_file : base.cover_file,
+			cover_url: changed('cover_url') ? l.cover_url : base.cover_url,
+			chapters: changed('chapters') ? l.chapters : base.chapters
+		};
+	}
+
 	async function save() {
 		if (!draft || saving || uploading || !dirty) return; // the server sweep races an in-flight upload
 		if (chapterErrors.length) return; // diagnostics already visible
@@ -685,10 +723,30 @@
 		saveError = null;
 		confirmingDiscard = false;
 		try {
+			// The inputs stay enabled while the PUT is in flight, so the
+			// live draft can change mid-flight: snapshot exactly what is
+			// about to be sent (savePayload serializes the same
+			// snapshotOf(draft) view) and diff against it after the save.
+			const submitted = snapshotOf(draft);
 			const resp = await put<BookMetadataResponse>(`/books/${startBook}/metadata`, savePayload());
 			if (bookId !== startBook || bookFetchSeq !== startGen) return;
+			// The response is the authoritative stored state: a first
+			// save on a historical book creates a capture and returns
+			// values the submitted draft never had (captured authors),
+			// and the server can normalize a field (clearing the subtitle
+			// override to '' restores the catalog subtitle). Rebuild the
+			// draft from the response, and base the baseline on THAT
+			// response-derived draft, before overlaying post-submission
+			// edits. Invariant: the baseline is the server's returned
+			// stored state; edits made after submission stay dirty on top
+			// of it and are picked up by the next save. A baseline taken
+			// from the overlaid result (or the pre-save live draft) would
+			// mark in-flight edits as persisted and make a later save of
+			// another field omit them for good.
 			meta = resp;
-			baseline = snapshotOf(draft);
+			const responseDraft = draftFrom(resp);
+			baseline = snapshotOf(responseDraft);
+			draft = overlayPostSubmitEdits(responseDraft, draft, submitted);
 			onSaved?.();
 		} catch (e) {
 			if (bookId !== startBook || bookFetchSeq !== startGen) return;
