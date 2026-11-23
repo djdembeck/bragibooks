@@ -148,3 +148,83 @@ func TestSetPathFormatTokensConcurrentExercises(t *testing.T) {
 		"series_name", "series_position", "year", "genre", "metadata_id", "book_id",
 	})
 }
+
+// TestAdvancedPathSchemesValid asserts that the advanced multi-token
+// structures from #71 (series name + position + title + subtitle + year in
+// the same segment, repeated across segments) are accepted at save time.
+// The #71 series-drop was in the resolver, which is engine-owned: no test in
+// this repo exercises path resolution, so these assertions cover the
+// Go-side save contract only.
+func TestAdvancedPathSchemesValid(t *testing.T) {
+	schemes := []string{
+		// #71 structure with the colon replaced by a space: colons are
+		// rejected in literal path text on the Linux+Windows union.
+		"{author}/{series_name} {series_position} - {title} {subtitle} ({year})/{author} - {series_name} {series_position} - {title} {subtitle} ({year})",
+		// Series segment first, bare author/title second.
+		"{series_name} {series_position}/{author}/{title}",
+		// Subtitle as the distinguishing token.
+		"{author}/{title} - {subtitle} ({year})",
+		// Genre and metadata id in the structure.
+		"{genre}/{series_name} {series_position}/{title} {metadata_id}",
+		// Deep nesting with a literal archive segment.
+		"archive/{year}/{author}/{title}",
+	}
+	for _, s := range schemes {
+		if err := ValidateRelativePathFormat(s); err != nil {
+			t.Errorf("ValidateRelativePathFormat(%q) = %v, want nil", s, err)
+		}
+	}
+	// The ORIGINAL #71 template carries a colon in "title: subtitle"; on the
+	// Linux+Windows character union it must be refused at save time, with the
+	// colon named as the offender.
+	original := "{author}/{series_name} {series_position} - {title}: {subtitle} ({year})/{author} - {series_name} {series_position} - {title}: {subtitle} ({year})"
+	if err := ValidateRelativePathFormat(original); err == nil {
+		t.Fatalf("ValidateRelativePathFormat(%q) = nil, want the colon refused", original)
+	} else if !strings.Contains(err.Error(), `path text cannot contain ":"`) {
+		t.Fatalf("ValidateRelativePathFormat(%q) = %q, want the colon named", original, err.Error())
+	}
+}
+
+// TestNormalizeEnginePathFormatAdvanced pins the trailing-.m4b strip on
+// advanced structures: only the last segment's suffix is removed, and a
+// stored format that already ends in .m4b must not gain a second one when
+// the engine appends its own (a live --job-preview probe showed a double
+// .m4b when the stored format is passed un-normalized).
+func TestNormalizeEnginePathFormatAdvanced(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{
+			in:   "{author}/{series_name} {series_position} - {title} {subtitle} ({year})/{author} - {series_name} {series_position} - {title} {subtitle} ({year}).m4b",
+			want: "{author}/{series_name} {series_position} - {title} {subtitle} ({year})/{author} - {series_name} {series_position} - {title} {subtitle} ({year})",
+		},
+		{
+			in:   "{author}/{title}.m4b",
+			want: "{author}/{title}",
+		},
+		// A literal .m4b in a MIDDLE segment is untouched.
+		{
+			in:   "archive.m4b/{title}",
+			want: "archive.m4b/{title}",
+		},
+		// No suffix: unchanged.
+		{
+			in:   "{author}/{title}",
+			want: "{author}/{title}",
+		},
+		// Mixed-case suffix: the strip is case-insensitive, so ".M4B" is
+		// removed exactly like lowercase ".m4b".
+		{
+			in:   "{author}/{title}.M4B",
+			want: "{author}/{title}",
+		},
+		// A mixed-case suffix in a MIDDLE segment is untouched.
+		{
+			in:   "archive.M4B/{title}",
+			want: "archive.M4B/{title}",
+		},
+	}
+	for _, tt := range tests {
+		if got := NormalizeEnginePathFormat(tt.in); got != tt.want {
+			t.Errorf("NormalizeEnginePathFormat(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}

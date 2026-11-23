@@ -98,22 +98,26 @@ func isPathFormatToken(reg map[string]struct{}, key string) bool {
 	return ok
 }
 
-// NormalizeEnginePathFormat strips a trailing literal ".m4b" from a path
-// format before it is handed to the engine's job protocol. The engine appends
+// NormalizeEnginePathFormat strips a trailing ".m4b" from a path format
+// before it is handed to the engine's job protocol. The engine appends
 // ".m4b" to the last component itself (and the legacy -p path did the same),
 // so a stored format that already carries the extension must not gain a
 // second one: "{author}/{title}.m4b" resolves to exactly the same file name
-// as "{author}/{title}". Only the last path segment's suffix is considered,
-// so a token like "{title}" or a literal "archive.tar" is untouched.
+// as "{author}/{title}". The suffix match is case-insensitive (a stored
+// "{title}.M4B" would otherwise resolve to "Title.M4B.m4b"), and only the
+// last path segment's suffix is considered, so a token like "{title}" or a
+// literal "archive.tar" in an earlier segment is untouched.
 func NormalizeEnginePathFormat(template string) string {
-	if idx := strings.LastIndexByte(template, '/'); idx >= 0 {
-		rest := template[idx+1:]
-		if n := strings.TrimSuffix(rest, ".m4b"); n != rest {
-			return template[:idx+1] + n
+	strip := func(s string) string {
+		if len(s) > len(".m4b") && strings.EqualFold(s[len(s)-len(".m4b"):], ".m4b") {
+			return s[:len(s)-len(".m4b")]
 		}
-		return template
+		return s
 	}
-	return strings.TrimSuffix(template, ".m4b")
+	if idx := strings.LastIndexByte(template, '/'); idx >= 0 {
+		return template[:idx+1] + strip(template[idx+1:])
+	}
+	return strip(template)
 }
 
 // ValidateRelativePathFormat checks a template that must resolve INSIDE the
