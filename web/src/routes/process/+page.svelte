@@ -917,7 +917,7 @@
 	.batch-detail { margin: 0.25rem 0 0; font-size: 0.8125rem; color: var(--text-secondary); }
 	.batch-action { display: inline-flex; align-items: center; gap: 0.35rem; min-height: 2.75rem; min-width: 2.75rem; padding: 0 0.5rem; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--workspace-action); font-size: 0.8125rem; font-weight: 600; cursor: pointer; }
 	.batch-action:hover { background: rgb(41 41 35 / 0.06); }
-	.batch-action--icon { color: var(--text-muted); padding: 0; }
+	.batch-action--icon { justify-content: center; color: var(--text-muted); padding: 0; }
 	.batch-action--icon:hover { color: var(--text); }
 	.batch-action:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
 	.queue-columns { display: grid; grid-template-columns: minmax(0, 1fr) 21rem; align-items: start; gap: 1.5rem; margin-top: 1.5rem; }
