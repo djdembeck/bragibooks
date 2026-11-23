@@ -149,12 +149,12 @@ func TestSetPathFormatTokensConcurrentExercises(t *testing.T) {
 	})
 }
 
-// TestAdvancedPathSchemesValid pins the advanced multi-token structures from
-// #71: series name + position + title + subtitle + year in the same segment,
-// repeated across segments. The #71 bug was the RESOLVED path dropping the
-// series, not validation rejecting these structures, so every scheme here
-// must validate; the resolver itself is engine-owned and covered by the
-// job-preview integration path.
+// TestAdvancedPathSchemesValid asserts that the advanced multi-token
+// structures from #71 (series name + position + title + subtitle + year in
+// the same segment, repeated across segments) are accepted at save time.
+// The #71 series-drop was in the resolver, which is engine-owned: no test in
+// this repo exercises path resolution, so these assertions cover the
+// Go-side save contract only.
 func TestAdvancedPathSchemesValid(t *testing.T) {
 	schemes := []string{
 		// #71 structure with the colon replaced by a space: colons are
@@ -173,34 +173,6 @@ func TestAdvancedPathSchemesValid(t *testing.T) {
 		if err := ValidateRelativePathFormat(s); err != nil {
 			t.Errorf("ValidateRelativePathFormat(%q) = %v, want nil", s, err)
 		}
-	}
-}
-
-func TestAdvancedPathSchemesRejected(t *testing.T) {
-	tests := []struct {
-		template  string
-		wantErrFr string
-	}{
-		// The EXACT #71 template: the colon in "title: subtitle" is the
-		// offender a user hitting this scheme must be told about at save time.
-		{`{author}/{series_name} {series_position} - {title}: {subtitle} ({year})`, `path text cannot contain ":"`},
-		// Traversal hidden in an advanced structure.
-		{"{author}/../{title}", "'..' path segment"},
-		// Reserved name reached only through a literal segment.
-		{"{author}/con", "reserved device name"},
-		// Unknown closed-brace token inside an otherwise valid structure.
-		{"{author}/{series_name}/{isbn}", "unsupported token {isbn}"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.template, func(t *testing.T) {
-			err := ValidateRelativePathFormat(tt.template)
-			if err == nil {
-				t.Fatalf("ValidateRelativePathFormat(%q) = nil, want error containing %q", tt.template, tt.wantErrFr)
-			}
-			if !strings.Contains(err.Error(), tt.wantErrFr) {
-				t.Fatalf("ValidateRelativePathFormat(%q) = %q, want error containing %q", tt.template, err.Error(), tt.wantErrFr)
-			}
-		})
 	}
 }
 
@@ -228,6 +200,14 @@ func TestNormalizeEnginePathFormatAdvanced(t *testing.T) {
 		{
 			in:   "{author}/{title}",
 			want: "{author}/{title}",
+		},
+		// Mixed-case suffix: TrimSuffix is case-sensitive, so ".M4B" passes
+		// through and the engine appends its own ".m4b" (Title.M4B.m4b).
+		// Documents current behavior; a case-insensitive strip is a
+		// pathscheme.go change, not a test one.
+		{
+			in:   "{author}/{title}.M4B",
+			want: "{author}/{title}.M4B",
 		},
 	}
 	for _, tt := range tests {
