@@ -174,6 +174,15 @@ func TestAdvancedPathSchemesValid(t *testing.T) {
 			t.Errorf("ValidateRelativePathFormat(%q) = %v, want nil", s, err)
 		}
 	}
+	// The ORIGINAL #71 template carries a colon in "title: subtitle"; on the
+	// Linux+Windows character union it must be refused at save time, with the
+	// colon named as the offender.
+	original := "{author}/{series_name} {series_position} - {title}: {subtitle} ({year})/{author} - {series_name} {series_position} - {title}: {subtitle} ({year})"
+	if err := ValidateRelativePathFormat(original); err == nil {
+		t.Fatalf("ValidateRelativePathFormat(%q) = nil, want the colon refused", original)
+	} else if !strings.Contains(err.Error(), `path text cannot contain ":"`) {
+		t.Fatalf("ValidateRelativePathFormat(%q) = %q, want the colon named", original, err.Error())
+	}
 }
 
 // TestNormalizeEnginePathFormatAdvanced pins the trailing-.m4b strip on
@@ -201,13 +210,16 @@ func TestNormalizeEnginePathFormatAdvanced(t *testing.T) {
 			in:   "{author}/{title}",
 			want: "{author}/{title}",
 		},
-		// Mixed-case suffix: TrimSuffix is case-sensitive, so ".M4B" passes
-		// through and the engine appends its own ".m4b" (Title.M4B.m4b).
-		// Documents current behavior; a case-insensitive strip is a
-		// pathscheme.go change, not a test one.
+		// Mixed-case suffix: the strip is case-insensitive, so ".M4B" is
+		// removed exactly like lowercase ".m4b".
 		{
 			in:   "{author}/{title}.M4B",
-			want: "{author}/{title}.M4B",
+			want: "{author}/{title}",
+		},
+		// A mixed-case suffix in a MIDDLE segment is untouched.
+		{
+			in:   "archive.M4B/{title}",
+			want: "archive.M4B/{title}",
 		},
 	}
 	for _, tt := range tests {
