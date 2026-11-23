@@ -1,16 +1,18 @@
 /**
  * Batch rollup for the queue page's completion banner.
  *
- * A batch is one queue request: all of its jobs share `batch_id`, so a run
- * breaks when the request id changes. Requests enqueued back to back are
- * contiguous in `queue_order` (queue_seq is max+1 per insert, completed
- * rows are never pruned), so adjacency alone cannot separate them. Rows
- * without a batch id (pre-batch history, audit-only) fall back to the old
- * rule: a run breaks at a queue-order gap, and interleaved audit rows
- * (imports, metadata saves) break it. The LATEST merge run is always the
- * banner's subject — an older finished batch is superseded once a newer
- * run exists. A run with no terminal job yet reports an in-flight rollup,
- * not completion.
+ * A batch is one queue request: all of its jobs share `batch_id`. The
+ * banner's subject is the LATEST request — the one owning the newest merge
+ * row — and its run is every job carrying that batch id, wherever those
+ * rows sit: two concurrent requests interleave in `queue_order` (A,B,A),
+ * so adjacency alone would split a request into fragments. Requests
+ * enqueued back to back are contiguous in `queue_order` (queue_seq is
+ * max+1 per insert, completed rows are never pruned), which is why the id
+ * is the only separator. Rows without a batch id (pre-batch history) fall
+ * back to the old rule: a run breaks at a queue-order gap, and interleaved
+ * audit rows (imports, metadata saves) break it. An older finished batch
+ * is superseded once a newer run exists. A run with no terminal job yet
+ * reports an in-flight rollup, not completion.
  *
  * `queue_order` is the durable enqueue counter (SQLite `created_at` is only
  * second-precision, so it cannot order a batch); pre-dispatcher rows carry
@@ -120,31 +122,37 @@ export function summarizeLatestBatch(jobs: BatchJob[]): BatchSummary | null {
 	if (jobs.length === 0) return null;
 
 	// Audit rows (imports, metadata saves) enqueue between batches; they are
-	// excluded from the walk, and adjacency is checked on merge queue orders
-	// so an interleaved row still breaks the run.
-	// Same convention as jobActionLabel: a missing action means merge.
+	// excluded from the walk. Same convention as jobActionLabel: a missing
+	// action means merge.
 	const mergeJobs = [...jobs]
 		.filter((job) => job.action === 'merge' || job.action == null)
 		.sort((a, b) => a.queueOrder - b.queueOrder);
-	let run: BatchJob[] = [];
-	for (const job of mergeJobs) {
-		if (run.length > 0) {
-			const prev = run[run.length - 1];
-			// One queue request is one run: its rows share batchId, and the
-			// NEXT request's rows are contiguous in queue order anyway
-			// (queue_seq is max+1 per insert, completed rows are never
-			// pruned), so adjacency alone cannot separate back-to-back
-			// requests. Rows without an identity (pre-batch history) keep
-			// the adjacency rule.
-			const sameBatch = prev.batchId != null && prev.batchId === job.batchId;
-			const adjacent =
-				prev.batchId == null && job.batchId == null && job.queueOrder === prev.queueOrder + 1;
-			if (sameBatch || adjacent) {
-				run.push(job);
-				continue;
+	if (mergeJobs.length === 0) return null;
+
+	// The LATEST request is the one whose newest row sits at the end of the
+	// sorted list (queue_seq is the durable enqueue counter). Every job of
+	// that request shares its batchId, so the run is ALL of that request's
+	// rows, wherever they sit: two concurrent requests interleave in
+	// queue order (A,B,A), and adjacency alone would report the last A job
+	// as a one-book run while the first A job is still running.
+	const last = mergeJobs[mergeJobs.length - 1];
+	let run: BatchJob[];
+	if (last.batchId != null) {
+		run = mergeJobs.filter((job) => job.batchId === last.batchId);
+	} else {
+		// Pre-batch history has no request identity: fall back to the
+		// adjacency rule, walking back from the newest legacy row while
+		// queue orders stay contiguous. A batched row (any id) breaks the
+		// walk, as a gap does.
+		run = [last];
+		for (let i = mergeJobs.length - 2; i >= 0; i--) {
+			const prev = mergeJobs[i];
+			if (prev.batchId == null && prev.queueOrder === run[0].queueOrder - 1) {
+				run.unshift(prev);
+			} else {
+				break;
 			}
 		}
-		run = [job];
 	}
 	return run.length > 0 ? buildSummary(run) : null;
 }

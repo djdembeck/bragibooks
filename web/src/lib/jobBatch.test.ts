@@ -230,6 +230,35 @@ describe('summarizeLatestBatch', () => {
 		expect(mixed?.jobIds).toEqual(['m3']);
 	});
 
+	it('collects every job of the latest request when concurrent requests interleave', () => {
+		// Two concurrent requests interleave in queue order (A,B,A): the
+		// banner must report ALL of request A's jobs, not just the last A
+		// row — the first A job may still be running while the last one
+		// finishes, so the run must not announce completion early.
+		const summary = summarizeLatestBatch([
+			job({ id: 'a1', queueOrder: 1, batchId: 'req-a', status: 'running', completedAt: null }),
+			job({ id: 'b1', queueOrder: 2, batchId: 'req-b' }),
+			job({ id: 'a2', queueOrder: 3, batchId: 'req-a', status: 'done' }),
+		]);
+		expect(summary?.jobIds).toEqual(['a1', 'a2']);
+		expect(summary?.total).toBe(2);
+		expect(summary?.isBatch).toBe(true);
+		expect(summary?.allTerminal).toBe(false);
+		expect(summary?.inFlight).toBe(1);
+	});
+
+	it('keeps an older finished batch out of the summary when a newer request exists', () => {
+		// The banner subjects the LATEST request; an older finished batch
+		// is superseded even when its rows sit between the newer request's.
+		const summary = summarizeLatestBatch([
+			job({ id: 'old1', queueOrder: 1, batchId: 'req-old' }),
+			job({ id: 'new1', queueOrder: 2, batchId: 'req-new' }),
+			job({ id: 'new2', queueOrder: 3, batchId: 'req-new' }),
+		]);
+		expect(summary?.jobIds).toEqual(['new1', 'new2']);
+		expect(summary?.total).toBe(2);
+	});
+
 	it('derives a stable dismissal identity from the run window', () => {
 		const first = summarizeLatestBatch([job({ id: 'm1', queueOrder: 1 }), job({ id: 'm2', queueOrder: 2 })]);
 		const sameRun = summarizeLatestBatch([job({ id: 'm1', queueOrder: 1 }), job({ id: 'm2', queueOrder: 2 })]);

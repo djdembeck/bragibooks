@@ -200,11 +200,11 @@
 			if (isActiveJob(item)) connectSSE(item);
 		}
 		// Active jobs need the book's cover and author even though the book
-		// has already left the matched/pending lists. History fetches only
-		// for the rows Recent activity renders (newest HISTORY_RENDER_LIMIT
-		// plus the banner's visible run — the Review-failures action scrolls
-		// to one of those rows), so the wide jobs fetch stops widening into
-		// one book fetch per history row.
+		// has already left the matched/pending lists. History rows are
+		// hydrated for the full past set too: the jobs fetch is capped at
+		// 100, book fetches dedupe per id, and known books cost nothing —
+		// "Show all" must not reveal rows as Book #<id> until the next
+		// poll rehydrates them.
 		const past = items.filter((job) => !isActiveJob(job));
 		const run = summarizeLatestBatch(
 			items.map((job) => ({
@@ -219,8 +219,7 @@
 				createdAt: job.createdAt,
 			}))
 		);
-		const renderIds = new Set(past.slice(0, HISTORY_RENDER_LIMIT).map((job) => job.id));
-		if (run) for (const job of past) if (run.jobIds.includes(job.id)) renderIds.add(job.id);
+		const renderIds = new Set(past.map((job) => job.id));
 		for (const item of items) {
 			const known = item.bookId !== null ? books.find((book) => book.id === item.bookId) : undefined;
 			if (!known && (isActiveJob(item) || renderIds.has(item.id))) hydrateBook(item);
@@ -486,14 +485,17 @@
 	const pastJobs = $derived(jobs.filter((job) => !isActiveJob(job)));
 	/** The history rows Recent activity renders: the newest
 	 *  HISTORY_RENDER_LIMIT, plus the banner's run's rows so the
-	 *  Review-failures action always has a row to land on. */
+	 *  Review-failures action always has a row to land on. "Show all"
+	 *  lifts the bound: the summary counts every row the fetch returned,
+	 *  so every one of them must be reachable from the view. */
 	const renderedHistory = $derived.by(() => {
 		const past = pastJobs;
-		if (past.length <= HISTORY_RENDER_LIMIT) return past;
+		if (showAllHistory || past.length <= HISTORY_RENDER_LIMIT) return past;
 		const ids = new Set(past.slice(0, HISTORY_RENDER_LIMIT).map((job) => job.id));
 		if (batchSummary) for (const id of batchSummary.jobIds) ids.add(id);
 		return past.filter((job) => ids.has(job.id));
 	});
+	const hiddenHistoryCount = $derived(pastJobs.length - renderedHistory.length);
 	const clock = liveNow(() => activeJobs.length > 0);
 	const failedJobs = $derived(pastJobs.filter((job) => job.status === 'error' || job.status === 'failed').length);
 	const runningJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'running').length);
@@ -526,6 +528,7 @@
 		batchSummary !== null && batchSummary.allTerminal && dismissedBatchId !== batchSummary.id
 	);
 	let historyDetails = $state<HTMLDetailsElement>();
+	let showAllHistory = $state(false);
 	// The first failed row of the latest run: the banner's "Review" action
 	// expands Recent activity and lands there.
 	const firstFailedJobId = $derived.by(() => {
@@ -808,7 +811,7 @@
 					<section class="queue-idle"><Clock size={21} aria-hidden="true" /><h2 id="activity-title">Nothing processing</h2><p>Ready books stay in the list until you start a batch.</p></section>
 				{/if}
 				{#if pastJobs.length > 0}
-					<details class="job-history" bind:this={historyDetails}><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each renderedHistory as job (job.id)}{@render JobRecord(job, false)}{/each}</details>
+					<details class="job-history" bind:this={historyDetails}><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each renderedHistory as job (job.id)}{@render JobRecord(job, false)}{/each}{#if hiddenHistoryCount > 0}<button type="button" class="history-more" onclick={() => { showAllHistory = true; }}>Show {hiddenHistoryCount} older {hiddenHistoryCount === 1 ? 'run' : 'runs'}</button>{:else if showAllHistory && pastJobs.length > HISTORY_RENDER_LIMIT}<button type="button" class="history-more" onclick={() => { showAllHistory = false; }}>Show fewer</button>{/if}</details>
 				{/if}
 			</aside>
 		</div>
@@ -965,6 +968,8 @@
 	.job-history > summary > span:first-child { display: inline-flex; align-items: baseline; gap: 0.5rem; }
 	.failure-count { font-size: 0.75rem; color: var(--state-red); font-weight: 500; margin-left: auto; }
 	.history-hint { margin: 0 0 1rem; }
+	.history-more { display: block; width: 100%; margin: 0.25rem 0 1rem; padding: 0.5rem 0; border: 1px solid var(--border); border-radius: 0.5rem; background: none; color: var(--text-muted); font-size: 0.8125rem; cursor: pointer; }
+	.history-more:hover { color: var(--text); border-color: var(--text-muted); }
 	.job-record { min-width: 0; padding: 1.25rem 1.5rem; border-top: 1px solid var(--border-subtle); }
 	.job-record--active { container-type: inline-size; padding-top: 1rem; }
 	.job-history .job-record { padding: 1rem 0; }

@@ -2095,6 +2095,10 @@ const jobsColumns = "id, book_id, status, action, detail, output, error, output_
 // a batch of audit rows (imports, metadata saves) must not push a running
 // merge — the state the page's live counters and cancel action rely on — out
 // of the limit window (the queue page derives its active set from this list).
+// The rows of the newest batch are appended as well: the queue page's
+// completion banner summarizes that batch, so it must stay whole even when
+// it is longer than the limit window or newer audit rows have pushed it out
+// of the recent window.
 func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 	limit := parseIntQueryParam(r, "limit", 20)
 	if limit <= 0 {
@@ -2142,8 +2146,35 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := make([]map[string]any, 0, len(recent)+len(active))
-	seen := make(map[string]bool, len(recent)+len(active))
+	// The completion banner summarizes the LATEST batch from this list, so a
+	// batch longer than the limit window (or one pushed out of the recent
+	// window by newer audit rows) must not be truncated: re-include every row
+	// of the newest batch by id, independent of the capped recent window.
+	var latestBatch []models.ProcessingJob
+	batchID, err := h.latestBatchID(bookID)
+	if err != nil {
+		// Probe failure degrades to the pre-batch behavior (the newest
+		// batch may be truncated by the limit window); the batch-row query
+		// below is the correctness-critical one, so a transient fault here
+		// is logged, not a 500.
+		log.Printf("list jobs: latest batch probe: %v", err)
+	} else if batchID != "" {
+		batchQuery := "SELECT " + jobsColumns + " FROM processing_jobs WHERE batch_id = ?"
+		batchArgs := []any{batchID}
+		if bookID > 0 {
+			batchQuery += " AND book_id = ?"
+			batchArgs = append(batchArgs, bookID)
+		}
+		batchQuery += " ORDER BY COALESCE(queue_seq, rowid) ASC"
+		latestBatch, err = h.queryJobs(batchQuery, batchArgs)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("query latest batch: %v", err))
+			return
+		}
+	}
+
+	response := make([]map[string]any, 0, len(recent)+len(active)+len(latestBatch))
+	seen := make(map[string]bool, len(recent)+len(active)+len(latestBatch))
 	for _, job := range recent {
 		seen[job.ID] = true
 		response = append(response, jobResp(job))
@@ -2152,10 +2183,37 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 		if seen[job.ID] {
 			continue
 		}
+		seen[job.ID] = true
+		response = append(response, jobResp(job))
+	}
+	for _, job := range latestBatch {
+		if seen[job.ID] {
+			continue
+		}
 		response = append(response, jobResp(job))
 	}
 
 	writeJSON(w, http.StatusOK, ListJobsResponse{Jobs: response})
+}
+
+// latestBatchID returns the batch_id of the newest batched job (highest
+// durable queue order), honoring the optional book scope. Empty when no
+// batched row exists (pre-batch history groups by queue-order adjacency on
+// the client, so there is no request id to fetch by).
+func (h *Handler) latestBatchID(bookID int64) (string, error) {
+	query := "SELECT batch_id FROM processing_jobs WHERE batch_id IS NOT NULL"
+	args := make([]any, 0, 1)
+	if bookID > 0 {
+		query += " AND book_id = ?"
+		args = append(args, bookID)
+	}
+	query += " ORDER BY COALESCE(queue_seq, rowid) DESC LIMIT 1"
+	var batchID string
+	err := h.svc.DB.QueryRow(query, args...).Scan(&batchID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return batchID, err
 }
 
 // queryJobs runs a jobs SELECT over the shared column list, scanning every

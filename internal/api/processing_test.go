@@ -2892,3 +2892,209 @@ func TestQueueResponseCarriesEffectiveDestination(t *testing.T) {
 		t.Errorf("global-settings batch response carries output_scheme: %s", w.Body.String())
 	}
 }
+
+// Regression: the completion banner summarizes the LATEST batch from this
+// list, so the batch must stay whole even when it is longer than the limit
+// window (the cap truncates it) or newer audit rows have pushed it out of
+// the recent window entirely (only active jobs used to be re-appended).
+func TestListJobsKeepsLatestBatchWhole(t *testing.T) {
+	t.Run("batch longer than the limit window", func(t *testing.T) {
+		h, _ := newTestJobsHandler(t)
+		// 120 done jobs of one batch, queue_seq 1..120, created 00:00:00..
+		// 01:59:00 so they are the NEWEST rows and also the newest batch.
+		for i := 1; i <= 120; i++ {
+			if _, err := h.svc.DB.Exec(
+				"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 1, 'done', 'merge', ?, ?, 'b1')",
+				fmt.Sprintf("b1-%03d", i), fmt.Sprintf("2026-01-01 %02d:%02d:00", (i-1)/60, (i-1)%60), i,
+			); err != nil {
+				t.Fatalf("seed batch job %d: %v", i, err)
+			}
+		}
+		w := httptest.NewRecorder()
+		h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=100", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+		}
+		byID, ids := jobIDsFromList(t, w)
+		if n := len(ids); n != 120 {
+			t.Fatalf("list len = %d; want the whole 120-job batch, not the 100-row cap", n)
+		}
+		for i := 1; i <= 120; i++ {
+			if _, ok := byID[fmt.Sprintf("b1-%03d", i)]; !ok {
+				t.Fatalf("batch job b1-%03d missing from list", i)
+			}
+		}
+	})
+
+	t.Run("finished batch pushed out of the recent window by newer audit rows", func(t *testing.T) {
+		h, _ := newTestJobsHandler(t)
+		// A finished 3-job batch created on 01-01.
+		for i := 1; i <= 3; i++ {
+			if _, err := h.svc.DB.Exec(
+				"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 1, 'done', 'merge', '2026-01-01 00:00:00', ?, 'b1')",
+				fmt.Sprintf("b1-%d", i), i,
+			); err != nil {
+				t.Fatalf("seed batch job %d: %v", i, err)
+			}
+		}
+		// 110 newer audit rows: the 100-row recent window no longer
+		// reaches the batch, and nothing in the batch is active.
+		seedAuditRows(t, h.svc.DB, 110)
+		w := httptest.NewRecorder()
+		h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=100", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+		}
+		byID, ids := jobIDsFromList(t, w)
+		// 100 recent audit rows + 3 appended batch rows, no duplicates.
+		if n := len(ids); n != 103 {
+			t.Fatalf("list len = %d; want 100 recent + 3 appended batch rows", n)
+		}
+		for i := 1; i <= 3; i++ {
+			if _, ok := byID[fmt.Sprintf("b1-%d", i)]; !ok {
+				t.Fatalf("finished batch job b1-%d missing from list; the banner would lose the run", i)
+			}
+		}
+	})
+}
+
+// Regression: latestBatchID's own contract — sql.ErrNoRows (no batched row)
+// is the only non-error outcome; any other probe failure must surface as a
+// real error so ListJobs can take its degrade branch (200, recent+active
+// only) instead of 500ing.
+func TestLatestBatchIDProbeFailureContract(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES ('b1-1', 1, 'done', 'merge', '2026-01-01 00:00:00', 1, 'b1')",
+	); err != nil {
+		t.Fatalf("seed batch job: %v", err)
+	}
+
+	// Healthy probe: newest batched row wins, book scope filters it.
+	got, err := h.latestBatchID(0)
+	if err != nil {
+		t.Fatalf("healthy probe: %v", err)
+	}
+	if got != "b1" {
+		t.Errorf("unscoped probe = %q; want b1", got)
+	}
+	if got, err = h.latestBatchID(1); err != nil || got != "b1" {
+		t.Errorf("book-1 probe = (%q, %v); want (b1, nil)", got, err)
+	}
+	if got, err = h.latestBatchID(2); err != nil || got != "" {
+		t.Errorf("book-2 probe = (%q, %v); want (\"\", nil) — no batched row for book 2", got, err)
+	}
+
+	// Closed DB: a non-ErrNoRows probe failure must come back as an error
+	// (the degrade branch's precondition).
+	h.svc.DB.Close()
+	t.Cleanup(func() { t.Log("db closed by test") })
+	if got, err := h.latestBatchID(0); err == nil {
+		t.Errorf("closed-db probe = (%q, nil); want a non-nil error the handler can log and degrade on", got)
+	} else if errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("closed-db probe error = %v; want a real fault, not ErrNoRows (which means 'no batch', not 'probe failed')", err)
+	}
+}
+
+// Regression: the book_id scope must apply to the batch-row append as well
+// as the recent and active queries — a scoped list must never surface
+// another book's batch rows.
+func TestListJobsBookScopeAppliesToBatchAppend(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (1, 'Book One', 'processing'), (2, 'Book Two', 'processing')",
+	); err != nil {
+		t.Fatalf("seed books: %v", err)
+	}
+	// Two finished 3-job batches created at the SAME second: created_at
+	// cannot separate them, so the newest-batch probe resolves by
+	// queue_seq. The book-2 batch has the HIGHER queue orders, so the
+	// probe picks it even for the unscoped list — the book-1 scope must
+	// then fall back to book 1's OWN batch id, not inherit the global one.
+	for i := 1; i <= 3; i++ {
+		if _, err := h.svc.DB.Exec(
+			"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 1, 'done', 'merge', '2026-01-01 00:00:00', ?, 'b1')",
+			fmt.Sprintf("b1-%d", i), i,
+		); err != nil {
+			t.Fatalf("seed book-1 batch %d: %v", i, err)
+		}
+		if _, err := h.svc.DB.Exec(
+			"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 2, 'done', 'merge', '2026-01-01 00:00:00', ?, 'b2')",
+			fmt.Sprintf("b2-%d", i), 3+i,
+		); err != nil {
+			t.Fatalf("seed book-2 batch %d: %v", i, err)
+		}
+	}
+	// 110 newer book-1 audit rows push BOTH batches out of the 100-row
+	// recent window: the append is the ONLY path that re-includes a batch.
+	seedAuditRows(t, h.svc.DB, 110)
+
+	// Unscoped: the probe's newest batch is b2 (queue_seq 4..6); only b2's
+	// rows are appended — b1's are gone from the window and not the
+	// probe's pick. 100 recent audit rows + 3 appended = 103.
+	w := httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=100", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("unscoped list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	byID, ids := jobIDsFromList(t, w)
+	if n := len(ids); n != 103 {
+		t.Fatalf("unscoped list len = %d; want 100 recent + 3 appended b2 rows", n)
+	}
+	for i := 1; i <= 3; i++ {
+		if _, ok := byID[fmt.Sprintf("b2-%d", i)]; !ok {
+			t.Errorf("unscoped list missing b2-%d", i)
+		}
+	}
+	for i := 1; i <= 3; i++ {
+		if _, ok := byID[fmt.Sprintf("b1-%d", i)]; ok {
+			t.Errorf("unscoped list carries b1-%d; only the probe's batch is appended", i)
+		}
+	}
+
+	// Book 1's scope: the probe must resolve book 1's OWN batch (b1) even
+	// though b2 is the global newest, and the append's AND book_id = ?
+	// must keep book 2's rows out. Without the scope on the append, the
+	// global-newest b2 rows would leak into the book-1 list.
+	w = httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=100&book_id=1", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("book-1 list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	byID, ids = jobIDsFromList(t, w)
+	if n := len(ids); n != 103 {
+		t.Fatalf("book-1 list len = %d; want 100 recent audits + 3 appended b1 rows", n)
+	}
+	for i := 1; i <= 3; i++ {
+		if _, ok := byID[fmt.Sprintf("b1-%d", i)]; !ok {
+			t.Errorf("book-1 list missing b1-%d", i)
+		}
+	}
+	for id := range byID {
+		if strings.HasPrefix(id, "b2-") {
+			t.Errorf("book-2 batch row %s present in book-1 list", id)
+		}
+	}
+
+	// Mirror image: book 2's scope carries its own batch only — its 3 rows
+	// sit inside its (uncontested) recent window, so the append dedupes.
+	w = httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=100&book_id=2", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("book-2 list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	byID, ids = jobIDsFromList(t, w)
+	if n := len(ids); n != 3 {
+		t.Fatalf("book-2 list len = %d; want its 3 batch rows only", n)
+	}
+	for i := 1; i <= 3; i++ {
+		if _, ok := byID[fmt.Sprintf("b2-%d", i)]; !ok {
+			t.Errorf("book-2 list missing b2-%d", i)
+		}
+	}
+	for id := range byID {
+		if strings.HasPrefix(id, "b1-") {
+			t.Errorf("book-1 batch row %s present in book-2 list", id)
+		}
+	}
+}
