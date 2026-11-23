@@ -775,7 +775,7 @@
 								<div class="queue-row" class:queue-row--selected={selectedIds.has(book.id)}>
 									<label class="queue-check"><input type="checkbox" checked={selectedIds.has(book.id)} onchange={() => toggleBook(book.id)} aria-label="Select {book.title} for processing" /></label>
 									<CoverArt url={book.cover_image_url} title={book.title} size="sm" />
-									<div class="book-identity"><a href="/books/{book.id}">{book.title}</a><p>{book.authors.map((author) => author.name).join(', ') || 'Unknown author'}</p></div>
+									<div class="book-identity"><a href="/books/{book.id}">{book.title}</a><p>{book.authors.map((author) => author.name).join(', ') || 'Unknown author'}</p><a class="ready-edit" href="/books/{book.id}#manual-metadata">Edit metadata</a></div>
 									<span class="ready-state"><CheckCircle size={14} aria-hidden="true" />Ready</span>
 								</div>
 							{/each}
@@ -942,6 +942,7 @@
 	.book-identity { min-width: 0; }
 	.book-identity a { display: inline-block; color: var(--text); font-size: 0.9375rem; line-height: 1.4; font-weight: 600; overflow-wrap: anywhere; }
 	.book-identity p { margin-top: 0.25rem; color: var(--text-muted); font-size: 0.8125rem; overflow-wrap: anywhere; }
+	.book-identity .ready-edit { display: inline-block; margin-top: 0.25rem; color: var(--text-muted); font-size: 0.8125rem; font-weight: 400; text-decoration: underline; }
 	.ready-state { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--state-green); font-size: 0.75rem; white-space: nowrap; }
 	.pending-list { margin-top: 1.25rem; border-top: 1px solid var(--border); }
 	.pending-list > summary, .job-history > summary { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; cursor: pointer; padding: 1rem 0; font-size: 0.875rem; font-weight: 600; min-height: 2.75rem; list-style: none; }
