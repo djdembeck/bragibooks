@@ -460,6 +460,35 @@ func TestReprocessActiveJob409(t *testing.T) {
 	}
 }
 
+// TestReprocessQueueJobFailure500: a QueueJob error that is not the
+// active-job conflict (here the unsupported-format refusal) is a 500 that
+// carries the queue job: prefix, with no reprocess row created.
+func TestReprocessQueueJobFailure500(t *testing.T) {
+	remain := t.TempDir()
+	h := newReprocessHandler(t, t.TempDir(), t.TempDir(), "{author}/{title}", "")
+	wav := filepath.Join(remain, "a.wav")
+	if err := os.WriteFile(wav, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write wav: %v", err)
+	}
+	seedReprocessBook(t, h, 1, "done", remain)
+	seedMergeRow(t, h, "seeded-fmt", 1, `{"src_paths":["`+wav+`"]}`, "2026-07-03 10:00:00")
+
+	w := postReprocess(t, h, StartReprocessRequest{BookID: 1})
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (body %s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "queue job:") {
+		t.Errorf("body %q does not carry the queue job: prefix", body)
+	}
+	if !strings.Contains(body, "a.wav") {
+		t.Errorf("body %q does not name the refused input", body)
+	}
+	if n := jobCountForBook(t, h.svc.DB, 1); n != 1 {
+		t.Errorf("job count = %d; want 1 (seeded only)", n)
+	}
+}
+
 // TestReprocessDirectoryShadowsInput: a DIRECTORY in the completed dir named
 // like a recorded input (or at its recorded path) is not an input — the real
 // file at the other location must win, or the input counts as missing.

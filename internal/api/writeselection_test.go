@@ -333,7 +333,7 @@ func TestQueueJobFreezesSelectionInArgs(t *testing.T) {
 	}
 
 	// Default (no saved selection): the stored row carries no selection.
-	jobID, err := svc.QueueJob(context.Background(), bookID, []string{srcPath}, queueDestination{})
+	jobID, err := svc.QueueJob(context.Background(), bookID, []string{srcPath}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("QueueJob (default): %v", err)
 	}
@@ -350,7 +350,7 @@ func TestQueueJobFreezesSelectionInArgs(t *testing.T) {
 	// Explicit title+cover selection freezes into the stored row.
 	titleCover := []string{"title", "cover"}
 	svc.proc.ApplyWriteSelection(&titleCover, audio.ChaptersPolicyValueWrite)
-	jobID, err = svc.QueueJob(context.Background(), bookID, []string{srcPath}, queueDestination{})
+	jobID, err = svc.QueueJob(context.Background(), bookID, []string{srcPath}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("QueueJob (title+cover): %v", err)
 	}

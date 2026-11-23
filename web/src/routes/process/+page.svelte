@@ -8,7 +8,8 @@
 	import { createJobLogTracker, type JobLogTracker } from '#lib/jobDestination.js';
 	import { mergeOutputEvent } from '#lib/jobOutput.js';
 	import { liveNow } from '#lib/liveNow.svelte.js';
-	import { CheckCircle, Clock, ArrowRight, FileText } from '@lucide/svelte';
+	import { summarizeLatestBatch, type BatchSummary } from '#lib/jobBatch.js';
+	import { CheckCircle, Clock, ArrowRight, FileText, X } from '@lucide/svelte';
 
 	interface JobItem {
 		id: string;
@@ -25,6 +26,8 @@
 		createdAt: string | null;
 		/** Explicit FIFO position; SQLite's second-precision timestamps can tie. */
 		queueOrder: number;
+		/** The queue request that created the job; the banner groups runs by it. */
+		batchId: string | null;
 		/** Local cancellation in flight: badge is optimistic until the backend terminal state lands. */
 		cancelRequested: boolean;
 		/** Final .m4b reported by the API once the job finishes. */
@@ -41,6 +44,14 @@
 		outputScheme?: string;
 	}
 
+	/** How many history rows Recent activity renders and hydrates by
+	 *  default: the jobs fetch is wide so the banner's run stays whole,
+	 *  but the list does not pay one book fetch and JobRecord subtree per
+	 *  history row. The banner's visible run's rows always render (the
+	 *  Review-failures action scrolls to one of them), and the banner
+	 *  reads only fields the jobs fetch already carries, so the bound does
+	 *  not change what the banner summarizes. */
+	const HISTORY_RENDER_LIMIT = 20;
 	let books: BookWithPeople[] = $state([]);
 	let selectedIds = $state<Set<number>>(new Set());
 	let profiles = $state<OutputProfile[]>([]);
@@ -87,7 +98,10 @@
 			const [matched, pending, jobsResp] = await Promise.all([
 				get<BooksListResponse>('/books?status=matched&limit=100'),
 				get<BooksListResponse>('/books?status=pending&limit=100'),
-				get<JobsListResponse>('/jobs?limit=20'),
+				// 100 (the API cap) keeps a finished batch whole: the banner
+				// summarizes the latest contiguous run, and a run longer than
+				// the default window would read as a smaller one.
+				get<JobsListResponse>('/jobs?limit=100'),
 			]);
 			books = [...(matched.books || []), ...(pending.books || [])];
 			restoreJobs(jobsResp.jobs);
@@ -142,6 +156,19 @@
 
 		const items: JobItem[] = [];
 		const bookRequests = new Map<number, Promise<BookWithPeople>>();
+		const hydrateBook = (item: JobItem) => {
+			if (item.bookId === null) return;
+			let request = bookRequests.get(item.bookId);
+			if (!request) {
+				request = get<BookWithPeople>(`/books/${item.bookId}`);
+				bookRequests.set(item.bookId, request);
+			}
+			void request
+				.then((book) => applyJobBook(item, book))
+				.catch(() => {
+					// Deleted or temporarily unavailable books retain the ID fallback.
+				});
+		};
 		// Use the API's durable enqueue order; fall back to API position for
 		// legacy rows so tied second-level timestamps cannot reverse a batch.
 		queueSequence = Math.max(0, ...jobList.map((j) => j.queue_order ?? 0), jobList.length);
@@ -164,27 +191,39 @@
 				completedAt: j.completed_at,
 				createdAt: j.created_at ?? null,
 				queueOrder: j.queue_order ?? (jobList.length - index),
+				batchId: j.batch_id ?? null,
 				cancelRequested: false,
 				outputDir: j.output_dir,
 				outputScheme: j.output_scheme,
 			});
 			items.push(item);
-			// Active jobs need the book's cover and author even though the book
-			// has already left the matched/pending lists. History only fetches
-			// when the job row arrived without a title.
-			if (item.bookId !== null && !known && (isActiveJob(item) || !item.bookTitle)) {
-				let request = bookRequests.get(item.bookId);
-				if (!request) {
-					request = get<BookWithPeople>(`/books/${item.bookId}`);
-					bookRequests.set(item.bookId, request);
-				}
-				void request
-					.then((book) => applyJobBook(item, book))
-					.catch(() => {
-						// Deleted or temporarily unavailable books retain the ID fallback.
-					});
-			}
 			if (isActiveJob(item)) connectSSE(item);
+		}
+		// Active jobs need the book's cover and author even though the book
+		// has already left the matched/pending lists. History fetches only
+		// for the rows Recent activity renders (newest HISTORY_RENDER_LIMIT
+		// plus the banner's visible run — the Review-failures action scrolls
+		// to one of those rows), so the wide jobs fetch stops widening into
+		// one book fetch per history row.
+		const past = items.filter((job) => !isActiveJob(job));
+		const run = summarizeLatestBatch(
+			items.map((job) => ({
+				id: job.id,
+				status: job.status,
+				cancelRequested: job.cancelRequested,
+				action: job.action,
+				batchId: job.batchId,
+				queueOrder: job.queueOrder,
+				startedAt: job.startedAt,
+				completedAt: job.completedAt,
+				createdAt: job.createdAt,
+			}))
+		);
+		const renderIds = new Set(past.slice(0, HISTORY_RENDER_LIMIT).map((job) => job.id));
+		if (run) for (const job of past) if (run.jobIds.includes(job.id)) renderIds.add(job.id);
+		for (const item of items) {
+			const known = item.bookId !== null ? books.find((book) => book.id === item.bookId) : undefined;
+			if (!known && (isActiveJob(item) || renderIds.has(item.id))) hydrateBook(item);
 		}
 		jobs = items;
 	}
@@ -391,6 +430,7 @@
 					completedAt: null,
 					createdAt: null,
 					queueOrder: ++queueSequence,
+					batchId: response.batch_id ?? null,
 					cancelRequested: false,
 					outputDir: response.output_dir,
 					outputScheme: response.output_scheme,
@@ -444,10 +484,116 @@
 	});
 	const pendingBooks = $derived(books.filter((b) => b.status === 'pending'));
 	const pastJobs = $derived(jobs.filter((job) => !isActiveJob(job)));
+	/** The history rows Recent activity renders: the newest
+	 *  HISTORY_RENDER_LIMIT, plus the banner's run's rows so the
+	 *  Review-failures action always has a row to land on. */
+	const renderedHistory = $derived.by(() => {
+		const past = pastJobs;
+		if (past.length <= HISTORY_RENDER_LIMIT) return past;
+		const ids = new Set(past.slice(0, HISTORY_RENDER_LIMIT).map((job) => job.id));
+		if (batchSummary) for (const id of batchSummary.jobIds) ids.add(id);
+		return past.filter((job) => ids.has(job.id));
+	});
 	const clock = liveNow(() => activeJobs.length > 0);
 	const failedJobs = $derived(pastJobs.filter((job) => job.status === 'error' || job.status === 'failed').length);
 	const runningJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'running').length);
 	const queuedJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'queued').length);
+
+	// The banner tracks the latest merge run (batch) so a finished queue has
+	// a result to look at, not just Recent activity. It states a result only
+	// — while a batch runs, the live job cards own that state. Dismissal is
+	// per run: a newer batch re-announces itself.
+	const batchSummary = $derived(
+		summarizeLatestBatch(
+			jobs.map((job) => ({
+				id: job.id,
+				status: job.status,
+				// An in-flight cancel holds an optimistic 'cancelled' badge;
+				// the run must not report itself stopped until the backend
+				// terminal row lands.
+				cancelRequested: job.cancelRequested,
+				action: job.action,
+				batchId: job.batchId,
+				queueOrder: job.queueOrder,
+				startedAt: job.startedAt,
+				completedAt: job.completedAt,
+				createdAt: job.createdAt,
+			}))
+		)
+	);
+	let dismissedBatchId = $state<string | null>(null);
+	const batchVisible = $derived(
+		batchSummary !== null && batchSummary.allTerminal && dismissedBatchId !== batchSummary.id
+	);
+	let historyDetails = $state<HTMLDetailsElement>();
+	// The first failed row of the latest run: the banner's "Review" action
+	// expands Recent activity and lands there.
+	const firstFailedJobId = $derived.by(() => {
+		if (!batchSummary || batchSummary.failed === 0) return null;
+		const ids = new Set(batchSummary.jobIds);
+		const job = jobs.find((j) => ids.has(j.id) && (j.status === 'error' || j.status === 'failed'));
+		return job?.id ?? null;
+	});
+	/** The banner's single next step, when the outcome has one: a single
+	 *  book points at its record; multi-job failures point at their rows. */
+	const batchAction = $derived.by(() => {
+		if (!batchVisible || !batchSummary) return null;
+		if (batchSummary.jobIds.length === 1) {
+			const job = jobs.find((j) => j.id === batchSummary.jobIds[0]);
+			if (job?.bookId) return { label: 'View book', href: `/books/${job.bookId}` };
+			if (batchSummary.failed > 0) return { label: 'Review failure', review: true };
+			return null;
+		}
+		if (batchSummary.failed === 0) return null;
+		return {
+			label: `Review ${batchSummary.failed} ${batchSummary.failed === 1 ? 'failure' : 'failures'}`,
+			review: true,
+		};
+	});
+
+	function reviewFailures() {
+		if (historyDetails) historyDetails.open = true;
+		const id = firstFailedJobId;
+		if (!id) return;
+		// The row renders once the disclosure opens; land on it a frame later.
+		// 'smooth' is an animated page move — reduced-motion users get the
+		// jump, not the glide.
+		const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+		requestAnimationFrame(() => {
+			document.querySelector(`[data-job-id="${id}"]`)?.scrollIntoView({ block: 'center', behavior });
+		});
+	}
+
+	/** Headline for the banner: states the batch and its outcome, in words. */
+	function batchLabel(batch: BatchSummary): string {
+		const kind = batch.isBatch ? 'Batch' : 'Book';
+		if (batch.tone === 'success') {
+			if (!batch.isBatch) return 'Book processed';
+			const cancelledNote = batch.cancelled > 0 ? `, ${batch.cancelled} cancelled` : '';
+			return `Batch complete — ${batch.done} of ${batch.total} processed${cancelledNote}`;
+		}
+		if (batch.tone === 'error') {
+			if (!batch.isBatch) return 'Book failed — nothing processed';
+			return `Batch failed — none of the ${batch.total} processed`;
+		}
+		if (batch.tone === 'warning') {
+			return `${kind} ended with ${batch.failed} ${batch.failed === 1 ? 'failure' : 'failures'}`;
+		}
+		return `${kind} stopped — ${batch.cancelled} ${batch.cancelled === 1 ? 'job was' : 'jobs were'} cancelled`;
+	}
+
+	/** Quiet detail line: the parts the headline doesn't name, plus the
+	 *  run's wall clock. "took" is a completion claim — interrupted runs
+	 *  report how long they ran. */
+	function batchDetail(batch: BatchSummary): string {
+		const parts: string[] = [];
+		if (!batch.isBatch && batch.done > 0) parts.push('M4B merge finished');
+		const verb = batch.tone === 'success' ? 'took' : 'ran for';
+		if (batch.startedAt && batch.finishedAt) {
+			parts.push(`${verb} ${formatElapsed(batch.startedAt, batch.finishedAt, 0)}`);
+		}
+		return parts.join(' · ');
+	}
 
 	function jobStatusLabel(status: string): string {
 		switch (status.toLowerCase()) {
@@ -586,6 +732,18 @@
 	{#if dl.showSkeleton}
 		<div class="queue-loading" aria-label="Loading queue">{#each Array(5) as _}<Skeleton height="4.5rem" />{/each}</div>
 	{:else if !loading && (!dl.error || books.length > 0 || jobs.length > 0)}
+		{#if batchVisible && batchSummary}
+			<div class="queue-banner-wrap">
+				<Alert
+					variant={batchSummary.tone}
+					role={batchSummary.tone === 'error' ? 'alert' : 'status'}
+					actions={batchActions}
+				>
+					{batchLabel(batchSummary)}
+					{#if batchDetail(batchSummary)}<p class="batch-detail">{batchDetail(batchSummary)}</p>{/if}
+				</Alert>
+			</div>
+		{/if}
 		<div class="queue-columns" class:queue-columns--single={matchedBooks.length === 0 && activeJobs.length > 0}>
 			<div class="queue-work">
 				{#if matchedBooks.length > 0}
@@ -650,19 +808,30 @@
 					<section class="queue-idle"><Clock size={21} aria-hidden="true" /><h2 id="activity-title">Nothing processing</h2><p>Ready books stay in the list until you start a batch.</p></section>
 				{/if}
 				{#if pastJobs.length > 0}
-					<details class="job-history"><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each pastJobs as job (job.id)}{@render JobRecord(job, false)}{/each}</details>
+					<details class="job-history" bind:this={historyDetails}><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each renderedHistory as job (job.id)}{@render JobRecord(job, false)}{/each}</details>
 				{/if}
 			</aside>
 		</div>
 	{/if}
 </div>
 
+{#snippet batchActions()}
+	{#if batchAction?.review}
+		<button type="button" class="batch-action" onclick={reviewFailures}>{batchAction.label} <ArrowRight size={14} aria-hidden="true" /></button>
+	{:else if batchAction?.href}
+		<a class="batch-action" href={batchAction.href}>View book <ArrowRight size={14} aria-hidden="true" /></a>
+	{/if}
+	<button type="button" class="batch-action batch-action--icon" aria-label="Dismiss batch result" onclick={() => { dismissedBatchId = batchSummary?.id ?? null; }}>
+		<X size={16} aria-hidden="true" />
+	</button>
+{/snippet}
+
 {#snippet JobRecord(job: JobItem, active: boolean)}
 	{@const destination = destinationFor(job)}
 	{@const profile = outputProfileLabel(job)}
 	{@const running = isRunning(job)}
 	{@const stage = activeStageLabel(job)}
-	<article class="job-record" class:job-record--active={active} aria-busy={active && running}>
+	<article class="job-record" data-job-id={job.id} class:job-record--active={active} aria-busy={active && running}>
 		{#if active && running}
 			<div class="job-progress" role="progressbar" aria-label="Processing {job.bookTitle || 'book'}" aria-valuetext={stage}><span></span></div>
 		{/if}
@@ -744,6 +913,13 @@
 	.live-dot { width: 0.45rem; height: 0.45rem; border-radius: 50%; background: var(--text-muted); }
 	.live-dot--running { background: var(--state-amber); }
 	.queue-loading { display: grid; gap: 0.75rem; }
+	.queue-banner-wrap { margin-top: 0.5rem; }
+	.batch-detail { margin: 0.25rem 0 0; font-size: 0.8125rem; color: var(--text-secondary); }
+	.batch-action { display: inline-flex; align-items: center; gap: 0.35rem; min-height: 2.75rem; min-width: 2.75rem; padding: 0 0.5rem; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--workspace-action); font-size: 0.8125rem; font-weight: 600; cursor: pointer; }
+	.batch-action:hover { background: rgb(41 41 35 / 0.06); }
+	.batch-action--icon { color: var(--text-muted); padding: 0; }
+	.batch-action--icon:hover { color: var(--text); }
+	.batch-action:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
 	.queue-columns { display: grid; grid-template-columns: minmax(0, 1fr) 21rem; align-items: start; gap: 1.5rem; margin-top: 1.5rem; }
 	.queue-columns--single { grid-template-columns: minmax(0, 1fr); }
 	.queue-columns--single .queue-work:empty { display: none; }

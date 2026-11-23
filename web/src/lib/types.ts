@@ -153,6 +153,8 @@ export interface ProcessingJob {
 	created_at: string;
 	/** Durable enqueue order; SQLite created_at is second-precision. */
 	queue_order?: number;
+	/** The queue request that created the job; groups a batch's rows. Absent for pre-batch history. */
+	batch_id?: string;
 	/** Queue-time destination snapshot (profiled batches only). */
 	output_dir?: string;
 	output_scheme?: string;
@@ -338,6 +340,8 @@ export interface ProcessingRequest {
 
 export interface ProcessingResponse {
 	jobs: Array<{ id: string; book_id: number }>;
+	/** Identity of the queue request, shared by every job it created; the completion banner groups runs by it. */
+	batch_id: string;
 	/** Queue-time destination snapshot of the started batch (profile-backed batches only); absent for global-settings batches. */
 	output_dir?: string;
 	output_scheme?: string;

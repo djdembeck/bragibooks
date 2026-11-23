@@ -325,7 +325,7 @@ func TestMetadataOverrideQueuedJobImmutability(t *testing.T) {
 	if err := os.WriteFile(in, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	id, err := svc.QueueJob(t.Context(), 1, []string{in}, queueDestination{})
+	id, err := svc.QueueJob(t.Context(), 1, []string{in}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("QueueJob: %v", err)
 	}
@@ -399,7 +399,7 @@ func TestMetadataOverrideEditedChaptersHonorPreserve(t *testing.T) {
 	if err := os.WriteFile(in, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	id, err := svc.QueueJob(t.Context(), 1, []string{in}, queueDestination{})
+	id, err := svc.QueueJob(t.Context(), 1, []string{in}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("QueueJob: %v", err)
 	}
@@ -519,7 +519,7 @@ func TestMetadataOverrideWriteURLCover(t *testing.T) {
 	if err := os.WriteFile(in, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	id, err := svc.QueueJob(t.Context(), 1, []string{in}, queueDestination{})
+	id, err := svc.QueueJob(t.Context(), 1, []string{in}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("QueueJob: %v", err)
 	}

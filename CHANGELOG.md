@@ -6,6 +6,24 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Added
 
+- Queue completion banner: when the most recent merge batch finishes, the
+  queue page now states the result up front ("Batch complete — 3 of 3
+  processed", "Batch ended with 1 failure", "Batch failed",
+  "Batch stopped") with the run's wall clock, instead of leaving a
+  finished queue to be judged from Recent activity. A failed run carries
+  a "Review N failures" action that opens Recent activity and scrolls to
+  the first failed row; a single-book run links through to the book
+  record. The banner is dismissible per run (a newer batch re-announces
+  itself), and a fully failed run is announced with `role="alert"`
+  rather than the polite `status` used by other outcomes. Each queue
+  request is stamped with a durable batch id (`batch_id` on the
+  `/api/process` response and job rows), so two requests enqueued back
+  to back are reported as separate batches; pre-batch history rows have
+  no id and keep grouping by queue position. Recent activity renders
+  and hydrates only its newest rows (plus the banner's run, so the
+  Review action always has a row to land on) instead of one book fetch
+  and job card per history row. A single failed book reads "Book
+  failed — nothing processed".
 - Manual metadata editor (per book): a durable override layer on the book
   record exposing every supported engine value — title, subtitle, ordered
   author/narrator lists, series name/position, description, genres, year,

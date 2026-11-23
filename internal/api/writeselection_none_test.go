@@ -30,7 +30,7 @@ func TestQueueJobNoneSelectedFreezesNonNilEmptySelection(t *testing.T) {
 
 	noneSel := []string{}
 	svc.proc.ApplyWriteSelection(&noneSel, audio.ChaptersPolicyValuePreserve)
-	jobID, err := svc.QueueJob(context.Background(), bookID, []string{srcPath}, queueDestination{})
+	jobID, err := svc.QueueJob(context.Background(), bookID, []string{srcPath}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("QueueJob (none-selected): %v", err)
 	}

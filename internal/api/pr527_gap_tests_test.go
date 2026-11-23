@@ -76,7 +76,7 @@ func TestCorruptChaptersColumnFailsQueue(t *testing.T) {
 	if err := os.WriteFile(srcPath, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.QueueJob(context.Background(), bookID, []string{srcPath}, queueDestination{}); err == nil {
+	if _, err := svc.QueueJob(context.Background(), bookID, []string{srcPath}, queueDestination{}, ""); err == nil {
 		t.Fatal("QueueJob succeeded on a book with a corrupt chapters column; want a re-match refusal")
 	}
 	var n int

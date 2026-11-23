@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
 	created_at TEXT DEFAULT (datetime('now')),
 	queue_seq INTEGER,
 	book_pre_status TEXT,
+	batch_id TEXT,
 	snapshot_version INTEGER NOT NULL DEFAULT 0
 );
 
@@ -253,7 +254,7 @@ func TestCancelQueuedJob(t *testing.T) {
 	// Queueing intentionally leaves the book in its pre-queue state ('matched'):
 	// the queued -> processing transition happens at worker start, so a queued
 	// cancel needs no status rollback.
-	id, err := h.svc.ProcessingSvc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{})
+	id, err := h.svc.ProcessingSvc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -308,7 +309,7 @@ func TestCancelQueuedJobRestoresPreQueueBookStatus(t *testing.T) {
 		t.Fatalf("seed book: %v", err)
 	}
 	seedSnapshot(t, h.svc.DB, 1)
-	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{})
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -331,7 +332,7 @@ func TestWorkerLosingQueuedClaimRestoresPreQueueBookStatus(t *testing.T) {
 		t.Fatalf("seed book: %v", err)
 	}
 	seedSnapshot(t, h.svc.DB, 1)
-	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{})
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -375,7 +376,7 @@ func TestCancelRunningJob(t *testing.T) {
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 1, []string{"/x/a.m4b"}, queueDestination{})
+	id, err := svc.QueueJob(ctx, 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -433,7 +434,7 @@ func TestCancelRunningJobPersistsLiveOutput(t *testing.T) {
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 1, []string{"/x/a.m4b"}, queueDestination{})
+	id, err := svc.QueueJob(ctx, 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -517,7 +518,7 @@ func TestFinalizeCancelledExecErrorSkipsBookRestoreAndCleansUp(t *testing.T) {
 	}
 	seedSnapshot(t, db, 1)
 
-	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{})
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -604,7 +605,7 @@ func TestQueueJobRecordsMergeAction(t *testing.T) {
 		t.Fatalf("seed book: %v", err)
 	}
 	seedSnapshot(t, h.svc.DB, 1)
-	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{})
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1244,7 +1245,7 @@ func TestJobsRoutesResolve(t *testing.T) {
 func TestStreamJobProgressCloseEndsStream(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1354,7 +1355,7 @@ func newStreamRequest(t *testing.T, id string) *http.Request {
 func TestStreamJobStreamsLiveOutput(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1418,7 +1419,7 @@ func TestStreamJobStreamsLiveOutput(t *testing.T) {
 func TestStreamJobFanOutToConcurrentTimeStreams(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1527,7 +1528,7 @@ func TestStreamJobSlowReaderCannotStallAppend(t *testing.T) {
 func TestStreamJobReconnectCarriesFullSnapshot(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1603,7 +1604,7 @@ func TestStreamJobFinalDrainDeliversTrailingLine(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
 	for i := range 20 {
-		id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{})
+		id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{}, "")
 		if err != nil {
 			t.Fatalf("iteration %d: queue job: %v", i, err)
 		}
@@ -1658,7 +1659,7 @@ func TestStreamJobFinalDrainDeliversTrailingLine(t *testing.T) {
 func TestStreamJobLateSubscriberGetsTerminalResult(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1845,11 +1846,11 @@ func TestJobStateOutputFrom(t *testing.T) {
 func TestJobsExposeDurableQueueOrder(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	first, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{})
+	first, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue first job: %v", err)
 	}
-	second, err := svc.QueueJob(t.Context(), 0, []string{"/x/b.m4b"}, queueDestination{})
+	second, err := svc.QueueJob(t.Context(), 0, []string{"/x/b.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue second job: %v", err)
 	}
@@ -1881,6 +1882,193 @@ func TestJobsExposeDurableQueueOrder(t *testing.T) {
 	}
 }
 
+// TestProcessRequestsCarryDurableBatchIdentity covers the completion
+// banner's grouping contract: one POST /api/process request shares one
+// batch id across every job it enqueues, and back-to-back requests stay
+// contiguous in queue_order (MAX+1 per insert, rows never pruned) — so the
+// batch id, not the adjacency, is what separates two user batches.
+func TestProcessRequestsCarryDurableBatchIdentity(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+
+	for id := int64(1); id <= 4; id++ {
+		if _, err := h.svc.DB.Exec(
+			"INSERT INTO books (id, title, status) VALUES (?, 'Book', 'matched')", id); err != nil {
+			t.Fatalf("seed book %d: %v", id, err)
+		}
+		seedSnapshot(t, h.svc.DB, id)
+	}
+	srcA := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcA, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed audio: %v", err)
+	}
+	srcB := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcB, "b.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed audio: %v", err)
+	}
+
+	post := func(bookIDs []int64, srcDirs []string) string {
+		body, _ := json.Marshal(StartProcessingRequest{BookIDs: bookIDs, SrcDirs: srcDirs})
+		req := httptest.NewRequest("POST", "/api/process", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		h.StartProcessing(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("process status = %d — body: %s", w.Code, w.Body.String())
+		}
+		var resp StartProcessingResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp.BatchID == "" || len(resp.Jobs) != len(bookIDs) {
+			t.Fatalf("response = %+v; want %d jobs and a batch id", resp, len(bookIDs))
+		}
+		return resp.BatchID
+	}
+
+	first := post([]int64{1, 2}, []string{srcA, srcB})
+	second := post([]int64{3, 4}, []string{srcA, srcB})
+	if first == second {
+		t.Fatalf("two requests share batch id %q; want distinct ids", first)
+	}
+
+	var list struct {
+		Jobs []struct {
+			BookID     int64  `json:"book_id"`
+			QueueOrder int64  `json:"queue_order"`
+			BatchID    string `json:"batch_id"`
+		} `json:"jobs"`
+	}
+	req := httptest.NewRequest("GET", "/api/jobs?limit=10", nil)
+	w := httptest.NewRecorder()
+	h.ListJobs(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list jobs status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode jobs: %v", err)
+	}
+	if len(list.Jobs) != 4 {
+		t.Fatalf("jobs = %d; want 4", len(list.Jobs))
+	}
+
+	byOrder := make(map[int64]struct {
+		bookID  int64
+		batchID string
+	}, len(list.Jobs))
+	minOrder, maxOrder := int64(1<<62), int64(-1)
+	for _, job := range list.Jobs {
+		byOrder[job.QueueOrder] = struct {
+			bookID  int64
+			batchID string
+		}{job.BookID, job.BatchID}
+		if job.QueueOrder < minOrder {
+			minOrder = job.QueueOrder
+		}
+		if job.QueueOrder > maxOrder {
+			maxOrder = job.QueueOrder
+		}
+	}
+	// The scenario the banner must survive: four contiguous queue orders
+	// across two separate requests (min..max with no gap).
+	if maxOrder-minOrder+1 != 4 {
+		t.Fatalf("queue orders span %d..%d; want 4 contiguous values", minOrder, maxOrder)
+	}
+	for i := int64(0); i < 4; i++ {
+		entry, ok := byOrder[minOrder+i]
+		if !ok {
+			t.Fatalf("missing queue order %d in %v", minOrder+i, byOrder)
+		}
+		wantBatch := first
+		wantBooks := map[int64]bool{1: true, 2: true}
+		if i >= 2 {
+			wantBatch, wantBooks = second, map[int64]bool{3: true, 4: true}
+		}
+		if !wantBooks[entry.bookID] {
+			t.Errorf("order %d: book %d; want one of %v", minOrder+i, entry.bookID, wantBooks)
+		}
+		if entry.batchID != wantBatch {
+			t.Errorf("order %d: batch id = %q; want %q", minOrder+i, entry.batchID, wantBatch)
+		}
+	}
+
+	// The single-job endpoint carries the id too (pollJob refreshes from it).
+	var one struct {
+		BatchID string `json:"batch_id"`
+	}
+	jobReq := httptest.NewRequest("GET", "/api/jobs?limit=1", nil)
+	jobW := httptest.NewRecorder()
+	h.ListJobs(jobW, jobReq)
+	newest := list.Jobs[0]
+	for _, job := range list.Jobs {
+		if job.QueueOrder > newest.QueueOrder {
+			newest = job
+		}
+	}
+	singleID := newestBookID(h, newest.BookID, t)
+	singleW := httptest.NewRecorder()
+	h.GetJobStatus(singleW, chiJobRequest(t, singleID))
+	if singleW.Code != http.StatusOK {
+		t.Fatalf("get job status = %d — body: %s", singleW.Code, singleW.Body.String())
+	}
+	if err := json.Unmarshal(singleW.Body.Bytes(), &one); err != nil {
+		t.Fatalf("decode job: %v", err)
+	}
+	wantID := first
+	if newest.BatchID == second {
+		wantID = second
+	}
+	if one.BatchID != wantID {
+		t.Errorf("single job batch id = %q; want %q", one.BatchID, wantID)
+	}
+
+	// Pre-batch rows (no batch id) omit the field: the web falls back to
+	// the queue-order adjacency rule for those.
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, status, action, detail, started_at, completed_at, queue_seq) VALUES ('legacy-1', 1, 'done', 'import', '/in/a.m4b', '2026-01-01 00:00:00', '2026-01-01 00:00:01', 0)",
+	); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	var legacy struct {
+		BatchID any `json:"batch_id"`
+	}
+	legacyW := httptest.NewRecorder()
+	h.GetJobStatus(legacyW, chiJobRequest(t, "legacy-1"))
+	if legacyW.Code != http.StatusOK {
+		t.Fatalf("legacy job status = %d — body: %s", legacyW.Code, legacyW.Body.String())
+	}
+	if err := json.Unmarshal(legacyW.Body.Bytes(), &legacy); err != nil {
+		t.Fatalf("decode legacy job: %v", err)
+	}
+	if legacy.BatchID != nil {
+		t.Errorf("legacy row batch id = %v; want the field absent", legacy.BatchID)
+	}
+}
+
+// chiJobRequest builds a GET /api/jobs/{id} request with the chi route
+// context the direct GetJobStatus test calls need (chiURLParam reads it).
+func chiJobRequest(t *testing.T, jobID string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/api/jobs/"+jobID, nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Keys = append(rctx.URLParams.Keys, "id")
+	rctx.URLParams.Values = append(rctx.URLParams.Values, jobID)
+	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+}
+
+// newestBookID looks a book id up for the test; the jobs API exposes only
+// ids, so the single-job probe needs the book's job id resolved from the DB.
+func newestBookID(h *Handler, bookID int64, t *testing.T) string {
+	t.Helper()
+	var id string
+	err := h.svc.DB.QueryRow(
+		"SELECT id FROM processing_jobs WHERE book_id = ? AND batch_id IS NOT NULL ORDER BY queue_seq DESC LIMIT 1",
+		bookID,
+	).Scan(&id)
+	if err != nil {
+		t.Fatalf("find newest job for book %d: %v", bookID, err)
+	}
+	return id
+}
+
 // TestQueueJobDuplicateRejected covers the server-side 409 guard.
 func TestQueueJobDuplicateRejected(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
@@ -1892,17 +2080,17 @@ func TestQueueJobDuplicateRejected(t *testing.T) {
 	}
 	seedSnapshot(t, h.svc.DB, 1)
 
-	first, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{})
+	first, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("first queue: %v", err)
 	}
-	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}); err == nil {
+	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, ""); err == nil {
 		t.Fatal("second queue for a book with a queued job: want error, got nil")
 	}
 
 	// A finished job frees the book for a new run.
 	setJobStatus(t, h.svc.DB, first, "done")
-	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}); err != nil {
+	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, ""); err != nil {
 		t.Fatalf("queue after terminal job: %v", err)
 	}
 }
@@ -2098,7 +2286,7 @@ func TestProcessJobRecordsOutputFormat(t *testing.T) {
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")}, queueDestination{})
+	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -2135,7 +2323,7 @@ func TestFinishedJobLeavesMap(t *testing.T) {
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")}, queueDestination{})
+	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
