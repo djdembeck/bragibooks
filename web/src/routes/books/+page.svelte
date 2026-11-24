@@ -404,9 +404,11 @@
 			// list, not from books.status: the status only becomes 'processing'
 			// when a worker claims the job, so a book whose job is still queued
 			// keeps its pre-queue status and would slip through a status test.
-			// limit trims only the recent-history query; ListJobs appends the
-			// complete queued/running set regardless, so limit=1 keeps the
-			// payload small while still returning every in-flight job.
+			// limit bounds the recent-history query; the active (queued/
+			// running) set is appended in full regardless, and the
+			// latest-batch aggregate is small and bounded, so limit=1 keeps
+			// the payload small while still returning every in-flight job.
+			// Full batch rows are fetched on demand, not here.
 			const activeJobs = await get<JobsListResponse>('/jobs?limit=1');
 			const { resolved, skipped } = partitionForRemoval(ids.map((id) => known.get(id)!), activeJobs.jobs);
 			removeSkipped = skipped;

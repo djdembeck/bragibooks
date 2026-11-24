@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { get, post, streamEvents } from '#lib/api.js';
-	import type { BookWithPeople, BooksListResponse, ProcessingResponse, ProcessingJob, JobsListResponse, OutputProfile, OutputProfilesResponse } from '#lib/types.js';
+	import type { BatchAggregate, BookWithPeople, BooksListResponse, ProcessingResponse, ProcessingJob, JobsListResponse, OutputProfile, OutputProfilesResponse } from '#lib/types.js';
 	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, StatusBadge, CoverArt, OutputProfileSelector, JobActionLabel } from '#lib/components/index.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { cleanAdbError, toCleanedError } from '#lib/adbError.js';
@@ -8,7 +8,7 @@
 	import { createJobLogTracker, type JobLogTracker } from '#lib/jobDestination.js';
 	import { mergeOutputEvent } from '#lib/jobOutput.js';
 	import { liveNow } from '#lib/liveNow.svelte.js';
-	import { summarizeLatestBatch, type BatchSummary } from '#lib/jobBatch.js';
+	import { summarizeRun, type BatchSummary } from '#lib/jobBatch.js';
 	import { CheckCircle, Clock, ArrowRight, FileText, X } from '@lucide/svelte';
 
 	interface JobItem {
@@ -45,13 +45,17 @@
 	}
 
 	/** How many history rows Recent activity renders and hydrates by
-	 *  default: the jobs fetch is wide so the banner's run stays whole,
-	 *  but the list does not pay one book fetch and JobRecord subtree per
-	 *  history row. The banner's visible run's rows always render (the
-	 *  Review-failures action scrolls to one of them), and the banner
-	 *  reads only fields the jobs fetch already carries, so the bound does
-	 *  not change what the banner summarizes. */
+	 *  default: the banner's run's rows always render (the Review-failures
+	 *  action scrolls to one of them), the rest stay hidden behind
+	 *  "Show N older". The banner reads the server's bounded batch
+	 *  aggregate (counts plus row ids, not rows), and the batch's full
+	 *  rows arrive on demand in bounded pages, so the bound does not
+	 *  change what the banner summarizes and a hidden history row costs
+	 *  no book fetch. */
 	const HISTORY_RENDER_LIMIT = 20;
+	/** Page size for the on-demand batch-row fetch: 16 rows in flight,
+	 *  the same bound the books page uses for its book fan-out. */
+	const BATCH_PAGE_SIZE = 16;
 	let books: BookWithPeople[] = $state([]);
 	let selectedIds = $state<Set<number>>(new Set());
 	let profiles = $state<OutputProfile[]>([]);
@@ -63,6 +67,23 @@
 	let loading = $state(true);
 	let starting = $state(false);
 	let jobs = $state<JobItem[]>([]);
+	// The /jobs response's bounded latest-batch aggregate (counts + row
+	// ids): the banner's source of truth. Written by load() and by
+	// refreshBatchAggregate (a batch's last row going terminal), cleared
+	// when a new batch starts. The batch's full rows are NOT in the
+	// response; loadBatchRows fetches them on demand, bounded.
+	let batchAggregate = $state<BatchAggregate | null>(null);
+	// Bumped on every load: an in-flight batch fetch outlived by a reload
+	// drops its rows instead of appending them to the fresh list.
+	let batchLoadToken = 0;
+	// A paged batch fetch failed: the rows past the failed page are
+	// missing from the list (the banner still counts them from the
+	// aggregate), so the batch area offers a retry for them.
+	let batchLoadError = $state(false);
+	// A paged batch fetch is in flight: the batch area's Retry button is
+	// disabled while one runs, so two clicks can never start two paged
+	// loops that both append the same fetched rows.
+	let batchLoading = $state(false);
 	let queueSequence = 0;
 	let cancelling = $state<Set<string>>(new Set());
 	const cleanupMap = $state(new Map<string, () => void>());
@@ -98,13 +119,24 @@
 			const [matched, pending, jobsResp] = await Promise.all([
 				get<BooksListResponse>('/books?status=matched&limit=100'),
 				get<BooksListResponse>('/books?status=pending&limit=100'),
-				// 100 (the API cap) keeps a finished batch whole: the banner
-				// summarizes the latest contiguous run, and a run longer than
-				// the default window would read as a smaller one.
+				// The response carries recent history, the active set, and a
+				// bounded aggregate of the latest batch (counts + row ids):
+				// the banner stays whole for a batch of any size without the
+				// batch's full rows (output logs) riding along on each call.
+				// The batch rows themselves come from loadBatchRows, on demand.
 				get<JobsListResponse>('/jobs?limit=100'),
 			]);
 			books = [...(matched.books || []), ...(pending.books || [])];
+			batchLoadToken++;
+			batchLoadError = false;
+			batchLoading = false;
+			showAllHistory = false;
 			restoreJobs(jobsResp.jobs);
+			batchAggregate = jobsResp.batch ?? null;
+			// The banner's run's rows are always reachable (the Review-
+			// failures action scrolls to one of them); the rest of the
+			// batch is paged in when "Show all" lifts the render bound.
+			void loadBatchRows(batchAggregate, batchLoadToken);
 		});
 		loading = false;
 		// Independent of the queue load: a profile-list failure must not
@@ -144,6 +176,24 @@
 		item.authorNames = authorLabel(book);
 	}
 
+	// Per-load book fan-out: one in-flight request per book id, shared by
+	// the job-list hydrator and the on-demand batch-row fetch. Cleared on
+	// every load, so a re-load re-hydrates (a book may have changed since).
+	const bookRequests = new Map<number, Promise<BookWithPeople>>();
+	function hydrateBook(item: JobItem) {
+		if (item.bookId === null) return;
+		let request = bookRequests.get(item.bookId);
+		if (!request) {
+			request = get<BookWithPeople>(`/books/${item.bookId}`);
+			bookRequests.set(item.bookId, request);
+		}
+		void request
+			.then((book) => applyJobBook(item, book))
+			.catch(() => {
+				// Deleted or temporarily unavailable books retain the ID fallback.
+			});
+	}
+
 	function restoreJobs(jobList: ProcessingJob[]) {
 		cleanupMap.forEach((fn) => fn());
 		pollTimers.forEach((timer) => clearInterval(timer));
@@ -151,24 +201,11 @@
 		cleanupMap.clear();
 		pollTimers.clear();
 		retryTimers.clear();
+		bookRequests.clear();
 		// The REST log has no SSE offset; trackers are rebuilt lazily per job.
 		logTrackers.clear();
 
 		const items: JobItem[] = [];
-		const bookRequests = new Map<number, Promise<BookWithPeople>>();
-		const hydrateBook = (item: JobItem) => {
-			if (item.bookId === null) return;
-			let request = bookRequests.get(item.bookId);
-			if (!request) {
-				request = get<BookWithPeople>(`/books/${item.bookId}`);
-				bookRequests.set(item.bookId, request);
-			}
-			void request
-				.then((book) => applyJobBook(item, book))
-				.catch(() => {
-					// Deleted or temporarily unavailable books retain the ID fallback.
-				});
-		};
 		// Use the API's durable enqueue order; fall back to API position for
 		// legacy rows so tied second-level timestamps cannot reverse a batch.
 		queueSequence = Math.max(0, ...jobList.map((j) => j.queue_order ?? 0), jobList.length);
@@ -199,33 +236,118 @@
 			items.push(item);
 			if (isActiveJob(item)) connectSSE(item);
 		}
-		// Active jobs need the book's cover and author even though the book
-		// has already left the matched/pending lists. History fetches only
-		// for the rows Recent activity renders (newest HISTORY_RENDER_LIMIT
-		// plus the banner's visible run — the Review-failures action scrolls
-		// to one of those rows), so the wide jobs fetch stops widening into
-		// one book fetch per history row.
-		const past = items.filter((job) => !isActiveJob(job));
-		const run = summarizeLatestBatch(
-			items.map((job) => ({
-				id: job.id,
-				status: job.status,
-				cancelRequested: job.cancelRequested,
-				action: job.action,
-				batchId: job.batchId,
-				queueOrder: job.queueOrder,
-				startedAt: job.startedAt,
-				completedAt: job.completedAt,
-				createdAt: job.createdAt,
-			}))
-		);
-		const renderIds = new Set(past.slice(0, HISTORY_RENDER_LIMIT).map((job) => job.id));
-		if (run) for (const job of past) if (run.jobIds.includes(job.id)) renderIds.add(job.id);
+		// Active jobs need the book's cover and author even though the
+		// book has already left the matched/pending lists. Past rows do
+		// NOT hydrate here: the banner reads the batch aggregate (not
+		// rows), and the rows the bounded view renders hydrate via
+		// hydrateRenderedHistory (the render cap) and loadBatchRows (the
+		// batch's own rows, paged in) — so a large batch never fans out a
+		// book fetch per row at load.
 		for (const item of items) {
+			if (!isActiveJob(item)) continue;
 			const known = item.bookId !== null ? books.find((book) => book.id === item.bookId) : undefined;
-			if (!known && (isActiveJob(item) || renderIds.has(item.id))) hydrateBook(item);
+			if (!known) hydrateBook(item);
 		}
 		jobs = items;
+	}
+
+	/** Hydrate the rows the bounded view renders (the render cap plus the
+	 *  banner's run), so "Show all" and Review-failures never land on a
+	 *  Book #<id> fallback. Bounded: the view renders at most the render
+	 *  cap plus the always-visible run, so a large batch's unrendered rows
+	 *  never fan out a book fetch per row at load. The effect re-runs when
+	 *  loadBatchRows appends a page (jobs changes) and when "Show all"
+	 *  lifts the bound, so every row the view shows gets its book here. */
+	function hydrateRenderedHistory() {
+		for (const item of renderedHistory) {
+			const known = item.bookId !== null ? books.find((book) => book.id === item.bookId) : undefined;
+			if (!known) hydrateBook(item);
+		}
+	}
+
+	/** Fetch the latest batch's full rows on demand, bounded: the /jobs
+	 *  response carries the batch's aggregate (counts + row ids), not its
+	 *  rows, so the page pages them in here — BATCH_PAGE_SIZE at a time,
+	 *  Hydration is the render effect's job (it re-runs
+	 *  when the append lands), so a large batch's unrendered rows never
+	 *  fan out a book fetch per row at load. A fetch failure marks the
+	 *  load as incomplete (the batch area offers a retry); the missing
+	 *  rows stay out of the list until the retry or the next load. */
+	async function loadBatchRows(agg: BatchAggregate | null, token: number) {
+		if (!agg || agg.job_ids.length === 0) return;
+		batchLoading = true;
+		const knownIds = new Set(jobs.map((job) => job.id));
+		for (let offset = 0; offset < agg.total; offset += BATCH_PAGE_SIZE) {
+			const count = Math.min(BATCH_PAGE_SIZE, agg.total - offset);
+			let resp: JobsListResponse;
+			try {
+				resp = await get<JobsListResponse>(
+					`/jobs?batch_id=${encodeURIComponent(agg.batch_id)}&limit=${count}&offset=${offset}`
+				);
+			} catch {
+				// A reload outlived this fetch: the fresh load owns the
+				// batch rows, so no stale error flag.
+				if (token !== batchLoadToken) return;
+				batchLoadError = true;
+				batchLoading = false;
+				return;
+			}
+			if (token !== batchLoadToken) return; // A reload outlived this fetch.
+			const fresh = resp.jobs.filter((job) => !knownIds.has(job.id));
+			if (fresh.length === 0) continue;
+			// Newest first: the appended rows are older than the recent
+			// window, and "Show all" must reveal them in queue order.
+			jobs = [...jobs, ...fresh.map(jobToItem)].sort((a, b) => b.queueOrder - a.queueOrder);
+			for (const job of fresh) knownIds.add(job.id);
+		}
+		// A stale loop outlived by a reload must not clear the flags a
+		// newer load already set.
+		if (token === batchLoadToken) {
+			batchLoadError = false;
+			batchLoading = false;
+		}
+	}
+
+	/** Retry the paged batch fetch after a failure: the missing rows are
+	 *  re-fetched from offset 0 (the known-ids filter drops what the
+	 *  list already holds). Bumping the token invalidates any stale
+	 *  in-flight attempt, so a second click can never run two paged
+	 *  loops over the same token (the button's disabled state is the
+	 *  first guard; this is the second). */
+	function retryBatchLoad() {
+		batchLoadToken++;
+		void loadBatchRows(batchAggregate, batchLoadToken);
+	}
+
+	/** A fetched batch row to its card shape: a state proxy (like
+	 *  restoreJobs' and start's items), so the async book hydration that
+	 *  lands after the push still re-renders. The book's title/cover come
+	 *  from the list when present; hydrateBook fills the rest. */
+	function jobToItem(j: ProcessingJob): JobItem {
+		const known = j.book_id !== null ? books.find((book) => book.id === j.book_id) : undefined;
+		const item = $state<JobItem>({
+			id: j.id,
+			bookId: j.book_id,
+			bookTitle: known?.title,
+			coverUrl: known?.cover_image_url,
+			authorNames: known ? authorLabel(known) : undefined,
+			status: j.status,
+			action: j.action ?? null,
+			detail: j.detail ?? null,
+			output: j.output || '',
+			outputOffset: null,
+			outputFile: j.output_file ?? null,
+			error: j.error || null,
+			startedAt: j.started_at,
+			completedAt: j.completed_at,
+			createdAt: j.created_at ?? null,
+			queueOrder: j.queue_order ?? 0,
+			batchId: j.batch_id ?? null,
+			cancelRequested: false,
+			outputDir: j.output_dir,
+			outputScheme: j.output_scheme,
+		});
+		return item;
 	}
 
 	// Heartbeats ("alive") and unknown payloads must not clobber the job
@@ -389,7 +511,52 @@
 				cleanupMap.delete(jobId);
 			}
 		}
+		// The aggregate is the banner's source of truth, and the last row
+		// of the batch to go terminal is the moment its rollup becomes
+		// final — that is when the completion banner appears. No
+		// full-page load(): that would flash the queue into a loading
+		// state on every job completion.
+		refreshBatchAggregate();
 		await loadBooks();
+	}
+
+	/** Re-pull the latest-batch aggregate without reloading the page:
+	 *  limit=1 keeps the body a single row — the response's batch field
+	 *  is what the banner reads. Called from refreshAfterTerminal once a
+	 *  batch's last local row is terminal, so the completion banner
+	 *  appears live when the newest run finishes — no full-page load(),
+	 *  which would flash the queue into a loading state on every job
+	 *  completion.
+	 *
+	 *  The subject is the NEWEST batch the page holds (highest durable
+	 *  queue order; start() queues at the head, so this is the server's
+	 *  latest). The rows always name it; the aggregate is only a shortcut
+	 *  to skip the refetch when it already reports that batch fully
+	 *  terminal. The aggregate being NULL is NOT a skip: a fresh page's
+	 *  first batch, or the window right after start() cleared the previous
+	 *  run's terminal rollup, both need this fetch to re-announce the
+	 *  banner once the new batch's rows land. */
+	async function refreshBatchAggregate() {
+		let batchId: string | null = null;
+		let newestSeq = -1;
+		for (const job of jobs) {
+			if (job.batchId && job.queueOrder > newestSeq) {
+				batchId = job.batchId;
+				newestSeq = job.queueOrder;
+			}
+		}
+		if (!batchId) return;
+		const batchJobs = jobs.filter((job) => job.batchId === batchId);
+		if (batchJobs.length === 0 || batchJobs.some((job) => !TERMINAL_STATUSES.has(job.status.toLowerCase()))) {
+			return;
+		}
+		if (batchAggregate?.batch_id === batchId && batchAggregate.all_terminal) return;
+		try {
+			const resp = await get<JobsListResponse>('/jobs?limit=1');
+			batchAggregate = resp.batch ?? null;
+		} catch {
+			// The next terminal event (or a manual reload) re-fetches.
+		}
 	}
 
 	function toggleBook(id: number) {
@@ -439,6 +606,11 @@
 				connectSSE(item);
 				void pollJob(item);
 			}
+			// The previous run's terminal aggregate must not keep its
+			// "Batch complete" banner up for the new run: the new batch
+			// owns the banner, and its own terminal rows will re-fetch
+			// the aggregate via refreshAfterTerminal.
+			batchAggregate = null;
 			selectedIds = new Set();
 			selectedProfileId = null; // Batch queued with this choice; back to Global settings.
 			await loadBooks();
@@ -486,13 +658,22 @@
 	const pastJobs = $derived(jobs.filter((job) => !isActiveJob(job)));
 	/** The history rows Recent activity renders: the newest
 	 *  HISTORY_RENDER_LIMIT, plus the banner's run's rows so the
-	 *  Review-failures action always has a row to land on. */
+	 *  Review-failures action always has a row to land on. "Show all"
+	 *  lifts the bound: the batch's rows are paged in by loadBatchRows,
+	 *  so every row the banner counts is reachable from the view. */
 	const renderedHistory = $derived.by(() => {
 		const past = pastJobs;
-		if (past.length <= HISTORY_RENDER_LIMIT) return past;
+		if (showAllHistory || past.length <= HISTORY_RENDER_LIMIT) return past;
 		const ids = new Set(past.slice(0, HISTORY_RENDER_LIMIT).map((job) => job.id));
 		if (batchSummary) for (const id of batchSummary.jobIds) ids.add(id);
 		return past.filter((job) => ids.has(job.id));
+	});
+	const hiddenHistoryCount = $derived(pastJobs.length - renderedHistory.length);
+	// Hydrate the rows the bounded view renders: the render cap for
+	// non-batch history, the batch's rows as they page in (loadBatchRows
+	// re-runs this via the derived), and "Show all" lifting the bound.
+	$effect(() => {
+		hydrateRenderedHistory();
 	});
 	const clock = liveNow(() => activeJobs.length > 0);
 	const failedJobs = $derived(pastJobs.filter((job) => job.status === 'error' || job.status === 'failed').length);
@@ -502,22 +683,24 @@
 	// The banner tracks the latest merge run (batch) so a finished queue has
 	// a result to look at, not just Recent activity. It states a result only
 	// — while a batch runs, the live job cards own that state. Dismissal is
-	// per run: a newer batch re-announces itself.
+	// per run: a newer batch re-announces itself. The rollup comes from the
+	// server's bounded batch aggregate (counts + row ids, computed in SQL
+	// over the whole batch); only when the response carries no aggregate
+	// (pre-batch history, probe degradation) does it fall back to the
+	// queue-order adjacency walk over the rows the page holds.
 	const batchSummary = $derived(
-		summarizeLatestBatch(
+		summarizeRun(
+			batchAggregate,
 			jobs.map((job) => ({
 				id: job.id,
 				status: job.status,
-				// An in-flight cancel holds an optimistic 'cancelled' badge;
-				// the run must not report itself stopped until the backend
-				// terminal row lands.
-				cancelRequested: job.cancelRequested,
 				action: job.action,
 				batchId: job.batchId,
 				queueOrder: job.queueOrder,
 				startedAt: job.startedAt,
 				completedAt: job.completedAt,
 				createdAt: job.createdAt,
+				cancelRequested: job.cancelRequested,
 			}))
 		)
 	);
@@ -526,6 +709,7 @@
 		batchSummary !== null && batchSummary.allTerminal && dismissedBatchId !== batchSummary.id
 	);
 	let historyDetails = $state<HTMLDetailsElement>();
+	let showAllHistory = $state(false);
 	// The first failed row of the latest run: the banner's "Review" action
 	// expands Recent activity and lands there.
 	const firstFailedJobId = $derived.by(() => {
@@ -541,10 +725,16 @@
 		if (batchSummary.jobIds.length === 1) {
 			const job = jobs.find((j) => j.id === batchSummary.jobIds[0]);
 			if (job?.bookId) return { label: 'View book', href: `/books/${job.bookId}` };
-			if (batchSummary.failed > 0) return { label: 'Review failure', review: true };
+			// The failed row must be in the list before the action can
+			// land on it: outside the recent window it is still paged in.
+			if (batchSummary.failed > 0 && firstFailedJobId) return { label: 'Review failure', review: true };
 			return null;
 		}
 		if (batchSummary.failed === 0) return null;
+		// Same gate: the action scrolls to the first failed row, so a
+		// failed row the page has not loaded yet hides the action until
+		// the paged batch fetch brings it in.
+		if (!firstFailedJobId) return null;
 		return {
 			label: `Review ${batchSummary.failed} ${batchSummary.failed === 1 ? 'failure' : 'failures'}`,
 			review: true,
@@ -808,7 +998,10 @@
 					<section class="queue-idle"><Clock size={21} aria-hidden="true" /><h2 id="activity-title">Nothing processing</h2><p>Ready books stay in the list until you start a batch.</p></section>
 				{/if}
 				{#if pastJobs.length > 0}
-					<details class="job-history" bind:this={historyDetails}><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each renderedHistory as job (job.id)}{@render JobRecord(job, false)}{/each}</details>
+					<details class="job-history" bind:this={historyDetails}><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each renderedHistory as job (job.id)}{@render JobRecord(job, false)}{/each}{#if hiddenHistoryCount > 0}<button type="button" class="history-more" onclick={() => { showAllHistory = true; }}>Show {hiddenHistoryCount} older {hiddenHistoryCount === 1 ? 'run' : 'runs'}</button>{:else if showAllHistory && pastJobs.length > HISTORY_RENDER_LIMIT}<button type="button" class="history-more" onclick={() => { showAllHistory = false; }}>Show fewer</button>{/if}</details>
+				{/if}
+				{#if batchLoadError && batchAggregate}
+					<div class="history-load-error" role="alert">Some batch rows failed to load.<button type="button" class="history-retry" disabled={batchLoading} onclick={retryBatchLoad}>Retry</button></div>
 				{/if}
 			</aside>
 		</div>
@@ -965,6 +1158,14 @@
 	.job-history > summary > span:first-child { display: inline-flex; align-items: baseline; gap: 0.5rem; }
 	.failure-count { font-size: 0.75rem; color: var(--state-red); font-weight: 500; margin-left: auto; }
 	.history-hint { margin: 0 0 1rem; }
+	.history-more { display: block; width: 100%; margin: 0.25rem 0 1rem; padding: 0.5rem 0; border: 1px solid var(--border); border-radius: 0.5rem; background: none; color: var(--text-muted); font-size: 0.8125rem; cursor: pointer; }
+	.history-more:hover { color: var(--text); border-color: var(--text-muted); }
+	/* Sits below the Recent activity disclosure (or, when the batch is
+	 * all active, directly below the active-jobs card): no top margin —
+	 * the disclosure's own spacing owns the gap above. */
+	.history-load-error { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin: 0 0 1rem; padding: 0.5rem 0.75rem; border: 1px solid var(--state-red-border); border-radius: 0.5rem; color: var(--state-red); font-size: 0.8125rem; }
+	.history-retry { border: 0; border-radius: var(--radius-sm); background: none; color: var(--workspace-action); font-size: 0.8125rem; font-weight: 600; cursor: pointer; min-height: 2.75rem; }
+	.history-retry:hover { text-decoration: underline; }
 	.job-record { min-width: 0; padding: 1.25rem 1.5rem; border-top: 1px solid var(--border-subtle); }
 	.job-record--active { container-type: inline-size; padding-top: 1rem; }
 	.job-history .job-record { padding: 1rem 0; }
