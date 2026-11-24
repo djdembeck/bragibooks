@@ -2292,10 +2292,21 @@ SELECT COUNT(*),
        MAX(completed_at),
        MAX(queue_seq)
 FROM processing_jobs` + where
+	// One read transaction: the count/rollup and the id list must see
+	// the same snapshot. StartProcessing enqueues a batch's jobs
+	// individually, so a request that lands mid-enqueue would otherwise
+	// count N rows and return N+1 (or N-1) ids, and the client would
+	// page the wrong number of rows.
+	tx, err := h.svc.DB.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() // safe to call after Commit
+
 	var total, done, failed, cancelled, inFlight int
 	var startedAt, finishedAt sql.NullString
 	var lastSeq int64
-	if err := h.svc.DB.QueryRow(query, args...).Scan(
+	if err := tx.QueryRow(query, args...).Scan(
 		&total, &done, &failed, &cancelled, &inFlight,
 		&startedAt, &finishedAt, &lastSeq,
 	); err != nil {
@@ -2312,7 +2323,7 @@ FROM processing_jobs` + where
 		idsArgs = append(idsArgs, bookID)
 	}
 	idsQuery += " ORDER BY queue_seq ASC"
-	idRows, err := h.svc.DB.Query(idsQuery, idsArgs...)
+	idRows, err := tx.Query(idsQuery, idsArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -2321,9 +2332,19 @@ FROM processing_jobs` + where
 	for idRows.Next() {
 		var id string
 		if err := idRows.Scan(&id); err != nil {
-			continue
+			// A row-read error means the id list is shorter than the
+			// count: return it so ListJobs takes its degrade branch
+			// (log + old behavior) instead of shipping an aggregate
+			// whose total overstates its ids.
+			return nil, err
 		}
 		jobIDs = append(jobIDs, id)
+	}
+	if err := idRows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 
 	agg := &BatchAggregate{

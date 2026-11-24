@@ -127,6 +127,10 @@ export interface LegacyJob {
 	startedAt: string | null;
 	completedAt: string | null;
 	createdAt: string | null;
+	/** Local cancellation in flight: the badge is optimistic 'cancelled'
+	 *  until the backend's terminal row lands, so the run is still in
+	 *  flight. */
+	cancelRequested?: boolean;
 }
 
 /** The latest legacy run (queue-order adjacency) among the given rows, or
@@ -175,7 +179,13 @@ function buildLegacySummary(run: LegacyJob[]): BatchSummary {
 		} else if (status === 'error' || status === 'failed') {
 			failed += 1;
 		} else if (status === 'cancelled') {
-			cancelled += 1;
+			if (job.cancelRequested) {
+				// Optimistic badge: the worker has not persisted the
+				// terminal row yet, so the run is still in flight.
+				inFlight += 1;
+			} else {
+				cancelled += 1;
+			}
 		} else {
 			inFlight += 1;
 		}

@@ -76,6 +76,10 @@
 	// Bumped on every load: an in-flight batch fetch outlived by a reload
 	// drops its rows instead of appending them to the fresh list.
 	let batchLoadToken = 0;
+	// A paged batch fetch failed: the rows past the failed page are
+	// missing from the list (the banner still counts them from the
+	// aggregate), so the batch area offers a retry for them.
+	let batchLoadError = $state(false);
 	let queueSequence = 0;
 	let cancelling = $state<Set<string>>(new Set());
 	const cleanupMap = $state(new Map<string, () => void>());
@@ -120,6 +124,7 @@
 			]);
 			books = [...(matched.books || []), ...(pending.books || [])];
 			batchLoadToken++;
+			batchLoadError = false;
 			showAllHistory = false;
 			restoreJobs(jobsResp.jobs);
 			batchAggregate = jobsResp.batch ?? null;
@@ -258,10 +263,11 @@
 	/** Fetch the latest batch's full rows on demand, bounded: the /jobs
 	 *  response carries the batch's aggregate (counts + row ids), not its
 	 *  rows, so the page pages them in here — BATCH_PAGE_SIZE at a time,
-	 *  in queue order. Hydration is the render effect's job (it re-runs
+	 *  Hydration is the render effect's job (it re-runs
 	 *  when the append lands), so a large batch's unrendered rows never
-	 *  fan out a book fetch per row at load. A fetch failure leaves the
-	 *  missing rows behind the "Show all" toggle until the next load. */
+	 *  fan out a book fetch per row at load. A fetch failure marks the
+	 *  load as incomplete (the batch area offers a retry); the missing
+	 *  rows stay out of the list until the retry or the next load. */
 	async function loadBatchRows(agg: BatchAggregate | null, token: number) {
 		if (!agg || agg.job_ids.length === 0) return;
 		const knownIds = new Set(jobs.map((job) => job.id));
@@ -273,6 +279,10 @@
 					`/jobs?batch_id=${encodeURIComponent(agg.batch_id)}&limit=${count}&offset=${offset}`
 				);
 			} catch {
+				// A reload outlived this fetch: the fresh load owns the
+				// batch rows, so no stale error flag.
+				if (token !== batchLoadToken) return;
+				batchLoadError = true;
 				return;
 			}
 			if (token !== batchLoadToken) return; // A reload outlived this fetch.
@@ -283,6 +293,17 @@
 			jobs = [...jobs, ...fresh.map(jobToItem)].sort((a, b) => b.queueOrder - a.queueOrder);
 			for (const job of fresh) knownIds.add(job.id);
 		}
+		// A stale loop outlived by a reload must not clear the flag a
+		// newer load's failure already set.
+		if (token === batchLoadToken) batchLoadError = false;
+	}
+
+	/** Retry the paged batch fetch after a failure: the missing rows are
+	 *  re-fetched from offset 0 (the known-ids filter drops what the
+	 *  list already holds), and the load token keeps a stale attempt
+	 *  from appending to a reloaded list. */
+	function retryBatchLoad() {
+		void loadBatchRows(batchAggregate, batchLoadToken);
 	}
 
 	/** A fetched batch row to its card shape: a state proxy (like
@@ -666,6 +687,7 @@
 				startedAt: job.startedAt,
 				completedAt: job.completedAt,
 				createdAt: job.createdAt,
+				cancelRequested: job.cancelRequested,
 			}))
 		)
 	);
@@ -690,10 +712,16 @@
 		if (batchSummary.jobIds.length === 1) {
 			const job = jobs.find((j) => j.id === batchSummary.jobIds[0]);
 			if (job?.bookId) return { label: 'View book', href: `/books/${job.bookId}` };
-			if (batchSummary.failed > 0) return { label: 'Review failure', review: true };
+			// The failed row must be in the list before the action can
+			// land on it: outside the recent window it is still paged in.
+			if (batchSummary.failed > 0 && firstFailedJobId) return { label: 'Review failure', review: true };
 			return null;
 		}
 		if (batchSummary.failed === 0) return null;
+		// Same gate: the action scrolls to the first failed row, so a
+		// failed row the page has not loaded yet hides the action until
+		// the paged batch fetch brings it in.
+		if (!firstFailedJobId) return null;
 		return {
 			label: `Review ${batchSummary.failed} ${batchSummary.failed === 1 ? 'failure' : 'failures'}`,
 			review: true,
@@ -957,7 +985,7 @@
 					<section class="queue-idle"><Clock size={21} aria-hidden="true" /><h2 id="activity-title">Nothing processing</h2><p>Ready books stay in the list until you start a batch.</p></section>
 				{/if}
 				{#if pastJobs.length > 0}
-					<details class="job-history" bind:this={historyDetails}><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each renderedHistory as job (job.id)}{@render JobRecord(job, false)}{/each}{#if hiddenHistoryCount > 0}<button type="button" class="history-more" onclick={() => { showAllHistory = true; }}>Show {hiddenHistoryCount} older {hiddenHistoryCount === 1 ? 'run' : 'runs'}</button>{:else if showAllHistory && pastJobs.length > HISTORY_RENDER_LIMIT}<button type="button" class="history-more" onclick={() => { showAllHistory = false; }}>Show fewer</button>{/if}</details>
+					<details class="job-history" bind:this={historyDetails}><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each renderedHistory as job (job.id)}{@render JobRecord(job, false)}{/each}{#if hiddenHistoryCount > 0}<button type="button" class="history-more" onclick={() => { showAllHistory = true; }}>Show {hiddenHistoryCount} older {hiddenHistoryCount === 1 ? 'run' : 'runs'}</button>{:else if showAllHistory && pastJobs.length > HISTORY_RENDER_LIMIT}<button type="button" class="history-more" onclick={() => { showAllHistory = false; }}>Show fewer</button>{/if}{#if batchLoadError && batchAggregate}<div class="history-load-error" role="alert">Some batch rows failed to load.<button type="button" class="history-retry" onclick={retryBatchLoad}>Retry</button></div>{/if}</details>
 				{/if}
 			</aside>
 		</div>
@@ -1116,6 +1144,9 @@
 	.history-hint { margin: 0 0 1rem; }
 	.history-more { display: block; width: 100%; margin: 0.25rem 0 1rem; padding: 0.5rem 0; border: 1px solid var(--border); border-radius: 0.5rem; background: none; color: var(--text-muted); font-size: 0.8125rem; cursor: pointer; }
 	.history-more:hover { color: var(--text); border-color: var(--text-muted); }
+	.history-load-error { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin: 0.25rem 0 1rem; padding: 0.5rem 0.75rem; border: 1px solid var(--state-red-border); border-radius: 0.5rem; color: var(--state-red); font-size: 0.8125rem; }
+	.history-retry { border: 0; border-radius: var(--radius-sm); background: none; color: var(--workspace-action); font-size: 0.8125rem; font-weight: 600; cursor: pointer; min-height: 2.75rem; }
+	.history-retry:hover { text-decoration: underline; }
 	.job-record { min-width: 0; padding: 1.25rem 1.5rem; border-top: 1px solid var(--border-subtle); }
 	.job-record--active { container-type: inline-size; padding-top: 1rem; }
 	.job-history .job-record { padding: 1rem 0; }

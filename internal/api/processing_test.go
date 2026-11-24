@@ -3042,6 +3042,83 @@ func TestListJobsServesLatestBatchAggregate(t *testing.T) {
 	})
 }
 
+// Regression: the aggregate's count/rollup and its id list must come from
+// one snapshot. StartProcessing enqueues a batch's jobs individually, so a
+// read that straddles an in-flight enqueue (two separate queries) can count
+// N rows and return N+1 (or N-1) ids, and the client pages the wrong number
+// of rows. One read transaction makes total and job_ids agree.
+func TestLatestBatchAggregateReadsOneSnapshot(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	// 24 rows on disk; a writer adds 16 more, like an in-flight enqueue.
+	for i := 1; i <= 24; i++ {
+		if _, err := h.svc.DB.Exec(
+			"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 1, 'done', 'merge', ?, ?, 'b1')",
+			fmt.Sprintf("b1-%03d", i), fmt.Sprintf("2026-01-01 %02d:%02d:00", (i-1)/60, (i-1)%60), i,
+		); err != nil {
+			t.Fatalf("seed batch job %d: %v", i, err)
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 25; i <= 40; i++ {
+			if _, err := h.svc.DB.Exec(
+				"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 1, 'done', 'merge', ?, ?, 'b1')",
+				fmt.Sprintf("b1-%03d", i), fmt.Sprintf("2026-01-01 %02d:%02d:00", (i-1)/60, (i-1)%60), i,
+			); err != nil {
+				t.Errorf("writer insert %d: %v", i, err)
+				return
+			}
+		}
+	}()
+	for i := range 25 {
+		agg, err := h.latestBatchAggregate("b1", 0)
+		if err != nil {
+			t.Fatalf("aggregate read %d: %v", i, err)
+		}
+		if len(agg.JobIDs) != agg.Total {
+			t.Fatalf("aggregate read %d: total = %d but job_ids has %d entries; the count and the id list must come from one snapshot", i, agg.Total, len(agg.JobIDs))
+		}
+	}
+	<-done
+	// After the writer stops, the aggregate covers the whole batch.
+	agg, err := h.latestBatchAggregate("b1", 0)
+	if err != nil {
+		t.Fatalf("final aggregate: %v", err)
+	}
+	if agg.Total != 40 || len(agg.JobIDs) != 40 {
+		t.Errorf("final aggregate = (total %d, ids %d); want 40 of each", agg.Total, len(agg.JobIDs))
+	}
+}
+
+// Regression: with the pool closed, ListJobs 500s — the recent query
+// fails before the handler ever reaches the aggregate. The aggregate's
+// own contract (a read failure comes back as an error, not a silently
+// overstated total) is asserted directly below.
+func TestListJobsFailsWhenDBClosed(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES ('b1-1', 1, 'done', 'merge', '2026-01-01 00:00:00', 1, 'b1')",
+	); err != nil {
+		t.Fatalf("seed batch job: %v", err)
+	}
+	h.svc.DB.Close()
+
+	w := httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=10", nil))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("list over a closed db = %d; want 500 — body: %s", w.Code, w.Body.String())
+	}
+
+	// The aggregate's read failure must surface as an error (the id
+	// scan must not be swallowed), so ListJobs' degrade branch can act
+	// on it when the recent/active queries survive.
+	agg, err := h.latestBatchAggregate("b1", 0)
+	if err == nil {
+		t.Fatalf("aggregate over a closed db = %+v, nil; want a non-nil error (the id read must not be swallowed)", agg)
+	}
+}
+
 // Regression: latestBatchID's own contract — sql.ErrNoRows (no batched row)
 // is the only non-error outcome; any other probe failure must surface as a
 // real error so ListJobs can take its degrade branch (200, recent+active

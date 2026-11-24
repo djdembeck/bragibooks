@@ -39,12 +39,13 @@ vi.mock('#lib/components/index.js', async () => {
 	// the file's static imports, so a static ButtonStub import would hit
 	// a not-yet-initialized binding.
 	const { default: Button } = await import('./ButtonStub.svelte');
+	const { default: Alert } = await import('./AlertStub.svelte');
 	const Null = () => null;
-	// Button is a real stub component (the page's controls are clicked in
-	// tests); every other stub is inert.
+	// Button and Alert are real stub components (the page's controls and
+	// banner actions are asserted in tests); every other stub is inert.
 	return {
 		Button,
-		Alert: Null,
+		Alert,
 		ErrorDetail: Null,
 		Skeleton: Null,
 		EmptyState: Null,
@@ -482,5 +483,116 @@ describe('queue page history hydration and render bound', () => {
 		// /jobs?limit=100 page load (which would flash the queue).
 		expect(target.querySelector('.queue-banner-wrap')).not.toBeNull();
 		expect(getMock.mock.calls.filter((call) => String(call[0]) === '/jobs?limit=100').length).toBe(1);
+	});
+
+	it('a failed batch page load surfaces a retry, and the retry fetches the missing pages', async () => {
+		// The banner counts the batch from the aggregate; the rows past
+		// the failed page are only reachable through the retry (the bare
+		// return used to abandon the rest of the batch for the load).
+		const jobs = batchJobList(32, 'req-1'); // books 1..32, queue orders 1..32
+		const batch = batchAggregate('req-1', 32, 32);
+		let batchPageFails = 1; // the first paged fetch fails, the retry succeeds
+		getMock.mockImplementation(async (path: string) => {
+			if (path.startsWith('/books?')) return { books: [], total: 0, page: 0, limit: 100 };
+			if (path.startsWith('/output-profiles')) return { profiles: [] };
+			if (path.startsWith('/jobs?')) {
+				const params = new URLSearchParams(path.split('?')[1]);
+				if (params.get('batch_id') === 'req-1') {
+					if (batchPageFails > 0) {
+						batchPageFails--;
+						throw new Error('batch page unavailable');
+					}
+					const offset = Number(params.get('offset') ?? 0);
+					const limit = Number(params.get('limit') ?? 100);
+					return { jobs: jobs.slice(offset, offset + limit), batch: null };
+				}
+				const limit = Number(params.get('limit') ?? 100);
+				const sorted = [...jobs].sort((a, b) => b.created_at.localeCompare(a.created_at));
+				return { jobs: sorted.slice(0, limit), batch };
+			}
+			if (path.startsWith('/books/')) return bookFixture(Number(path.split('/').pop()));
+			return {};
+		});
+		component = mount(ProcessPage, { target });
+		flushSync();
+		await vi.waitFor(() => {
+			expect(target.querySelector('.job-history')).not.toBeNull();
+		}, { timeout: 4000 });
+
+		// The failed page flags the load: a visible error with a retry.
+		await vi.waitFor(() => {
+			expect(target.querySelector('.history-load-error')).not.toBeNull();
+		}, { timeout: 4000 });
+		expect(target.querySelector('.history-retry')).not.toBeNull();
+		const attemptsBefore = getMock.mock.calls.filter((call) => String(call[0]).includes('batch_id=req-1')).length;
+		expect(attemptsBefore).toBe(1); // the failed offset-0 page only
+
+		// The retry re-runs the paged fetch from offset 0 and clears the
+		// flag once every page has landed.
+		(target.querySelector('.history-retry') as HTMLButtonElement).click();
+		flushSync();
+		await vi.waitFor(() => {
+			expect(target.querySelector('.history-load-error')).toBeNull();
+		}, { timeout: 4000 });
+		const attemptsAfter = getMock.mock.calls.filter((call) => String(call[0]).includes('batch_id=req-1')).length;
+		expect(attemptsAfter).toBe(attemptsBefore + 2); // offset 0 and offset 16
+	});
+
+	it('withholds the Review-failures action until the failed row is loaded', async () => {
+		// A 120-job batch with 2 failures on the OLDEST rows (queue
+		// orders 1-2): the 100-row recent window holds no failed row, and
+		// the paged batch fetch that would bring it in fails. The banner
+		// (from the aggregate) reports 2 failures, but the action is
+		// hidden while firstFailedJobId is null: clicking it would open
+		// Recent activity and scroll to nothing.
+		const all = batchJobList(120, 'req-1');
+		all[0] = { ...all[0], status: 'error' };
+		all[1] = { ...all[1], status: 'error' };
+		const recent = all.slice(100); // the newest 100 rows, all done
+		const batch = { ...batchAggregate('req-1', 120, 120), done: 118, failed: 2 };
+		let batchPageFailing = true;
+		getMock.mockImplementation(async (path: string) => {
+			if (path.startsWith('/books?')) return { books: [], total: 0, page: 0, limit: 100 };
+			if (path.startsWith('/output-profiles')) return { profiles: [] };
+			if (path.startsWith('/jobs?')) {
+				const params = new URLSearchParams(path.split('?')[1]);
+				if (params.get('batch_id') === 'req-1') {
+					if (batchPageFailing) throw new Error('batch page unavailable');
+					const offset = Number(params.get('offset') ?? 0);
+					const limit = Number(params.get('limit') ?? 100);
+					return { jobs: all.slice(offset, offset + limit), batch: null };
+				}
+				const limit = Number(params.get('limit') ?? 100);
+				const sorted = [...recent].sort((a, b) => b.created_at.localeCompare(a.created_at));
+				return { jobs: sorted.slice(0, limit), batch };
+			}
+			if (path.startsWith('/books/')) return bookFixture(Number(path.split('/').pop()));
+			return {};
+		});
+		component = mount(ProcessPage, { target });
+		flushSync();
+		await vi.waitFor(() => {
+			expect(target.querySelector('.queue-banner-wrap')).not.toBeNull();
+		}, { timeout: 4000 });
+
+		const reviewActions = () =>
+			Array.from(target.querySelectorAll('button.batch-action')).filter((b) =>
+				String(b.textContent).includes('Review')
+			);
+		// The banner is up (the aggregate is terminal) and the Dismiss
+		// action renders, but with no failed row in the list the Review
+		// action is withheld.
+		expect(target.querySelector('.batch-action--icon')).not.toBeNull();
+		expect(reviewActions()).toHaveLength(0);
+
+		// The paged fetch recovers (via the F1 retry) and brings the
+		// failed rows in: the action appears, aimed at the first failure.
+		batchPageFailing = false;
+		(target.querySelector('.history-retry') as HTMLButtonElement).click();
+		flushSync();
+		await vi.waitFor(() => {
+			expect(reviewActions()).toHaveLength(1);
+		}, { timeout: 4000 });
+		expect(String(reviewActions()[0].textContent)).toContain('Review 2 failures');
 	});
 });

@@ -15,6 +15,7 @@ function job(overrides: Partial<LegacyJob> & { id: string; queueOrder: number })
 		startedAt: '2026-07-01 12:00:00',
 		completedAt: '2026-07-01 12:04:30',
 		createdAt: '2026-07-01 11:59:00',
+		cancelRequested: false,
 		...overrides
 	};
 }
@@ -182,6 +183,31 @@ describe('summarizeLegacyRun (queue-order adjacency)', () => {
 			job({ id: 'm1', queueOrder: 1, startedAt: null, completedAt: '2026-07-01 12:00:10' })
 		]);
 		expect(summary?.startedAt).toBe('2026-07-01 11:59:00');
+	});
+
+	it('counts an optimistic cancellation as in flight, not terminal', () => {
+		// cancelJob sets status='cancelled' and cancelRequested=true
+		// before the worker persists the terminal row: the badge is
+		// optimistic, so the run must stay in flight (no completion
+		// banner, no cancelled count) until the canonical row lands.
+		const summary = summarizeLegacyRun([
+			job({ id: 'm1', queueOrder: 1 }),
+			job({ id: 'm2', queueOrder: 2, status: 'cancelled', cancelRequested: true, completedAt: null })
+		]);
+		expect(summary?.inFlight).toBe(1);
+		expect(summary?.cancelled).toBe(0);
+		expect(summary?.allTerminal).toBe(false);
+		expect(summary?.tone).toBe('info');
+
+		// The worker's terminal row (cancelRequested cleared) counts as
+		// a real cancellation.
+		const terminal = summarizeLegacyRun([
+			job({ id: 'm1', queueOrder: 1 }),
+			job({ id: 'm2', queueOrder: 2, status: 'cancelled', cancelRequested: false })
+		]);
+		expect(terminal?.cancelled).toBe(1);
+		expect(terminal?.inFlight).toBe(0);
+		expect(terminal?.allTerminal).toBe(true);
 	});
 
 	it('breaks a run at a queue-order gap', () => {
