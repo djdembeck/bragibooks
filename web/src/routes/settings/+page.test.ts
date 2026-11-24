@@ -49,7 +49,7 @@ const engineCaps = vi.hoisted(() => {
 		}
 	};
 });
-vi.mock('#lib/engineCapabilities.js', () => ({
+vi.mock('#lib/engineCapabilities.svelte.js', () => ({
 	getEngineCapabilities: () => engineCaps.holder.value,
 	loadEngineCapabilities: async () => {}
 }));

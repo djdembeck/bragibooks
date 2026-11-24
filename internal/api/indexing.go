@@ -341,6 +341,14 @@ func (s *IndexService) scan(ctx context.Context) {
 		return
 	}
 
+	// Arm the partial-write guard BEFORE the destructive batches below
+	// (deletePrefix, pruneVanished, upsertAll): an interrupted scan must
+	// not serve a depleted table, and a root-switch failure must not leave
+	// the old published root with partially-deleted rows.
+	if !s.armWriteFailedRoot(gen, root) {
+		return
+	}
+
 	// Root change: clear old-root rows before treating everything as new.
 	// Separator-aware prefix + bounded batches (one giant DELETE would pin
 	// the writer past the busy timeout). A failure here is terminal —
@@ -483,23 +491,9 @@ func (s *IndexService) scan(ctx context.Context) {
 	// keep serving the filesystem (not the half-written table) until the
 	// next clean scan. A clean done/truncated terminal on this root
 	// releases it (below, in setTerminal); an error terminal keeps it.
-	s.mu.Lock()
-	if s.writeFailedRoot != root {
-		// Persist the guard BEFORE claiming it in memory: a failed write
-		// means the guard is not durable, so the half-written table this
-		// scan is about to commit is exactly what a restart would serve —
-		// the failure the guard exists to prevent. Abort (same terminal
-		// "error" treatment as a failed upsert) instead of exposing it.
-		s.writeFailedRoot = root
-		perr := s.persistLocked()
-		if perr != nil {
-			s.writeFailedRoot = ""
-			s.mu.Unlock()
-			s.setTerminal(gen, "error", fmt.Sprintf("persist write-failed guard: %v", perr), 0, s.last.Root)
-			return
-		}
+	if !s.armWriteFailedRoot(gen, root) {
+		return
 	}
-	s.mu.Unlock()
 	if err := s.upsertAll(append(unchanged, extract...)); err != nil {
 		s.mu.Lock()
 		s.writeFailedRoot = root
@@ -629,6 +623,21 @@ func (s *IndexService) walk(ctx context.Context, root string) (rows []indexRow, 
 			detail = fmt.Sprintf("entry cap %d exceeded", indexMaxEntries)
 			return filepath.SkipAll
 		}
+		// A file-symlink named like audio is walked as a regular file and
+		// its TARGET is probed (ffprobe follows the link) and extracted:
+		// a link leaving the input root would probe, enumerate, and
+		// persist metadata for a location the index does not cover. Skip
+		// it (d.Type() is the LSTAT mode; directory symlinks are not
+		// followed by WalkDir, so only file-type rows can be links).
+		if d.Type()&os.ModeSymlink != 0 {
+			resolved, rerr := filepath.EvalSymlinks(p)
+			if rerr != nil {
+				return nil // dangling link: nothing to probe
+			}
+			if rel, rerr := filepath.Rel(root, resolved); rerr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+				return nil // link escapes the input root
+			}
+		}
 		row := indexRow{Path: p, Name: d.Name(), Type: "file"}
 		if d.IsDir() {
 			row.Type = "dir"
@@ -665,10 +674,14 @@ func (s *IndexService) storeRoot() (string, bool) {
 // deletePrefix removes all index rows under oldRoot (separator-aware:
 // "root" itself plus "root/..."), in bounded batches.
 func (s *IndexService) deletePrefix(oldRoot string) error {
-	sep := string(os.PathSeparator)
 	for {
+		// indexChildPrefix builds the single-separator child prefix
+		// (oldRoot+sep for a non-root dir, oldRoot unchanged for a
+		// Windows volume root like D:\): a hand-rolled oldRoot+sep would
+		// double the separator on a volume root and LIKE would match no
+		// stored rows, leaving old-root rows behind a root switch.
 		rows, err := s.db.Query(`SELECT path FROM source_index WHERE path = ? OR path LIKE ? ESCAPE '\' LIMIT ?`,
-			oldRoot, likeEscape(oldRoot+sep)+"%", indexWriteBatch)
+			oldRoot, likeEscape(indexChildPrefix(oldRoot))+"%", indexWriteBatch)
 		if err != nil {
 			return err
 		}
@@ -1084,6 +1097,35 @@ func (s *IndexService) persistLocked() error {
 		log.Printf("index: persist state: %v", err)
 	}
 	return err
+}
+
+// armWriteFailedRoot persists the partial-write guard for root BEFORE any
+// destructive batch (deletePrefix, pruneVanished, upsertAll) commits: a
+// crash (or process kill) after an early batch must leave the guard set so
+// a restarted process serves the filesystem, not a table with old-root
+// rows deleted or new rows half-written. A clean done/truncated terminal
+// on the root releases it (setTerminal); an error terminal keeps it.
+// Returns false (and records the terminal) when the guard cannot be made
+// durable.
+func (s *IndexService) armWriteFailedRoot(gen int64, root string) bool {
+	s.mu.Lock()
+	if s.writeFailedRoot != root {
+		// Persist the guard BEFORE claiming it in memory: a failed write
+		// means the guard is not durable, so the table state this scan is
+		// about to mutate is exactly what a restart would serve — the
+		// failure the guard exists to prevent. Abort (same terminal
+		// "error" treatment as a failed upsert) instead of exposing it.
+		s.writeFailedRoot = root
+		perr := s.persistLocked()
+		if perr != nil {
+			s.writeFailedRoot = ""
+			s.mu.Unlock()
+			s.setTerminal(gen, "error", fmt.Sprintf("persist write-failed guard: %v", perr), 0, s.last.Root)
+			return false
+		}
+	}
+	s.mu.Unlock()
+	return true
 }
 
 // canonicalRoot is the one canonical form every index-mode path handling

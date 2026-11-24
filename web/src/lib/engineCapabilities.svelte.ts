@@ -10,6 +10,11 @@
  * `loaded` flips to true ONLY on success: one failed fetch (server
  * restarting, transient 5xx) must not permanently block retries — the
  * shell's retry and the post-swap refresh re-run the GET until it lands.
+ *
+ * A .svelte.ts module: the cache is $state, so a $derived that reads
+ * getEngineCapabilities() repaints when a swap-refresh lands new
+ * capabilities (a plain module variable has no reactive dependency, so the
+ * settings field list would keep showing the old vocabulary).
  */
 import { get } from '#lib/api.js';
 import { setEngineTokens, type EngineToken } from '#lib/scheme.js';
@@ -24,8 +29,8 @@ export interface EngineCapabilities {
 	chapter_policies?: { constraint?: string; variants?: string[] };
 }
 
-let loaded = false;
-let caps: EngineCapabilities | null = null;
+let loaded = $state(false);
+let caps = $state<EngineCapabilities | null>(null);
 let inflight: Promise<void> | null = null;
 // The in-flight fetch was started by loadEngineCapabilities (the app
 // shell's initial load), not by a refresh: a refresh that inherits a

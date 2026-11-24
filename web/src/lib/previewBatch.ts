@@ -33,6 +33,13 @@ export interface PreviewBatchState {
 	 * replacement owns. The slot is released when the count reaches 0.
 	 */
 	outstanding: Map<number, number>;
+	/**
+	 * Consecutive failure count per id (reset on a success). plan
+	 * dispatches lower-failure ids first, so a persistently failing row
+	 * yields its freed slots to healthy rows instead of re-claiming the
+	 * head of the order every 250 ms and starving the tail.
+	 */
+	failCount: Map<number, number>;
 }
 
 export interface Dispatch {
@@ -49,7 +56,8 @@ export function newPreviewBatchState(): PreviewBatchState {
 		inFlight: new Set(),
 		queue: new Set(),
 		genFor: new Map(),
-		outstanding: new Map()
+		outstanding: new Map(),
+		failCount: new Map()
 	};
 }
 
@@ -114,7 +122,18 @@ export function plan(
 		state.queue.add(id);
 	}
 	const dispatched: Dispatch[] = [];
-	for (const id of [...state.queue]) {
+	// Dispatch order is the queue's insertion order EXCEPT rows with a
+	// higher consecutive-failure count go last (their relative order is
+	// kept): a persistently failing row would otherwise re-claim the head
+	// of the order on every re-plan and starve the tail.
+	const order = new Map([...state.queue].map((id, i) => [id, i]));
+	const ordered = [...state.queue].sort((a, b) => {
+		const fa = state.failCount.get(a) ?? 0;
+		const fb = state.failCount.get(b) ?? 0;
+		if (fa !== fb) return fa - fb;
+		return (order.get(a) ?? 0) - (order.get(b) ?? 0);
+	});
+	for (const id of ordered) {
 		if (state.inFlight.size >= concurrency) break;
 		const payload = wanted.get(id);
 		if (payload == null) continue;
@@ -167,23 +186,32 @@ export function settle(
 	if (latest) {
 		if (result.ok) {
 			state.previews[id] = result.value ?? '';
+			state.failCount.delete(id);
 		} else {
 			// Failure by the latest dispatch: drop the settled slot so the
 			// next plan requeues the id (retry, never a permanent pending
-			// row).
+			// row), and count the failure so plan defers it behind
+			// healthy rows.
 			state.payloadFor.delete(id);
 			delete state.previews[id];
+			state.failCount.set(id, (state.failCount.get(id) ?? 0) + 1);
 		}
-	} else if (count === 0 && state.payloadFor.get(id) === payload) {
+	} else if (
+		count === 0 &&
+		state.payloadFor.get(id) === payload &&
+		state.previews[id] === ''
+	) {
 		// The last outstanding request for the id was superseded and
 		// settled without painting (a stale response, or a failure of a
 		// non-latest dispatch): the id is still wanted, so drop BOTH the
 		// pending preview slot and the payload-cache entry to make the
 		// next plan requeue it — a surviving payload record would match
 		// the (re-wanted) payload against a missing preview and make the
-		// row read as already settled, stranding it with no dispatch. (A
-		// settled NEWER value is untouched: its payload differs from
-		// this request's, so this branch cannot fire on top of it.)
+		// row read as already settled, stranding it with no dispatch.
+		// The previews[id] === '' guard keeps this branch from deleting a
+		// NEWER settled value that stands for the SAME payload (a
+		// supersede/re-want of the identical payload): only a stale settle
+		// on a PENDING slot may clear it; a standing value survives.
 		state.payloadFor.delete(id);
 		delete state.previews[id];
 	}

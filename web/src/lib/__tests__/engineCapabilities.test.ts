@@ -21,7 +21,7 @@ const CAPS = {
 async function freshModule() {
 	vi.resetModules();
 	getMock.mockReset();
-	const mod = await import('../engineCapabilities');
+	const mod = await import('../engineCapabilities.svelte.js');
 	return mod;
 }
 

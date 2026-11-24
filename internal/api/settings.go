@@ -56,6 +56,11 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 			_, c := h.svc.Config.MetadataEnvManaged()
 			return c
 		}(),
+		// Stored profiles the boot validation rejected (the server started
+		// anyway so the Settings UI could repair them): the UI renders
+		// these as a fixable list. Empty (not null) when the store is
+		// clean, so the client can count on a list shape.
+		"invalid_output_profiles": bootInvalidProfileList(),
 	}
 
 	writeJSON(w, http.StatusOK, settings)
@@ -300,8 +305,20 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.OutputScheme != nil {
 		// The same relative-path rules the boot check and enqueue apply:
 		// a value the engine cannot resolve inside the output root must
-		// fail HERE (400), not make the next startup fatal.
-		if verr := audio.ValidateRelativePathFormat(*req.OutputScheme); verr != nil {
+		// fail HERE (400), not make the next startup fatal. When this
+		// request also swaps the engine binary, the token vocabulary is
+		// validated against the CANDIDATE's registry in the swap branch
+		// below, so the pre-check covers only the engine-independent
+		// structure (a candidate-specific token must not 400 before the
+		// candidate is probed).
+		swapping := req.M4bMergeBinary != nil && *req.M4bMergeBinary != h.svc.Config.Config().M4bMerge.Binary
+		var verr error
+		if swapping {
+			verr = audio.ValidateRelativePathStructure(*req.OutputScheme)
+		} else {
+			verr = audio.ValidateRelativePathFormat(*req.OutputScheme)
+		}
+		if verr != nil {
 			writeError(w, http.StatusBadRequest, "output scheme: "+verr.Error())
 			return
 		}

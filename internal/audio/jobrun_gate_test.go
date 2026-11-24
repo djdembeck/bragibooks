@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -13,9 +14,15 @@ import (
 // --job --machine (which records its argv and emits a succeeded machine doc
 // with one artifact under the job's output_root). The reported resolver
 // version is configurable so a test can model a re-pointed engine whose
-// identity no longer matches a captured job.
-func writeJobProtocolBinary(t *testing.T, dir, resolverVersion string) string {
+// identity no longer matches a captured job. exitCode (default 0) models the
+// process exit status AFTER the machine document is emitted, so a test can
+// model a contradictory "succeeded doc + nonzero exit" engine.
+func writeJobProtocolBinary(t *testing.T, dir, resolverVersion string, exitCode ...int) string {
 	t.Helper()
+	code := 0
+	if len(exitCode) > 0 {
+		code = exitCode[0]
+	}
 	p := filepath.Join(dir, "job-protocol-bin")
 	script := `#!/usr/bin/env python3
 import json, os, sys
@@ -58,6 +65,7 @@ print(json.dumps({
         "files_moved": True
     }]
 }))
+sys.exit(` + strconv.Itoa(code) + `)
 `
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatalf("write job-protocol binary: %v", err)
@@ -189,17 +197,29 @@ func TestProbeCapabilitiesAppliesOwnTimeout(t *testing.T) {
 // TestRunJobRefusesPreexistingJobFileSymlink guards the O_EXCL create: a
 // pre-existing SYMLINK at the predictable job-file path must make the open
 // fail (the link is left untouched, and no write follows it to a target
-// outside the claim root) instead of the job payload being written through
-// the link.
+// outside the job dir) instead of the job payload being written through the
+// link. The manifest lives in the job-scoped subdirectory, so the link is
+// planted there (pre-created, as a principal with directory write access
+// could).
 func TestRunJobRefusesPreexistingJobFileSymlink(t *testing.T) {
 	dir := t.TempDir()
 	bin := writeJobProtocolBinary(t, dir, "1")
 	proc := NewProcessor(bin, t.TempDir(), "", 1, "{author}/{title}", "info")
 	root := t.TempDir()
 
+	// A pre-existing job dir holding a SYMLINK at the job-file path: the
+	// dir is non-empty, so RunJob's residue handling (os.Remove of a
+	// non-empty dir) fails fail-closed before the O_EXCL create, the link
+	// is left untouched, and no write follows it to a target outside the
+	// job dir.
+	jobDir := filepath.Join(root, ".bragi-job-sym1")
+	if err := os.Mkdir(jobDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	outside := t.TempDir()
 	target := filepath.Join(outside, "jobfile-target.json")
-	if err := os.Symlink(target, filepath.Join(root, ".bragi-job-sym1.json")); err != nil {
+	link := filepath.Join(jobDir, ".bragi-job-sym1.json")
+	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
 
@@ -219,7 +239,65 @@ func TestRunJobRefusesPreexistingJobFileSymlink(t *testing.T) {
 	}
 	// The link itself is preserved (cleanup removes only files Bragi
 	// created).
-	if _, statErr := os.Lstat(filepath.Join(root, ".bragi-job-sym1.json")); statErr != nil {
+	if _, statErr := os.Lstat(link); statErr != nil {
 		t.Fatalf("pre-existing job-file symlink was removed: %v", statErr)
+	}
+}
+
+// TestRunJobSucceededDocNonzeroExitIsFailure pins the CF-24 exit-code gate:
+// a machine document that says "succeeded" while the process exits nonzero
+// is a contradiction the document alone cannot settle. The run must return
+// an error (not a success) and preserve the staging output so the artifact
+// stays recoverable, instead of validating and publishing it.
+func TestRunJobSucceededDocNonzeroExitIsFailure(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeJobProtocolBinary(t, dir, "1", 3) // succeeded doc, exit 3
+	proc := NewProcessor(bin, t.TempDir(), "", 1, "{author}/{title}", "info")
+	root := t.TempDir()
+
+	jf := jobFileForRunTest()
+	jf.OutputRoot = root
+	res, err := proc.RunJob(context.Background(), "exit3", jf, JobRunOptions{
+		OutputRoot: root,
+		Identity:   EngineIdentity{SchemaVersion: 1, ResolverVersion: "1"},
+	})
+	if err == nil {
+		t.Fatal("RunJob = nil error; want a failure for a succeeded document with a nonzero exit")
+	}
+	if !strings.Contains(err.Error(), "succeeded document") {
+		t.Fatalf("error = %v; want the contradiction diagnosis", err)
+	}
+	if res == nil {
+		t.Fatal("RunJob returned a nil result; want the result with the exit code and preserved staging")
+	}
+	if res.Status != "succeeded" {
+		t.Errorf("status = %q; want the document's succeeded (the run reports what the engine said)", res.Status)
+	}
+	if res.ExitCode != 3 {
+		t.Errorf("exit code = %d; want 3", res.ExitCode)
+	}
+	if res.StagingPreserved != root {
+		t.Errorf("staging preserved = %q; want %q (the artifact must stay recoverable)", res.StagingPreserved, root)
+	}
+	if res.PrimaryOutput != "" {
+		t.Errorf("primary output = %q; want empty (a contradictory run publishes nothing)", res.PrimaryOutput)
+	}
+	if len(res.OutputFiles) != 0 {
+		t.Errorf("output files = %v; want none (the artifact is unvalidated staging)", res.OutputFiles)
+	}
+	// The artifact the engine published is still on disk under the root:
+	// preservation means the engine's output was not cleaned up as residue.
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read output root: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Name() == "Author" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("output root = %v; want the engine's published tree preserved", entries)
 	}
 }

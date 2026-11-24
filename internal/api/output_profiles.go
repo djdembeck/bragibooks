@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -19,6 +20,62 @@ import (
 )
 
 var errProfileNotFound = errors.New("output profile not found")
+
+// InvalidOutputProfile names a stored output profile whose format the
+// current engine rejects, as found at boot. The server starts anyway
+// (the Settings UI is the only repair path); the Settings API exposes
+// the list so the UI can show what to fix.
+type InvalidOutputProfile struct {
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Format string `json:"format"`
+	Error  string `json:"error"`
+}
+
+var bootInvalidProfiles atomic.Pointer[[]InvalidOutputProfile]
+
+// SetBootInvalidProfiles records the stored profiles the validation
+// rejected. Called once at boot, before the server starts serving, and
+// after every profile mutation (refreshInvalidProfiles); a nil slice is
+// the normal (no issues) case.
+func SetBootInvalidProfiles(profiles []InvalidOutputProfile) {
+	bootInvalidProfiles.Store(&profiles)
+}
+
+// refreshInvalidProfiles re-derives the invalid-profile list from the
+// CURRENTLY stored profiles, so a profile repaired or deleted through the
+// profile endpoints stops being reported as invalid on the next Settings
+// read. Called after every successful create/update/delete. A list read
+// failure keeps the last known list; the next mutation retries.
+func refreshInvalidProfiles(db *sql.DB) {
+	rows, err := db.Query("SELECT id, name, output_scheme FROM output_profiles WHERE output_scheme <> ''")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	var invalid []InvalidOutputProfile
+	for rows.Next() {
+		var pid int64
+		var pname, scheme string
+		if err := rows.Scan(&pid, &pname, &scheme); err != nil {
+			return
+		}
+		if verr := audio.ValidateRelativePathFormat(scheme); verr != nil {
+			invalid = append(invalid, InvalidOutputProfile{ID: pid, Name: pname, Format: scheme, Error: verr.Error()})
+		}
+	}
+	if rows.Err() != nil {
+		return
+	}
+	SetBootInvalidProfiles(invalid)
+}
+
+func bootInvalidProfileList() []InvalidOutputProfile {
+	if p := bootInvalidProfiles.Load(); p != nil {
+		return *p
+	}
+	return []InvalidOutputProfile{}
+}
 
 // isProfileUniqueViolation reports whether a profile insert/update failed on
 // the table's UNIQUE constraint via the modernc typed error (result code
@@ -175,6 +232,7 @@ func (h *Handler) CreateOutputProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "read created profile: "+err.Error())
 		return
 	}
+	refreshInvalidProfiles(h.svc.DB)
 	writeJSON(w, http.StatusCreated, profile)
 }
 
@@ -241,6 +299,7 @@ func (h *Handler) UpdateOutputProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "read updated profile: "+err.Error())
 		return
 	}
+	refreshInvalidProfiles(h.svc.DB)
 	writeJSON(w, http.StatusOK, profile)
 }
 
@@ -262,6 +321,7 @@ func (h *Handler) DeleteOutputProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "output profile not found")
 		return
 	}
+	refreshInvalidProfiles(h.svc.DB)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -149,13 +149,37 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	// run's residue (see removeStagingSiblings).
 	preExisting := existingStagingSiblings(absRoot)
 
-	// Job-owned job file inside the claim root: the job's own tree, no
-	// shared /tmp naming. Removed in a defer on every path. O_EXCL on the
-	// create is the symlink guard: a pre-existing path at this name
-	// (regular file OR symlink) makes the open fail instead of letting a
-	// write follow the link to a target outside the claim root — 0o600
-	// only protects a file Bragi itself created.
-	jobFile := filepath.Join(absRoot, ".bragi-job-"+jobID+".json")
+	// Job-owned manifest in a job-scoped 0700 subdirectory of the claim
+	// root: the job's own tree, no shared /tmp naming, and OUT of the
+	// shared writable root. A principal that can write the output root
+	// (the trust boundary for the manifest's Bragi-authored content) can
+	// no longer substitute the file (rename over it) between Bragi's
+	// close and the engine's open -- it cannot write the directory at
+	// all. The directory is removed in a defer on every path.
+	jobDir := filepath.Join(absRoot, ".bragi-job-"+jobID)
+	if err := os.Mkdir(jobDir, 0o700); err != nil {
+		if os.IsExist(err) {
+			// Residue from a crashed run: the directory is named by
+			// jobID, so removing and recreating cannot touch a live
+			// run's manifest. os.Remove fails on a non-empty directory,
+			// keeping the check fail-closed.
+			if rerr := os.Remove(jobDir); rerr != nil {
+				return nil, fmt.Errorf("create job dir %s: %w", jobDir, rerr)
+			}
+			if err = os.Mkdir(jobDir, 0o700); err != nil {
+				return nil, fmt.Errorf("create job dir %s: %w", jobDir, err)
+			}
+		} else {
+			return nil, fmt.Errorf("create job dir %s: %w", jobDir, err)
+		}
+	}
+	defer os.Remove(jobDir)
+
+	// O_EXCL on the create is the symlink guard: a pre-existing path at
+	// this name (regular file OR symlink) makes the open fail instead of
+	// letting a write follow the link to a target outside the job dir --
+	// 0o600 only protects a file Bragi itself created.
+	jobFile := filepath.Join(jobDir, ".bragi-job-"+jobID+".json")
 	jobFileHandle, err := os.OpenFile(jobFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("write job file: %w", err)
@@ -165,11 +189,25 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 		os.Remove(jobFile)
 		return nil, fmt.Errorf("write job file: %w", werr)
 	}
+	created, statErr := jobFileHandle.Stat()
 	if cerr := jobFileHandle.Close(); cerr != nil {
 		os.Remove(jobFile)
 		return nil, fmt.Errorf("write job file: %w", cerr)
 	}
 	defer os.Remove(jobFile)
+
+	// Same-uid re-check against the entry Bragi just created: the 0700
+	// directory excludes other principals, and this closes the residual
+	// same-user window between close and the engine's open of --job.
+	if statErr == nil {
+		launched, lerr := os.Stat(jobFile)
+		if lerr != nil {
+			return nil, fmt.Errorf("job file vanished before launch: %w", lerr)
+		}
+		if launched.Size() != created.Size() || !launched.ModTime().Equal(created.ModTime()) {
+			return nil, fmt.Errorf("job file %q was modified between write and launch", jobFile)
+		}
+	}
 
 	cmd := newEngineCommand(ctx, binary, jobFile, logLevel, numCPUs, false)
 	tree, err := newProcessTree(cmd)
@@ -239,10 +277,18 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	if perr != nil {
 		return result, fmt.Errorf("m4b-merge exited %d with an unreadable machine result: %w", result.ExitCode, perr)
 	}
-	// Staging siblings are named with THIS engine process's pid; the pid
+	// Staging siblings are named with the ENGINE process's pid; the pid
 	// plus the pre-run snapshot (preExisting) are what scope cleanup to
-	// this run (see removeStagingSiblings).
+	// this run (see removeStagingSiblings). With a wrapper (non-exec)
+	// command, cmd.Process.Pid is the WRAPPER's pid, so the engine's own
+	// pid (reported by the machine document) is what the staging naming
+	// used — a success scan by the wrapper pid would miss the engine's
+	// siblings. Fall back to the direct child's pid when the document
+	// does not report one (a bare engine IS the direct child).
 	engPID := cmd.Process.Pid
+	if doc.Pid != nil && *doc.Pid > 0 {
+		engPID = *doc.Pid
+	}
 	return p.finishJobRun(result, doc, opts, absRoot, engPID, preExisting)
 }
 
@@ -280,6 +326,16 @@ func (p *Processor) finishJobRun(result *JobRunResult, doc machineResult, opts J
 			result.GroupErrors = []string{result.Stderr}
 		}
 		return result, fmt.Errorf("engine run %s (exit %d)", doc.Status, result.ExitCode)
+	}
+	if result.ExitCode != 0 {
+		// The machine document says succeeded but the process exited
+		// nonzero: a contradiction the document alone cannot settle. Treat
+		// it as a failure (the artifact stays recoverable in staging).
+		result.StagingPreserved = root
+		if len(result.GroupErrors) == 0 {
+			result.GroupErrors = []string{result.Stderr}
+		}
+		return result, fmt.Errorf("engine exited %d with a succeeded document", result.ExitCode)
 	}
 
 	// Success: validate every artifact, then remove leftover staging siblings.

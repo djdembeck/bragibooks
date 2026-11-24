@@ -1042,3 +1042,41 @@ func TestFirstCaptureViaEditorEnrichesCatalog(t *testing.T) {
 		t.Errorf("the first capture never fetched the release; want the release chapters/subtitle")
 	}
 }
+
+// ── T13: a failing cover fetch names the host, never the secret ──
+
+// TestCoverFetchErrorRedactsPathQueryAndCredentials pins the CF-9 redaction:
+// when a credential-bearing cover URL fails mid-fetch, the returned error
+// (including the wrapped transport error from doPinnedCoverGet) must
+// identify the host, but must NOT include the path, the query, or the
+// userinfo credentials. A regression that re-exposes the full URL would
+// write the operator's token into the job log.
+func TestCoverFetchErrorRedactsPathQueryAndCredentials(t *testing.T) {
+	// Not t.Parallel(): the test swaps the package-level lookupCoverHost,
+	// the same constraint the other cover-resolver tests carry.
+	// Deterministic resolver: the host is public (passes the SSRF gate),
+	// so the failure lands in the FETCH, not the validation.
+	oldLookup := lookupCoverHost
+	lookupCoverHost = func(_ context.Context, host string) ([]string, error) {
+		if host == "example.com" {
+			return []string{"93.184.216.34"}, nil
+		}
+		return nil, fmt.Errorf("no addresses for %s", host)
+	}
+	t.Cleanup(func() { lookupCoverHost = oldLookup })
+
+	credURL := "https://user:pass@example.com/path?token=abc"
+	err := downloadCoverFile(context.Background(), credURL, filepath.Join(t.TempDir(), "cover.jpg"))
+	if err == nil {
+		t.Fatal("downloadCoverFile = nil; want a fetch failure (nothing listens at the pinned address)")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "example.com") {
+		t.Fatalf("error = %q; want the host identified", got)
+	}
+	for _, secret := range []string{"/path", "token=abc", "user", "pass"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("error = %q; must not include %q (path, query, and credentials are redacted)", got, secret)
+		}
+	}
+}

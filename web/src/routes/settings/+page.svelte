@@ -3,7 +3,7 @@
 	import { Pencil, Trash2 } from '@lucide/svelte';
 	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker, Modal, PathFormatBuilder } from '#lib/components/index.js';
 	import { parseParts, validateScheme, trimSegment } from '#lib/scheme.js';
-	import { getEngineCapabilities, refreshEngineCapabilities } from '#lib/engineCapabilities.js';
+	import { getEngineCapabilities, refreshEngineCapabilities } from '#lib/engineCapabilities.svelte.js';
 	import type { Settings, OutputProfile, IndexStatus, IndexState } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';

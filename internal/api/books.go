@@ -424,6 +424,18 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The per-book lock spans the book+people writes AND the capture
+	// below: without it, an enqueue landing between the committed write
+	// and the capture freezes the PRE-update snapshot, and a capture
+	// failure does not revoke the already-queued copy (invalidation is
+	// not revoking). The lock is released before the response build
+	// (getBook), which does not touch the snapshot.
+	var bookLock func()
+	if h.svc.ProcessingSvc != nil {
+		bookLock = h.svc.ProcessingSvc.lockBookCover(bookID)
+		defer bookLock()
+	}
+
 	if len(setters) > 0 {
 		args = append(args, bookID)
 		settersStr := strings.Join(setters, ", ")
@@ -443,9 +455,9 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 			// disagreeing with the saved selection, and the existing
 			// snapshot is stale with respect to both. Fail closed on the
 			// early return path the same way a hard capture failure does:
-			// invalidate the snapshot under the per-book lock so the book
-			// can never run on the stale row.
-			if derr := h.invalidateBookSnapshot(bookID); derr != nil {
+			// invalidate the snapshot under the per-book lock (held since
+			// the writes) so the book can never run on the stale row.
+			if derr := h.invalidateBookSnapshotLocked(bookID); derr != nil {
 				log.Printf("update book %d: replace people failed (%v) AND invalidation failed: %v", bookID, err, derr)
 				writeError(w, http.StatusInternalServerError, fmt.Sprintf(
 					"people update failed (%v) and the old snapshot could not be invalidated (%v): the book's metadata is in an unknown state — do not process it until a fresh save/re-preview succeeds", err, derr))
@@ -475,14 +487,18 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 	// On catalog unavailability the capture degrades: the row is refreshed
 	// with the new local fields while retaining the previously captured
 	// catalog content (genres/chapters/cover), and the save succeeds.
-	if _, cerr := h.captureSnapshot(r.Context(), bookID, snapshotRelevantChanged(&req)); cerr != nil {
+	if _, cerr := h.captureSnapshotUnlocked(r.Context(), bookID, snapshotRelevantChanged(&req)); cerr != nil {
 		// Fail closed: the stale row MUST be invalidated so the book can never
 		// later run on it. If the invalidation itself fails, do NOT report a
 		// clean 503 — the book's state is now unknown (a row that may be
 		// stale and loadable), so report 500 and say the snapshot is in an
 		// unknown state, never "re-preview to restore it" (finding: ignored
-		// invalidation DELETE).
-		if derr := h.invalidateBookSnapshot(bookID); derr != nil {
+		// invalidation DELETE). The per-book lock is held, so the delete
+		// and the capture above ran under it: an enqueue that wanted the
+		// snapshot waited for the whole section, so the queued copy is
+		// either the new snapshot (capture succeeded) or none at all
+		// (invalidated below) — never the pre-update one.
+		if derr := h.invalidateBookSnapshotLocked(bookID); derr != nil {
 			log.Printf("capture snapshot for book %d: %v — AND invalidation failed: %v", bookID, cerr, derr)
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf(
 				"book saved, but its processing snapshot capture failed (%v) and the old snapshot could not be invalidated (%v): the book's metadata is in an unknown state — do not process it until a fresh save/re-preview succeeds", cerr, derr))
@@ -543,6 +559,14 @@ func (h *Handler) invalidateBookSnapshot(bookID int64) error {
 	if h.svc.ProcessingSvc != nil {
 		defer h.svc.ProcessingSvc.lockBookCover(bookID)()
 	}
+	_, err := h.svc.DB.Exec("DELETE FROM book_snapshots WHERE book_id = ?", bookID)
+	return err
+}
+
+// invalidateBookSnapshotLocked is the same delete with the per-book lock
+// ALREADY held by the caller (UpdateBook holds it across the writes and the
+// capture; a sync.Mutex is not re-entrant).
+func (h *Handler) invalidateBookSnapshotLocked(bookID int64) error {
 	_, err := h.svc.DB.Exec("DELETE FROM book_snapshots WHERE book_id = ?", bookID)
 	return err
 }
@@ -780,7 +804,7 @@ func (h *Handler) storedIndexMetadata(srcPath string) *audio.SourceMetadata {
 // never consults this gate: a file row's own signals are the source of
 // truth for a file source.
 func (h *Handler) indexedChildrenFresh(dirPath string) bool {
-	rows, err := h.svc.DB.Query(`SELECT path, size, modtime FROM source_index WHERE path LIKE ? ESCAPE '\'`,
+	rows, err := h.svc.DB.Query(`SELECT path, size, modtime, type FROM source_index WHERE path LIKE ? ESCAPE '\'`,
 		likeEscape(indexChildPrefix(dirPath))+"%")
 	if err != nil {
 		log.Printf("stored index metadata children for %s: query: %v", dirPath, err)
@@ -788,16 +812,22 @@ func (h *Handler) indexedChildrenFresh(dirPath string) bool {
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var childPath, childModtime string
+		var childPath, childModtime, childType string
 		var childSize int64
-		if err := rows.Scan(&childPath, &childSize, &childModtime); err != nil {
-			log.Printf("stored index metadata children for %s: scan: %v", dirPath, err)
+		if err := rows.Scan(&childPath, &childSize, &childModtime, &childType); err != nil {
+			log.Printf("stored index metadata children for %s: scan: %v", childPath, err)
 			return false
 		}
 		info, err := os.Stat(childPath)
-		if err != nil || info.Size() != childSize ||
+		if err != nil {
+			return false // child missing
+		}
+		// The type is part of the freshness signal: a same-size/mtime
+		// file-to-dir (or dir-to-file) replacement would otherwise reuse
+		// the stale metadata.
+		if (childType == "dir") != info.IsDir() || info.Size() != childSize ||
 			info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z") != childModtime {
-			return false // child missing, rewritten in place, or mtime-bumped
+			return false // child re-typed, rewritten in place, or mtime-bumped
 		}
 	}
 	return rows.Err() == nil

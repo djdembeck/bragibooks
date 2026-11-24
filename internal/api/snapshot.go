@@ -217,6 +217,15 @@ func (h *Handler) captureSnapshot(ctx context.Context, bookID int64, changed boo
 	if h.svc.ProcessingSvc != nil {
 		defer h.svc.ProcessingSvc.lockBookCover(bookID)()
 	}
+	return h.captureSnapshotUnlocked(ctx, bookID, changed)
+}
+
+// captureSnapshotUnlocked is the capture core with the per-book lock
+// ALREADY held by the caller (UpdateBook holds it across the book+people
+// writes AND the capture, so an enqueue in that window cannot freeze the
+// pre-update snapshot; a sync.Mutex is not re-entrant, so the locked
+// wrapper above must not call this while holding the lock).
+func (h *Handler) captureSnapshotUnlocked(ctx context.Context, bookID int64, changed bool) (catalogDegraded bool, err error) {
 	var (
 		title, description, series, releaseDate, coverURL string
 		adbBook, adbRelease                               sql.NullString
@@ -545,14 +554,24 @@ func loadBookSnapshot(db *sql.DB, bookID int64) (*BookSnapshot, error) {
 	// writes for an empty list) unmarshals into a NIL slice without error;
 	// normalize it to the empty slice so the snapshot's wire shape keeps
 	// its string[] contract — a null genres payload crashed the metadata
-	// editor for genreless books.
-	if err := json.Unmarshal([]byte(authorsJSON), &s.Authors); err != nil || s.Authors == nil {
+	// editor for genreless books. A decode ERROR is corruption (like the
+	// chapters arrays below), not a valid empty list: fail closed.
+	if err := json.Unmarshal([]byte(authorsJSON), &s.Authors); err != nil {
+		return nil, fmt.Errorf("decode authors: %w", err)
+	}
+	if s.Authors == nil {
 		s.Authors = []string{}
 	}
-	if err := json.Unmarshal([]byte(narratorsJSON), &s.Narrators); err != nil || s.Narrators == nil {
+	if err := json.Unmarshal([]byte(narratorsJSON), &s.Narrators); err != nil {
+		return nil, fmt.Errorf("decode narrators: %w", err)
+	}
+	if s.Narrators == nil {
 		s.Narrators = []string{}
 	}
-	if err := json.Unmarshal([]byte(genresJSON), &s.Genres); err != nil || s.Genres == nil {
+	if err := json.Unmarshal([]byte(genresJSON), &s.Genres); err != nil {
+		return nil, fmt.Errorf("decode genres: %w", err)
+	}
+	if s.Genres == nil {
 		s.Genres = []string{}
 	}
 	// A MALFORMED chapters value is corruption, not a valid empty list: a
@@ -749,7 +768,7 @@ func buildEngineJob(ctx context.Context, args jobArgs, jobID string, snap BookSn
 					log.Printf("encode cover policy for book %d: %v", snap.BookID, merr)
 				}
 			} else {
-				log.Printf("book %d: run-time cover download failed for %q: %v (degrading to no cover)", snap.BookID, sel.CoverURL, derr)
+				log.Printf("book %d: run-time cover download failed for %s: %v (degrading to no cover)", snap.BookID, redactCoverURL(sel.CoverURL), derr)
 				jf.Cover = json.RawMessage(`"clear"`)
 			}
 		} else {
@@ -1105,20 +1124,77 @@ func assertPublicCoverURL(ctx context.Context, u *url.URL) (coverHop, error) {
 
 // isNonPublicCoverAddress classifies an address as a non-public fetch
 // destination: the standard private/loopback/link-local/multicast sets,
-// unspecified (0.0.0.0, :: — locally routable on applicable systems), and
-// the 100.64.0.0/10 shared address space, none of which a cover fetch may
-// reach.
+// unspecified (0.0.0.0, :: — locally routable on applicable systems), the
+// 100.64.0.0/10 shared address space, and the remaining IANA
+// special-purpose ranges (RFC 6890/1122/4291: documentation, benchmarking,
+// Teredo, NAT64/DNS64 well-known, IPv4-mapped, 6to4), none of which a
+// cover fetch may reach.
 func isNonPublicCoverAddress(ip net.IP) bool {
 	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
 		return true
 	}
-	return ip4InCGNAT(ip)
+	if ip4InCGNAT(ip) {
+		return true
+	}
+	v4 := ip.To4()
+	if v4 != nil {
+		switch {
+		// 192.0.0.0/24 IETF protocol assignments; 198.18.0.0/15 benchmarking;
+		// 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 documentation (RFC 5737).
+		case v4[0] == 192 && v4[1] == 0 && v4[2] == 0,
+			v4[0] == 198 && (v4[1] == 18 || v4[1] == 19),
+			v4[0] == 192 && v4[1] == 0 && v4[2] == 2,
+			v4[0] == 198 && v4[1] == 51 && v4[2] == 100,
+			v4[0] == 203 && v4[1] == 0 && v4[2] == 113:
+			return true
+		// 255.255.255.255/32 limited broadcast.
+		case v4[0] == 255 && v4[1] == 255 && v4[2] == 255 && v4[3] == 255:
+			return true
+		}
+		return false
+	}
+	// IPv6 special-purpose: 2001:db8::/32 documentation, fc00::/7 unique-local
+	// (IsPrivate covers fc00::/7 already, kept explicit for parity with the
+	// IANA list), fe80::/10 link-local (IsLinkLocalUnicast), 64:ff9b::/96
+	// NAT64/DNS64 well-known, ::ffff:0:0/96 IPv4-mapped (the mapped IPv4 is
+	// re-checked through the v4 table above).
+	if ip6 := ip.To16(); ip6 != nil {
+		if ip6[0] == 0x20 && ip6[1] == 0x01 && ip6[2] == 0x0d && ip6[3] == 0xb8 {
+			return true
+		}
+		// 2002::/16 6to4 (RFC 3056): the embedded IPv4 may be private, so
+		// the address is not public-Internet-reachable in the general
+		// sense and is rejected like the other special-purpose ranges.
+		if ip6[0] == 0x20 && ip6[1] == 0x02 {
+			return true
+		}
+		if ip6[0] == 0x64 && ip6[1] == 0xff && ip6[2] == 0x9b {
+			return true
+		}
+		if ip6[0] == 0 && ip6[1] == 0 && ip6[2] == 0 && ip6[3] == 0 &&
+			ip6[4] == 0 && ip6[5] == 0 && ip6[6] == 0 && ip6[7] == 0 &&
+			ip6[8] == 0 && ip6[9] == 0 && ip6[10] == 0xff {
+			return isNonPublicCoverAddress(net.IP(ip6[12:16]))
+		}
+	}
+	return false
 }
 
 func ip4InCGNAT(ip net.IP) bool {
 	v4 := ip.To4()
 	return v4 != nil && v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127
+}
+
+// redactCoverURL keeps only the host of a cover URL for logs and wrapped
+// errors: the operator-supplied path and query can carry credentials, and
+// the host is what an operator needs to identify the failing destination.
+func redactCoverURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "<unparseable cover URL>"
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // downloadCoverFile fetches url into dest with the bounded client, writing
@@ -1130,17 +1206,17 @@ func downloadCoverFile(ctx context.Context, coverURL string, dest string) error 
 		return fmt.Errorf("parse cover URL: %w", err)
 	}
 	if _, err := assertPublicCoverURL(ctx, parsed); err != nil {
-		return err
+		return fmt.Errorf("fetch cover %s: %w", redactCoverURL(coverURL), err)
 	}
 	current := parsed
 	for hop := 0; hop < 4; hop++ {
 		hp, err := assertPublicCoverURL(ctx, current)
 		if err != nil {
-			return err
+			return fmt.Errorf("fetch cover %s: %w", redactCoverURL(coverURL), err)
 		}
 		resp, err := doPinnedCoverGet(ctx, hp)
 		if err != nil {
-			return err
+			return fmt.Errorf("fetch cover %s: %w", redactCoverURL(coverURL), err)
 		}
 		switch {
 		case resp.StatusCode >= 300 && resp.StatusCode < 400:
@@ -1198,9 +1274,29 @@ func doPinnedCoverGet(ctx context.Context, hop coverHop) (*http.Response, error)
 	req.Host = hop.url.Host
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		// The transport error embeds the full request URL (path + query)
+		// in its string; the caller re-wraps and logs it, so the URL must
+		// not survive to the log line. Replace it with the redacted
+		// hostname-only form (same destination, no credentials in path).
+		return nil, fmt.Errorf("%s: %s", redactCoverURL(target), sanitizeTransportError(err, target))
 	}
 	return resp, nil
+}
+
+// sanitizeTransportError renders a transport error for a log line: a
+// *url.Error carries the full request URL in its message, which would
+// re-expose the operator's path+query past the caller's redaction. Strip
+// the URL from the nested message; every other error passes through.
+func sanitizeTransportError(err error, target string) string {
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		return err.Error()
+	}
+	msg := urlErr.Err.Error()
+	if i := strings.Index(msg, target); i >= 0 {
+		msg = msg[:i] + redactCoverURL(target) + msg[i+len(target):]
+	}
+	return msg
 }
 
 // writeCoverBody streams the response into dest atomically, capped. The

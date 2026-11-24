@@ -5,6 +5,7 @@ package audio
 import (
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"syscall"
 )
 
@@ -34,7 +35,8 @@ type processTree interface {
 // of the Windows suspended-start contract: the tree is established the
 // moment the process exists).
 type posixProcessTree struct {
-	cmd *exec.Cmd
+	cmd      *exec.Cmd
+	finished atomic.Bool
 }
 
 // newProcessTree must run before cmd.Start: the process-group attribute
@@ -48,7 +50,15 @@ func (p *posixProcessTree) start(cmd *exec.Cmd) error {
 	return nil
 }
 
+// kill terminates the whole tree. A cancel after cmd.Wait has reaped the
+// child (finish already ran) is a no-op: the group is gone, so a late
+// Kill on the recycled pgid would misfire on an unrelated group.
+// os.ErrProcessDone means the tree is already gone: nothing for os/exec
+// to do.
 func (p *posixProcessTree) kill() error {
+	if p.finished.Load() {
+		return os.ErrProcessDone
+	}
 	if err := syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL); err != nil {
 		if err == syscall.ESRCH {
 			return os.ErrProcessDone
@@ -59,6 +69,7 @@ func (p *posixProcessTree) kill() error {
 }
 
 func (p *posixProcessTree) finish() {
+	p.finished.Store(true)
 }
 
 var _ processTree = (*posixProcessTree)(nil)

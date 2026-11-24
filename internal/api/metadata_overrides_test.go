@@ -493,11 +493,13 @@ func TestMetadataOverrideBuildEngineJobPolicies(t *testing.T) {
 func TestMetadataOverrideWriteURLCover(t *testing.T) {
 	// The save-time URL guard resolves the cover host; stub it to a public
 	// address so the fixture domain needs no live resolver and the guard's
-	// public-address check is exercised deterministically.
+	// public-address check is exercised deterministically. A special-purpose
+	// address (e.g. RFC 5737 documentation 203.0.113.0/24) is refused by the
+	// guard, so the stub must name a genuinely public one.
 	oldLookup := lookupCoverHost
 	lookupCoverHost = func(_ context.Context, host string) ([]string, error) {
 		if host == "covers.example" {
-			return []string{"203.0.113.10"}, nil
+			return []string{"93.184.216.34"}, nil
 		}
 		return nil, fmt.Errorf("no address for %s", host)
 	}
@@ -803,7 +805,11 @@ func TestMetadataOverrideResetPrunesOrphanedAsset(t *testing.T) {
 // an override cover an upload just wrote (not yet referenced by the saved
 // row) must survive a same-book reset that runs before the draft save lands.
 // Without the pending-upload keep-set the reset prunes it and the later save
-// points at a deleted asset (the job degrades to no cover).
+// points at a deleted asset (the job degrades to no cover). The save's drop
+// is scoped to the cover the saved row references, so a save that does NOT
+// reference the upload (a concurrent draft saving something else) must also
+// keep it: only the referencing save drops the pending entry and lets the
+// sweep prune it.
 func TestMetadataOverrideResetKeepsPendingUpload(t *testing.T) {
 	h := newOverrideTestHandler(t)
 	covers := t.TempDir()
@@ -824,13 +830,28 @@ func TestMetadataOverrideResetKeepsPendingUpload(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(covers, asset)); err != nil {
 		t.Fatalf("pending upload pruned by reset before its draft save: %v", err)
 	}
-	// Once the draft save lands (and drops the pending entry), a later save
-	// that no longer references the asset prunes it again.
+	// A save that does not reference the upload leaves the pending entry
+	// (and the asset) in place: the not-yet-saved draft may still point at
+	// it, and the row no longer does.
 	if code := putOverride(t, h, 1, `{"title":"T2"}`); code != http.StatusOK {
 		t.Fatalf("PUT = %d", code)
 	}
+	if _, err := os.Stat(filepath.Join(covers, asset)); err != nil {
+		t.Fatalf("non-referencing save pruned a pending upload: %v", err)
+	}
+	// Once the draft save lands referencing the asset (and drops the pending
+	// entry), a later save that no longer references it prunes it.
+	if code := putOverride(t, h, 1, `{"cover_source":"file","cover_file":"`+asset+`"}`); code != http.StatusOK {
+		t.Fatalf("PUT = %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(covers, asset)); err != nil {
+		t.Fatalf("referencing save pruned its own cover asset: %v", err)
+	}
+	if code := putOverride(t, h, 1, `{"title":"T3"}`); code != http.StatusOK {
+		t.Fatalf("PUT = %d", code)
+	}
 	if _, err := os.Stat(filepath.Join(covers, asset)); !os.IsNotExist(err) {
-		t.Fatalf("pending entry survived the referencing save")
+		t.Fatalf("pending entry survived the later non-referencing save")
 	}
 }
 

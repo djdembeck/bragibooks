@@ -194,14 +194,16 @@ func main() {
 	}
 	// Stored output-profile formats inherit the same token vocabulary. A
 	// profile the engine cannot resolve cannot produce a valid path, so
-	// each stored value is validated at boot too: fatal with a clear,
-	// nameable diagnosis, consistent with the global check above (fixing
-	// the global alone would leave the profile job refusing at enqueue
-	// with a message that does not name the profile).
+	// each stored value is validated at boot. The check is non-fatal:
+	// the server must start even with a bad stored profile so the
+	// Settings UI (the only repair path) stays reachable. Enqueue
+	// re-validates via resolveDestination, so a bad profile is refused
+	// there with a nameable diagnosis.
 	profileRows, perr := database.Query("SELECT id, name, output_scheme FROM output_profiles WHERE output_scheme <> ''")
 	if perr != nil {
 		log.Fatalf("list output profiles for boot validation: %v", perr)
 	}
+	var invalidProfiles []api.InvalidOutputProfile
 	for profileRows.Next() {
 		var pid int64
 		var pname, scheme string
@@ -209,13 +211,15 @@ func main() {
 			log.Fatalf("read output profile for boot validation: %v", err)
 		}
 		if verr := audio.ValidateRelativePathFormat(scheme); verr != nil {
-			log.Fatalf("stored output profile %q (id %d) format %q is not valid for this engine: %v — fix the profile (the legacy {asin} token is no longer supported)", pname, pid, scheme, verr)
+			log.Printf("stored output profile %q (id %d) format %q is not valid for this engine: %v — fix the profile in settings (the legacy {asin} token is no longer supported)", pname, pid, scheme, verr)
+			invalidProfiles = append(invalidProfiles, api.InvalidOutputProfile{ID: pid, Name: pname, Format: scheme, Error: verr.Error()})
 		}
 	}
 	if err := profileRows.Err(); err != nil {
 		log.Fatalf("iterate output profiles for boot validation: %v", err)
 	}
 	profileRows.Close()
+	api.SetBootInvalidProfiles(invalidProfiles)
 	api.SetCoversDir(coversDir)
 
 	audiobookDBClient := audiobookdb.NewClient(cfg.APIKey.APIKey, cfg.APIKey.BaseURL)
