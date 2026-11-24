@@ -372,6 +372,19 @@ ALTER TABLE index_state ADD COLUMN write_failed_root TEXT NOT NULL DEFAULT '';
 ALTER TABLE processing_jobs ADD COLUMN batch_id TEXT;
 `,
 	},
+	{
+		// v20: index the batch_id lookups. v19 added the column only, so
+		// the newest-batch probe (batch_id IS NOT NULL, highest queue_seq)
+		// and the paged batch-row fetch (batch_id = ?, ordered by
+		// queue_seq) both ran full table scans. (batch_id, queue_seq)
+		// serves both: equality on batch_id with the queue_seq ordering,
+		// and the IS NOT NULL probe via a reverse index scan. The
+		// book-scoped batch fetch stays on idx_processing_jobs_book_id.
+		version: 20,
+		sql: `
+CREATE INDEX IF NOT EXISTS idx_processing_jobs_batch_id ON processing_jobs(batch_id, queue_seq);
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

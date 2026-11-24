@@ -2024,11 +2024,6 @@ func (h *Handler) StartReprocess(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListJobsResponse is the JSON shape returned by GET /api/jobs.
-type ListJobsResponse struct {
-	Jobs []map[string]any `json:"jobs"`
-}
-
 // jobResp converts a jobs-table row to its clean JSON shape, shared by the
 // list and active endpoints so the two payloads stay identical. sql.Null* is
 // what the columns carry, hence the per-field nil/unwrapping.
@@ -2088,17 +2083,52 @@ func jobResp(job models.ProcessingJob) map[string]any {
 
 const jobsColumns = "id, book_id, status, action, detail, output, error, output_file, started_at, completed_at, created_at, m4b_merge_args, batch_id, COALESCE(queue_seq, rowid) AS queue_seq"
 
-// ListJobs handles GET /api/jobs?limit=N&book_id=B.
-// Returns recent jobs newest-first with clean JSON matching the single-job contract.
-// When book_id is present and positive, only that book's jobs are returned.
+// BatchAggregate is the bounded latest-batch rollup in the /jobs response:
+// the queue page's completion banner reads only this, so it must stay small
+// and correct for a batch of any size. Per-status counts, the batch's wall
+// clock, and its queue-order window (last_seq is the newest-batch marker
+// the client derives its dismissal identity from). JobIDs carries the
+// batch's row ids in queue order; the paged batch fetch (?batch_id=ID)
+// serves the same order, so the client can merge pages into the list.
+type BatchAggregate struct {
+	BatchID     string   `json:"batch_id"`
+	Total       int      `json:"total"`
+	Done        int      `json:"done"`
+	Failed      int      `json:"failed"`
+	Cancelled   int      `json:"cancelled"`
+	InFlight    int      `json:"in_flight"`
+	AllTerminal bool     `json:"all_terminal"`
+	StartedAt   *string  `json:"started_at,omitempty"`
+	FinishedAt  *string  `json:"finished_at,omitempty"`
+	LastSeq     int64    `json:"last_seq"`
+	JobIDs      []string `json:"job_ids"`
+}
+
+// ListJobsResponse is the JSON shape returned by GET /api/jobs.
+type ListJobsResponse struct {
+	Jobs  []map[string]any `json:"jobs"`
+	Batch *BatchAggregate  `json:"batch,omitempty"`
+}
+
+// ListJobs handles GET /api/jobs?limit=N&offset=O&book_id=B&batch_id=ID.
+// Returns recent jobs newest-first with clean JSON matching the single-job
+// contract. When book_id is present and positive, only that book's jobs are
+// returned.
 // Active (queued/running) jobs are appended after the capped recent history:
 // a batch of audit rows (imports, metadata saves) must not push a running
 // merge — the state the page's live counters and cancel action rely on — out
 // of the limit window (the queue page derives its active set from this list).
-// The rows of the newest batch are appended as well: the queue page's
-// completion banner summarizes that batch, so it must stay whole even when
-// it is longer than the limit window or newer audit rows have pushed it out
-// of the recent window.
+// The response also carries a BOUNDED aggregate of the newest batch (the
+// completion banner's subject): counts, wall clock, and row ids computed in
+// SQL, so the banner stays whole for a batch of any size without shipping
+// every full batch row (output logs included) on each call. The batch rows
+// themselves are fetched on demand, bounded: ?batch_id=ID pages them with
+// limit/offset in queue order (the page's "Show all" toggle).
+// When batch_id is present the endpoint pages that batch's rows in queue
+// order (offset is a plain row offset into the queue-ordered batch); the
+// optional book scope still applies. No active append and no aggregate:
+// the caller already has the aggregate from its /jobs call and is
+// collecting the remaining rows.
 func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 	limit := parseIntQueryParam(r, "limit", 20)
 	if limit <= 0 {
@@ -2107,11 +2137,41 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 	if limit > 100 {
 		limit = 100
 	}
+	offset := parseIntQueryParam(r, "offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
 
 	var bookID int64
 	if v, ok := r.URL.Query()["book_id"]; ok && len(v) > 0 {
 		// Non-numeric values are treated as absent for tolerance.
 		bookID, _ = strconv.ParseInt(v[0], 10, 64)
+	}
+
+	// Paged batch fetch: ?batch_id=ID returns only that batch's rows, in
+	// queue order, bounded by limit/offset. No active append and no
+	// aggregate: the caller already has the aggregate from its /jobs call
+	// and is collecting the remaining rows.
+	if batchParam, ok := r.URL.Query()["batch_id"]; ok && len(batchParam) > 0 && batchParam[0] != "" {
+		query := "SELECT " + jobsColumns + " FROM processing_jobs WHERE batch_id = ?"
+		args := []any{batchParam[0]}
+		if bookID > 0 {
+			query += " AND book_id = ?"
+			args = append(args, bookID)
+		}
+		query += " ORDER BY queue_seq ASC LIMIT ? OFFSET ?"
+		args = append(args, limit, offset)
+		jobs, err := h.queryJobs(query, args)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("query batch jobs: %v", err))
+			return
+		}
+		response := make([]map[string]any, 0, len(jobs))
+		for _, job := range jobs {
+			response = append(response, jobResp(job))
+		}
+		writeJSON(w, http.StatusOK, ListJobsResponse{Jobs: response})
+		return
 	}
 
 	recentQuery := "SELECT " + jobsColumns + " FROM processing_jobs"
@@ -2146,35 +2206,25 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The completion banner summarizes the LATEST batch from this list, so a
-	// batch longer than the limit window (or one pushed out of the recent
-	// window by newer audit rows) must not be truncated: re-include every row
-	// of the newest batch by id, independent of the capped recent window.
-	var latestBatch []models.ProcessingJob
+	// The completion banner summarizes the LATEST batch: ship its bounded
+	// aggregate (counts and wall clock, computed in SQL over the batch, no
+	// row load) instead of the batch's rows. A probe failure degrades to
+	// the pre-batch behavior (no aggregate; the banner groups the list by
+	// queue-order adjacency), logged, not a 500.
+	var batch *BatchAggregate
 	batchID, err := h.latestBatchID(bookID)
 	if err != nil {
-		// Probe failure degrades to the pre-batch behavior (the newest
-		// batch may be truncated by the limit window); the batch-row query
-		// below is the correctness-critical one, so a transient fault here
-		// is logged, not a 500.
 		log.Printf("list jobs: latest batch probe: %v", err)
 	} else if batchID != "" {
-		batchQuery := "SELECT " + jobsColumns + " FROM processing_jobs WHERE batch_id = ?"
-		batchArgs := []any{batchID}
-		if bookID > 0 {
-			batchQuery += " AND book_id = ?"
-			batchArgs = append(batchArgs, bookID)
-		}
-		batchQuery += " ORDER BY COALESCE(queue_seq, rowid) ASC"
-		latestBatch, err = h.queryJobs(batchQuery, batchArgs)
+		batch, err = h.latestBatchAggregate(batchID, bookID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("query latest batch: %v", err))
-			return
+			log.Printf("list jobs: latest batch aggregate: %v", err)
+			batch = nil
 		}
 	}
 
-	response := make([]map[string]any, 0, len(recent)+len(active)+len(latestBatch))
-	seen := make(map[string]bool, len(recent)+len(active)+len(latestBatch))
+	response := make([]map[string]any, 0, len(recent)+len(active))
+	seen := make(map[string]bool, len(recent)+len(active))
 	for _, job := range recent {
 		seen[job.ID] = true
 		response = append(response, jobResp(job))
@@ -2186,28 +2236,132 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 		seen[job.ID] = true
 		response = append(response, jobResp(job))
 	}
-	for _, job := range latestBatch {
-		if seen[job.ID] {
-			continue
+
+	// Book-scoped history completeness: the book page renders its
+	// response AS the book's full activity history (unscoped callers
+	// fetch batch rows on demand via ?batch_id=), so re-include the rows
+	// of the book's LATEST batch that the recent window no longer
+	// reaches — otherwise a book whose newest merge is followed by more
+	// audit rows than the limit loses its terminal merge row from the
+	// list. Bounded like the aggregate: the probe already resolved the
+	// latest batch id, and the rows come back through the
+	// idx_processing_jobs_batch_id index (queue order, deduped against
+	// the window).
+	if bookID > 0 && batchID != "" {
+		batchRows, err := h.queryJobs(
+			"SELECT "+jobsColumns+" FROM processing_jobs WHERE batch_id = ? AND book_id = ? ORDER BY queue_seq ASC",
+			[]any{batchID, bookID},
+		)
+		if err != nil {
+			log.Printf("list jobs: latest batch rows: %v", err)
+		} else {
+			for _, job := range batchRows {
+				if seen[job.ID] {
+					continue
+				}
+				seen[job.ID] = true
+				response = append(response, jobResp(job))
+			}
 		}
-		response = append(response, jobResp(job))
 	}
 
-	writeJSON(w, http.StatusOK, ListJobsResponse{Jobs: response})
+	writeJSON(w, http.StatusOK, ListJobsResponse{Jobs: response, Batch: batch})
+}
+
+// latestBatchAggregate rolls up the newest batch in SQL: per-status counts,
+// wall clock, last queue order, and the row ids. The aggregate is computed
+// over the whole batch (COUNT/MIN/MAX, no row load, no output logs) so the
+// banner stays whole for a batch of any size; only the row ids are carried,
+// and they are what the paged batch fetch consumes. The counts use the
+// same terminal-status convention as the client's rollup: done,
+// error/failed, cancelled; everything else (queued, running) is in flight.
+func (h *Handler) latestBatchAggregate(batchID string, bookID int64) (*BatchAggregate, error) {
+	where := " WHERE batch_id = ?"
+	args := []any{batchID}
+	if bookID > 0 {
+		where += " AND book_id = ?"
+		args = append(args, bookID)
+	}
+	query := `
+SELECT COUNT(*),
+       SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END),
+       SUM(CASE WHEN status IN ('error', 'failed') THEN 1 ELSE 0 END),
+       SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END),
+       SUM(CASE WHEN status IN ('queued', 'running') THEN 1 ELSE 0 END),
+       MIN(COALESCE(started_at, created_at)),
+       MAX(completed_at),
+       MAX(queue_seq)
+FROM processing_jobs` + where
+	var total, done, failed, cancelled, inFlight int
+	var startedAt, finishedAt sql.NullString
+	var lastSeq int64
+	if err := h.svc.DB.QueryRow(query, args...).Scan(
+		&total, &done, &failed, &cancelled, &inFlight,
+		&startedAt, &finishedAt, &lastSeq,
+	); err != nil {
+		return nil, err
+	}
+
+	// Row ids in queue order, the order the paged batch fetch serves.
+	// A batch's rows all carry the same batch_id; queue_seq is non-null
+	// for every batched row (v11 backfilled it and every enqueue sets it).
+	idsQuery := "SELECT id FROM processing_jobs WHERE batch_id = ?"
+	idsArgs := []any{batchID}
+	if bookID > 0 {
+		idsQuery += " AND book_id = ?"
+		idsArgs = append(idsArgs, bookID)
+	}
+	idsQuery += " ORDER BY queue_seq ASC"
+	idRows, err := h.svc.DB.Query(idsQuery, idsArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer idRows.Close()
+	jobIDs := make([]string, 0, total)
+	for idRows.Next() {
+		var id string
+		if err := idRows.Scan(&id); err != nil {
+			continue
+		}
+		jobIDs = append(jobIDs, id)
+	}
+
+	agg := &BatchAggregate{
+		BatchID:     batchID,
+		Total:       total,
+		Done:        done,
+		Failed:      failed,
+		Cancelled:   cancelled,
+		InFlight:    inFlight,
+		AllTerminal: inFlight == 0,
+		LastSeq:     lastSeq,
+		JobIDs:      jobIDs,
+	}
+	if startedAt.Valid {
+		agg.StartedAt = &startedAt.String
+	}
+	if finishedAt.Valid {
+		agg.FinishedAt = &finishedAt.String
+	}
+	return agg, nil
 }
 
 // latestBatchID returns the batch_id of the newest batched job (highest
 // durable queue order), honoring the optional book scope. Empty when no
 // batched row exists (pre-batch history groups by queue-order adjacency on
-// the client, so there is no request id to fetch by).
+// the client, so there is no request id to fetch by). Every batched row
+// carries a non-null queue_seq (v11 backfilled the column; every enqueue
+// sets it), so the probe orders by the plain column and the
+// idx_processing_jobs_batch_id / idx_processing_jobs_queue_seq indexes can
+// serve it (a COALESCE(queue_seq, rowid) expression cannot).
 func (h *Handler) latestBatchID(bookID int64) (string, error) {
-	query := "SELECT batch_id FROM processing_jobs WHERE batch_id IS NOT NULL"
+	query := "SELECT batch_id FROM processing_jobs WHERE batch_id IS NOT NULL AND queue_seq IS NOT NULL"
 	args := make([]any, 0, 1)
 	if bookID > 0 {
 		query += " AND book_id = ?"
 		args = append(args, bookID)
 	}
-	query += " ORDER BY COALESCE(queue_seq, rowid) DESC LIMIT 1"
+	query += " ORDER BY queue_seq DESC LIMIT 1"
 	var batchID string
 	err := h.svc.DB.QueryRow(query, args...).Scan(&batchID)
 	if err == sql.ErrNoRows {

@@ -160,8 +160,30 @@ export interface ProcessingJob {
 	output_scheme?: string;
 }
 
+/** Bounded latest-batch rollup in the /jobs response: the completion
+ *  banner reads only this (counts, wall clock, row ids), so it stays small
+ *  and whole for a batch of any size. The batch's full rows are fetched on
+ *  demand via `/jobs?batch_id=ID&limit=&offset=`. */
+export interface BatchAggregate {
+	batch_id: string;
+	total: number;
+	done: number;
+	failed: number;
+	cancelled: number;
+	in_flight: number;
+	all_terminal: boolean;
+	started_at?: string | null;
+	finished_at?: string | null;
+	/** The batch's newest queue order: the banner's dismissal identity marker. */
+	last_seq: number;
+	/** The batch's row ids in queue order. */
+	job_ids: string[];
+}
+
 export interface JobsListResponse {
 	jobs: ProcessingJob[];
+	/** Absent when no batched job exists or the probe degraded. */
+	batch?: BatchAggregate | null;
 }
 
 export interface StatusCounts {

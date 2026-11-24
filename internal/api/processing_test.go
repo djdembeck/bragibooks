@@ -1054,6 +1054,18 @@ func jobIDsFromList(t *testing.T, body *httptest.ResponseRecorder) (map[string]s
 	return byID, ids
 }
 
+// decodeList decodes a ListJobsResponse from raw response bytes: the
+// recorder's reader is consumed by the first decode, so the aggregate
+// assertions decode the captured copy, not the recorder.
+func decodeList(t *testing.T, raw []byte) ListJobsResponse {
+	t.Helper()
+	var resp ListJobsResponse
+	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&resp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	return resp
+}
+
 // Regression: the Queue page derives its active set from GET /jobs. When a
 // batch of audit rows (imports/metadata saves) lands while a merge is in
 // flight, the recent-history LIMIT used to push the active job out of the
@@ -2893,11 +2905,13 @@ func TestQueueResponseCarriesEffectiveDestination(t *testing.T) {
 	}
 }
 
-// Regression: the completion banner summarizes the LATEST batch from this
-// list, so the batch must stay whole even when it is longer than the limit
-// window (the cap truncates it) or newer audit rows have pushed it out of
-// the recent window entirely (only active jobs used to be re-appended).
-func TestListJobsKeepsLatestBatchWhole(t *testing.T) {
+// Regression: the completion banner summarizes the LATEST batch, so its
+// rollup must stay whole even when the batch is longer than the limit
+// window (the cap truncates the recent list) or newer audit rows have
+// pushed it out of the recent window entirely. The response carries the
+// batch as a bounded aggregate (counts, wall clock, row ids) — not its
+// full rows — and ?batch_id=ID pages the rows in queue order.
+func TestListJobsServesLatestBatchAggregate(t *testing.T) {
 	t.Run("batch longer than the limit window", func(t *testing.T) {
 		h, _ := newTestJobsHandler(t)
 		// 120 done jobs of one batch, queue_seq 1..120, created 00:00:00..
@@ -2915,14 +2929,72 @@ func TestListJobsKeepsLatestBatchWhole(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("list status = %d; want 200 — body: %s", w.Code, w.Body.String())
 		}
-		byID, ids := jobIDsFromList(t, w)
-		if n := len(ids); n != 120 {
-			t.Fatalf("list len = %d; want the whole 120-job batch, not the 100-row cap", n)
+		var resp ListJobsResponse
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		// The recent window is capped at 100 rows: the batch's full rows
+		// no longer ride along, so the list stays bounded.
+		if n := len(resp.Jobs); n != 100 {
+			t.Fatalf("list len = %d; want the 100-row cap, not the 120-job batch", n)
+		}
+		// The aggregate covers the WHOLE 120-job batch: counts, wall
+		// clock, and every row id, in queue order.
+		if resp.Batch == nil {
+			t.Fatal("batch aggregate missing from response")
+		}
+		if resp.Batch.BatchID != "b1" || resp.Batch.Total != 120 || resp.Batch.Done != 120 {
+			t.Fatalf("aggregate = %+v; want b1, total 120, done 120", resp.Batch)
+		}
+		if !resp.Batch.AllTerminal || resp.Batch.InFlight != 0 {
+			t.Errorf("aggregate terminal = (%v, %d); want all terminal", resp.Batch.AllTerminal, resp.Batch.InFlight)
+		}
+		if resp.Batch.LastSeq != 120 {
+			t.Errorf("aggregate last_seq = %d; want 120 (the batch's newest queue order)", resp.Batch.LastSeq)
+		}
+		if n := len(resp.Batch.JobIDs); n != 120 {
+			t.Fatalf("aggregate job ids = %d; want all 120 row ids", n)
 		}
 		for i := 1; i <= 120; i++ {
-			if _, ok := byID[fmt.Sprintf("b1-%03d", i)]; !ok {
-				t.Fatalf("batch job b1-%03d missing from list", i)
+			if want := fmt.Sprintf("b1-%03d", i); resp.Batch.JobIDs[i-1] != want {
+				t.Fatalf("aggregate job id %d = %q; want %q (queue order)", i, resp.Batch.JobIDs[i-1], want)
 			}
+		}
+
+		// The paged fetch serves the same batch in queue order, bounded:
+		// page 1 is the first 16 rows, and the last page the tail.
+		w = httptest.NewRecorder()
+		h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?batch_id=b1&limit=16&offset=0", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("batch page status = %d; want 200 — body: %s", w.Code, w.Body.String())
+		}
+		var page ListJobsResponse
+		if err := json.NewDecoder(w.Body).Decode(&page); err != nil {
+			t.Fatalf("decode page: %v", err)
+		}
+		if page.Batch != nil {
+			t.Errorf("batch page carries an aggregate; want rows only")
+		}
+		if n := len(page.Jobs); n != 16 {
+			t.Fatalf("batch page len = %d; want 16", n)
+		}
+		if page.Jobs[0]["id"] != "b1-001" || page.Jobs[15]["id"] != "b1-016" {
+			t.Errorf("batch page = (%v..%v); want b1-001..b1-016 in queue order", page.Jobs[0]["id"], page.Jobs[15]["id"])
+		}
+		w = httptest.NewRecorder()
+		h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?batch_id=b1&limit=16&offset=112", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("batch tail page status = %d; want 200 — body: %s", w.Code, w.Body.String())
+		}
+		var tail ListJobsResponse
+		if err := json.NewDecoder(w.Body).Decode(&tail); err != nil {
+			t.Fatalf("decode tail: %v", err)
+		}
+		if n := len(tail.Jobs); n != 8 {
+			t.Fatalf("batch tail len = %d; want the final 8 rows", n)
+		}
+		if tail.Jobs[0]["id"] != "b1-113" || tail.Jobs[7]["id"] != "b1-120" {
+			t.Errorf("batch tail = (%v..%v); want b1-113..b1-120", tail.Jobs[0]["id"], tail.Jobs[7]["id"])
 		}
 	})
 
@@ -2945,15 +3017,27 @@ func TestListJobsKeepsLatestBatchWhole(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("list status = %d; want 200 — body: %s", w.Code, w.Body.String())
 		}
-		byID, ids := jobIDsFromList(t, w)
-		// 100 recent audit rows + 3 appended batch rows, no duplicates.
-		if n := len(ids); n != 103 {
-			t.Fatalf("list len = %d; want 100 recent + 3 appended batch rows", n)
+		var resp ListJobsResponse
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
 		}
-		for i := 1; i <= 3; i++ {
-			if _, ok := byID[fmt.Sprintf("b1-%d", i)]; !ok {
-				t.Fatalf("finished batch job b1-%d missing from list; the banner would lose the run", i)
+		// The recent window is 100 audit rows; the batch's rows are NOT
+		// appended (the aggregate stands in for them).
+		if n := len(resp.Jobs); n != 100 {
+			t.Fatalf("list len = %d; want the 100-row recent window only", n)
+		}
+		for _, j := range resp.Jobs {
+			if id, _ := j["id"].(string); strings.HasPrefix(id, "b1-") {
+				t.Fatalf("batch row %s in the list; the aggregate, not the rows, rides along", id)
 			}
+		}
+		// The aggregate still covers the whole batch: the banner keeps the
+		// run even when no batch row is in the response.
+		if resp.Batch == nil || resp.Batch.BatchID != "b1" || resp.Batch.Total != 3 || resp.Batch.Done != 3 {
+			t.Fatalf("aggregate = %+v; want b1, total 3, done 3", resp.Batch)
+		}
+		if n := len(resp.Batch.JobIDs); n != 3 {
+			t.Fatalf("aggregate job ids = %d; want 3", n)
 		}
 	})
 }
@@ -2996,10 +3080,70 @@ func TestLatestBatchIDProbeFailureContract(t *testing.T) {
 	}
 }
 
-// Regression: the book_id scope must apply to the batch-row append as well
-// as the recent and active queries — a scoped list must never surface
-// another book's batch rows.
-func TestListJobsBookScopeAppliesToBatchAppend(t *testing.T) {
+// Regression: when the probe finds no batch (or fails), ListJobs degrades
+// to the pre-batch behavior — 200 with recent + active only and NO batch
+// aggregate — and the client falls back to queue-order adjacency. A
+// batched row the probe cannot see (queue_seq NULL) is the faithful
+// fixture: the probe's filter excludes it, so the handler takes the
+// no-aggregate branch while the row still rides along in the list.
+func TestListJobsDegradesWithoutBatchOnProbeMiss(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	// A batched row the probe cannot see: batch_id set, queue_seq NULL.
+	// The probe (batch_id IS NOT NULL AND queue_seq IS NOT NULL) misses it,
+	// so the response must carry no aggregate — the old behavior.
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, status, action, created_at, batch_id) VALUES ('b1-1', 1, 'done', 'merge', '2026-01-01 00:00:00', 'b1')",
+	); err != nil {
+		t.Fatalf("seed batch job: %v", err)
+	}
+	// Pre-batch history: no batch id at all.
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq) VALUES ('l1', 1, 'done', 'merge', '2025-12-31 00:00:00', 1)",
+	); err != nil {
+		t.Fatalf("seed legacy job: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=10", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("degraded list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	raw := w.Body.Bytes()
+	resp := decodeList(t, raw)
+	// No aggregate: the probe saw no batch, so the banner falls back to
+	// the adjacency walk over the rows the list carries.
+	if resp.Batch != nil {
+		t.Fatalf("degraded response carries aggregate %+v; want none", resp.Batch)
+	}
+	// The rows are still there (old behavior: the list is the source of
+	// truth for the banner).
+	if n := len(resp.Jobs); n != 2 {
+		t.Fatalf("degraded list len = %d; want both rows", n)
+	}
+
+	// Control: the same row WITH a queue_seq is visible to the probe and
+	// the aggregate appears.
+	h2, _ := newTestJobsHandler(t)
+	if _, err := h2.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES ('b1-1', 1, 'done', 'merge', '2026-01-01 00:00:00', 1, 'b1')",
+	); err != nil {
+		t.Fatalf("seed visible batch job: %v", err)
+	}
+	w = httptest.NewRecorder()
+	h2.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=10", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("control list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	control := decodeList(t, w.Body.Bytes())
+	if control.Batch == nil || control.Batch.BatchID != "b1" || control.Batch.Total != 1 {
+		t.Fatalf("control aggregate = %+v; want b1 total 1", control.Batch)
+	}
+}
+
+// Regression: the book_id scope must apply to the batch aggregate and the
+// paged batch fetch as well as the recent and active queries — a scoped
+// list must never surface another book's batch (its rollup or its rows).
+func TestListJobsBookScopeAppliesToBatchAggregate(t *testing.T) {
 	h, _ := newTestJobsHandler(t)
 	if _, err := h.svc.DB.Exec(
 		"INSERT INTO books (id, title, status) VALUES (1, 'Book One', 'processing'), (2, 'Book Two', 'processing')",
@@ -3025,64 +3169,74 @@ func TestListJobsBookScopeAppliesToBatchAppend(t *testing.T) {
 			t.Fatalf("seed book-2 batch %d: %v", i, err)
 		}
 	}
-	// 110 newer book-1 audit rows push BOTH batches out of the 100-row
-	// recent window: the append is the ONLY path that re-includes a batch.
+	// 110 newer book-1 audit rows push book 1's batch out of the 100-row
+	// recent window: the aggregate (and the paged fetch) are the ONLY
+	// paths that re-include it.
 	seedAuditRows(t, h.svc.DB, 110)
 
-	// Unscoped: the probe's newest batch is b2 (queue_seq 4..6); only b2's
-	// rows are appended — b1's are gone from the window and not the
-	// probe's pick. 100 recent audit rows + 3 appended = 103.
+	// Unscoped: the probe's newest batch is b2 (queue_seq 4..6); the
+	// aggregate carries b2, not b1. The list is the 100-row window only.
 	w := httptest.NewRecorder()
 	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=100", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("unscoped list status = %d; want 200 — body: %s", w.Code, w.Body.String())
 	}
 	byID, ids := jobIDsFromList(t, w)
-	if n := len(ids); n != 103 {
-		t.Fatalf("unscoped list len = %d; want 100 recent + 3 appended b2 rows", n)
-	}
-	for i := 1; i <= 3; i++ {
-		if _, ok := byID[fmt.Sprintf("b2-%d", i)]; !ok {
-			t.Errorf("unscoped list missing b2-%d", i)
-		}
+	if n := len(ids); n != 100 {
+		t.Fatalf("unscoped list len = %d; want the 100-row recent window", n)
 	}
 	for i := 1; i <= 3; i++ {
 		if _, ok := byID[fmt.Sprintf("b1-%d", i)]; ok {
-			t.Errorf("unscoped list carries b1-%d; only the probe's batch is appended", i)
+			t.Errorf("unscoped list carries b1-%d; the batch's rows are not appended", i)
 		}
 	}
 
 	// Book 1's scope: the probe must resolve book 1's OWN batch (b1) even
-	// though b2 is the global newest, and the append's AND book_id = ?
-	// must keep book 2's rows out. Without the scope on the append, the
-	// global-newest b2 rows would leak into the book-1 list.
+	// though b2 is the global newest, and the aggregate's AND book_id = ?
+	// must keep book 2's rollup out.
 	w = httptest.NewRecorder()
 	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=100&book_id=1", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("book-1 list status = %d; want 200 — body: %s", w.Code, w.Body.String())
 	}
+	raw1 := w.Body.Bytes()
 	byID, ids = jobIDsFromList(t, w)
+	// 100-row recent window PLUS book 1's own latest-batch rows re-included
+	// (b1's 3 rows sort out of the window behind the 110 audit rows; the
+	// book page needs its book's full history in the list).
 	if n := len(ids); n != 103 {
-		t.Fatalf("book-1 list len = %d; want 100 recent audits + 3 appended b1 rows", n)
-	}
-	for i := 1; i <= 3; i++ {
-		if _, ok := byID[fmt.Sprintf("b1-%d", i)]; !ok {
-			t.Errorf("book-1 list missing b1-%d", i)
-		}
+		t.Fatalf("book-1 list len = %d; want the 100-row recent window + 3 re-included b1 rows", n)
 	}
 	for id := range byID {
 		if strings.HasPrefix(id, "b2-") {
 			t.Errorf("book-2 batch row %s present in book-1 list", id)
 		}
 	}
+	for i := 1; i <= 3; i++ {
+		if _, ok := byID[fmt.Sprintf("b1-%d", i)]; !ok {
+			t.Errorf("book-1 list missing re-included batch row b1-%d", i)
+		}
+	}
+	// Book 1's aggregate: b1, not the global-newest b2.
+	book1Resp := decodeList(t, raw1)
+	if book1Resp.Batch == nil || book1Resp.Batch.BatchID != "b1" || book1Resp.Batch.Total != 3 {
+		t.Fatalf("book-1 aggregate = %+v; want b1 with total 3", book1Resp.Batch)
+	}
+	for i := 1; i <= 3; i++ {
+		if want := fmt.Sprintf("b1-%d", i); book1Resp.Batch.JobIDs[i-1] != want {
+			t.Errorf("book-1 aggregate job id %d = %q; want %q", i, book1Resp.Batch.JobIDs[i-1], want)
+		}
+	}
 
-	// Mirror image: book 2's scope carries its own batch only — its 3 rows
-	// sit inside its (uncontested) recent window, so the append dedupes.
+	// Mirror image: book 2's scope carries its own aggregate, and its 3
+	// rows sit inside its (uncontested) recent window, so the list holds
+	// them without an append.
 	w = httptest.NewRecorder()
 	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=100&book_id=2", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("book-2 list status = %d; want 200 — body: %s", w.Code, w.Body.String())
 	}
+	raw2 := w.Body.Bytes()
 	byID, ids = jobIDsFromList(t, w)
 	if n := len(ids); n != 3 {
 		t.Fatalf("book-2 list len = %d; want its 3 batch rows only", n)
@@ -3095,6 +3249,121 @@ func TestListJobsBookScopeAppliesToBatchAppend(t *testing.T) {
 	for id := range byID {
 		if strings.HasPrefix(id, "b1-") {
 			t.Errorf("book-1 batch row %s present in book-2 list", id)
+		}
+	}
+	book2Resp := decodeList(t, raw2)
+	if book2Resp.Batch == nil || book2Resp.Batch.BatchID != "b2" || book2Resp.Batch.Total != 3 {
+		t.Fatalf("book-2 aggregate = %+v; want b2 with total 3", book2Resp.Batch)
+	}
+
+	// The paged batch fetch honors the book scope too: book 1's page of
+	// b2 is empty, book 2's page carries its rows.
+	w = httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?batch_id=b2&limit=100&book_id=1", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("scoped batch page status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	scopedPage := decodeList(t, w.Body.Bytes())
+	if n := len(scopedPage.Jobs); n != 0 {
+		t.Errorf("book-1 scoped page of b2 = %d rows; want 0", n)
+	}
+	w = httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?batch_id=b2&limit=100&book_id=2", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("book-2 batch page status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	ownPage := decodeList(t, w.Body.Bytes())
+	if n := len(ownPage.Jobs); n != 3 {
+		t.Fatalf("book-2 page of b2 = %d rows; want 3", n)
+	}
+	if ownPage.Jobs[0]["id"] != "b2-1" || ownPage.Jobs[2]["id"] != "b2-3" {
+		t.Errorf("book-2 page = (%v..%v); want b2-1..b2-3 in queue order", ownPage.Jobs[0]["id"], ownPage.Jobs[2]["id"])
+	}
+}
+
+// Regression: the book page renders /jobs?book_id=ID&limit=20 AS the book's
+// full activity history (it has no on-demand batch fetch). Before the
+// bounded aggregate, ListJobs appended the whole latest batch to the list;
+// the aggregate replaced that for the queue page, so a book whose latest
+// merge job is followed by >= limit of its own audit rows loses the
+// terminal merge row from the recent window. The book-scoped list must
+// re-include the latest batch's rows (bounded: only that batch, via the
+// batch_id index), so the history stays whole.
+func TestListJobsBookScopeReincludesLatestBatchRows(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (1, 'Book', 'done')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	// The book's finished 2-job batch, created first (queue_seq 1..2).
+	for i := 1; i <= 2; i++ {
+		if _, err := h.svc.DB.Exec(
+			"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 1, 'done', 'merge', '2026-01-01 00:00:00', ?, 'b1')",
+			fmt.Sprintf("b1-%d", i), i,
+		); err != nil {
+			t.Fatalf("seed batch job %d: %v", i, err)
+		}
+	}
+	// 25 newer audit rows of the SAME book: with limit=20 (the book page's
+	// bound) the recent window holds only audit rows — the batch's rows
+	// sort out of it entirely.
+	for i := 1; i <= 25; i++ {
+		mins := 10 * (i - 1)
+		if _, err := h.svc.DB.Exec(
+			"INSERT INTO processing_jobs (id, book_id, status, action, detail, created_at) VALUES (?, 1, 'done', 'import', ?, ?)",
+			fmt.Sprintf("audit-%02d", i), fmt.Sprintf("/in/%02d.m4b", i), fmt.Sprintf("2026-01-02 %02d:%02d:00", 9+mins/60, mins%60),
+		); err != nil {
+			t.Fatalf("seed audit %d: %v", i, err)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?book_id=1&limit=20", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	byID, ids := jobIDsFromList(t, w)
+	// 20 recent audit rows + 2 re-included batch rows; nothing else.
+	if n := len(ids); n != 22 {
+		t.Fatalf("list len = %d; want 20 recent + 2 re-included batch rows", n)
+	}
+	for i := 1; i <= 2; i++ {
+		if status, ok := byID[fmt.Sprintf("b1-%d", i)]; !ok || status != "done" {
+			t.Errorf("terminal batch row b1-%d missing from book history (or wrong status %q)", i, status)
+		}
+	}
+	// The re-included rows come after the window, deduped (no row appears
+	// twice — the raw list, not the id map, exposes a duplicate).
+	seen := make(map[string]int, len(ids))
+	for _, id := range ids {
+		seen[id]++
+		if seen[id] > 1 {
+			t.Errorf("duplicate row %s in list", id)
+		}
+	}
+	for _, id := range ids {
+		if strings.HasPrefix(id, "b1-") {
+			if id != ids[len(ids)-2] && id != ids[len(ids)-1] {
+				t.Errorf("batch row %s not at the tail of the list: %v", id, ids)
+			}
+		}
+	}
+
+	// The unscoped list must NOT re-include: it pages batch rows on
+	// demand via ?batch_id=, so its body stays the plain recent window.
+	w = httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=20", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("unscoped list status = %d; want 200", w.Code)
+	}
+	byID, ids = jobIDsFromList(t, w)
+	if n := len(ids); n != 20 {
+		t.Fatalf("unscoped list len = %d; want the 20-row recent window", n)
+	}
+	for id := range byID {
+		if strings.HasPrefix(id, "b1-") {
+			t.Errorf("unscoped list carries re-included batch row %s", id)
 		}
 	}
 }
