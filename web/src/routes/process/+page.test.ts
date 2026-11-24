@@ -174,6 +174,22 @@ describe('queue page history hydration and render bound', () => {
 	let target: HTMLElement;
 	let component: Record<string, any>;
 
+	// Holds every paged batch fetch (offset >= offsetFrom) in flight until
+	// its gate resolves: the test drives the retry button while a batch
+	// load is still in progress. Returns the gate's release function.
+	function gateBatchFetch(offsetFrom: number) {
+		const gate = Promise.withResolvers<void>();
+		const original = getMock.getMockImplementation();
+		getMock.mockImplementation(async (path: string) => {
+			if (String(path).startsWith('/jobs?') && String(path).includes('batch_id=')) {
+				const offset = Number(new URLSearchParams(String(path).split('?')[1]).get('offset') ?? 0);
+				if (offset >= offsetFrom) await gate.promise;
+			}
+			return original ? original(path) : {};
+		});
+		return gate.resolve;
+	}
+
 	beforeEach(() => {
 		getMock.mockReset();
 		postMock.mockReset();
@@ -594,5 +610,253 @@ describe('queue page history hydration and render bound', () => {
 			expect(reviewActions()).toHaveLength(1);
 		}, { timeout: 4000 });
 		expect(String(reviewActions()[0].textContent)).toContain('Review 2 failures');
+	});
+
+	it('disables the batch retry while a retry load is in flight, and re-enables it when the retry fails', async () => {
+		// A 32-job batch whose offset-0 page fails: the retry control is
+		// up and its button enabled (the load finished). A retry then
+		// runs with every batch page gated in flight: while the load
+		// runs the button is disabled, a second click starts nothing,
+		// and when the retry fails the button is enabled again for the
+		// next attempt.
+		const jobs = batchJobList(32, 'req-1');
+		const batch = batchAggregate('req-1', 32, 32);
+		let batchPageFails = true;
+		const batchPageCalls = () =>
+			getMock.mock.calls.filter((call) => String(call[0]).includes('batch_id=req-1')).length;
+		getMock.mockImplementation(async (path: string) => {
+			if (path.startsWith('/books?')) return { books: [], total: 0, page: 0, limit: 100 };
+			if (path.startsWith('/output-profiles')) return { profiles: [] };
+			if (path.startsWith('/jobs?')) {
+				const params = new URLSearchParams(path.split('?')[1]);
+				if (params.get('batch_id') === 'req-1') {
+					if (batchPageFails) throw new Error('batch page unavailable');
+					const offset = Number(params.get('offset') ?? 0);
+					const limit = Number(params.get('limit') ?? 100);
+					return { jobs: jobs.slice(offset, offset + limit), batch: null };
+				}
+				const limit = Number(params.get('limit') ?? 100);
+				const sorted = [...jobs].sort((a, b) => b.created_at.localeCompare(a.created_at));
+				return { jobs: sorted.slice(0, limit), batch };
+			}
+			if (path.startsWith('/books/')) return bookFixture(Number(path.split('/').pop()));
+			return {};
+		});
+		component = mount(ProcessPage, { target });
+		flushSync();
+		await vi.waitFor(
+			() => {
+				expect(target.querySelector('.history-load-error')).not.toBeNull();
+			},
+			{ timeout: 4000 }
+		);
+		const retry = target.querySelector('.history-retry') as HTMLButtonElement;
+		expect(retry).not.toBeNull();
+		expect(retry.disabled).toBe(false); // the failed load has finished
+		expect(batchPageCalls()).toBe(1); // only the failed offset-0 page
+
+		// Retry with every batch page gated: the load is in flight, the
+		// control stays up (the flag persists until the loop finishes),
+		// and the button is disabled for its duration.
+		const releasePages = gateBatchFetch(0);
+		retry.click();
+		flushSync();
+		await vi.waitFor(
+			() => {
+				expect(batchPageCalls()).toBe(2); // the retry's offset-0 page
+			},
+			{ timeout: 4000 }
+		);
+		expect(retry.disabled).toBe(true);
+		// A second click while the load is in flight is a no-op: no new
+		// paged loop starts.
+		retry.click();
+		flushSync();
+		expect(batchPageCalls()).toBe(2);
+
+		// The retry fails: the load is over, the flag is set again, and
+		// the button is enabled for the next attempt.
+		releasePages();
+		flushSync();
+		await vi.waitFor(
+			() => {
+				expect(retry.disabled).toBe(false);
+			},
+			{ timeout: 4000 }
+		);
+		expect(target.querySelector('.history-load-error')).not.toBeNull();
+		expect(batchPageCalls()).toBe(2); // the retry's single offset-0 attempt
+	});
+
+	it('disables the batch retry while a retry load is in flight, and a second click does not double-append rows', async () => {
+		// A 32-job batch whose offset-16 page fails: the retry control is
+		// up. Clicking retry starts a paged fetch that is held in flight
+		// (gated) — while it runs the button is disabled, so a second
+		// click is a no-op that starts no second paged loop; and once
+		// the retry lands, every batch row is appended exactly once.
+		const jobs = batchJobList(32, 'req-1');
+		const batch = batchAggregate('req-1', 32, 32);
+		let batchPageFails = true;
+		const batchPageCalls = () =>
+			getMock.mock.calls.filter((call) => String(call[0]).includes('batch_id=req-1')).length;
+		getMock.mockImplementation(async (path: string) => {
+			if (path.startsWith('/books?')) return { books: [], total: 0, page: 0, limit: 100 };
+			if (path.startsWith('/output-profiles')) return { profiles: [] };
+			if (path.startsWith('/jobs?')) {
+				const params = new URLSearchParams(path.split('?')[1]);
+				if (params.get('batch_id') === 'req-1') {
+					if (batchPageFails) throw new Error('batch page unavailable');
+					const offset = Number(params.get('offset') ?? 0);
+					const limit = Number(params.get('limit') ?? 100);
+					return { jobs: jobs.slice(offset, offset + limit), batch: null };
+				}
+				const limit = Number(params.get('limit') ?? 100);
+				const sorted = [...jobs].sort((a, b) => b.created_at.localeCompare(a.created_at));
+				return { jobs: sorted.slice(0, limit), batch };
+			}
+			if (path.startsWith('/books/')) return bookFixture(Number(path.split('/').pop()));
+			return {};
+		});
+		component = mount(ProcessPage, { target });
+		flushSync();
+		await vi.waitFor(
+			() => {
+				expect(target.querySelector('.history-load-error')).not.toBeNull();
+			},
+			{ timeout: 4000 }
+		);
+		const retry = target.querySelector('.history-retry') as HTMLButtonElement;
+		expect(retry).not.toBeNull();
+		expect(retry.disabled).toBe(false); // the initial load finished (failed)
+
+		// Gate every batch page, then retry: the load is in flight.
+		batchPageFails = false;
+		const releasePages = gateBatchFetch(0);
+		retry.click();
+		flushSync();
+		await vi.waitFor(
+			() => {
+				// The retry's offset-0 page is the gated in-flight call.
+				expect(batchPageCalls()).toBe(2); // failed initial 0 + retry 0
+			},
+			{ timeout: 4000 }
+		);
+		// In flight: the control stays up (the error flag persists until
+		// the loop finishes) with its button disabled, so a second
+		// click starts no second paged loop.
+		expect(retry.disabled).toBe(true);
+		retry.click();
+		flushSync();
+		expect(batchPageCalls()).toBe(2);
+
+		// Release the gate: the retry lands both pages, the flag clears,
+		// and the history renders every batch row exactly once.
+		releasePages();
+		flushSync();
+		await vi.waitFor(
+			() => {
+				expect(target.querySelector('.history-load-error')).toBeNull();
+			},
+			{ timeout: 4000 }
+		);
+		await vi.waitFor(
+			() => {
+				expect(batchPageCalls()).toBe(3); // the retry's offset-16 page
+			},
+			{ timeout: 4000 }
+		);
+		const recordIds = () =>
+			Array.from(target.querySelectorAll<HTMLElement>('.job-record[data-job-id]')).map(
+				(el) => el.dataset.jobId
+			);
+		// Every batch row renders exactly once: the retry re-fetched from
+		// offset 0, and the known-ids filter plus the token bump kept
+		// the two attempts from appending the same rows twice.
+		await vi.waitFor(
+			() => {
+				const rendered = recordIds();
+				expect(rendered).toHaveLength(32);
+				expect(new Set(rendered).size).toBe(32); // no duplicate ids
+			},
+			{ timeout: 4000 }
+		);
+	});
+
+	it('renders the batch retry when the batch is all active and no past jobs exist', async () => {
+		// A 32-job batch that is entirely queued: /jobs?limit=100 holds
+		// only active rows, so pastJobs is empty and the Recent activity
+		// disclosure never renders. If the paged batch fetch fails, the
+		// missing rows must still be retriable: the error control renders
+		// in the activity region, independent of the disclosure.
+		const jobs = batchJobList(32, 'req-1').map((job) => ({ ...job, status: 'queued' as const }));
+		const batch = {
+			...batchAggregate('req-1', 32, 32),
+			done: 0,
+			in_flight: 0,
+			all_terminal: false,
+			started_at: '2026-01-01 00:00:00',
+			finished_at: null
+		};
+		getMock.mockImplementation(async (path: string) => {
+			if (path.startsWith('/books?')) return { books: [], total: 0, page: 0, limit: 100 };
+			if (path.startsWith('/output-profiles')) return { profiles: [] };
+			if (path.startsWith('/jobs?')) {
+				const params = new URLSearchParams(path.split('?')[1]);
+				if (params.get('batch_id') === 'req-1') throw new Error('batch page unavailable');
+				const limit = Number(params.get('limit') ?? 100);
+				const sorted = [...jobs].sort((a, b) => b.created_at.localeCompare(a.created_at));
+				return { jobs: sorted.slice(0, limit), batch };
+			}
+			if (path.startsWith('/books/')) return bookFixture(Number(path.split('/').pop()));
+			return {};
+		});
+		component = mount(ProcessPage, { target });
+		flushSync();
+		await vi.waitFor(
+			() => {
+				expect(getMock.mock.calls.some((call) => String(call[0]).includes('batch_id=req-1'))).toBe(true);
+			},
+			{ timeout: 4000 }
+		);
+		// The disclosure is absent (no past jobs), yet the failed batch
+		// load surfaces its retry in the activity region.
+		expect(target.querySelector('.job-history')).toBeNull();
+		await vi.waitFor(
+			() => {
+				expect(target.querySelector('.history-load-error')).not.toBeNull();
+			},
+			{ timeout: 4000 }
+		);
+		const alert = target.querySelector('.history-load-error');
+		expect(alert?.getAttribute('role')).toBe('alert');
+		const retry = target.querySelector('.history-retry') as HTMLButtonElement;
+		expect(retry).not.toBeNull();
+		// The retry re-runs the paged fetch (the mock now succeeds).
+		getMock.mockImplementation(async (path: string) => {
+			if (path.startsWith('/books?')) return { books: [], total: 0, page: 0, limit: 100 };
+			if (path.startsWith('/output-profiles')) return { profiles: [] };
+			if (path.startsWith('/jobs?')) {
+				const params = new URLSearchParams(path.split('?')[1]);
+				if (params.get('batch_id') === 'req-1') {
+					const offset = Number(params.get('offset') ?? 0);
+					const limit = Number(params.get('limit') ?? 100);
+					return { jobs: jobs.slice(offset, offset + limit), batch: null };
+				}
+				const limit = Number(params.get('limit') ?? 100);
+				const sorted = [...jobs].sort((a, b) => b.created_at.localeCompare(a.created_at));
+				return { jobs: sorted.slice(0, limit), batch };
+			}
+			if (path.startsWith('/books/')) return bookFixture(Number(path.split('/').pop()));
+			return {};
+		});
+		retry.click();
+		flushSync();
+		await vi.waitFor(
+			() => {
+				expect(target.querySelector('.history-load-error')).toBeNull();
+			},
+			{ timeout: 4000 }
+		);
+		expect(getMock.mock.calls.filter((call) => String(call[0]).includes('offset=16'))).toHaveLength(1);
 	});
 });

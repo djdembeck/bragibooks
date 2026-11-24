@@ -80,6 +80,10 @@
 	// missing from the list (the banner still counts them from the
 	// aggregate), so the batch area offers a retry for them.
 	let batchLoadError = $state(false);
+	// A paged batch fetch is in flight: the batch area's Retry button is
+	// disabled while one runs, so two clicks can never start two paged
+	// loops that both append the same fetched rows.
+	let batchLoading = $state(false);
 	let queueSequence = 0;
 	let cancelling = $state<Set<string>>(new Set());
 	const cleanupMap = $state(new Map<string, () => void>());
@@ -125,6 +129,7 @@
 			books = [...(matched.books || []), ...(pending.books || [])];
 			batchLoadToken++;
 			batchLoadError = false;
+			batchLoading = false;
 			showAllHistory = false;
 			restoreJobs(jobsResp.jobs);
 			batchAggregate = jobsResp.batch ?? null;
@@ -270,6 +275,7 @@
 	 *  rows stay out of the list until the retry or the next load. */
 	async function loadBatchRows(agg: BatchAggregate | null, token: number) {
 		if (!agg || agg.job_ids.length === 0) return;
+		batchLoading = true;
 		const knownIds = new Set(jobs.map((job) => job.id));
 		for (let offset = 0; offset < agg.total; offset += BATCH_PAGE_SIZE) {
 			const count = Math.min(BATCH_PAGE_SIZE, agg.total - offset);
@@ -283,6 +289,7 @@
 				// batch rows, so no stale error flag.
 				if (token !== batchLoadToken) return;
 				batchLoadError = true;
+				batchLoading = false;
 				return;
 			}
 			if (token !== batchLoadToken) return; // A reload outlived this fetch.
@@ -293,16 +300,22 @@
 			jobs = [...jobs, ...fresh.map(jobToItem)].sort((a, b) => b.queueOrder - a.queueOrder);
 			for (const job of fresh) knownIds.add(job.id);
 		}
-		// A stale loop outlived by a reload must not clear the flag a
-		// newer load's failure already set.
-		if (token === batchLoadToken) batchLoadError = false;
+		// A stale loop outlived by a reload must not clear the flags a
+		// newer load already set.
+		if (token === batchLoadToken) {
+			batchLoadError = false;
+			batchLoading = false;
+		}
 	}
 
 	/** Retry the paged batch fetch after a failure: the missing rows are
 	 *  re-fetched from offset 0 (the known-ids filter drops what the
-	 *  list already holds), and the load token keeps a stale attempt
-	 *  from appending to a reloaded list. */
+	 *  list already holds). Bumping the token invalidates any stale
+	 *  in-flight attempt, so a second click can never run two paged
+	 *  loops over the same token (the button's disabled state is the
+	 *  first guard; this is the second). */
 	function retryBatchLoad() {
+		batchLoadToken++;
 		void loadBatchRows(batchAggregate, batchLoadToken);
 	}
 
@@ -985,7 +998,10 @@
 					<section class="queue-idle"><Clock size={21} aria-hidden="true" /><h2 id="activity-title">Nothing processing</h2><p>Ready books stay in the list until you start a batch.</p></section>
 				{/if}
 				{#if pastJobs.length > 0}
-					<details class="job-history" bind:this={historyDetails}><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each renderedHistory as job (job.id)}{@render JobRecord(job, false)}{/each}{#if hiddenHistoryCount > 0}<button type="button" class="history-more" onclick={() => { showAllHistory = true; }}>Show {hiddenHistoryCount} older {hiddenHistoryCount === 1 ? 'run' : 'runs'}</button>{:else if showAllHistory && pastJobs.length > HISTORY_RENDER_LIMIT}<button type="button" class="history-more" onclick={() => { showAllHistory = false; }}>Show fewer</button>{/if}{#if batchLoadError && batchAggregate}<div class="history-load-error" role="alert">Some batch rows failed to load.<button type="button" class="history-retry" onclick={retryBatchLoad}>Retry</button></div>{/if}</details>
+					<details class="job-history" bind:this={historyDetails}><summary><span>Recent activity <span class="count">{pastJobs.length}</span></span>{#if failedJobs > 0}<span class="failure-count">{failedJobs} failed</span>{/if}</summary><p class="history-hint">Recent runs and record changes. Open one for details and any recorded output.</p>{#each renderedHistory as job (job.id)}{@render JobRecord(job, false)}{/each}{#if hiddenHistoryCount > 0}<button type="button" class="history-more" onclick={() => { showAllHistory = true; }}>Show {hiddenHistoryCount} older {hiddenHistoryCount === 1 ? 'run' : 'runs'}</button>{:else if showAllHistory && pastJobs.length > HISTORY_RENDER_LIMIT}<button type="button" class="history-more" onclick={() => { showAllHistory = false; }}>Show fewer</button>{/if}</details>
+				{/if}
+				{#if batchLoadError && batchAggregate}
+					<div class="history-load-error" role="alert">Some batch rows failed to load.<button type="button" class="history-retry" disabled={batchLoading} onclick={retryBatchLoad}>Retry</button></div>
 				{/if}
 			</aside>
 		</div>
@@ -1144,7 +1160,10 @@
 	.history-hint { margin: 0 0 1rem; }
 	.history-more { display: block; width: 100%; margin: 0.25rem 0 1rem; padding: 0.5rem 0; border: 1px solid var(--border); border-radius: 0.5rem; background: none; color: var(--text-muted); font-size: 0.8125rem; cursor: pointer; }
 	.history-more:hover { color: var(--text); border-color: var(--text-muted); }
-	.history-load-error { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin: 0.25rem 0 1rem; padding: 0.5rem 0.75rem; border: 1px solid var(--state-red-border); border-radius: 0.5rem; color: var(--state-red); font-size: 0.8125rem; }
+	/* Sits below the Recent activity disclosure (or, when the batch is
+	 * all active, directly below the active-jobs card): no top margin —
+	 * the disclosure's own spacing owns the gap above. */
+	.history-load-error { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin: 0 0 1rem; padding: 0.5rem 0.75rem; border: 1px solid var(--state-red-border); border-radius: 0.5rem; color: var(--state-red); font-size: 0.8125rem; }
 	.history-retry { border: 0; border-radius: var(--radius-sm); background: none; color: var(--workspace-action); font-size: 0.8125rem; font-weight: 600; cursor: pointer; min-height: 2.75rem; }
 	.history-retry:hover { text-decoration: underline; }
 	.job-record { min-width: 0; padding: 1.25rem 1.5rem; border-top: 1px solid var(--border-subtle); }
