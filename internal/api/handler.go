@@ -124,6 +124,7 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 		r.Get("/search", h.SearchAudiobookdb)
 		r.Get("/search/books/{id}", h.GetBookFromDB)
 		r.Get("/search/releases/{id}", h.GetReleaseFromDB)
+		r.Get("/search/by-asin/{asin}", h.GetBookByASIN)
 
 		// Engine protocol: verified capabilities (Settings picker and path
 		// examples) and the non-mutating job preview (Match preview).

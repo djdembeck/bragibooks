@@ -1,9 +1,12 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/bragibooks/bragibooks/internal/audiobookdb"
 )
 
 // SearchAudiobookdb handles GET /api/search.
@@ -81,4 +84,26 @@ func (h *Handler) GetReleaseFromDB(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, release)
+}
+
+// GetBookByASIN handles GET /api/search/by-asin/:asin.
+// Resolves a book directly from its Audible ASIN via the upstream
+// external/audible endpoint. Returns 404 when the ASIN is not in the
+// catalog; 502 on other upstream failures.
+func (h *Handler) GetBookByASIN(w http.ResponseWriter, r *http.Request) {
+	asin := chiURLParam(r, "asin")
+	if asin == "" {
+		writeError(w, http.StatusBadRequest, "asin parameter is required")
+		return
+	}
+	book, err := h.getAudiobookDB().GetBookByASIN(r.Context(), asin)
+	if err != nil {
+		if errors.Is(err, audiobookdb.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "no catalog record for this ASIN")
+			return
+		}
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("audiobookdb ASIN lookup: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, book)
 }

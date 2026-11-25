@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,6 +24,21 @@ type Client struct {
 	csrfMu  sync.Mutex
 	csrfTok string
 }
+
+// StatusError carries an upstream HTTP status code and response body.
+// do() returns one for every response with status >= 400.
+type StatusError struct {
+	Code int
+	Body string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("audiobookdb %d: %s", e.Code, e.Body)
+}
+
+// ErrNotFound is returned by GetBookByASIN when the upstream catalog has
+// no record for the given ASIN (HTTP 404).
+var ErrNotFound = errors.New("audiobookdb: not found")
 
 // NewClient creates an audiobookdb client. An empty apiKey is valid for
 // keyless/Guest requests; a non-empty one is sent as X-API-Key. If baseURL
@@ -107,7 +123,7 @@ func (c *Client) do(ctx context.Context, req *http.Request, v interface{}) error
 	}
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("audiobookdb %d: %s", resp.StatusCode, body)
+		return &StatusError{Code: resp.StatusCode, Body: string(body)}
 	}
 
 	if v == nil {
@@ -295,4 +311,26 @@ func (c *Client) GetRelease(ctx context.Context, id string, include string) (*Re
 		return nil, err
 	}
 	return &release, nil
+}
+
+// GetBookByASIN calls GET /audiobooks/external/audible/{asin} and returns
+// the book. The upstream endpoint returns a full book payload (releases,
+// people, genres, tags, images) by default; the ?include= param has no
+// effect. A 404 (ASIN not in the catalog) returns ErrNotFound; any other
+// status returns the *StatusError.
+func (c *Client) GetBookByASIN(ctx context.Context, asin string) (*Book, error) {
+	url := fmt.Sprintf("%s/audiobooks/external/audible/%s", c.baseURL, asin)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build ASIN request: %v", err)
+	}
+	var book Book
+	if err := c.do(ctx, req, &book); err != nil {
+		var se *StatusError
+		if errors.As(err, &se) && se.Code == http.StatusNotFound {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &book, nil
 }

@@ -306,6 +306,31 @@
 	async function autoMatch(candidate: MatchCandidate) {
 		const seq = ++candidate.seq;
 		try {
+			// ASIN fast path: resolve directly when the source carries a
+			// present, unambiguous ASIN. An empty/missing value (status
+			// 'present' is never paired with one, but 'ambiguous'/'missing'/
+			// 'unknown' carry no value) falls through to title search.
+			const asin = candidate.sourceAsin?.status === 'present'
+				? candidate.sourceAsin.value
+				: undefined;
+			if (asin) {
+				const book = await searchByASIN(asin);
+				if (seq !== candidate.seq) return;
+				if (book) {
+					candidate.searchResults = [book];
+					candidate.selectedBookId = book.id;
+					candidate.details = { book: null, release: null };
+					const releaseId = book.releases?.[0]?.id;
+					const release = releaseId ? await getReleaseDetail(releaseId) : null;
+					if (seq !== candidate.seq) return;
+					candidate.details = { book, release };
+					candidate.selectedReleaseId = release?.id ?? null;
+					candidate.manualPick = false;
+					void loadEvidence(candidate);
+					return;
+				}
+			}
+			// Title search fallback (existing path, unchanged below).
 			const hits = await searchBooks(stripExtension(candidate.title));
 			if (seq !== candidate.seq) return;
 			candidate.searchResults = hits;
@@ -372,6 +397,16 @@
 		let n = 0;
 		for (const t of a) if (b.has(t)) n++;
 		return n;
+	}
+
+	async function searchByASIN(asin: string): Promise<AudiobookDBBook | null> {
+		try {
+			return await get<AudiobookDBBook>(`/search/by-asin/${encodeURIComponent(asin)}`);
+		} catch {
+			// 404 = ASIN not in catalog; any other error = network/upstream
+			// failure. Both fall back to title search.
+			return null;
+		}
 	}
 
 	async function searchBooks(query: string): Promise<AudiobookDBBook[]> {

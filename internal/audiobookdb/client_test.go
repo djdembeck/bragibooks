@@ -3,6 +3,8 @@ package audiobookdb
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -170,4 +172,54 @@ func TestSearchTakeCap(t *testing.T) {
 	if len(r.Results) != searchTakeCap {
 		t.Errorf("capped results = %d, want %d", len(r.Results), searchTakeCap)
 	}
+}
+
+func TestGetBookByASIN(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/audiobooks/external/audible/B00B5HZGUG":
+			fmt.Fprint(w, `{"id":"WQQDcMBQ3qUT","title":"The Martian"}`)
+		case "/audiobooks/external/audible/NOPE000000":
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"errors":[{"status":"404","title":"Not Found","detail":"audiobook with id audible/NOPE000000 not found"}]}`)
+		case "/audiobooks/external/audible/BROKEN0000":
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprint(w, `{"errors":[{"status":"502","title":"Bad Gateway","detail":"404 not in this body"}]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("BRAGIBOOKS_ALLOW_LOCAL_ADB", "1")
+	c := NewClient("k", srv.URL)
+
+	t.Run("found", func(t *testing.T) {
+		book, err := c.GetBookByASIN(context.Background(), "B00B5HZGUG")
+		if err != nil {
+			t.Fatalf("GetBookByASIN: %v", err)
+		}
+		if book.ID != "WQQDcMBQ3qUT" || book.Title != "The Martian" {
+			t.Errorf("book = %+v", book)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		_, err := c.GetBookByASIN(context.Background(), "NOPE000000")
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("err = %v; want ErrNotFound", err)
+		}
+	})
+
+	t.Run("other status is not ErrNotFound", func(t *testing.T) {
+		// 502 body deliberately contains "404" text: only the status
+		// code decides, never the body.
+		_, err := c.GetBookByASIN(context.Background(), "BROKEN0000")
+		if errors.Is(err, ErrNotFound) {
+			t.Errorf("err = %v; must not be ErrNotFound", err)
+		}
+		if err == nil {
+			t.Error("502 must return an error")
+		}
+	})
 }

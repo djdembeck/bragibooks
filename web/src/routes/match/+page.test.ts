@@ -77,7 +77,12 @@ const RELEASE = {
 // The stock fixture: release subtitle present. The precedence inputs are
 // all set to DISTINCT values so any precedence regression changes the
 // payload's subtitle.
-function wireApi(bookOverrides: Record<string, unknown> = {}, releaseOverrides: Record<string, unknown> = {}) {
+function wireApi(
+	bookOverrides: Record<string, unknown> = {},
+	releaseOverrides: Record<string, unknown> = {},
+	pendingOverrides: Record<string, unknown> = {},
+	byAsin: (asin: string) => Promise<unknown> | unknown = async () => ({ ...BOOK, ...bookOverrides, id: 'asin-book' })
+) {
 	const book = { ...BOOK, ...bookOverrides };
 	const release = { ...RELEASE, ...releaseOverrides };
 	getMock.mockImplementation(async (path: string) => {
@@ -106,13 +111,17 @@ function wireApi(bookOverrides: Record<string, unknown> = {}, releaseOverrides: 
 						status_message: '',
 						cover_image_url: '',
 						created_at: '',
-						updated_at: ''
+						updated_at: '',
+						...pendingOverrides
 					}
 				],
 				total: 1,
 				page: 0,
 				limit: 100
 			};
+		}
+		if (path.startsWith('/search/by-asin/')) {
+			return byAsin(path.slice('/search/by-asin/'.length));
 		}
 		if (path.startsWith('/search?')) {
 			return { results: [{ type: 'books', data: book }] };
@@ -181,5 +190,93 @@ describe('match engine-preview payload', () => {
 	it('falls back to the DISAMBIGUATION when neither release nor book has one (precedence 3)', async () => {
 		wireApi({ subtitle: null }, { subtitle: '' });
 		await expectPreviewSubtitle('Disambig');
+	});
+});
+
+describe('match ASIN fast path', () => {
+	let target: HTMLElement;
+	let component: Record<string, any>;
+
+	beforeEach(() => {
+		getMock.mockReset();
+		postMock.mockReset();
+		target = document.createElement('div');
+		document.body.appendChild(target);
+	});
+
+	afterEach(() => {
+		unmount(component);
+		target.remove();
+	});
+
+	async function mountAndSettle() {
+		component = mount(MatchPage, { target });
+		flushSync();
+		// loadPending's async body schedules the autoMatch chain as
+		// microtasks; a macrotask boundary (setTimeout) lets them all
+		// complete before the first vi.waitFor poll, so the assertions
+		// see a settled call list rather than a mid-flight snapshot.
+		await new Promise<void>((r) => setTimeout(r, 0));
+		await vi.waitFor(
+			() => {
+				// autoMatch completes when it has either fetched the
+				// release (fast path success) or run the title search.
+				const paths = getMock.mock.calls.map((c) => c[0] as string);
+				return (
+					paths.some((p) => p.startsWith('/search/releases/')) ||
+					paths.some((p) => p.startsWith('/search?'))
+				);
+			},
+			{ timeout: 4000 }
+		);
+	}
+
+	function callsWith(prefix: string): string[] {
+		return getMock.mock.calls
+			.map((c) => c[0] as string)
+			.filter((p) => p.startsWith(prefix));
+	}
+
+	it('resolves a present source ASIN via the by-asin endpoint (no title search)', async () => {
+		wireApi({}, {}, { source_asin: { status: 'present', value: 'B00B5HZGUG' } });
+		await mountAndSettle();
+		expect(callsWith('/search/by-asin/')).toEqual(['/search/by-asin/B00B5HZGUG']);
+		expect(callsWith('/search?')).toEqual([]);
+	});
+
+	it('falls back to title search when the ASIN lookup 404s', async () => {
+		wireApi(
+			{},
+			{},
+			{ source_asin: { status: 'present', value: 'B00B5HZGUG' } },
+			() => {
+				throw new Error('API 404: no catalog record for this ASIN');
+			}
+		);
+		await mountAndSettle();
+		expect(callsWith('/search/by-asin/')).toHaveLength(1);
+		expect(callsWith('/search?')).toHaveLength(1);
+	});
+
+	it('falls back to title search when the ASIN lookup 502s', async () => {
+		wireApi(
+			{},
+			{},
+			{ source_asin: { status: 'present', value: 'B00B5HZGUG' } },
+			() => {
+				throw new Error('API 502: audiobookdb ASIN lookup: boom');
+			}
+		);
+		await mountAndSettle();
+		expect(callsWith('/search/by-asin/')).toHaveLength(1);
+		expect(callsWith('/search?')).toHaveLength(1);
+	});
+
+	it('skips the ASIN fast path when source_asin is not present', async () => {
+		// 'ambiguous' carries no value; 'missing'/'unknown' likewise.
+		wireApi({}, {}, { source_asin: { status: 'ambiguous', count: 2 } });
+		await mountAndSettle();
+		expect(callsWith('/search/by-asin/')).toEqual([]);
+		expect(callsWith('/search?')).toHaveLength(1);
 	});
 });
