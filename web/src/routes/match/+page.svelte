@@ -441,7 +441,7 @@
 		const cached = bookRequests.get(bookId);
 		if (cached) return cached;
 		const request = get<AudiobookDBBook>(
-			`/search/books/${bookId}?include=releases,people,series,images,external`
+			`/search/books/${bookId}?include=releases,people,series,images,external,genres`
 		);
 		bookRequests.set(bookId, request);
 		void request.catch(() => {

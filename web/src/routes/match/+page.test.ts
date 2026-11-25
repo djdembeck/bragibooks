@@ -367,7 +367,7 @@ describe('match ASIN fast path', () => {
 		await mountAndSettle();
 		// The detail fetch (with `external` include) must have run for the
 		// resolved book, so the save payload is repaired, not the raw hit.
-		expect(callsWith('/search/books/')).toEqual(['/search/books/b1?include=releases,people,series,images,external']);
+		expect(callsWith('/search/books/')).toEqual(['/search/books/b1?include=releases,people,series,images,external,genres']);
 		const save = mountTarget?.querySelector<HTMLButtonElement>('button.match__save');
 		expect(save).not.toBeNull();
 		save!.click();
@@ -399,7 +399,7 @@ describe('match ASIN fast path', () => {
 		});
 		await mountAndSettle();
 		// The detail fetch ran (and failed) for the resolved book.
-		expect(callsWith('/search/books/')).toEqual(['/search/books/b1?include=releases,people,series,images,external']);
+		expect(callsWith('/search/books/')).toEqual(['/search/books/b1?include=releases,people,series,images,external,genres']);
 		// No title-search fallback: the by-asin hit is kept, not re-derived.
 		expect(callsWith('/search?')).toEqual([]);
 		// The rejected detail fetch must not crash the match: the candidate
@@ -413,5 +413,40 @@ describe('match ASIN fast path', () => {
 		);
 		const badge = mountTarget?.querySelector('button.match__origin');
 		expect(badge?.textContent).toContain('Selected by source ASIN');
+	});
+
+	it('carries the book genre in the preview payload from the canonical detail', async () => {
+		// The by-asin payload carries no genres; the canonical detail fetch
+		// (include set, now including `genres`) is the only source. The
+		// preview's captureMetadata reads book.genres[0].title, so a missing
+		// include would drop the value and a {genre} scheme would resolve a
+		// different path in the preview than in the queued job.
+		wireApi(
+			{ genres: [{ id: 'g1', name: 'Mystery', title: 'Mystery' }] },
+			{},
+			{ source_asin: { status: 'present', value: 'B00B5HZGUG' } },
+			undefined,
+			{ genres: [] }
+		);
+		await mountAndSettle();
+		// The preview effect dispatches on a 250ms timer after the book
+		// settles; vi.waitUntil (boolean return) retries until the post
+		// lands. A stale dispatch from a preceding test's mount can post a
+		// genre-less payload first, so select THIS mount's payload: the
+		// first post whose metadata carries genres (only this test's
+		// canonical detail carries them).
+		let genres: unknown;
+		await vi.waitUntil(
+			() => {
+				const body = postMock.mock.calls
+					.map((c) => c[1] as { metadata?: Record<string, unknown> })
+					.find((b) => b.metadata && b.metadata.genres !== undefined);
+				if (!body) return false;
+				genres = body.metadata!.genres;
+				return true;
+			},
+			{ timeout: 4000, interval: 5 }
+		);
+		expect(genres).toEqual(['Mystery']);
 	});
 });
