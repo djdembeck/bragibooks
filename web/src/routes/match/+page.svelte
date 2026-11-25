@@ -1227,6 +1227,16 @@
 		}
 	});
 
+	// Trims exactly the rune set Go's unicode.IsSpace covers (what
+	// strings.TrimSpace in genreTitles, internal/api/snapshot.go, trims).
+	// JS String.prototype.trim's whitespace set differs — e.g. U+0085 —
+	// and a title JS would leave would diverge the preview from the
+	// saved snapshot.
+	function goTrim(s: string): string {
+		const ws = '[\t\n\u000B\f\r \u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]';
+		return s.replace(new RegExp('^' + ws + '+'), '').replace(new RegExp(ws + '+$'), '');
+	}
+
 	/** The snapshot shape a save captures for this selection — ordered
 	 *  people arrays, canonical ADB book id (#480), release year. */
 	function captureMetadata(book: AudiobookDBBook, release: AudiobookDBRelease | null): Record<string, unknown> {
@@ -1266,8 +1276,15 @@
 		const [firstSeriesName, firstSeriesPosition] = splitSeries(seriesName);
 		if (firstSeriesName) meta.series_name = firstSeriesName;
 		if (firstSeriesPosition) meta.series_position = firstSeriesPosition;
-		const genre = (book.genres ?? [])[0]?.title;
-		if (genre) meta.genres = [genre];
+		// Same genre normalization the saved snapshot uses (genreTitles in
+		// internal/api/snapshot.go): the FULL ordered list, each title
+		// trimmed by goTrim (Go's unicode.IsSpace set), blanks dropped.
+		// A first-genre-only preview diverged from the queued job whenever
+		// the first title was blank.
+		const genres = (book.genres ?? [])
+			.map((g) => goTrim(g.title))
+			.filter((t) => t !== '');
+		if (genres.length) meta.genres = genres;
 		return meta;
 	}
 

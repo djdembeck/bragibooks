@@ -449,4 +449,36 @@ describe('match ASIN fast path', () => {
 		);
 		expect(genres).toEqual(['Mystery']);
 	});
+
+	it('trims genre titles with Go unicode.IsSpace whitespace (U+0085) and drops blanks', async () => {
+		// Go's strings.TrimSpace (genreTitles) trims U+0085; JS String.trim
+		// does not. The preview must match the snapshot: a U+0085-only title
+		// is dropped, a padded title is trimmed.
+		wireApi(
+			{
+				genres: [
+					{ id: 'g1', name: '', title: '\u0085' },
+					{ id: 'g2', name: 'Mystery', title: '\u0085 Mystery \u00A0' }
+				]
+			},
+			{},
+			{ source_asin: { status: 'present', value: 'B00B5HZGUG' } },
+			undefined,
+			{ genres: [] }
+		);
+		await mountAndSettle();
+		let genres: unknown;
+		await vi.waitUntil(
+			() => {
+				const body = postMock.mock.calls
+					.map((c) => c[1] as { metadata?: Record<string, unknown> })
+					.find((b) => b.metadata && b.metadata.genres !== undefined);
+				if (!body) return false;
+				genres = body.metadata!.genres;
+				return true;
+			},
+			{ timeout: 4000, interval: 5 }
+		);
+		expect(genres).toEqual(['Mystery']);
+	});
 });
