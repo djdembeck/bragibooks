@@ -1395,8 +1395,8 @@ func TestListIndexedChildrenFallsBackAfterPartialWrite(t *testing.T) {
 	if st.Root != root {
 		t.Fatalf("failed scan root = %q, want the retained root %q", st.Root, root)
 	}
-	if got := svc.WriteFailedRoot(); got != root {
-		t.Fatalf("WriteFailedRoot = %q, want %q after the failed scan", got, root)
+	if got := svc.writeFailedRootContains(root); !got {
+		t.Fatalf("writeFailedRoots missing %q after the failed scan", root)
 	}
 	// The listing must fall back to the filesystem for the half-written
 	// root: no index entries served.
@@ -1413,8 +1413,8 @@ func TestListIndexedChildrenFallsBackAfterPartialWrite(t *testing.T) {
 	if st.Status != "done" {
 		t.Fatalf("healing scan status = %s, want done", st.Status)
 	}
-	if got := svc.WriteFailedRoot(); got != "" {
-		t.Fatalf("WriteFailedRoot = %q, want cleared after a clean scan on the root", got)
+	if got := svc.writeFailedRootContains(root); got {
+		t.Fatalf("writeFailedRoots still marks %q after a clean scan on the root", root)
 	}
 	if entries, ok, err := h.listIndexedChildren(root); err != nil || !ok || len(entries) != 1 {
 		t.Fatalf("healed listing = ok=%v n=%d err=%v, want the index served again", ok, len(entries), err)
@@ -1756,11 +1756,22 @@ func TestListDirectoriesIndexMode(t *testing.T) {
 
 // countingFFprobeStub writes an ffprobe stub that appends each input path
 // to logPath and answers with a valid, complete probe document, so callers
-// can count how many times the scanner probed.
+// can count how many times the scanner probed. On unix the scanner hands
+// the probe the opened descriptor's /proc/self/fd/<n> path (the
+// symlink-confinement fix), so the stub resolves that back to the real
+// path before logging it.
 func countingFFprobeStub(t *testing.T, logPath string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ffprobe")
-	script := "#!/bin/sh\nfor last; do :; done\necho \"$last\" >> " + logPath + "\n" +
+	script := "#!/bin/bash\nfor last; do :; done\n" +
+		"case \"$last\" in /proc/[0-9]*/fd/*)\n" +
+		"  pid=${last#/proc/}; pid=${pid%%/*}\n" +
+		"  after=${last#*/fd/}; n=${after%%/*}\n" +
+		"  rest=${after#*/}; [ \"$rest\" = \"$after\" ] && rest=\"\"\n" +
+		"  dir=$(readlink \"/proc/$pid/fd/$n\")\n" +
+		"  [ -n \"$rest\" ] && last=\"$dir/$rest\" || last=\"$dir\"\n" +
+		"  ;;\nesac\n" +
+		"echo \"$last\" >> " + logPath + "\n" +
 		`echo '{"format":{"duration":"10","tags":{"title":"T"}}, "streams":[]}'
 `
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {

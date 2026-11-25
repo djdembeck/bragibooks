@@ -37,9 +37,12 @@ var bootInvalidProfiles atomic.Pointer[[]InvalidOutputProfile]
 // SetBootInvalidProfiles records the stored profiles the validation
 // rejected. Called once at boot, before the server starts serving, and
 // after every profile mutation (refreshInvalidProfiles); a nil slice is
-// the normal (no issues) case.
+// the normal (no issues) case. The stored value is always a non-nil
+// slice: a nil slice would marshal as JSON null, and the settings
+// response promises [] (the field comment in settings.go).
 func SetBootInvalidProfiles(profiles []InvalidOutputProfile) {
-	bootInvalidProfiles.Store(&profiles)
+	normalized := append([]InvalidOutputProfile{}, profiles...)
+	bootInvalidProfiles.Store(&normalized)
 }
 
 // refreshInvalidProfiles re-derives the invalid-profile list from the

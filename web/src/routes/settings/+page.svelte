@@ -977,6 +977,25 @@
 								{/each}
 							</ul>
 						{/if}
+						{#if (settings.invalid_output_profiles?.length ?? 0) > 0}
+							<p class="settings-help mt-4">
+								These saved profiles use a path format the current m4b-merge engine rejects. Edit each
+								profile to a format the engine accepts, or delete it.
+							</p>
+							<ul class="profile-list profile-list--invalid" aria-label="Profiles the current engine rejects">
+								{#each settings.invalid_output_profiles as invalid (invalid.id)}
+									<li class="profile-row">
+										<div class="profile-row__info">
+											<span class="profile-row__name">{invalid.name}</span>
+											<span class="profile-row__values">
+												<code>{invalid.format}</code>
+												<span class="profile-row__error">{invalid.error}</span>
+											</span>
+										</div>
+									</li>
+								{/each}
+							</ul>
+						{/if}
 					</div>
 				</div>
 			</section>
@@ -1605,6 +1624,10 @@
 
 	.profile-row__values code {
 		overflow-wrap: anywhere;
+	}
+
+	.profile-row__error {
+		color: var(--text-muted);
 	}
 
 	.profile-row__actions {

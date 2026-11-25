@@ -628,3 +628,97 @@ func TestCaptureAndEnqueueSerializePerBook(t *testing.T) {
 		t.Fatalf("enqueue after capture = %v; want success", enqErr)
 	}
 }
+
+// TestUpdateBookHoldsLockAcrossWriteAndCapture pins the UpdateBook lock
+// contract the capture-and-enqueue test covers for captureSnapshot alone:
+// the per-book lock must span the book+people writes AND the re-capture,
+// so a concurrent QueueJob (snapshot read→insert) for the same book cannot
+// observe the pre-update row. The test drives the REAL UpdateBook handler
+// (not captureSnapshot directly): a regression that narrows the lock to
+// just the write, or releases it before the capture, lets the enqueue read
+// the snapshot in the gap, so the "blocked while held" assertion fails.
+func TestUpdateBookHoldsLockAcrossWriteAndCapture(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (1, 'Pre-Update Book', 'matched')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	seedSnapshot(t, h.svc.DB, 1)
+	h.svc.CoversDir = t.TempDir()
+
+	// The hook takes the real per-book lock, then holds it past the
+	// update's write+capture: lockAcquired fires once the update owns the
+	// lock, and release lets its unlock proceed. While the update holds
+	// the lock, an enqueue for the same book must block (so it cannot
+	// read the pre-update snapshot).
+	lockAcquired := make(chan struct{})
+	release := make(chan struct{})
+	var n atomic.Int32
+	svc.bookCoverLockFn = func(bookID int64) func() {
+		unlock := svc.lockBookCoverDirect(bookID)
+		first := n.Add(1) == 1
+		if first {
+			close(lockAcquired)
+		}
+		return func() {
+			if first {
+				<-release
+			}
+			unlock()
+		}
+	}
+	t.Cleanup(func() { svc.bookCoverLockFn = nil })
+
+	// Start the update; it takes the lock, runs the book write + capture,
+	// then blocks on release before unlocking.
+	updDone := make(chan struct{})
+	var updCode int
+	go func() {
+		defer close(updDone)
+		updCode = doUpdateBook(t, h, 1, UpdateBookRequest{Title: ptrStr("Post-Update Book")}).Code
+	}()
+	select {
+	case <-lockAcquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("UpdateBook did not take the per-book lock within 2s")
+	}
+
+	enqDone := make(chan struct{})
+	var enqErr error
+	go func() {
+		defer close(enqDone)
+		_, enqErr = svc.QueueJob(context.Background(), 1, []string{"/x/a.m4b"}, queueDestination{}, "")
+	}()
+
+	// The enqueue must NOT complete while the update holds the lock.
+	select {
+	case <-enqDone:
+		t.Fatal("enqueue completed while UpdateBook held the per-book lock; the lock does not span the write and the capture")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Release the update's lock; both must then complete.
+	close(release)
+	<-updDone
+	if updCode != http.StatusOK {
+		t.Fatalf("UpdateBook = %d; want 200", updCode)
+	}
+	select {
+	case <-enqDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("enqueue did not complete after UpdateBook released the lock")
+	}
+	if enqErr != nil {
+		t.Fatalf("enqueue after update = %v; want success", enqErr)
+	}
+	// The re-capture ran under the lock: the snapshot row the enqueue
+	// reads is the POST-update one, never the pre-update row.
+	s, err := h.loadSnapshot(1)
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	if s == nil || s.Title != "Post-Update Book" {
+		t.Fatalf("snapshot title = %q; want the post-update value (the capture must run under the lock)", s.Title)
+	}
+}

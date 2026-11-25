@@ -1126,9 +1126,16 @@ func assertPublicCoverURL(ctx context.Context, u *url.URL) (coverHop, error) {
 // destination: the standard private/loopback/link-local/multicast sets,
 // unspecified (0.0.0.0, :: — locally routable on applicable systems), the
 // 100.64.0.0/10 shared address space, and the remaining IANA
-// special-purpose ranges (RFC 6890/1122/4291: documentation, benchmarking,
-// Teredo, NAT64/DNS64 well-known, IPv4-mapped, 6to4), none of which a
-// cover fetch may reach.
+// special-purpose ranges (RFC 6890/1122/4291/8215: documentation,
+// benchmarking, Teredo, NAT64/DNS64 well-known, local-use NAT64 — both the
+// 100::/64 and the 64:ff9b:1::/48 prefix — IPv4-mapped, 6to4), none of
+// which a cover fetch may reach. The 6to4 and NAT64/DNS64 well-known
+// ranges carry an embedded IPv4, so the verdict runs on that 32-bit
+// address: on an IPv6-only host, DNS64 synthesizes exactly those prefixes
+// for public names, and a fetch that is public at the IPv4 level must
+// stay fetchable. The local-use NAT64 prefixes are local translation
+// prefixes, not assigned destinations, so they are rejected outright
+// regardless of any embedded bytes.
 func isNonPublicCoverAddress(ip net.IP) bool {
 	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
@@ -1163,14 +1170,37 @@ func isNonPublicCoverAddress(ip net.IP) bool {
 		if ip6[0] == 0x20 && ip6[1] == 0x01 && ip6[2] == 0x0d && ip6[3] == 0xb8 {
 			return true
 		}
-		// 2002::/16 6to4 (RFC 3056): the embedded IPv4 may be private, so
-		// the address is not public-Internet-reachable in the general
-		// sense and is rejected like the other special-purpose ranges.
-		if ip6[0] == 0x20 && ip6[1] == 0x02 {
+		// 2001::/32 Teredo (RFC 4380): tunnel traffic to an arbitrary
+		// endpoint, never a plain public destination.
+		if ip6[0] == 0x20 && ip6[1] == 0x01 && ip6[2] == 0x00 {
 			return true
 		}
-		if ip6[0] == 0x64 && ip6[1] == 0xff && ip6[2] == 0x9b {
+		// 100::/64 local-use NAT64 (RFC 8215): a local translation prefix,
+		// not an assigned destination. (First hextet 0x0100 → bytes 01 00.)
+		if ip6[0] == 0x01 && ip6[1] == 0x00 && ip6[2] == 0x00 && ip6[3] == 0x00 &&
+			ip6[4] == 0x00 && ip6[5] == 0x00 && ip6[6] == 0x00 && ip6[7] == 0x00 {
 			return true
+		}
+		// 2002::/16 6to4 (RFC 3056): the embedded IPv4 (bytes 2-5) is the
+		// destination the request really targets, so the verdict runs on
+		// it — a 6to4 mapping of a private IPv4 is refused like any other
+		// private address, a public one stays fetchable.
+		if ip6[0] == 0x20 && ip6[1] == 0x02 {
+			return isNonPublicCoverAddress(net.IP{ip6[2], ip6[3], ip6[4], ip6[5]})
+		}
+		// 64:ff9b::/96 NAT64/DNS64 well-known (RFC 6052): same unwrap —
+		// DNS64 on an IPv6-only host synthesizes exactly this prefix for
+		// public names, so the verdict belongs to the embedded IPv4
+		// (bytes 12-15).
+		if ip6[0] == 0x64 && ip6[1] == 0xff && ip6[2] == 0x9b {
+			// 64:ff9b:1::/48 local-use NAT64 (RFC 8215) is a LOCAL
+			// translation prefix, not an assigned destination: reject it
+			// outright, before the well-known /96 unwrap would classify
+			// it by its bytes 12-15 (e.g. 64:ff9b:1::808:808 → 8.8.8.8).
+			if ip6[3] == 0x00 && ip6[4] == 0x00 && ip6[5] == 0x01 {
+				return true
+			}
+			return isNonPublicCoverAddress(net.IP{ip6[12], ip6[13], ip6[14], ip6[15]})
 		}
 		if ip6[0] == 0 && ip6[1] == 0 && ip6[2] == 0 && ip6[3] == 0 &&
 			ip6[4] == 0 && ip6[5] == 0 && ip6[6] == 0 && ip6[7] == 0 &&
@@ -1203,7 +1233,9 @@ func redactCoverURL(raw string) string {
 func downloadCoverFile(ctx context.Context, coverURL string, dest string) error {
 	parsed, err := url.Parse(coverURL)
 	if err != nil {
-		return fmt.Errorf("parse cover URL: %w", err)
+		// The parse error quotes the input URL; a fixed message keeps
+		// the path/query (credentials live there) out of the log.
+		return errors.New("parse cover URL: invalid URL")
 	}
 	if _, err := assertPublicCoverURL(ctx, parsed); err != nil {
 		return fmt.Errorf("fetch cover %s: %w", redactCoverURL(coverURL), err)
@@ -1236,15 +1268,23 @@ func downloadCoverFile(ctx context.Context, coverURL string, dest string) error 
 	return errors.New("cover: too many redirects")
 }
 
+// coverDialContext opens the pinned connection for one hop. Var-bound so a
+// test can substitute a deterministic dial (the redaction regression test
+// must not depend on a live address answering, or failing to).
+var coverDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+	var d net.Dialer
+	d.Timeout = 5 * time.Second
+	return d.DialContext(ctx, network, addr)
+}
+
 // doPinnedCoverGet fetches one hop, connecting only to the validated IP
 // while keeping the hostname for routing, Host, and TLS.
 func doPinnedCoverGet(ctx context.Context, hop coverHop) (*http.Response, error) {
 	scheme := hop.url.Scheme
-	dialer := net.Dialer{Timeout: 5 * time.Second}
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return dialer.DialContext(ctx, network, net.JoinHostPort(hop.ip, hop.port))
+			return coverDialContext(ctx, network, net.JoinHostPort(hop.ip, hop.port))
 		},
 		TLSClientConfig:       &tls.Config{ServerName: hop.url.Hostname()},
 		ForceAttemptHTTP2:     scheme == "https",
@@ -1269,34 +1309,68 @@ func doPinnedCoverGet(ctx context.Context, hop coverHop) (*http.Response, error)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return nil, err
+		// The build error embeds the full target URL; a fixed message
+		// keeps the path/query out of the log (the caller re-wraps with
+		// the redacted form).
+		return nil, errors.New("build cover request: unexpected URL error")
 	}
 	req.Host = hop.url.Host
 	resp, err := client.Do(req)
 	if err != nil {
 		// The transport error embeds the full request URL (path + query)
 		// in its string; the caller re-wraps and logs it, so the URL must
-		// not survive to the log line. Replace it with the redacted
-		// hostname-only form (same destination, no credentials in path).
-		return nil, fmt.Errorf("%s: %s", redactCoverURL(target), sanitizeTransportError(err, target))
+		// not survive to the log line. Every URL in the message is
+		// redacted to its host-only form (a redirect-hop failure names
+		// the NEXT hop, not this hop's target).
+		return nil, fmt.Errorf("%s: %s", redactCoverURL(target), sanitizeTransportError(err))
 	}
 	return resp, nil
 }
 
 // sanitizeTransportError renders a transport error for a log line: a
 // *url.Error carries the full request URL in its message, which would
-// re-expose the operator's path+query past the caller's redaction. Strip
-// the URL from the nested message; every other error passes through.
-func sanitizeTransportError(err error, target string) string {
+// re-expose the operator's path+query past the caller's redaction. The
+// NESTED message can name any hop's URL (a redirect failure names the
+// destination, not the pinned target), so every http(s) URL in it is
+// redacted to its host-only form; a message without URLs passes through.
+func sanitizeTransportError(err error) string {
 	var urlErr *url.Error
 	if !errors.As(err, &urlErr) {
 		return err.Error()
 	}
-	msg := urlErr.Err.Error()
-	if i := strings.Index(msg, target); i >= 0 {
-		msg = msg[:i] + redactCoverURL(target) + msg[i+len(target):]
+	return redactURLsInMessage(urlErr.Err.Error())
+}
+
+// redactURLsInMessage replaces every http(s) URL in msg with its
+// host-only form (redactCoverURL): the operator's path and query can
+// carry credentials, and the host is what an operator needs to identify
+// the failing destination.
+func redactURLsInMessage(msg string) string {
+	out := msg
+	off := 0
+	for {
+		rest := out[off:]
+		start := strings.Index(rest, "https://")
+		httpStart := strings.Index(rest, "http://")
+		if httpStart >= 0 && (start < 0 || httpStart < start) {
+			start = httpStart
+		}
+		if start < 0 {
+			break
+		}
+		end := strings.IndexAny(rest[start:], " \t\n\r\"'")
+		if end < 0 {
+			end = len(rest) - start
+		}
+		raw := rest[start : start+end]
+		// Advance off past the replaced region: redactCoverURL's output
+		// is itself a URL (the host-only form), and re-searching from the
+		// start would find that output and loop forever.
+		replaced := redactCoverURL(raw)
+		out = out[:off+start] + replaced + out[off+start+end:]
+		off += start + len(replaced)
 	}
-	return msg
+	return out
 }
 
 // writeCoverBody streams the response into dest atomically, capped. The

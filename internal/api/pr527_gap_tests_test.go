@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -454,16 +455,16 @@ func TestPersistedWriteFailedRootSurvivesRestart(t *testing.T) {
 	if err := db.QueryRow(`SELECT write_failed_root FROM index_state WHERE id = 1`).Scan(&persisted); err != nil {
 		t.Fatalf("read write_failed_root: %v", err)
 	}
-	if persisted != root {
-		t.Fatalf("persisted write_failed_root = %q, want %q (the guard must be durable, not in-memory only)", persisted, root)
+	if persisted != `["`+root+`"]` {
+		t.Fatalf("persisted write_failed_root = %q, want %q (the guard must be durable, not in-memory only)", persisted, `["`+root+`"]`)
 	}
 
 	// RESTART: a fresh IndexService on the same DB. The filesystem
 	// fallback must be active from the persisted row, with no scan run
 	// in this process.
 	fresh := NewIndexService(db, cm, "")
-	if got := fresh.WriteFailedRoot(); got != root {
-		t.Fatalf("fresh service WriteFailedRoot = %q, want the persisted %q (restart must keep serving the filesystem, not the half-written table)", got, root)
+	if got := fresh.writeFailedRootContains(root); !got {
+		t.Fatalf("fresh service writeFailedRoots missing %q (restart must keep serving the filesystem, not the half-written table)", root)
 	}
 	freshH := &Handler{svc: &Services{DB: db, Config: cm, IndexSvc: fresh}}
 	if entries, ok, err := freshH.listIndexedChildren(root); err != nil || ok || len(entries) != 0 {
@@ -1052,8 +1053,9 @@ func TestFirstCaptureViaEditorEnrichesCatalog(t *testing.T) {
 // userinfo credentials. A regression that re-exposes the full URL would
 // write the operator's token into the job log.
 func TestCoverFetchErrorRedactsPathQueryAndCredentials(t *testing.T) {
-	// Not t.Parallel(): the test swaps the package-level lookupCoverHost,
-	// the same constraint the other cover-resolver tests carry.
+	// Not t.Parallel(): the test swaps the package-level lookupCoverHost
+	// and coverDialContext, the same constraint the other cover-resolver
+	// tests carry.
 	// Deterministic resolver: the host is public (passes the SSRF gate),
 	// so the failure lands in the FETCH, not the validation.
 	oldLookup := lookupCoverHost
@@ -1064,11 +1066,19 @@ func TestCoverFetchErrorRedactsPathQueryAndCredentials(t *testing.T) {
 		return nil, fmt.Errorf("no addresses for %s", host)
 	}
 	t.Cleanup(func() { lookupCoverHost = oldLookup })
+	// Deterministic dial: the fetch fails at the connection, not on the
+	// luck of a live address being (un)reachable — the test checks the
+	// redaction of the failure, not the outcome of a real fetch.
+	oldDial := coverDialContext
+	coverDialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
+		return nil, fmt.Errorf("connection refused")
+	}
+	t.Cleanup(func() { coverDialContext = oldDial })
 
 	credURL := "https://user:pass@example.com/path?token=abc"
 	err := downloadCoverFile(context.Background(), credURL, filepath.Join(t.TempDir(), "cover.jpg"))
 	if err == nil {
-		t.Fatal("downloadCoverFile = nil; want a fetch failure (nothing listens at the pinned address)")
+		t.Fatal("downloadCoverFile = nil; want a fetch failure (the dial is stubbed to refuse)")
 	}
 	got := err.Error()
 	if !strings.Contains(got, "example.com") {

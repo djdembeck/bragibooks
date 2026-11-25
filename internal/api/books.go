@@ -428,12 +428,21 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 	// below: without it, an enqueue landing between the committed write
 	// and the capture freezes the PRE-update snapshot, and a capture
 	// failure does not revoke the already-queued copy (invalidation is
-	// not revoking). The lock is released before the response build
-	// (getBook), which does not touch the snapshot.
-	var bookLock func()
+	// not revoking). The lock is released explicitly BEFORE the
+	// response build (getBook, getPeopleByBookID, RecordBookAction,
+	// writeJSON) — reads that do not touch the snapshot must not hold
+	// the enqueue lock; the early-return paths release it via the defer.
+	var bookUnlock func()
 	if h.svc.ProcessingSvc != nil {
-		bookLock = h.svc.ProcessingSvc.lockBookCover(bookID)
-		defer bookLock()
+		u := h.svc.ProcessingSvc.lockBookCover(bookID)
+		bookUnlock = func() {
+			if bookUnlock == nil {
+				return
+			}
+			bookUnlock = nil
+			u()
+		}
+		defer bookUnlock()
 	}
 
 	if len(setters) > 0 {
@@ -509,6 +518,12 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 			"book saved, but its processing snapshot capture failed: %v — re-preview the book to restore it", cerr))
 		return
 	}
+	// Critical section over: the book row, people, and snapshot are all
+	// settled. Release the per-book lock before the response build so a
+	// concurrent enqueue does not wait on these reads.
+	if bookUnlock != nil {
+		bookUnlock()
+	}
 
 	book, err := h.getBook(bookID)
 	if err != nil {
@@ -550,22 +565,15 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, bookWithPeople)
 }
 
-// invalidateBookSnapshot deletes the book's snapshot row under the per-book
-// cover lock, the same lock QueueJob holds across its snapshot read→insert
-// and captureSnapshot holds across the whole capture. Deleting without it
-// could remove the very file a concurrent enqueue already read and is about
-// to name in the job's frozen args.
-func (h *Handler) invalidateBookSnapshot(bookID int64) error {
-	if h.svc.ProcessingSvc != nil {
-		defer h.svc.ProcessingSvc.lockBookCover(bookID)()
-	}
-	_, err := h.svc.DB.Exec("DELETE FROM book_snapshots WHERE book_id = ?", bookID)
-	return err
-}
-
-// invalidateBookSnapshotLocked is the same delete with the per-book lock
-// ALREADY held by the caller (UpdateBook holds it across the writes and the
-// capture; a sync.Mutex is not re-entrant).
+// invalidateBookSnapshotLocked deletes the book's snapshot row. The
+// caller MUST already hold the per-book cover lock — the same lock
+// QueueJob holds across its snapshot read→insert and captureSnapshot
+// holds across the whole capture (UpdateBook holds it across the writes
+// and the capture). Deleting without it could remove the very file a
+// concurrent enqueue already read and is about to name in the job's
+// frozen args; and because the per-book lock is a non-reentrant
+// sync.Mutex, calling this from inside the critical section is the only
+// safe form — an auto-locking variant there would deadlock.
 func (h *Handler) invalidateBookSnapshotLocked(bookID int64) error {
 	_, err := h.svc.DB.Exec("DELETE FROM book_snapshots WHERE book_id = ?", bookID)
 	return err

@@ -211,11 +211,14 @@ func TestRunJobRefusesPreexistingJobFileSymlink(t *testing.T) {
 	// dir is non-empty, so RunJob's residue handling (os.Remove of a
 	// non-empty dir) fails fail-closed before the O_EXCL create, the link
 	// is left untouched, and no write follows it to a target outside the
-	// job dir.
-	jobDir := filepath.Join(root, ".bragi-job-sym1")
+	// job dir. The manifest dir is under the system temp root (out of the
+	// shared claim root), so the link is planted THERE, as a principal
+	// with write access to that root could.
+	jobDir := filepath.Join(os.TempDir(), "bragi-job-sym1")
 	if err := os.Mkdir(jobDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { os.RemoveAll(jobDir) })
 	outside := t.TempDir()
 	target := filepath.Join(outside, "jobfile-target.json")
 	link := filepath.Join(jobDir, ".bragi-job-sym1.json")

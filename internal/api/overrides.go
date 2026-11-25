@@ -752,6 +752,18 @@ func (h *Handler) UpdateBookMetadata(w http.ResponseWriter, r *http.Request) {
 	// then deletes (finding: prune vs save). The lock is released before
 	// the audit insert and the response build, which do not touch covers.
 	unlock := h.svc.ProcessingSvc.lockBookCover(bookID)
+	// The cover file's existence is re-checked INSIDE this critical
+	// section, not by the pre-lock validation above: a concurrent
+	// save/reset can prune the referenced asset between a pre-lock Stat
+	// and this row's persist, and the prune below runs under the same
+	// lock, so the check must too.
+	if o.CoverSource == "file" && o.CoverFile != "" {
+		if _, serr := os.Stat(filepath.Join(h.svc.CoversDir, o.CoverFile)); serr != nil {
+			unlock()
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("cover file %q is not on disk — upload it again", o.CoverFile))
+			return
+		}
+	}
 	if err := h.saveMetadataOverride(o); err != nil {
 		unlock()
 		writeError(w, http.StatusInternalServerError, "save metadata overrides: "+err.Error())
@@ -1263,15 +1275,15 @@ func validateMetadataOverride(ctx context.Context, coversDir string, o *Metadata
 		if o.CoverURL != "" {
 			return errors.New("a file cover must not also reference a URL")
 		}
-		// The name check alone admits a dangling reference: the asset the
-		// name points at may already be gone (a pending upload pruned by a
-		// concurrent save's sweep before this draft saved). A cover file
-		// that is not on disk is a 500 at run time, so refuse the save.
+		// The name check is the pre-lock gate: it admits only this
+		// book's override assets. Existence is re-checked under the
+		// per-book lock at persist time (UpdateBookMetadata), where it
+		// cannot race the orphan prune — a pre-lock Stat would leave a
+		// window in which a concurrent save's sweep deletes the asset
+		// between the Stat and this row's persist, creating exactly the
+		// dangling reference the prune exists to prevent.
 		if coversDir == "" {
 			return errors.New("covers directory is not configured")
-		}
-		if _, serr := os.Stat(filepath.Join(coversDir, o.CoverFile)); serr != nil {
-			return fmt.Errorf("cover file %q is not on disk — upload it again", o.CoverFile)
 		}
 	case "url":
 		if o.CoverURL == "" {

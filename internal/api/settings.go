@@ -303,22 +303,17 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.OutputScheme != nil {
-		// The same relative-path rules the boot check and enqueue apply:
-		// a value the engine cannot resolve inside the output root must
-		// fail HERE (400), not make the next startup fatal. When this
-		// request also swaps the engine binary, the token vocabulary is
-		// validated against the CANDIDATE's registry in the swap branch
-		// below, so the pre-check covers only the engine-independent
-		// structure (a candidate-specific token must not 400 before the
-		// candidate is probed).
-		swapping := req.M4bMergeBinary != nil && *req.M4bMergeBinary != h.svc.Config.Config().M4bMerge.Binary
-		var verr error
-		if swapping {
-			verr = audio.ValidateRelativePathStructure(*req.OutputScheme)
-		} else {
-			verr = audio.ValidateRelativePathFormat(*req.OutputScheme)
-		}
-		if verr != nil {
+		// Only the engine-independent structural rules run here (a value
+		// the engine cannot resolve inside the output root must fail HERE
+		// with 400, not make the next startup fatal). The token
+		// vocabulary is validated UNDER the settings lock, where whether
+		// this request swaps the engine is knowable: a concurrent save
+		// may have published the same binary before this request takes
+		// the lock, and only the in-lock comparison against prev decides
+		// which registry (the candidate's or the live one) the scheme
+		// must satisfy. A lock-free precheck reading the config could
+		// see a stale binary and pick the wrong validation path.
+		if verr := audio.ValidateRelativePathStructure(*req.OutputScheme); verr != nil {
 			writeError(w, http.StatusBadRequest, "output scheme: "+verr.Error())
 			return
 		}
@@ -412,6 +407,18 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if ferr := h.freezePinnedMetadata(&snap); ferr != nil {
 		writeError(w, http.StatusInternalServerError, ferr.Error())
 		return
+	}
+	// Token-vocabulary validation for this request's output scheme runs
+	// HERE, under the lock: the lock-free precheck above covered only the
+	// engine-independent structure, and only the in-lock comparison
+	// against prev settles whether this request swaps the engine. A
+	// same-binary save validates against the live registry; the swap
+	// branch below validates against the candidate's registry.
+	if req.OutputScheme != nil && (req.M4bMergeBinary == nil || *req.M4bMergeBinary == prev.M4bMerge.Binary) {
+		if verr := audio.ValidateRelativePathFormat(*req.OutputScheme); verr != nil {
+			writeError(w, http.StatusBadRequest, "output scheme: "+verr.Error())
+			return
+		}
 	}
 	changed := make(map[string]any)
 	if h.svc.SettingsPersistDelay != nil {
@@ -613,6 +620,12 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			tokenNames = append(tokenNames, t.Name)
 		}
 		audio.SetPathFormatTokens(tokenNames)
+		// The saved profile schemes were validated against the PREVIOUS
+		// engine's token set at write time: a swap can make a stored
+		// profile invalid (or repair one). Re-derive the invalid-profile
+		// list against the new registry so the Settings page tracks the
+		// live engine, not the boot-time verdict.
+		refreshInvalidProfiles(h.svc.DB)
 	}
 	// The mutable settings AND the write selection refresh under ONE
 	// processor lock: the save changes both, and a queue snapshot taken

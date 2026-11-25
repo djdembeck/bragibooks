@@ -149,14 +149,15 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	// run's residue (see removeStagingSiblings).
 	preExisting := existingStagingSiblings(absRoot)
 
-	// Job-owned manifest in a job-scoped 0700 subdirectory of the claim
-	// root: the job's own tree, no shared /tmp naming, and OUT of the
-	// shared writable root. A principal that can write the output root
-	// (the trust boundary for the manifest's Bragi-authored content) can
-	// no longer substitute the file (rename over it) between Bragi's
-	// close and the engine's open -- it cannot write the directory at
-	// all. The directory is removed in a defer on every path.
-	jobDir := filepath.Join(absRoot, ".bragi-job-"+jobID)
+	// Job-owned manifest in a job-scoped 0700 directory under the
+	// system temp root, OUT of the shared writable claim root: a
+	// principal with write (rename) rights on the claim root could
+	// replace the directory the engine later opens by pathname — 0700
+	// protects the directory's contents, not the directory entry itself.
+	// The system temp root is not writable by the output root's
+	// principals, so the entry sits behind a directory they cannot
+	// rename. The directory is removed in a defer on every path.
+	jobDir := filepath.Join(os.TempDir(), "bragi-job-"+jobID)
 	if err := os.Mkdir(jobDir, 0o700); err != nil {
 		if os.IsExist(err) {
 			// Residue from a crashed run: the directory is named by
@@ -285,9 +286,14 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	// used — a success scan by the wrapper pid would miss the engine's
 	// siblings. Fall back to the direct child's pid when the document
 	// does not report one (a bare engine IS the direct child).
+	//
+	// The reported pid authorizes deletion, so it is ownership-verified
+	// first: it must be this run's child or a verified descendant (the
+	// /proc ppid chain on unix); anything else falls back to the known
+	// child pid rather than deleting siblings it does not own.
 	engPID := cmd.Process.Pid
 	if doc.Pid != nil && *doc.Pid > 0 {
-		engPID = *doc.Pid
+		engPID = verifyEnginePID(cmd.Process.Pid, *doc.Pid)
 	}
 	return p.finishJobRun(result, doc, opts, absRoot, engPID, preExisting)
 }
