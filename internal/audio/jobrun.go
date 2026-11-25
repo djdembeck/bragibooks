@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -12,8 +13,21 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// drainTimeout bounds the post-exit wait for the stdout reader: a
+// background descendant that inherits the pipe's write side can hold it
+// open long after the direct child exits, and an unbounded drain would
+// stall the job worker on the inherited descriptor. After the bound, the
+// process group is killed (the inherited-fd holder dies with it) AND the
+// read end is closed, so the reader's copy errors out even when the
+// holder escaped the group (a descendant that started its own session):
+// the reader is stoppable on its own, so the drain can never outlive the
+// bound.
+const drainTimeout = 2 * time.Second
 
 // newEngineCommand builds the m4b-merge child for a structured job file.
 // preview selects --job-preview (non-mutating) vs. execution. ctx must come
@@ -221,14 +235,81 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	cmd.Cancel = func() error {
 		return tree.kill()
 	}
-	cmd.WaitDelay = 5 * time.Second
+	// os/exec enforces WaitDelay as an I/O-completion bound measured from
+	// the child's exit: with a background descendant holding the
+	// inherited stdout, the I/O goroutine's copy runs past a too-short
+	// bound and cmd.Wait returns "WaitDelay expired before I/O complete"
+	// (not an exit outcome). The bounded drain below kills the group up
+	// to drainTimeout after the child exits, so the bound must outlive
+	// it.
+	cmd.WaitDelay = 5*time.Second + drainTimeout
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	var stream *lineStreamWriter
 	// Machine mode: stdout is the result document, stderr is the log/progress
 	// stream. This is the inverse of the legacy CLI invocation, where stdout
 	// carried human progress.
-	cmd.Stdout = &stdoutBuf
+	//
+	// stdout is a pipe drained by the reader goroutine below, not a buffer:
+	// the reader parses the machine document the moment its first line is
+	// available and, if it carries a pid, verifies that pid against the
+	// direct child's LIVE /proc ppid chain (unix) and stores the verified
+	// pid in earlyPID. The verification is BEST-EFFORT and runs as early
+	// as the pid is readable — on the first complete document line
+	// (ReadString on '\n'), not at document EOF — so it lands while the
+	// engine is still observable. This is what lets a wrapped (non-exec)
+	// run keep its engine's staging files: with a wrapper the wrapper
+	// reaps the engine before the wrapper itself exits, so a verification
+	// after cmd.Wait cannot read the engine's /proc entry and falls back
+	// to the wrapper's pid — leaving the engine's staging siblings
+	// behind. The RESIDUAL RACE IS ACCEPTED: if the wrapper reaps the
+	// engine before the reader runs the verification, the /proc chain is
+	// already gone and the fallback to the wrapper PID is the correct
+	// degraded behavior (a pid that cannot be proven to belong to this
+	// run's tree must not authorize cleanup). The post-Wait drain wait is
+	// bounded (drainTimeout) precisely to give the reader its one chance
+	// to verify before that fallback is committed. earlyPID stays 0 when
+	// the document reports no pid or the pid cannot be proven to belong
+	// to this run's tree; the post-Wait resolution then falls back to
+	// the known child pid.
+	stdoutRead, stdoutWrite, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", pipeErr)
+	}
+	cmd.Stdout = stdoutWrite
+	// closeRead closes the pipe's read end exactly once: the reader's
+	// deferred close and the drain-timeout close share it, so a timeout
+	// that lands while the reader is still in flight never double-closes
+	// the fd (a second Close would only return EBADF, but the fd is then
+	// gone from the process's table regardless of which caller asked).
+	var closeReadOnce sync.Once
+	closeRead := func() { closeReadOnce.Do(func() { _ = stdoutRead.Close() }) }
+	// 0 = the read-time verification found nothing usable (the post-Wait
+	// resolution falls back to the known child pid).
+	var earlyPID atomic.Int64
+	var earlyWG sync.WaitGroup
+	earlyWG.Add(1)
+	go func() {
+		defer earlyWG.Done()
+		defer closeRead()
+		r := bufio.NewReader(stdoutRead)
+		// Read the machine document (one line of JSON) as it streams in and
+		// verify its pid against the LIVE tree the moment the line is
+		// complete. ReadString returns the partial line on EOF, so a
+		// document written without a trailing newline is still parsed.
+		line, lerr := r.ReadString('\n')
+		if doc, perr := parseMachineResult([]byte(strings.TrimSpace(line))); perr == nil && doc.Pid != nil && *doc.Pid > 0 {
+			earlyPID.Store(int64(verifyEnginePID(cmd.Process.Pid, *doc.Pid)))
+		}
+		stdoutBuf.WriteString(line)
+		if lerr == nil || lerr == io.EOF {
+			// Drain anything after the document line (a clean document
+			// writes nothing more), then let the pipe close normally.
+			if _, derr := io.Copy(&stdoutBuf, r); derr != nil && derr != io.EOF {
+				_ = derr
+			}
+		}
+	}()
 	if opts.OnOutput != nil {
 		stream = &lineStreamWriter{onLine: opts.OnOutput}
 		cmd.Stderr = io.MultiWriter(&stderrBuf, stream)
@@ -238,6 +319,9 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 
 	if err := cmd.Start(); err != nil {
 		tree.finish()
+		// Release the reader (the child never inherited the write side).
+		_ = stdoutWrite.Close()
+		earlyWG.Wait()
 		return nil, fmt.Errorf("m4b-merge start: %w", err)
 	}
 	// Constrain the child to the tree NOW, before it can spawn
@@ -248,9 +332,43 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 		tree.finish()
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
+		// The killed child released its write side; close ours too and
+		// drain the reader before returning.
+		_ = stdoutWrite.Close()
+		earlyWG.Wait()
 		return nil, fmt.Errorf("confine process tree: %w", err)
 	}
 	waitErr := cmd.Wait()
+	// Close the write side so the reader sees EOF: a run that exits without
+	// writing a document (crash, OOM, kill before output) would otherwise
+	// leave the reader blocked in ReadString forever. cmd.Wait has reaped
+	// the child, so no further writes from the direct child are possible.
+	_ = stdoutWrite.Close()
+	// Bounded drain: the pid verification is best-effort, so the reader
+	// gets its one chance to parse the document line and run it before
+	// the fallback is committed — but an INHERITED write side held by a
+	// background descendant (the direct child exits without killing its
+	// group) must not stall the worker. On the bound, kill the process
+	// group: the holder dies with it, the reader sees EOF, and a
+	// document without a trailing newline is still parsed from the
+	// partial line.
+	drainDone := make(chan struct{})
+	go func() { earlyWG.Wait(); close(drainDone) }()
+	select {
+	case <-drainDone:
+	case <-time.After(drainTimeout):
+		// Kill the group first (the primary release: the inherited-fd
+		// holder dies with it). Then close the read end: a holder that
+		// escaped the group (its own session, SIGKILL ignored) keeps the
+		// write side open, so without this the reader would sit in its
+		// copy until that holder exits — the <drainDone> below would
+		// block past the bound. The close makes the copy error and the
+		// reader return; closeRead is idempotent with the reader's own
+		// deferred close.
+		_ = tree.kill()
+		closeRead()
+		<-drainDone
+	}
 	tree.finish()
 	if stream != nil {
 		stream.Flush()
@@ -287,13 +405,19 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	// siblings. Fall back to the direct child's pid when the document
 	// does not report one (a bare engine IS the direct child).
 	//
-	// The reported pid authorizes deletion, so it is ownership-verified
-	// first: it must be this run's child or a verified descendant (the
-	// /proc ppid chain on unix); anything else falls back to the known
-	// child pid rather than deleting siblings it does not own.
+	// The reported pid authorizes deletion, so it is ownership-verified:
+	// it must be this run's child or a verified descendant (the /proc ppid
+	// chain on unix); anything else falls back to the known child pid
+	// rather than deleting siblings it does not own. The verification
+	// happened in the reader goroutine at document-read time (earlyPID) —
+	// while the process tree is still alive — because a wrapped run's
+	// wrapper reaps the engine before it exits, so a post-Wait /proc read
+	// would find the engine gone and fall back to the wrapper's pid.
+	// earlyPID already carries the verified pid, or 0 when the document
+	// reported none / it was unverifiable (the child-pid fallback).
 	engPID := cmd.Process.Pid
-	if doc.Pid != nil && *doc.Pid > 0 {
-		engPID = verifyEnginePID(cmd.Process.Pid, *doc.Pid)
+	if early := int(earlyPID.Load()); early > 0 {
+		engPID = early
 	}
 	return p.finishJobRun(result, doc, opts, absRoot, engPID, preExisting)
 }

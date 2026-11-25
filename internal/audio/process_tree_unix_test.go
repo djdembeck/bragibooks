@@ -69,9 +69,10 @@ func TestProcessTreeKillRecycledPgidIsNotSignaled(t *testing.T) {
 	// A recorded baseline that provably differs from the kill target's
 	// start time: the target is NOT this run's child.
 	tree := &posixProcessTree{
-		cmd:        &exec.Cmd{Process: helper.Process},
-		childStart: currentStart + "-recycled",
+		cmd: &exec.Cmd{Process: helper.Process},
 	}
+	recycled := currentStart + "-recycled"
+	tree.childStart.Store(&recycled)
 	err := tree.kill()
 	if !errors.Is(err, os.ErrProcessDone) {
 		t.Fatalf("kill = %v; want os.ErrProcessDone for a kill target with a mismatched start time", err)
@@ -91,10 +92,14 @@ func TestProcessTreeKillMatchingPgidStillSignaled(t *testing.T) {
 		t.Skip("recycled-pgid identity is verified via /proc, linux only")
 	}
 	helper, pid := spawnGroupedHelper(t)
-	tree := &posixProcessTree{
-		cmd:        &exec.Cmd{Process: helper.Process},
-		childStart: procStartTime(pid),
+	match := procStartTime(pid)
+	if match == "" {
+		t.Fatalf("helper pid %d has no readable /proc start time", pid)
 	}
+	tree := &posixProcessTree{
+		cmd: &exec.Cmd{Process: helper.Process},
+	}
+	tree.childStart.Store(&match)
 	if err := tree.kill(); err != nil {
 		t.Fatalf("kill = %v; want the group signaled for a matching start time", err)
 	}

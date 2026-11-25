@@ -10,25 +10,95 @@ import (
 	"syscall"
 )
 
+// rootContains reports whether target lies inside root: the same
+// containment rule the walk applies to symlinks, so a file the open binds
+// to is accepted only when the walk would have accepted its path.
+func rootContains(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // openInsideRoot opens path for probing, binding the probe to the file at
-// open time: O_NOFOLLOW refuses a final-component symlink, and the opened
-// file's resolved target (/proc/self/fd/<fd>) must still lie inside root.
-// The walk's earlier symlink-confinement check is a walk-time verdict — a
-// regular file replaced by an escaping symlink in between would otherwise
-// be re-followed by the probe; the open-time check catches that here.
-func openInsideRoot(path, root string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+// open time. The walk's earlier symlink-confinement check is a walk-time
+// verdict — a regular file replaced by an escaping symlink in between
+// would otherwise be re-followed by the probe; the open-time check catches
+// that here.
+//
+// A FINAL-COMPONENT SYMLINK is allowed when its resolved target stays
+// inside root (the walk indexes such links; O_NOFOLLOW alone would reject
+// them all); a target outside root is refused before it is probed and
+// persisted. The open then runs NONBLOCKING (O_NOFOLLOW|O_NONBLOCK):
+// a blocking read-open of a FIFO the writer replaced the file with would
+// stall the scan worker until a reader appears that never will. The
+// opened descriptor's OWN type (fstat of the fd) is what is trusted —
+// a regular file, or a directory when allowDir (folder aggregation needs
+// them; the walk already confined them) — so the special-file verdict
+// binds to the descriptor, not to a pre-open stat a writer can replace.
+// A file row must open as a regular file: a row that is a directory —
+// directly, or through a symlink to one whose target the walk's Lstat
+// never saw — is a kind change out from under the walk and is refused
+// BEFORE the open, so it is never handed to the extractor.
+func openInsideRoot(path, root string, allowDir bool) (*os.File, error) {
+	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
-	resolved, rerr := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", f.Fd()))
-	if rerr != nil {
-		f.Close()
-		return nil, rerr
+	openPath := path
+	if info.Mode()&os.ModeSymlink != 0 {
+		resolved, rerr := filepath.EvalSymlinks(path)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if !rootContains(root, resolved) {
+			return nil, fmt.Errorf("opened file escapes input root: %s", resolved)
+		}
+		if !allowDir {
+			// A file row pointing at a DIRECTORY target: the walk's
+			// Lstat saw the link, not the target, so a link to a
+			// directory arrives here as a file row. Refuse the TARGET
+			// before the open — the extractor must never enter folder
+			// discovery from a file row (its unpinned child paths
+			// would reach ffprobe).
+			if tinfo, terr := os.Stat(resolved); terr == nil && tinfo.IsDir() {
+				return nil, fmt.Errorf("opened path is not a regular file: %s", path)
+			}
+		}
+		openPath = resolved
 	}
-	if rel, rerr := filepath.Rel(root, resolved); rerr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if !allowDir && info.IsDir() {
+		// A file row that is (or became) a directory: the row kind
+		// changed out from under the walk.
+		return nil, fmt.Errorf("opened path is not a regular file: %s", path)
+	}
+	// Nonblocking: a writerless FIFO at this name (direct, or behind the
+	// just-verified target) opens instead of blocking the worker.
+	f, err := os.OpenFile(openPath, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	// The descriptor's own type is the verdict: a pre-open lstat is a
+	// race against replacement, an fstat of the opened fd is not. A
+	// FIFO, socket, or device that landed between the checks is closed
+	// and degraded here.
+	if fi, ferr := f.Stat(); ferr != nil {
 		f.Close()
-		return nil, fmt.Errorf("opened file escapes input root: %s", resolved)
+		return nil, ferr
+	} else if !fi.Mode().IsRegular() && !(allowDir && fi.IsDir()) {
+		f.Close()
+		return nil, fmt.Errorf("opened path is not a regular file: %s", path)
+	}
+	// Final verification on the opened descriptor. On Linux this re-reads
+	// the resolved target (/proc/self/fd/<fd>) so the descriptor's file
+	// is verified to be the one the mode/symlink checks accepted; on
+	// other Unix platforms there is no procfs, and the O_NOFOLLOW open
+	// of the verified path above IS the binding (walk-time check plus
+	// this open-time check; no procfs dependency off Linux).
+	if target, cerr := openRootFinalCheck(f); cerr != nil {
+		f.Close()
+		return nil, cerr
+	} else if target != "" && !rootContains(root, target) {
+		f.Close()
+		return nil, fmt.Errorf("opened file escapes input root: %s", target)
 	}
 	return f, nil
 }

@@ -674,6 +674,13 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		"metadata_chapters":        live.Processing.MetadataChapters,
 		"metadata_fields_pinned":   fieldsPinned,
 		"metadata_chapters_pinned": chaptersPinned,
+		// The invalid-profile list must reach the client from the PUT too:
+		// an engine-binary swap in this very save re-derives the list
+		// (refreshInvalidProfiles above), and the page copies it from the
+		// response so the repair list tracks the live engine without a
+		// follow-up GET. Empty (not null) when the store is clean,
+		// matching GET's shape.
+		"invalid_output_profiles": bootInvalidProfileList(),
 	}
 
 	writeJSON(w, http.StatusOK, settings)

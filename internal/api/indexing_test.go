@@ -1174,7 +1174,7 @@ func TestDeletePrefixRemovesDescendants(t *testing.T) {
 	for _, p := range paths {
 		storeIndexRow(t, db, p, 1, "2026-01-01T00:00:00.000000000Z", completeSnapPayload())
 	}
-	if err := svc.deletePrefix(oldRoot); err != nil {
+	if err := svc.deletePrefix(oldRoot, ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range paths {
@@ -1184,6 +1184,66 @@ func TestDeletePrefixRemovesDescendants(t *testing.T) {
 		}
 		if n != 0 {
 			t.Errorf("row %s survived deletePrefix", p)
+		}
+	}
+}
+
+// TestDeletePrefixKeepPrefixPreservesRootRow pins the predicate grouping:
+// the keep exclusion must apply to the path = oldRoot arm too, not only
+// the LIKE arm (SQL AND binds tighter than OR). A parent→child root
+// switch whose child-root scan was truncated leaves the child's root row
+// behind; on switch-back deletePrefix must keep it — a deleted root row
+// is classified unchanged and upsertAll only bumps seen_at, so the
+// directory would be absent from the index.
+func TestDeletePrefixKeepPrefixPreservesRootRow(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := dbpkg.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := dbpkg.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	cm := config.NewConfigManager()
+	cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	cm.Config().Directories.InputDir = root
+	cm.Store(cm.Config())
+	svc := NewIndexService(db, cm, "")
+
+	oldRoot := "/data/books"
+	keepRoot := "/data/books/favorites"
+	deleted := []string{
+		oldRoot + "/a.mp3",
+		oldRoot + "/other/b.mp3",
+	}
+	kept := []string{
+		keepRoot, // the root row itself (path = oldRoot? no: under keep)
+		keepRoot + "/c.mp3",
+	}
+	for _, p := range append(append([]string{}, deleted...), kept...) {
+		storeIndexRow(t, db, p, 1, "2026-01-01T00:00:00.000000000Z", completeSnapPayload())
+	}
+	if err := svc.deletePrefix(oldRoot, keepRoot); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range deleted {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM source_index WHERE path = ?`, p).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Errorf("row %s survived deletePrefix, want deleted", p)
+		}
+	}
+	for _, p := range kept {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM source_index WHERE path = ?`, p).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Errorf("row %s = %d, want 1 (the keep exclusion must cover the path = arm too)", p, n)
 		}
 	}
 }

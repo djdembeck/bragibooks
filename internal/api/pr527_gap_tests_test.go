@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -450,13 +451,19 @@ func TestPersistedWriteFailedRootSurvivesRestart(t *testing.T) {
 		t.Fatalf("failed scan status = %s, want error (detail %q)", st.Status, st.Detail)
 	}
 	// The persisted row carries the guard (the in-memory field alone is
-	// not durable).
+	// not durable). Compare the DECODED list, not the raw JSON: on
+	// Windows t.TempDir() paths carry backslashes, which JSON escapes
+	// (\\), so a verbatim string compare fails there.
 	var persisted string
 	if err := db.QueryRow(`SELECT write_failed_root FROM index_state WHERE id = 1`).Scan(&persisted); err != nil {
 		t.Fatalf("read write_failed_root: %v", err)
 	}
-	if persisted != `["`+root+`"]` {
-		t.Fatalf("persisted write_failed_root = %q, want %q (the guard must be durable, not in-memory only)", persisted, `["`+root+`"]`)
+	var persistedRoots []string
+	if err := json.Unmarshal([]byte(persisted), &persistedRoots); err != nil {
+		t.Fatalf("decode persisted write_failed_root %q: %v", persisted, err)
+	}
+	if len(persistedRoots) != 1 || persistedRoots[0] != root {
+		t.Fatalf("persisted write_failed_root = %q (decoded %v), want [%q] (the guard must be durable, not in-memory only)", persisted, persistedRoots, root)
 	}
 
 	// RESTART: a fresh IndexService on the same DB. The filesystem

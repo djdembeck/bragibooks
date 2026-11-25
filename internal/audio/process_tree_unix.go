@@ -45,7 +45,14 @@ type posixProcessTree struct {
 	// process at the kill target is STILL this child: a cancel landing
 	// after cmd.Wait has reaped the child (before finish ran) would
 	// otherwise SIGKILL a RECYCLED pgid that happens to exist.
-	childStart string
+	//
+	// It is atomic: cmd.Start launches the context watcher BEFORE
+	// returning, and the watcher's kill can run CONCURRENTLY with the
+	// caller's start (the store). A plain string field would race the
+	// write with kill's read; atomic.Pointer[string] closes that window
+	// (a cancel that lands before the store sees the nil baseline and
+	// falls through to the kill attempt, where ESRCH reads as "gone").
+	childStart atomic.Pointer[string]
 }
 
 // newProcessTree must run before cmd.Start: the process-group attribute
@@ -56,7 +63,8 @@ func newProcessTree(cmd *exec.Cmd) (processTree, error) {
 }
 
 func (p *posixProcessTree) start(cmd *exec.Cmd) error {
-	p.childStart = procStartTime(cmd.Process.Pid)
+	st := procStartTime(cmd.Process.Pid)
+	p.childStart.Store(&st)
 	return nil
 }
 
@@ -104,7 +112,11 @@ func (p *posixProcessTree) kill() error {
 		return os.ErrProcessDone
 	}
 	if pid := p.cmd.Process.Pid; pid > 0 {
-		if st := procStartTime(pid); st != "" && p.childStart != "" && st != p.childStart {
+		var recorded string
+		if rec := p.childStart.Load(); rec != nil {
+			recorded = *rec
+		}
+		if st := procStartTime(pid); st != "" && recorded != "" && st != recorded {
 			// The process at the kill target is not (or no longer)
 			// this child: signaling it could hit a recycled group.
 			// An empty current start time (process gone) or an empty

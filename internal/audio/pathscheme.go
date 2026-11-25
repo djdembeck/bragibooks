@@ -35,6 +35,19 @@ func pathTokenSet() map[string]struct{} {
 	return *tokenRegistry.Load()
 }
 
+// CapturedPathFormatTokens returns the live path-format token registry's
+// contents, so a caller that republishes it (a settings swap, via
+// SetPathFormatTokens) can restore the state it found. Tests use it to
+// keep the process-global registry suite-safe.
+func CapturedPathFormatTokens() []string {
+	reg := pathTokenSet()
+	tokens := make([]string, 0, len(reg))
+	for name := range reg {
+		tokens = append(tokens, name)
+	}
+	return tokens
+}
+
 func init() {
 	tokenRegistry.Store(&map[string]struct{}{})
 }

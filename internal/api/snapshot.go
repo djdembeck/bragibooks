@@ -1332,13 +1332,17 @@ func doPinnedCoverGet(ctx context.Context, hop coverHop) (*http.Response, error)
 // re-expose the operator's path+query past the caller's redaction. The
 // NESTED message can name any hop's URL (a redirect failure names the
 // destination, not the pinned target), so every http(s) URL in it is
-// redacted to its host-only form; a message without URLs passes through.
+// redacted to its host-only form, and every Location header value is
+// dropped whole (a MALFORMED/relative redirect location — a relative path
+// with a signed query — is not an http(s) URL and would otherwise survive
+// into the log carrying its query credentials); a message without URLs
+// or locations passes through.
 func sanitizeTransportError(err error) string {
 	var urlErr *url.Error
 	if !errors.As(err, &urlErr) {
 		return err.Error()
 	}
-	return redactURLsInMessage(urlErr.Err.Error())
+	return redactLocationValues(redactURLsInMessage(urlErr.Err.Error()))
 }
 
 // redactURLsInMessage replaces every http(s) URL in msg with its
@@ -1371,6 +1375,145 @@ func redactURLsInMessage(msg string) string {
 		off += start + len(replaced)
 	}
 	return out
+}
+
+// redactLocationValues drops the value of every redirect Location in msg
+// to a fixed placeholder. Go's redirect failure EMBEDS the raw Location
+// string in two shapes: an explicit `Location:` mention (case-insensitive,
+// quoted or bare) and the parse failure's quoted value (e.g. `parse
+// "cdn.example/cover.jpg?sig=abc": first path segment in relative URL
+// cannot be absolute`). A relative value with a signed query carries
+// credentials that the http(s)-URL pass above does not reach (no scheme
+// prefix); an ABSOLUTE value was already reduced to its host-only form by
+// that pass and is left alone here. Bare tokens are redacted only when
+// they carry a query (the credential signal), so an unrelated
+// `GET /api/x` mention is not eaten; the placeholder carries no scheme or
+// `?`, so neither pass can loop on its own output.
+func redactLocationValues(msg string) string {
+	const placeholder = "<redacted location>"
+	var b strings.Builder
+	off := 0
+	for off < len(msg) {
+		rest := msg[off:]
+		start, end := nextLocationToken(rest)
+		if end == 0 {
+			b.WriteString(rest) // no more tokens
+			break
+		}
+		if start >= 0 {
+			b.WriteString(rest[:start])
+			b.WriteString(placeholder)
+		} else {
+			b.WriteString(rest[:end]) // a mention we skip, not redact
+		}
+		off += end
+	}
+	return b.String()
+}
+
+// nextLocationToken finds the next redirect-Location value in s and
+// returns (start, end): the span [start, end) to replace with the
+// placeholder, or (start<0, end>0) for a mention to SKIP (advance past,
+// no redaction), or (-1, 0) when there is nothing left. Three shapes, in
+// priority order:
+//
+//   - an explicit `Location:` mention (case-insensitive); the value runs
+//     from after the colon to the next delimiter. It is SKIPPED (not
+//     redacted) when it already carries a scheme prefix — the URL pass
+//     reduced an absolute value to its host-only form, so the host stays;
+//   - a quoted "..." token that carries a query (the parse-failure value
+//     `parse "cdn.example/cover.jpg?sig=abc": ...`);
+//   - a bare /path?... token (query required, the credential signal), so
+//     an unrelated `GET /api/x` mention is not eaten.
+//
+// The placeholder carries no scheme, quote, or '?', so neither pass can
+// re-match its own output.
+func nextLocationToken(s string) (int, int) {
+	// Shape 1: an explicit `Location:` mention (case-insensitive).
+	if loc := strings.Index(strings.ToLower(s), "location:"); loc >= 0 {
+		i := loc + len("location:")
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+			i++
+		}
+		// A scheme prefix means the URL pass already reduced this value
+		// to its host-only form: skip past it (advance, no redaction).
+		// Checked BEFORE tokenEnd, which stops at the scheme's ':'.
+		if i < len(s) && (s[i:] == "http://" || s[i:] == "https://") {
+			return -1, i + tokenEnd(s[i:])
+		}
+		end := i + tokenEnd(s[i:])
+		if end > i {
+			return loc, end
+		}
+		return -1, i // empty value: consume the mention only
+	}
+	// Shape 2: a quoted token carrying a query. The scan is escape-aware:
+	// Go's url.Error quotes a malformed Location with embedded quotes
+	// ESCAPED (`parse "/cover\"broken%zz?sig=SECRET"`), so a \" inside
+	// the token is CONTENT, not the closer — a plain quote scan would
+	// stop at the escaped quote and leave the signed query behind.
+	for i := 0; i < len(s); i++ {
+		if s[i] != '"' {
+			continue
+		}
+		j := i + 1
+		// The closer is an UNESCAPED quote: a \" is content. (j starts
+		// after the opening quote, whose own preceding byte cannot be a
+		// backslash.)
+		for j < len(s) && !(s[j] == '"' && s[j-1] != '\\') {
+			j++
+		}
+		// j lands on the closer, or at len(s) when unterminated.
+		if j >= len(s) {
+			break
+		}
+		if strings.ContainsRune(s[i+1:j], '?') {
+			return i, j + 1
+		}
+		i = j
+	}
+	// Shape 3: a bare /path?... token (query required).
+	for i := 0; i < len(s); i++ {
+		if s[i] != '/' {
+			continue
+		}
+		j := i
+		for j < len(s) && !isLocationTokenEnd(s[j]) {
+			j++
+		}
+		if strings.ContainsRune(s[i:j], '?') {
+			return i, j
+		}
+		i = j
+	}
+	return -1, 0
+}
+
+// tokenEnd returns the length of the run of non-delimiter bytes at the
+// start of s (a Location value runs to the next whitespace, quote, or
+// end of message).
+func tokenEnd(s string) int {
+	for i, c := range s {
+		if isLocationTokenEnd(byte(c)) {
+			return i
+		}
+	}
+	return len(s)
+}
+
+// isLocationTokenEnd reports whether c terminates a Location value:
+// whitespace, a quote, a colon (a scheme separator, or the trailing ':'
+// of a host:port that the URL pass left), or a bracket that delimits it
+// from the surrounding error text. A ';' or ',' is CONTENT, not a
+// boundary — both are legal URI value characters (a redirect value like
+// /cover;v=1?sig=abc is one value, and stopping early would leave the
+// signed query in the log), and a '?' is part of the token (the query).
+func isLocationTokenEnd(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', '"', '\'', '(', ')', '<', '>', ':':
+		return true
+	}
+	return false
 }
 
 // writeCoverBody streams the response into dest atomically, capped. The

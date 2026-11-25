@@ -710,7 +710,7 @@ func (h *Handler) attachSourceMetadata(ctx context.Context, bookID int64, srcPat
 	if h.svc.FFprobe == "" {
 		snap = audio.DegradedSourceMetadata("ffprobe binary unavailable; extraction not run")
 	} else {
-		snap, err = audio.ExtractSourceMetadata(ctx, h.svc.FFprobe, srcPath)
+		snap, err = audio.ExtractSourceMetadata(ctx, h.svc.FFprobe, srcPath, srcPath, "unknown", nil)
 		if err != nil || snap == nil {
 			log.Printf("extract source metadata for book %d: %v", bookID, err)
 			snap = audio.DegradedSourceMetadata(fmt.Sprintf("extraction failed: %v", err))
