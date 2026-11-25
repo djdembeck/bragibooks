@@ -8,12 +8,12 @@ import (
 	"testing"
 )
 
-// TestProberPathOtherUnixReturnsOriginal pins the no-procfs fallback:
+// TestProberPathOtherUnixReturnsOriginal pins the no-procfs contract:
 // with no /proc on this platform, proberPath cannot name the descriptor
 // by path and must hand the probe the ORIGINAL pathname verbatim (the
-// walk-time plus open-time containment checks remain the binding). The
-// test does not run on Linux CI (Linux resolves the descriptor through
-// /proc) — it protects the macOS/BSD build.
+// walk-time plus open-time containment checks remain the binding),
+// reporting ok. The test does not run on Linux CI (Linux resolves the
+// descriptor through /proc) — it protects the macOS/BSD build.
 func TestProberPathOtherUnixReturnsOriginal(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "media", "book.m4b")
@@ -28,7 +28,11 @@ func TestProberPathOtherUnixReturnsOriginal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if got := proberPath(f, p); got != p {
+	got, ok := proberPath(f, p)
+	if !ok {
+		t.Fatal("proberPath ok = false; want true (no procfs, no failing lookup)")
+	}
+	if got != p {
 		t.Fatalf("proberPath = %q; want the original pathname %q", got, p)
 	}
 }

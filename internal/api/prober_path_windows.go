@@ -20,7 +20,8 @@ const fileNameNormalized = 0x1
 // \\host\share form that ffprobe accepts. ok is false when the
 // resolution fails. Shared with openInsideRoot, which uses the same
 // resolution to PROVE containment (it refuses on failure, where
-// proberPath falls back).
+// proberPath reports ok=false and the caller degrades the row instead of
+// falling back to the un-checked original pathname).
 func finalPathByHandle(f *os.File) (string, bool) {
 	// Two calls: the first sizes the buffer, the second fills it.
 	n, err := windows.GetFinalPathNameByHandle(windows.Handle(f.Fd()), nil, 0, fileNameNormalized)
@@ -62,12 +63,12 @@ func normalizeFinalPath(s string) string {
 // pathname, it is bound to the file the open inside openInsideRoot
 // verified: a replaced symlink (or any rename) after the check cannot
 // repoint the probe, because the device path was resolved before the
-// swap. The caller must keep f open for the probe's duration. If the
-// resolution fails, the original pathname is used and the open-time
-// regular-file check is the only binding, as before.
-func proberPath(f *os.File, original string) string {
-	if s, ok := finalPathByHandle(f); ok {
-		return s
-	}
-	return original
+// swap. The caller must keep f open for the probe's duration. ok is
+// false when the resolution fails: the original pathname is NOT a valid
+// fallback (it was never approved for reopening by the open-time
+// containment check), so the caller must degrade the row rather than send
+// an un-checked pathname to the extractor.
+func proberPath(f *os.File, original string) (string, bool) {
+	s, ok := finalPathByHandle(f)
+	return s, ok
 }

@@ -1101,8 +1101,8 @@ func (s *IndexService) extractOne(ctx context.Context, r indexRow) *audio.Source
 	// swapped to an escaping (or special) file between discovery and
 	// probe would then be probed and persisted. Pin every part with the
 	// same open-time containment rule before it reaches ffprobe; a part
-	// that fails to pin degrades as ONE errored file, not the whole
-	// folder.
+	// that fails to pin (or whose descriptor cannot be named) degrades
+	// as ONE errored file, not the whole folder.
 	var pinPart func(part string) (string, func(), bool)
 	if allowDir {
 		pinPart = func(part string) (string, func(), bool) {
@@ -1111,8 +1111,14 @@ func (s *IndexService) extractOne(ctx context.Context, r indexRow) *audio.Source
 				log.Printf("index: pin part %s: %v", part, err)
 				return "", nil, false
 			}
+			p, ok := proberPath(f, part)
+			if !ok {
+				_ = f.Close()
+				log.Printf("index: pin part %s: %v", part, fmt.Errorf("name pinned descriptor for probe"))
+				return "", nil, false
+			}
 			close := func() { _ = f.Close() }
-			return proberPath(f, part), close, true
+			return p, close, true
 		}
 	}
 	// r.Path is the source's IDENTITY (the ASIN filename fallback and
@@ -1127,7 +1133,16 @@ func (s *IndexService) extractOne(ctx context.Context, r indexRow) *audio.Source
 	if allowDir {
 		srcKind = "folder"
 	}
-	snap, err := audio.ExtractSourceMetadata(ctx, s.ffprobe, r.Path, proberPath(probeFile, r.Path), srcKind, pinPart)
+	probePath, ok := proberPath(probeFile, r.Path)
+	if !ok {
+		// The descriptor cannot be named (Windows handle resolution
+		// failed): the open-time containment check proved the file is
+		// inside the root, but the probe must not be handed an un-checked
+		// pathname — degrade the row.
+		log.Printf("index: extract %s: %v", r.Path, fmt.Errorf("name pinned descriptor for probe"))
+		return audio.DegradedSourceMetadata("extraction refused: name pinned descriptor for probe")
+	}
+	snap, err := audio.ExtractSourceMetadata(ctx, s.ffprobe, r.Path, probePath, srcKind, pinPart)
 	if err != nil || snap == nil {
 		log.Printf("index: extract %s: %v", r.Path, err)
 		return audio.DegradedSourceMetadata(fmt.Sprintf("extraction failed: %v", err))

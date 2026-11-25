@@ -15,105 +15,89 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// TestSanitizeTransportErrorRedactsRelativeLocations guards the cover-log
-// redaction against MALFORMED/relative redirect locations: Go's redirect
-// parse error embeds the raw Location string, and a relative value with a
-// signed query (no scheme prefix) must not survive into the log.
-func TestSanitizeTransportErrorRedactsRelativeLocations(t *testing.T) {
+// TestSanitizeTransportErrorFixedDiagnostic guards the cover-log
+// redaction: a *url.Error embeds the full request URL (path + query) in
+// its message, and its nested message can name any hop's URL — including
+// a malformed/relative Location whose signed query is not an http(s) URL
+// and survives substring-scanning redaction. The fix replaces the fragile
+// substring recovery with a fixed diagnostic that cannot leak the raw
+// URL/path/query; the caller already reports the redacted host.
+func TestSanitizeTransportErrorFixedDiagnostic(t *testing.T) {
+	const wantFixed = "cover request failed (URL details redacted)"
 	cases := []struct {
-		name    string
-		err     error
-		wantSub []string // substrings that MUST appear
-		noSub   []string // substrings that MUST NOT appear
+		name string
+		err  error
+		want string
 	}{
 		{
-			// The exact shape of the finding: a relative location with a
-			// signed query, as url.Parse reports it inside a *url.Error.
 			name: "relative location with signed query",
 			err: &url.Error{
 				Op:  "GET",
 				URL: "https://covers.example/seed.jpg",
 				Err: errors.New(`Get "https://covers.example/seed.jpg": redirect: relative Location "cdn.example/cover.jpg?sig=abc123" is not a valid redirect target`),
 			},
-			wantSub: []string{"<redacted location>", "covers.example"},
-			noSub:   []string{"sig=abc123", "cdn.example/cover.jpg"},
+			want: wantFixed,
 		},
 		{
-			// An unquoted redirect value with a semicolon parameter AND a
-			// signed query: ';' is a legal URI value character, so the
-			// WHOLE value must be redacted — stopping at the ';' would
-			// leave the signed query in the log.
 			name: "unquoted value with semicolon parameter",
 			err: &url.Error{
 				Op:  "GET",
 				URL: "https://covers.example/seed.jpg",
 				Err: errors.New(`Get "https://covers.example/seed.jpg": redirect to Location: /cover;v=1?sig=abc failed`),
 			},
-			wantSub: []string{"<redacted location>", "covers.example"},
-			noSub:   []string{"sig=abc", "/cover;v=1"},
+			want: wantFixed,
 		},
 		{
-			// Go's actual parse failure for a bare relative path: the raw
-			// value is quoted, and it carries a signed query.
 			name: "url.Parse form quoted relative",
 			err: &url.Error{
 				Op:  "GET",
 				URL: "https://covers.example/seed.jpg",
 				Err: errors.New(`parse "cdn.example/cover.jpg?sig=abc123": first path segment in relative URL cannot be absolute`),
 			},
-			wantSub: []string{},
-			noSub:   []string{"sig=abc123", "cdn.example/cover.jpg"},
+			want: wantFixed,
 		},
 		{
-			// A malformed Location with an embedded quote: Go's url.Error
-			// quotes the raw value with the embedded quote ESCAPED, so a
-			// plain quote scan stops at \" and leaves the signed query
-			// behind. The WHOLE escaped token must be redacted.
 			name: "quoted value with escaped quote",
 			err: &url.Error{
 				Op:  "GET",
 				URL: "https://covers.example/seed.jpg",
 				Err: errors.New(`parse "/cover\"broken%zz?sig=SECRET": invalid URL escape "%zz"`),
 			},
-			wantSub: []string{"<redacted location>"},
-			noSub:   []string{"sig=SECRET", "broken%zz"},
+			want: wantFixed,
 		},
 		{
-			// An absolute Location is reduced to its host-only form by the
-			// URL pass; the Location pass must not eat the host.
-			name: "absolute location keeps host",
+			name: "absolute location",
 			err: &url.Error{
 				Op:  "GET",
 				URL: "https://covers.example/seed.jpg",
 				Err: errors.New(`redirect to Location: https://cdn.example/cover.jpg?sig=abc123 failed`),
 			},
-			wantSub: []string{"cdn.example"},
-			noSub:   []string{"sig=abc123", "cover.jpg?"},
+			want: wantFixed,
 		},
 		{
-			// A message with no URL and no Location passes through.
-			name: "plain message untouched",
+			name: "plain message with URL wrapper",
 			err: &url.Error{
 				Op:  "GET",
 				URL: "https://covers.example/seed.jpg",
 				Err: errors.New("connection reset by peer"),
 			},
-			wantSub: []string{"connection reset by peer"},
-			noSub:   []string{"<redacted>"},
+			want: wantFixed,
+		},
+		{
+			name: "non-url error passes through",
+			err:  errors.New("connection reset by peer"),
+			want: "connection reset by peer",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := sanitizeTransportError(tc.err)
-			for _, s := range tc.wantSub {
-				if !strings.Contains(got, s) {
-					t.Errorf("sanitize = %q; want it to contain %q", got, s)
-				}
+			if got != tc.want {
+				t.Errorf("sanitize = %q; want %q", got, tc.want)
 			}
-			for _, s := range tc.noSub {
-				if strings.Contains(got, s) {
-					t.Errorf("sanitize = %q; must not contain %q", got, s)
-				}
+			// The fixed diagnostic must never leak URL fragments.
+			if strings.Contains(got, "sig=") || strings.Contains(got, "cdn.example") || strings.Contains(got, "covers.example") {
+				t.Errorf("sanitize = %q; must not contain URL fragments", got)
 			}
 		})
 	}

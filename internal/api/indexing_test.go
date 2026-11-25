@@ -1165,11 +1165,15 @@ func TestDeletePrefixRemovesDescendants(t *testing.T) {
 	cm.Store(cm.Config())
 	svc := NewIndexService(db, cm, "")
 
-	oldRoot := "/data/old root"
+	// Native separators: deletePrefix builds its descendant LIKE pattern
+	// with the platform's separator (indexChildPrefix), so the fixture
+	// rows must use the same form to be matched (on Windows a "/"-joined
+	// row would sit outside the pattern and survive).
+	oldRoot := filepath.Join("/data", "old root")
 	paths := []string{
 		oldRoot,
-		oldRoot + "/x.mp3",
-		oldRoot + "/a%b/c.mp3", // metacharacters in a descendant name
+		filepath.Join(oldRoot, "x.mp3"),
+		filepath.Join(oldRoot, "a%b", "c.mp3"), // metacharacters in a descendant name
 	}
 	for _, p := range paths {
 		storeIndexRow(t, db, p, 1, "2026-01-01T00:00:00.000000000Z", completeSnapPayload())
@@ -1190,11 +1194,14 @@ func TestDeletePrefixRemovesDescendants(t *testing.T) {
 
 // TestDeletePrefixKeepPrefixPreservesRootRow pins the predicate grouping:
 // the keep exclusion must apply to the path = oldRoot arm too, not only
-// the LIKE arm (SQL AND binds tighter than OR). A parent→child root
-// switch whose child-root scan was truncated leaves the child's root row
-// behind; on switch-back deletePrefix must keep it — a deleted root row
+// the LIKE arm (SQL AND binds tighter than OR). A child→parent root
+// switch (switch-back) whose child-root scan was truncated leaves the
+// child's root row behind; deletePrefix must keep it — a deleted root row
 // is classified unchanged and upsertAll only bumps seen_at, so the
-// directory would be absent from the index.
+// directory would be absent from the index. The fixtures use native
+// separators: deletePrefix builds its descendant LIKE pattern with the
+// platform's separator (indexChildPrefix), so "/"-joined rows would sit
+// outside the pattern on Windows and survive there.
 func TestDeletePrefixKeepPrefixPreservesRootRow(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(t.TempDir(), "index.db")
@@ -1212,30 +1219,22 @@ func TestDeletePrefixKeepPrefixPreservesRootRow(t *testing.T) {
 	cm.Store(cm.Config())
 	svc := NewIndexService(db, cm, "")
 
-	oldRoot := "/data/books"
-	keepRoot := "/data/books/favorites"
-	deleted := []string{
-		oldRoot + "/a.mp3",
-		oldRoot + "/other/b.mp3",
-	}
+	// Child→parent switch: the old root sits UNDER the keep prefix, so
+	// every old-root row is a kept row — including the old root's own
+	// row, which only the parenthesized predicate keeps (an ungrouped
+	// keep exclusion binds to the LIKE arm alone and deletes it).
+	oldRoot := filepath.Join("/data", "books", "favorites")
+	keepRoot := filepath.Join("/data", "books")
 	kept := []string{
-		keepRoot, // the root row itself (path = oldRoot? no: under keep)
-		keepRoot + "/c.mp3",
+		oldRoot, // the old root's own row: path = oldRoot arm under keep
+		filepath.Join(oldRoot, "c.mp3"),
+		keepRoot, // the new root's row: path = keepPrefix arm
 	}
-	for _, p := range append(append([]string{}, deleted...), kept...) {
+	for _, p := range kept {
 		storeIndexRow(t, db, p, 1, "2026-01-01T00:00:00.000000000Z", completeSnapPayload())
 	}
 	if err := svc.deletePrefix(oldRoot, keepRoot); err != nil {
 		t.Fatal(err)
-	}
-	for _, p := range deleted {
-		var n int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM source_index WHERE path = ?`, p).Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		if n != 0 {
-			t.Errorf("row %s survived deletePrefix, want deleted", p)
-		}
 	}
 	for _, p := range kept {
 		var n int
@@ -1243,7 +1242,73 @@ func TestDeletePrefixKeepPrefixPreservesRootRow(t *testing.T) {
 			t.Fatal(err)
 		}
 		if n != 1 {
-			t.Errorf("row %s = %d, want 1 (the keep exclusion must cover the path = arm too)", p, n)
+			t.Errorf("row %s = %d, want 1 (the keep exclusion must cover the path = oldRoot arm too)", p, n)
+		}
+	}
+}
+
+// TestDeletePrefixKeepPrefixDeletesOutsideKeep pins the selective-deletion
+// half of the keep contract: with keepPrefix set, deletePrefix must DELETE
+// old-root rows that sit OUTSIDE the keep subtree (including the old root's
+// own row and metacharacter descendants) while PRESERVING the rows INSIDE
+// it. The child→parent test above keeps every old-root row, so without this
+// case a broken keep prefix (never matching, or matching everything) would
+// pass both deletion tests.
+func TestDeletePrefixKeepPrefixDeletesOutsideKeep(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := dbpkg.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := dbpkg.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	cm := config.NewConfigManager()
+	cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	cm.Config().Directories.InputDir = root
+	cm.Store(cm.Config())
+	svc := NewIndexService(db, cm, "")
+
+	// Parent→child switch: the keep prefix sits UNDER the old root, so
+	// the old root's rows split into a kept subtree and residue. Native
+	// separators: deletePrefix builds its LIKE patterns with the
+	// platform's separator (indexChildPrefix), so the fixture rows must
+	// match that form.
+	oldRoot := filepath.Join("/data", "old")
+	keepRoot := filepath.Join(oldRoot, "keep")
+	kept := []string{
+		keepRoot,                         // the keep root's own row: path = keepPrefix arm
+		filepath.Join(keepRoot, "k.mp3"), // a kept descendant
+	}
+	deleted := []string{
+		oldRoot, // the old root's own row: NOT under the keep prefix
+		filepath.Join(oldRoot, "x.mp3"),
+		filepath.Join(oldRoot, "a%b", "c.mp3"), // metacharacters in a descendant name
+	}
+	for _, p := range append(append([]string{}, kept...), deleted...) {
+		storeIndexRow(t, db, p, 1, "2026-01-01T00:00:00.000000000Z", completeSnapPayload())
+	}
+	if err := svc.deletePrefix(oldRoot, keepRoot); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range kept {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM source_index WHERE path = ?`, p).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Errorf("row %s = %d, want 1 (the keep prefix must preserve rows inside the keep subtree)", p, n)
+		}
+	}
+	for _, p := range deleted {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM source_index WHERE path = ?`, p).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Errorf("row %s = %d, want 0 (rows outside the keep prefix must be deleted)", p, n)
 		}
 	}
 }

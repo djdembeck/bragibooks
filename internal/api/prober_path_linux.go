@@ -14,7 +14,8 @@ import (
 // root), not to the original pathname that a symlink swap after the
 // check could repoint. The caller must keep f open for the probe's
 // duration: a closed fd would make the path resolve to nothing and the
-// probe would degrade.
-func proberPath(f *os.File, original string) string {
-	return fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), f.Fd())
+// probe would degrade. ok is always true: the /proc path is built from
+// the live descriptor, so there is no lookup that can fail.
+func proberPath(f *os.File, original string) (string, bool) {
+	return fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), f.Fd()), true
 }

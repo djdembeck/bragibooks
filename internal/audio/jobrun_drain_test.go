@@ -12,12 +12,28 @@ import (
 
 // writeDrainHolderJobBinary writes a job-protocol engine that writes its
 // machine document, spawns a background descendant that inherits the
-// stdout pipe, and exits WITHOUT killing that descendant. The holder
-// keeps the pipe's write side open after the direct child exits: an
-// unbounded drain would stall the run on the inherited descriptor.
-func writeDrainHolderJobBinary(t *testing.T, dir string, newSession bool) string {
+// named pipe's write side (holderPipe: "stdout" or "stderr"), and exits
+// WITHOUT killing that descendant. The holder keeps the pipe's write
+// side open after the direct child exits: an unbounded drain would stall
+// the run on the inherited descriptor. The other pipe is released
+// (DEVNULL), so the drain under test is the named pipe's reader, not the
+// other's.
+func writeDrainHolderJobBinary(t *testing.T, dir string, newSession bool, holderPipe string) string {
 	t.Helper()
 	p := filepath.Join(dir, "drain-holder-bin")
+	// The holder inherits ONLY the pipe under test; the other is DEVNULL
+	// so its reader drains immediately and cannot mask a stall on the
+	// pipe being measured.
+	otherDev := "stderr=subprocess.DEVNULL"
+	if holderPipe == "stderr" {
+		otherDev = "stdout=subprocess.DEVNULL"
+	}
+	if newSession {
+		// Its own session: the wrapper's process-group kill cannot reach
+		// the holder, so only the drain-timeout read-side close can
+		// release the reader.
+		otherDev += ", start_new_session=True"
+	}
 	script := `#!/usr/bin/env python3
 import json, os, subprocess, sys
 
@@ -44,12 +60,14 @@ rel = "Author/Title.m4b"
 os.makedirs(os.path.join(root, "Author"), exist_ok=True)
 with open(os.path.join(root, rel), "w") as f:
     f.write("book")
-# Background holder of the inherited STDOUT: it survives the wrapper's
-# exit (the wrapper does not kill its group), keeping that pipe's write
-# side open until the bounded drain kills the process group. stderr is
-# released so cmd.Wait's own stderr copy (bounded by WaitDelay) is not
-# what the test measures — the drain under test is the stdout reader's.
-subprocess.Popen(["sleep", "60"], stderr=subprocess.DEVNULL)
+# Background holder of the inherited pipe under test: it survives the
+# wrapper's exit (the wrapper does not kill its group), keeping that
+# pipe's write side open until the bounded drain kills the process group
+# (or, for a session-escaped holder, the drain-timeout read-side close).
+# The other pipe is released (DEVNULL) so the drain under test is the
+# Bragi-owned reader of the named pipe and its bounded drain (no
+# os/exec copier is involved: both readers are Bragi's own goroutines).
+subprocess.Popen(["sleep", "60"], __HOLDER_DEV__)
 doc = {
     "schema_version": 1,
     "resolver_version": "1",
@@ -64,14 +82,7 @@ doc = {
 print(json.dumps(doc))
 sys.exit(0)
 `
-	if newSession {
-		// Its own session: the wrapper's process-group kill cannot reach
-		// the holder, so only the drain-timeout read-side close can
-		// release the reader.
-		script = strings.Replace(script,
-			`subprocess.Popen(["sleep", "60"], stderr=subprocess.DEVNULL)`,
-			`subprocess.Popen(["sleep", "60"], stderr=subprocess.DEVNULL, start_new_session=True)`, 1)
-	}
+	script = strings.Replace(script, "__HOLDER_DEV__", otherDev, 1)
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatalf("write drain-holder binary: %v", err)
 	}
@@ -88,7 +99,7 @@ func TestRunJobBoundedDrainDoesNotStallOnInheritedStdout(t *testing.T) {
 		t.Skip("process-group drain bound is a unix concept")
 	}
 	dir := t.TempDir()
-	bin := writeDrainHolderJobBinary(t, dir, false)
+	bin := writeDrainHolderJobBinary(t, dir, false, "stdout")
 	proc := NewProcessor(bin, t.TempDir(), "", 1, "{author}/{title}", "info")
 	root := t.TempDir()
 
@@ -125,7 +136,7 @@ func TestRunJobBoundedDrainBoundsSessionEscapedStdoutHolder(t *testing.T) {
 		t.Skip("process-group drain bound is a unix concept")
 	}
 	dir := t.TempDir()
-	bin := writeDrainHolderJobBinary(t, dir, true)
+	bin := writeDrainHolderJobBinary(t, dir, true, "stdout")
 	proc := NewProcessor(bin, t.TempDir(), "", 1, "{author}/{title}", "info")
 	root := t.TempDir()
 
@@ -147,6 +158,44 @@ func TestRunJobBoundedDrainBoundsSessionEscapedStdoutHolder(t *testing.T) {
 	// drain would sit here until the holder's sleep 60 expires.
 	if elapsed > drainTimeout+13*time.Second {
 		t.Fatalf("RunJob took %v; the session-escaped stdout holder is not released at the drain bound (want %v + margin)",
+			elapsed, drainTimeout)
+	}
+}
+
+// TestRunJobBoundedDrainBoundsInheritedStderrHolder pins the bounded drain
+// on the stderr side: a run whose direct child exits while a background
+// descendant still holds the inherited stderr descriptor must return
+// within the drain bound plus margin (the group kill releases the holder),
+// not stall the worker on the inherited fd. The stdout-holder cases exercise
+// the stdout reader only; a regression in the stderr reader's timeout-close
+// path would pass with this case missing.
+func TestRunJobBoundedDrainBoundsInheritedStderrHolder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group drain bound is a unix concept")
+	}
+	dir := t.TempDir()
+	bin := writeDrainHolderJobBinary(t, dir, false, "stderr")
+	proc := NewProcessor(bin, t.TempDir(), "", 1, "{author}/{title}", "info")
+	root := t.TempDir()
+
+	jf := jobFileForRunTest()
+	jf.OutputRoot = root
+	start := time.Now()
+	res, err := proc.RunJob(context.Background(), "drainholderstderr", jf, JobRunOptions{
+		OutputRoot: root,
+		Identity:   EngineIdentity{SchemaVersion: 1, ResolverVersion: "1"},
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("RunJob: %v", err)
+	}
+	if res.PrimaryOutput == "" {
+		t.Fatal("RunJob succeeded but enumerated no audio artifact")
+	}
+	// drainTimeout (2s) plus a generous scheduling margin: an unbounded
+	// drain would sit here until the holder's sleep 60 expires.
+	if elapsed > drainTimeout+13*time.Second {
+		t.Fatalf("RunJob took %v; the inherited stderr holder is not released at the drain bound (want %v + margin)",
 			elapsed, drainTimeout)
 	}
 }
