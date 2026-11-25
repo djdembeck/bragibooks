@@ -66,6 +66,8 @@
 		/** Every book/release request increments this; only the newest may apply. */
 		seq: number;
 		manualPick: boolean;
+		/** Auto-selection via the source ASIN fast path (not title search). */
+		asinPick: boolean;
 		removing: boolean;
 		removingConfirming: boolean;
 		descriptionOpen: boolean;
@@ -285,6 +287,7 @@
 					included: true,
 					seq: 0,
 					manualPick: false,
+					asinPick: false,
 					removing: false,
 					removingConfirming: false,
 					descriptionOpen: false,
@@ -326,6 +329,7 @@
 					candidate.details = { book, release };
 					candidate.selectedReleaseId = release?.id ?? null;
 					candidate.manualPick = false;
+					candidate.asinPick = true;
 					void loadEvidence(candidate);
 					return;
 				}
@@ -1452,8 +1456,9 @@
 				: { kind: 'low', text: 'No close title match' };
 		}
 		if (!isReady(candidate)) return { kind: 'loading', text: 'Loading edition…' };
-		return candidate.manualPick
-			? { kind: 'manual', text: 'Selected manually' }
+		if (candidate.manualPick) return { kind: 'manual', text: 'Selected manually' };
+		return candidate.asinPick
+			? { kind: 'auto', text: 'Selected by source ASIN' }
 			: { kind: 'auto', text: 'Selected by title' };
 	}
 
@@ -1729,7 +1734,7 @@
 					{#if fields.length}<span class="match__explanation-line">Fields differ: {fields.map((field) => evidenceFieldLabels[field]).join(', ')}.</span>{/if}
 					{#if identifiers.some((identifier) => identifier.state === 'conflict')}<span class="match__explanation-line">The source identifier points to a different record.</span>{/if}
 				{:else}
-					<span class="match__explanation-line">{#if badge.identityScope === 'edition'}Source identifier matches this edition.{:else if badge.identityScope === 'book'}Identifies the book, not the edition.{:else if c.manualPick}You chose this record; check its narrator and edition.{:else}Title-based suggestion; check narrator and edition.{/if}</span>
+					<span class="match__explanation-line">{#if badge.identityScope === 'edition'}Source identifier matches this edition.{:else if badge.identityScope === 'book'}Identifies the book, not the edition.{:else if c.manualPick}You chose this record; check its narrator and edition.{:else if c.asinPick}Matched by the source file's ASIN; check narrator and edition.{:else}Title-based suggestion; check narrator and edition.{/if}</span>
 				{/if}
 			</span>
 		</span>

@@ -195,6 +195,7 @@ describe('match engine-preview payload', () => {
 
 describe('match ASIN fast path', () => {
 	let target: HTMLElement;
+	let mountTarget: HTMLElement | null = null;
 	let component: Record<string, any>;
 
 	beforeEach(() => {
@@ -210,6 +211,7 @@ describe('match ASIN fast path', () => {
 	});
 
 	async function mountAndSettle() {
+		mountTarget = target;
 		component = mount(MatchPage, { target });
 		flushSync();
 		// loadPending's async body schedules the autoMatch chain as
@@ -242,6 +244,9 @@ describe('match ASIN fast path', () => {
 		await mountAndSettle();
 		expect(callsWith('/search/by-asin/')).toEqual(['/search/by-asin/B00B5HZGUG']);
 		expect(callsWith('/search?')).toEqual([]);
+		// The auto-selection must explain itself as ASIN-based, not
+		// title-based: the operator sees which evidence produced the pick.
+		expect(mountTarget?.textContent).toContain('Matched by the source file\'s ASIN');
 	});
 
 	it('falls back to title search when the ASIN lookup 404s', async () => {
