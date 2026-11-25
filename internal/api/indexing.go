@@ -1084,11 +1084,15 @@ func (s *IndexService) extractOne(ctx context.Context, r indexRow) *audio.Source
 	// O_NOFOLLOW + resolved-target inside the input root; windows:
 	// regular-file check + the handle's final name inside the root); a
 	// file that escapes now degrades rather than probed-and-persisted.
-	// The probe is then handed the OPENED descriptor's path (unix:
-	// /proc/self/fd/<n>, which resolves to the verified target; windows:
-	// the NT device path resolved from the handle), with the file kept
-	// open for the probe's duration — a symlink swap after the check
-	// cannot repoint the probe.
+	// The probe is then handed a path bound to the OPENED descriptor
+	// (linux: /proc/self/fd/<n>, which resolves to the verified target;
+	// darwin/bsd: the original pathname, once proberPath verifies at
+	// probe time that it is a regular file naming the same filesystem
+	// object as the descriptor; windows: the NT device path resolved
+	// from the handle), with the file kept open for the probe's
+	// duration. Keeping f open does not bind the name on darwin/bsd
+	// (no procfs), so the identity check narrows the swap window to
+	// the few syscalls between the final stat and ffprobe's open.
 	allowDir := r.Type == "dir"
 	probeFile, oerr := openInsideRoot(r.Path, root, allowDir)
 	if oerr != nil {
@@ -1135,10 +1139,12 @@ func (s *IndexService) extractOne(ctx context.Context, r indexRow) *audio.Source
 	}
 	probePath, ok := proberPath(probeFile, r.Path)
 	if !ok {
-		// The descriptor cannot be named (Windows handle resolution
-		// failed): the open-time containment check proved the file is
-		// inside the root, but the probe must not be handed an un-checked
-		// pathname — degrade the row.
+		// The probe's pathname is not bound to the opened descriptor
+		// (windows: the handle's final path cannot be resolved;
+		// darwin/bsd: the pathname no longer names the opened file):
+		// the open-time containment check proved the file is inside the
+		// root, but the probe must not be handed an un-checked pathname
+		// — degrade the row.
 		log.Printf("index: extract %s: %v", r.Path, fmt.Errorf("name pinned descriptor for probe"))
 		return audio.DegradedSourceMetadata("extraction refused: name pinned descriptor for probe")
 	}

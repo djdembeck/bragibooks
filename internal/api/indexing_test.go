@@ -1881,10 +1881,11 @@ func TestListDirectoriesIndexMode(t *testing.T) {
 
 // countingFFprobeStub writes an ffprobe stub that appends each input path
 // to logPath and answers with a valid, complete probe document, so callers
-// can count how many times the scanner probed. On unix the scanner hands
+// can count how many times the scanner probed. On Linux the scanner hands
 // the probe the opened descriptor's /proc/self/fd/<n> path (the
 // symlink-confinement fix), so the stub resolves that back to the real
-// path before logging it.
+// path before logging it. On other unix hosts the probe already receives
+// the real pathname, so the stub logs it as-is.
 func countingFFprobeStub(t *testing.T, logPath string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ffprobe")
