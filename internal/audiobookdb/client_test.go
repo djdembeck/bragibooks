@@ -223,3 +223,26 @@ func TestGetBookByASIN(t *testing.T) {
 		}
 	})
 }
+
+func TestGetBookByASINRejectsInvalidASIN(t *testing.T) {
+	// The client must refuse non-Audible-shaped ASINs before they are
+	// interpolated into the upstream URL; no server is reached at all.
+	t.Setenv("BRAGIBOOKS_ALLOW_LOCAL_ADB", "1")
+	c := NewClient("k", "http://127.0.0.1:0")
+
+	for _, asin := range []string{
+		"",                 // empty
+		"b00b5hzgug",       // lowercase
+		"B00B5HZGU",        // 9 chars
+		"B00B5HZGUGG",      // 11 chars
+		"B00B5HZG%2FG",     // encoded slash
+		"B00B5HZGUG?x=1",   // query char
+		"B00B5HZGUG/extra", // path separator
+		"B00B5HZGUG ",      // trailing space
+		"B00B5HZGUG-",      // non-alphanumeric
+	} {
+		if _, err := c.GetBookByASIN(context.Background(), asin); !errors.Is(err, ErrInvalidASIN) {
+			t.Errorf("GetBookByASIN(%q) err = %v; want ErrInvalidASIN", asin, err)
+		}
+	}
+}

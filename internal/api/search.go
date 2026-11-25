@@ -88,21 +88,32 @@ func (h *Handler) GetReleaseFromDB(w http.ResponseWriter, r *http.Request) {
 
 // GetBookByASIN handles GET /api/search/by-asin/:asin.
 // Resolves a book directly from its Audible ASIN via the upstream
-// external/audible endpoint. Returns 404 when the ASIN is not in the
-// catalog; 502 on other upstream failures.
+// external/audible endpoint. Returns 400 when the ASIN does not have the
+// Audible shape, 404 when the ASIN is not in the catalog, and 502 on
+// other upstream failures.
 func (h *Handler) GetBookByASIN(w http.ResponseWriter, r *http.Request) {
 	asin := chiURLParam(r, "asin")
 	if asin == "" {
 		writeError(w, http.StatusBadRequest, "asin parameter is required")
 		return
 	}
+	// Validate the Audible ASIN shape before it is interpolated into the
+	// upstream URL: a decoded %2F or ? in the parameter would alter the
+	// request structure on a key-carrying request.
+	if !audiobookdb.IsValidASIN(asin) {
+		writeError(w, http.StatusBadRequest, "asin must be 10 uppercase alphanumeric characters")
+		return
+	}
 	book, err := h.getAudiobookDB().GetBookByASIN(r.Context(), asin)
 	if err != nil {
-		if errors.Is(err, audiobookdb.ErrNotFound) {
+		switch {
+		case errors.Is(err, audiobookdb.ErrInvalidASIN):
+			writeError(w, http.StatusBadRequest, "asin must be 10 uppercase alphanumeric characters")
+		case errors.Is(err, audiobookdb.ErrNotFound):
 			writeError(w, http.StatusNotFound, "no catalog record for this ASIN")
-			return
+		default:
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("audiobookdb ASIN lookup: %v", err))
 		}
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("audiobookdb ASIN lookup: %v", err))
 		return
 	}
 	writeJSON(w, http.StatusOK, book)

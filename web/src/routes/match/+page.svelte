@@ -317,12 +317,24 @@
 				? candidate.sourceAsin.value
 				: undefined;
 			if (asin) {
-				const book = await searchByASIN(asin);
+				const hit = await searchByASIN(asin);
 				if (seq !== candidate.seq) return;
-				if (book) {
-					candidate.searchResults = [book];
-					candidate.selectedBookId = book.id;
+				if (hit) {
+					candidate.selectedBookId = hit.id;
 					candidate.details = { book: null, release: null };
+					// The by-asin payload lacks `external` and `series`, which
+					// the save derives the asin and series from. Fetch the
+					// canonical detail (the title path's include set) so the
+					// save carries both; a detail-fetch failure keeps the
+					// already-resolved by-asin book.
+					let book = hit;
+					try {
+						book = await getBookDetail(hit.id);
+					} catch {
+						book = hit;
+					}
+					if (seq !== candidate.seq) return;
+					candidate.searchResults = [book];
 					const releaseId = book.releases?.[0]?.id;
 					const release = releaseId ? await getReleaseDetail(releaseId) : null;
 					if (seq !== candidate.seq) return;
@@ -1718,7 +1730,7 @@
 	{@const kind = statusKind(c)}
 	{#if kind === 'auto' || kind === 'manual'}
 		{@const report = selectedEvidence(c)}
-		{@const badge = evidenceBadge(report, c.manualPick)}
+		{@const badge = evidenceBadge(report, c.manualPick, c.asinPick)}
 		{@const fields = badge.kind === 'conflict' ? conflictingEvidenceFields(report) : []}
 		{@const identifiers = report && (report.sourceRead.status === 'read' || report.sourceRead.status === 'partial') ? report.identifiers : []}
 		<span class="match__explanation" data-evidence-origin={badge.kind}>
@@ -1734,7 +1746,7 @@
 					{#if fields.length}<span class="match__explanation-line">Fields differ: {fields.map((field) => evidenceFieldLabels[field]).join(', ')}.</span>{/if}
 					{#if identifiers.some((identifier) => identifier.state === 'conflict')}<span class="match__explanation-line">The source identifier points to a different record.</span>{/if}
 				{:else}
-					<span class="match__explanation-line">{#if badge.identityScope === 'edition'}Source identifier matches this edition.{:else if badge.identityScope === 'book'}Identifies the book, not the edition.{:else if c.manualPick}You chose this record; check its narrator and edition.{:else if c.asinPick}Matched by the source file's ASIN; check narrator and edition.{:else}Title-based suggestion; check narrator and edition.{/if}</span>
+					<span class="match__explanation-line">{#if badge.identityScope === 'edition'}Source identifier matches this edition.{:else if badge.identityScope === 'book'}{#if c.asinPick && !c.manualPick}Matched by the source file's ASIN. Identifies the book, not the edition.{:else}Identifies the book, not the edition.{/if}{:else if c.manualPick}You chose this record; check its narrator and edition.{:else if c.asinPick}Matched by the source file's ASIN; check narrator and edition.{:else}Title-based suggestion; check narrator and edition.{/if}</span>
 				{/if}
 			</span>
 		</span>

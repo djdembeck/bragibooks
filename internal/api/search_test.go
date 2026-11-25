@@ -64,3 +64,107 @@ func TestGetBookByASINHandler(t *testing.T) {
 		}
 	})
 }
+
+// TestGetBookByASINHandlerRejectsInvalidASIN pins the URL-injection guard:
+// chi decodes %2F and ? in path parameters, so without validation a
+// structurally-altering value would change the upstream request that
+// carries the API key. The handler must answer 400 without reaching
+// upstream.
+func TestGetBookByASINHandlerRejectsInvalidASIN(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"WQQDcMBQ3qUT","title":"The Martian"}`)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("BRAGIBOOKS_ALLOW_LOCAL_ADB", "1")
+
+	h := newTestHandler(t)
+	av := &syncValue{}
+	av.Store(audiobookdb.NewClient("k", srv.URL))
+	h.svc.AudiobookDB = av
+
+	for _, asin := range []string{
+		"b00b5hzgug",     // lowercase
+		"B00B5HZGU",      // 9 chars
+		"B00B5HZGUGG",    // 11 chars
+		"B00B5HZG%2FG",   // decoded slash
+		"B00B5HZGUG?x=1", // decoded query char
+	} {
+		w := httptest.NewRecorder()
+		h.GetBookByASIN(w, asinHandlerRequest(t, asin))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("asin %q: status = %d; want 400: %s", asin, w.Code, w.Body)
+		}
+	}
+	if hits != 0 {
+		t.Errorf("upstream hits = %d; want 0 (validation must happen before the request)", hits)
+	}
+}
+
+// TestGetBookByASINHandlerMapsUpstream5xxTo502 pins the upstream-failure
+// mapping: every non-404 client error (500, 503, …) must surface as a 502
+// Bad Gateway. A 404 would be read by the UI as "not in catalog" and would
+// silently fall back to title search on a transient upstream outage.
+func TestGetBookByASINHandlerMapsUpstream5xxTo502(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/audiobooks/external/audible/FAIL500000":
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/audiobooks/external/audible/FAIL503000":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		fmt.Fprint(w, `{"errors":[{"detail":"upstream failure"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("BRAGIBOOKS_ALLOW_LOCAL_ADB", "1")
+
+	h := newTestHandler(t)
+	av := &syncValue{}
+	av.Store(audiobookdb.NewClient("k", srv.URL))
+	h.svc.AudiobookDB = av
+
+	for _, asin := range []string{"FAIL500000", "FAIL503000"} {
+		t.Run(asin, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			h.GetBookByASIN(w, asinHandlerRequest(t, asin))
+			if w.Code != http.StatusBadGateway {
+				t.Fatalf("upstream %s: status = %d; want 502 (and not 404): %s", asin, w.Code, w.Body)
+			}
+		})
+	}
+}
+
+// TestGetBookByASINHandlerRequiresASIN pins the empty-parameter branch: an
+// empty route parameter answers 400 before any upstream request is made.
+func TestGetBookByASINHandlerRequiresASIN(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"WQQDcMBQ3qUT","title":"The Martian"}`)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("BRAGIBOOKS_ALLOW_LOCAL_ADB", "1")
+
+	h := newTestHandler(t)
+	av := &syncValue{}
+	av.Store(audiobookdb.NewClient("k", srv.URL))
+	h.svc.AudiobookDB = av
+
+	w := httptest.NewRecorder()
+	h.GetBookByASIN(w, asinHandlerRequest(t, ""))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400: %s", w.Code, w.Body)
+	}
+	var errResp map[string]string
+	json.Unmarshal(w.Body.Bytes(), &errResp)
+	if errResp["error"] != "asin parameter is required" {
+		t.Errorf("error = %q; want %q", errResp["error"], "asin parameter is required")
+	}
+	if hits != 0 {
+		t.Errorf("upstream hits = %d; want 0 (empty param must be rejected before the request)", hits)
+	}
+}

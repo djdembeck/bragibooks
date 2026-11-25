@@ -6,26 +6,48 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // release's own subtitle when present, then the book's, then the book's
 // disambiguation. Without the value, a {subtitle} scheme resolves a
 // different name in the preview than in the queued job.
-const { getMock, postMock } = vi.hoisted(() => ({
+const { getMock, postMock, putMock } = vi.hoisted(() => ({
 	getMock: vi.fn(),
-	postMock: vi.fn()
+	postMock: vi.fn(),
+	putMock: vi.fn()
 }));
 
 vi.mock('#lib/api.js', () => ({
 	get: getMock,
 	post: postMock,
-	put: vi.fn(),
+	put: putMock,
 	del: vi.fn(),
 	ApiError: class ApiError extends Error {}
 }));
-vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
+const { gotoMock } = vi.hoisted(() => ({ gotoMock: vi.fn() }));
+vi.mock('$app/navigation', () => ({ goto: gotoMock }));
 // The page composes many presentational components; the payload under test
 // is built in the script and shipped by the preview effect, so everything
 // visual stubs out.
 vi.mock('#lib/components/index.js', () => {
 	const Null = () => null;
+	// Renders a real <button> into Svelte's anchor so the save flow is
+	// triggerable; the `class` prop (match__save) is enough to locate it.
+	const Button = (anchor: ChildNode, props: {
+		class?: string;
+		disabled?: boolean;
+		loading?: boolean;
+		onclick?: (event: MouseEvent) => void;
+		[key: string]: unknown;
+	}) => {
+		const el = document.createElement('button');
+		el.className = props.class ?? '';
+		// A Svelte function component runs once; `disabled`/`loading` change
+		// later, so expose them as live getters reading the props proxy.
+		Object.defineProperty(el, 'disabled', {
+			get: () => props.disabled || props.loading,
+			configurable: true
+		});
+		el.onclick = props.onclick ?? null;
+		anchor.before(el);
+	};
 	return {
-		Button: Null,
+		Button,
 		Alert: Null,
 		ErrorDetail: Null,
 		Skeleton: Null,
@@ -81,7 +103,9 @@ function wireApi(
 	bookOverrides: Record<string, unknown> = {},
 	releaseOverrides: Record<string, unknown> = {},
 	pendingOverrides: Record<string, unknown> = {},
-	byAsin: (asin: string) => Promise<unknown> | unknown = async () => ({ ...BOOK, ...bookOverrides, id: 'asin-book' })
+	byAsin: (asin: string) => Promise<unknown> | unknown = async () => ({ ...BOOK, ...byAsinOverrides }),
+	byAsinOverrides: Record<string, unknown> = {},
+	evidenceOverrides: Record<string, unknown> = {}
 ) {
 	const book = { ...BOOK, ...bookOverrides };
 	const release = { ...RELEASE, ...releaseOverrides };
@@ -138,7 +162,8 @@ function wireApi(
 				selection: { bookId: 'b1', releaseId: 'r1' },
 				origin: 'title',
 				identifiers: [],
-				comparisons: {}
+				comparisons: {},
+				...evidenceOverrides
 			};
 		}
 		return {};
@@ -201,6 +226,8 @@ describe('match ASIN fast path', () => {
 	beforeEach(() => {
 		getMock.mockReset();
 		postMock.mockReset();
+		putMock.mockReset();
+		gotoMock.mockReset();
 		target = document.createElement('div');
 		document.body.appendChild(target);
 	});
@@ -215,21 +242,24 @@ describe('match ASIN fast path', () => {
 		component = mount(MatchPage, { target });
 		flushSync();
 		// loadPending's async body schedules the autoMatch chain as
-		// microtasks; a macrotask boundary (setTimeout) lets them all
-		// complete before the first vi.waitFor poll, so the assertions
-		// see a settled call list rather than a mid-flight snapshot.
+		// microtasks; a macrotask boundary (setTimeout) lets them start
+		// before the first poll.
 		await new Promise<void>((r) => setTimeout(r, 0));
-		await vi.waitFor(
+		// vi.waitUntil (not vi.waitFor): a plain boolean return is treated
+		// as "not yet complete" and retried, so the settle is asserted on
+		// the call list rather than assumed after one timer.
+		await vi.waitUntil(
 			() => {
-				// autoMatch completes when it has either fetched the
-				// release (fast path success) or run the title search.
+				// autoMatch completes when it has fetched the selected
+				// release (fast path success) or the title-path book
+				// detail (title search ran).
 				const paths = getMock.mock.calls.map((c) => c[0] as string);
 				return (
 					paths.some((p) => p.startsWith('/search/releases/')) ||
-					paths.some((p) => p.startsWith('/search?'))
+					paths.some((p) => p.startsWith('/search/books/'))
 				);
 			},
-			{ timeout: 4000 }
+			{ timeout: 4000, interval: 5 }
 		);
 	}
 
@@ -246,7 +276,42 @@ describe('match ASIN fast path', () => {
 		expect(callsWith('/search?')).toEqual([]);
 		// The auto-selection must explain itself as ASIN-based, not
 		// title-based: the operator sees which evidence produced the pick.
-		expect(mountTarget?.textContent).toContain('Matched by the source file\'s ASIN');
+		// The VISIBLE badge button carries the attribution (the hidden
+		// popover does too); the neutral fallback must not win here.
+		const badge = mountTarget?.querySelector('button.match__origin');
+		expect(badge?.textContent).toContain('Selected by source ASIN');
+		expect(badge?.textContent).not.toContain('Title suggestion');
+	});
+
+	it('keeps the ASIN attribution on the badge when the report verifies the book identity', async () => {
+		// The canonical detail fetch verifies the book identity for exactly
+		// the ASIN-resolved case (origin book_id, verified book-scope
+		// identifier). The visible badge must keep the source-ASIN
+		// attribution; the identity label must not replace it.
+		wireApi(
+			{},
+			{},
+			{ source_asin: { status: 'present', value: 'B00B5HZGUG' } },
+			undefined,
+			{ external: [], series: [] },
+			{
+				origin: 'book_id',
+				identifiers: [{ identifier: 'B00B5HZGUG', provenance: 'Source ASIN', state: 'verified', scope: 'book', bookId: 'b1', reason: 'Resolved book matches the source ASIN.' }]
+			}
+		);
+		await mountAndSettle();
+		await vi.waitUntil(
+			() => {
+				const badge = mountTarget?.querySelector('button.match__origin');
+				return (badge?.textContent ?? '').includes('Selected by source ASIN');
+			},
+			{ timeout: 4000, interval: 5 }
+		);
+		const badge = mountTarget?.querySelector('button.match__origin');
+		expect(badge?.textContent).toContain('Selected by source ASIN');
+		expect(badge?.textContent).not.toContain('Exact book ID');
+		// The popover heading keeps the identity scope.
+		expect(mountTarget?.querySelector('button.match__origin + .match__explanation-popover strong')?.textContent).toBe('Exact book ID');
 	});
 
 	it('falls back to title search when the ASIN lookup 404s', async () => {
@@ -283,5 +348,70 @@ describe('match ASIN fast path', () => {
 		await mountAndSettle();
 		expect(callsWith('/search/by-asin/')).toEqual([]);
 		expect(callsWith('/search?')).toHaveLength(1);
+	});
+
+	it('saves the resolved ASIN and series even though the by-asin payload lacks them', async () => {
+		// The by-asin endpoint returns the upstream payload with no
+		// `external` and no `series`; the page must fetch the canonical
+		// detail so the save carries both. The mock detail (the /search/books/
+		// response) is the source of truth here. The by-asin route gets its
+		// own overrides map and stays field-less, so the save assertions can
+		// only be satisfied via the detail fetch.
+		wireApi(
+			{ external: [{ type: 'amazon', id: 'B00B5HZGUG' }], series: [{ name: 'Grim Hollow', id: 's1', position: 2 }] },
+			{},
+			{ source_asin: { status: 'present', value: 'B00B5HZGUG' } },
+			undefined,
+			{ external: [], series: [] }
+		);
+		await mountAndSettle();
+		// The detail fetch (with `external` include) must have run for the
+		// resolved book, so the save payload is repaired, not the raw hit.
+		expect(callsWith('/search/books/')).toEqual(['/search/books/b1?include=releases,people,series,images,external']);
+		const save = mountTarget?.querySelector<HTMLButtonElement>('button.match__save');
+		expect(save).not.toBeNull();
+		save!.click();
+		await vi.waitUntil(
+			() => putMock.mock.calls.length > 0,
+			{ timeout: 4000, interval: 5 }
+		);
+		const body = putMock.mock.calls[0][1] as Record<string, unknown>;
+		expect(body.asin).toBe('B00B5HZGUG');
+		expect(body.series).toBe('Grim Hollow #2');
+	});
+
+	it('keeps the by-ASIN book selected when the canonical detail fetch fails', async () => {
+		// The detail fetch (include set) repairs the by-asin payload with
+		// `external`/`series` for the save. A 500 there must NOT demote the
+		// match to title search: the already-resolved by-asin book stays
+		// selected and the ASIN attribution survives.
+		wireApi(
+			{},
+			{},
+			{ source_asin: { status: 'present', value: 'B00B5HZGUG' } }
+		);
+		const base = getMock.getMockImplementation()!;
+		getMock.mockImplementation(async (path: string) => {
+			if (path.startsWith('/search/books/')) {
+				throw new Error('API 500: internal server error');
+			}
+			return base(path);
+		});
+		await mountAndSettle();
+		// The detail fetch ran (and failed) for the resolved book.
+		expect(callsWith('/search/books/')).toEqual(['/search/books/b1?include=releases,people,series,images,external']);
+		// No title-search fallback: the by-asin hit is kept, not re-derived.
+		expect(callsWith('/search?')).toEqual([]);
+		// The rejected detail fetch must not crash the match: the candidate
+		// is still rendered with the ASIN attribution on the badge.
+		await vi.waitUntil(
+			() => {
+				const badge = mountTarget?.querySelector('button.match__origin');
+				return (badge?.textContent ?? '').includes('Selected by source ASIN');
+			},
+			{ timeout: 4000, interval: 5 }
+		);
+		const badge = mountTarget?.querySelector('button.match__origin');
+		expect(badge?.textContent).toContain('Selected by source ASIN');
 	});
 });
