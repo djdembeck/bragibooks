@@ -9,9 +9,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// FILE_NAME_NORMALIZED (0x1) from winbase.h: resolve to the normalized
-// NT path of the file the handle refers to.
-const fileNameNormalized = 0x1
+// GetFinalPathNameByHandle flags from winbase.h: FILE_NAME_NORMALIZED
+// (0x0) normalizes the returned path, and VOLUME_NAME_DOS (0x0) selects
+// the DOS device path: \\?\C:\… for a local drive, \\?\UNC\host\share…
+// for a share. VOLUME_NAME_GUID (0x1) would return the \\?\Volume{GUID}\…
+// form instead, which cannot be compared against a drive-letter root.
+const finalPathFlags = 0x0
 
 // finalPathByHandle resolves the normalized final path of the file the
 // handle refers to (GetFinalPathNameByHandle). It is the handle-bound
@@ -24,19 +27,19 @@ const fileNameNormalized = 0x1
 // falling back to the un-checked original pathname).
 func finalPathByHandle(f *os.File) (string, bool) {
 	// Two calls: the first sizes the buffer, the second fills it.
-	n, err := windows.GetFinalPathNameByHandle(windows.Handle(f.Fd()), nil, 0, fileNameNormalized)
+	n, err := windows.GetFinalPathNameByHandle(windows.Handle(f.Fd()), nil, 0, finalPathFlags)
 	if err != nil || n == 0 {
 		return "", false
 	}
 	buf := make([]uint16, n)
-	written, err := windows.GetFinalPathNameByHandle(windows.Handle(f.Fd()), &buf[0], n, fileNameNormalized)
+	written, err := windows.GetFinalPathNameByHandle(windows.Handle(f.Fd()), &buf[0], n, finalPathFlags)
 	if err != nil {
 		return "", false
 	}
 	buf = buf[:written]
-	// FILE_NAME_NORMALIZED strips the handle's file name, so the result
-	// points at the same file even when casing differs from the original
-	// pathname (NTFS is case-insensitive).
+	// FILE_NAME_NORMALIZED returns the handle's normalized name, so the
+	// result points at the same file even when casing differs from the
+	// original pathname (NTFS is case-insensitive).
 	s := windows.UTF16ToString(buf)
 	return normalizeFinalPath(s), true
 }

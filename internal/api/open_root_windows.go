@@ -77,18 +77,44 @@ func normalizeDrivePath(s string) string {
 }
 
 // withinResolvedRoot reports whether final lies inside root: both are
-// absolute, root is symlink-resolved, and the comparison is
-// case-insensitive (NTFS is case-insensitive, and a case-only mismatch
-// must not read as "outside").
+// absolute and root is symlink-resolved. Drive letters compare
+// case-insensitively (Windows drive letters are case-insensitive), but
+// the rest of the path compares case-SENSITIVELY: on a case-sensitive
+// volume (CSNTFS) a case-only sibling of the root (C:\books when the
+// root is C:\Books) is a different directory and must not read as
+// inside. UNC roots stay fully case-insensitive: server and share
+// names are case-insensitive.
 func withinResolvedRoot(root, final string) bool {
-	rootL := strings.ToLower(filepath.Clean(root))
-	finalL := strings.ToLower(filepath.Clean(final))
-	if rootL == finalL {
+	root = filepath.Clean(root)
+	final = filepath.Clean(final)
+	if strings.HasPrefix(root, `\\`) || strings.HasPrefix(root, `\\?\UNC\`) {
+		rootL := strings.ToLower(root)
+		finalL := strings.ToLower(final)
+		if rootL == finalL {
+			return true
+		}
+		prefix := rootL
+		if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+			prefix += string(filepath.Separator)
+		}
+		return strings.HasPrefix(finalL, prefix)
+	}
+	if len(root) < 2 || len(final) < 2 {
+		return false
+	}
+	if !strings.EqualFold(root[:2], final[:2]) {
+		return false
+	}
+	// Reuse the root's drive-letter spelling in final so the prefix
+	// check compares the remainder case-sensitively while the drive
+	// letter stays case-insensitive (c:\Books\x is inside C:\Books).
+	folded := root[:2] + final[2:]
+	if folded == root {
 		return true
 	}
-	prefix := rootL
+	prefix := root
 	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
 		prefix += string(filepath.Separator)
 	}
-	return strings.HasPrefix(finalL, prefix)
+	return strings.HasPrefix(folded, prefix)
 }

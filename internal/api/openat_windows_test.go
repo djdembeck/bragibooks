@@ -66,13 +66,46 @@ func TestOpenPartInDirAcceptsPrefixedDrivePath(t *testing.T) {
 	if !os.SameFile(gotInfo, wantInfo) {
 		t.Errorf("openPartInDir = %q; does not identify the fixture %q", f.Name(), part)
 	}
-	// Pin the prefix case when the volume uses it: on a local drive the
-	// part's final path carries the \\?\ spelling that the old
-	// comparison rejected. On a UNC volume the final path is already
-	// \\host\share form, and the same containment path applies.
+	// Pin the DOS device form when the volume uses it: on a local drive
+	// the part's final path must be the drive-letter form \\?\C:\… (the
+	// old comparison rejected the prefix; the old flag returned the
+	// Volume{GUID} form, which the containment check cannot compare
+	// against a drive-letter root at all). On a UNC volume the final
+	// path is already \\host\share form, and the same containment path
+	// applies.
 	if final, ok := finalPathByHandle(f); ok && !strings.HasPrefix(root, `\\`) {
 		if !strings.HasPrefix(final, `\\?\`) {
 			t.Errorf("final path %q lacks the \\?\\ drive prefix on a local volume; the regression case is not pinned", final)
+		}
+		if strings.Contains(final, `Volume{`) {
+			t.Errorf("final path %q is the VOLUME_NAME_GUID form; the containment check expects the DOS drive-letter form", final)
+		}
+	}
+}
+
+// TestWithinResolvedRoot pins the CSNTFS boundary: drive letters are
+// case-insensitive (c:\Books is the same drive as C:\Books), the rest
+// of the path is case-sensitive (C:\books is a different directory on a
+// case-sensitive volume), and UNC roots stay fully case-insensitive.
+func TestWithinResolvedRoot(t *testing.T) {
+	for name, tc := range map[string]struct {
+		root  string
+		final string
+		want  bool
+	}{
+		"in-root":                    {`C:\Books`, `C:\Books\vol1\part.mp3`, true},
+		"root itself":                {`C:\Books`, `C:\Books`, true},
+		"drive letter case differs":  {`C:\Books`, `c:\Books\vol1\part.mp3`, true},
+		"case-only sibling rejected": {`C:\Books`, `C:\books\vol1\part.mp3`, false},
+		"prefix-name sibling":        {`C:\Books`, `C:\Books2\vol1\part.mp3`, false},
+		"other drive":                {`C:\Books`, `D:\Books\vol1\part.mp3`, false},
+		"drive-root in-root":         {`C:\`, `C:\file.mp3`, true},
+		"drive-root other drive":     {`C:\`, `D:\file.mp3`, false},
+		"unc in-root":                {`\\server\share\books`, `\\server\share\books\vol1\part.mp3`, true},
+		"unc case-insensitive":       {`\\Server\Share`, `\\server\share\vol1\part.mp3`, true},
+	} {
+		if got := withinResolvedRoot(tc.root, tc.final); got != tc.want {
+			t.Errorf("withinResolvedRoot(%q, %q) = %v; want %v (%s)", tc.root, tc.final, got, tc.want, name)
 		}
 	}
 }
