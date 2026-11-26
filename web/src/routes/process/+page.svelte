@@ -84,6 +84,17 @@
 	// disabled while one runs, so two clicks can never start two paged
 	// loops that both append the same fetched rows.
 	let batchLoading = $state(false);
+	// Plain (not $state) reentrancy guard: loadBatchRows reads `jobs` (for
+	// its known-ids set) before its first await, so the "Show all" effect
+	// tracks `jobs` and would re-fire on every page append, spawning a
+	// cascading fetch loop. The guard is plain so toggling it does not
+	// re-run the effect; the in-flight loop runs to completion on its own.
+	let batchLoadInFlight = false;
+	// The token whose batch load last completed (plain: not a dependency,
+	// so setting it does not re-fire the effect). The effect starts a load
+	// only for a token not yet loaded, so a success that clears
+	// batchLoadError does not re-fire the effect into a redundant loop.
+	let batchLoadedToken = -1;
 	let queueSequence = 0;
 	let cancelling = $state<Set<string>>(new Set());
 	const cleanupMap = $state(new Map<string, () => void>());
@@ -133,10 +144,16 @@
 			showAllHistory = false;
 			restoreJobs(jobsResp.jobs);
 			batchAggregate = jobsResp.batch ?? null;
-			// The banner's run's rows are always reachable (the Review-
-			// failures action scrolls to one of them); the rest of the
-			// batch is paged in when "Show all" lifts the render bound.
-			void loadBatchRows(batchAggregate, batchLoadToken);
+			// The batch's full rows (output logs) are paged in only when
+			// "Show all" lifts the render bound (the effect below) — the
+			// initial load keeps the aggregate for counts and defers the
+			// per-row log fetches. The Review-failures action fetches its
+			// single target row separately (fetchJobRow). With no past
+			// jobs there is no "Show all" to defer for, so run the fetch
+			// now (a failure still surfaces its retry control).
+			if (pastJobs.length === 0 && batchAggregate) {
+				void loadBatchRows(batchAggregate, batchLoadToken);
+			}
 		});
 		loading = false;
 		// Independent of the queue load: a profile-list failure must not
@@ -276,35 +293,43 @@
 	async function loadBatchRows(agg: BatchAggregate | null, token: number) {
 		if (!agg || agg.job_ids.length === 0) return;
 		batchLoading = true;
-		const knownIds = new Set(jobs.map((job) => job.id));
-		for (let offset = 0; offset < agg.total; offset += BATCH_PAGE_SIZE) {
-			const count = Math.min(BATCH_PAGE_SIZE, agg.total - offset);
-			let resp: JobsListResponse;
-			try {
-				resp = await get<JobsListResponse>(
-					`/jobs?batch_id=${encodeURIComponent(agg.batch_id)}&limit=${count}&offset=${offset}`
-				);
-			} catch {
-				// A reload outlived this fetch: the fresh load owns the
-				// batch rows, so no stale error flag.
-				if (token !== batchLoadToken) return;
-				batchLoadError = true;
-				batchLoading = false;
-				return;
+		batchLoadInFlight = true;
+		try {
+			const knownIds = new Set(jobs.map((job) => job.id));
+			for (let offset = 0; offset < agg.total; offset += BATCH_PAGE_SIZE) {
+				const count = Math.min(BATCH_PAGE_SIZE, agg.total - offset);
+				let resp: JobsListResponse;
+				try {
+					resp = await get<JobsListResponse>(
+						`/jobs?batch_id=${encodeURIComponent(agg.batch_id)}&limit=${count}&offset=${offset}`
+					);
+				} catch {
+					// A reload outlived this fetch: the fresh load owns the
+					// batch rows, so no stale error flag.
+					if (token !== batchLoadToken) return;
+					batchLoadError = true;
+					batchLoading = false;
+					return;
+				}
+				if (token !== batchLoadToken) return; // A reload outlived this fetch.
+				const fresh = resp.jobs.filter((job) => !knownIds.has(job.id));
+				if (fresh.length === 0) continue;
+				// Newest first: the appended rows are older than the recent
+				// window, and "Show all" must reveal them in queue order.
+				jobs = [...jobs, ...fresh.map(jobToItem)].sort((a, b) => b.queueOrder - a.queueOrder);
+				for (const job of fresh) knownIds.add(job.id);
 			}
-			if (token !== batchLoadToken) return; // A reload outlived this fetch.
-			const fresh = resp.jobs.filter((job) => !knownIds.has(job.id));
-			if (fresh.length === 0) continue;
-			// Newest first: the appended rows are older than the recent
-			// window, and "Show all" must reveal them in queue order.
-			jobs = [...jobs, ...fresh.map(jobToItem)].sort((a, b) => b.queueOrder - a.queueOrder);
-			for (const job of fresh) knownIds.add(job.id);
-		}
-		// A stale loop outlived by a reload must not clear the flags a
-		// newer load already set.
-		if (token === batchLoadToken) {
-			batchLoadError = false;
-			batchLoading = false;
+			// A stale loop outlived by a reload must not clear the flags a
+			// newer load already set. Marking the token loaded stops the
+			// effect from re-firing into a redundant loop once the success
+			// clears batchLoadError.
+			if (token === batchLoadToken) {
+				batchLoadError = false;
+				batchLoading = false;
+				batchLoadedToken = token;
+			}
+		} finally {
+			batchLoadInFlight = false;
 		}
 	}
 
@@ -553,6 +578,22 @@
 		if (batchAggregate?.batch_id === batchId && batchAggregate.all_terminal) return;
 		try {
 			const resp = await get<JobsListResponse>('/jobs?limit=1');
+			// An older refresh can outlive a newer run: started when batch
+			// A finished, it stays in flight while start() queues batch B
+			// and clears batchAggregate. Applying A's aggregate then would
+			// reinstate A's completion banner while B runs (and a second
+			// stale response can overwrite B's terminal aggregate). Apply
+			// the response only if the page's newest batch is still the
+			// one this refresh was for.
+			let currentBatchId: string | null = null;
+			let newestSeq = -1;
+			for (const job of jobs) {
+				if (job.batchId && job.queueOrder > newestSeq) {
+					currentBatchId = job.batchId;
+					newestSeq = job.queueOrder;
+				}
+			}
+			if (currentBatchId !== batchId) return;
 			batchAggregate = resp.batch ?? null;
 		} catch {
 			// The next terminal event (or a manual reload) re-fetches.
@@ -710,6 +751,18 @@
 	);
 	let historyDetails = $state<HTMLDetailsElement>();
 	let showAllHistory = $state(false);
+	// Defer the batch's full rows (output logs) until "Show all" lifts the
+	// render bound: the initial load keeps the aggregate for counts and the
+	// rows the recent window already returned; the per-row log fetches only
+	// start when the user asks for the full history. The Review-failures
+	// action fetches its single target row separately (fetchJobRow). With
+	// no past jobs there is no "Show all" to defer for: load() runs the
+	// fetch itself in that case (a failure still surfaces its retry).
+	$effect(() => {
+		if (showAllHistory && batchAggregate && !batchLoadError && !batchLoadInFlight && batchLoadedToken !== batchLoadToken) {
+			void loadBatchRows(batchAggregate, batchLoadToken);
+		}
+	});
 	// The first failed row of the latest run: the banner's "Review" action
 	// expands Recent activity and lands there.
 	const firstFailedJobId = $derived.by(() => {
@@ -741,10 +794,28 @@
 		};
 	});
 
+	/** Fetch one job row by id (the Review-failures action's target), so
+	 *  the row renders even while the batch's full rows are deferred. The
+	 *  row is appended newest-first; the known-ids guard in loadBatchRows
+	 *  drops it later when the full batch pages in. */
+	async function fetchJobRow(id: string) {
+		try {
+			const job = await get<ProcessingJob>(`/jobs/${id}`);
+			if (!jobs.some((j) => j.id === id)) {
+				jobs = [jobToItem(job), ...jobs].sort((a, b) => b.queueOrder - a.queueOrder);
+			}
+		} catch {
+			// The row stays out; the banner's count is still correct.
+		}
+	}
+
 	function reviewFailures() {
 		if (historyDetails) historyDetails.open = true;
 		const id = firstFailedJobId;
 		if (!id) return;
+		// The row may not be in the deferred batch rows: fetch its single
+		// row so the disclosure has a target to land on.
+		void fetchJobRow(id);
 		// The row renders once the disclosure opens; land on it a frame later.
 		// 'smooth' is an animated page move — reduced-motion users get the
 		// jump, not the glide.

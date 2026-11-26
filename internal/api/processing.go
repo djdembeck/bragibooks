@@ -1585,10 +1585,36 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobs := make([]ProcessingJobCreated, 0)
+	// Acceptance is atomic: EVERY book is validated before ANY job is
+	// enqueued. A mid-batch failure used to 500 with the earlier books'
+	// jobs already in the queue (some already running) while the response
+	// carried no job ids — the queue page's error path never discovered
+	// the work that had started. The pre-pass below performs exactly the
+	// checks QueueJob would (input files, unsupported formats, snapshot,
+	// active job) without inserting, so a failing book rejects the whole
+	// request with zero jobs created.
+	type batchItem struct {
+		bookID     int64
+		srcDir     string
+		inputPaths []string
+	}
+	items := make([]batchItem, 0, len(req.BookIDs))
+	queueQue := h.svc.ProcessingSvc.proc.QueueSnapshot()
+	seenBookID := make(map[int64]bool, len(req.BookIDs))
 	for i, bookID := range req.BookIDs {
 		// Use the corresponding src_dir (or wrap around if fewer dirs than books)
 		srcDir := req.SrcDirs[i%len(req.SrcDirs)]
+		if bookID > 0 {
+			if seenBookID[bookID] {
+				// A repeated ID would pass pre-validation (neither occurrence
+				// is queued yet), then hit the active-job guard mid-batch and
+				// return 409 with the first job already accepted. Reject the
+				// whole request before any insert.
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("book %d appears more than once in the batch", bookID))
+				return
+			}
+			seenBookID[bookID] = true
+		}
 
 		// Collect input file paths: a source is either a directory of
 		// audio files (the folder route) or a bare audio file itself.
@@ -1616,12 +1642,45 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		jobID, err := h.svc.ProcessingSvc.QueueJob(r.Context(), bookID, inputPaths, runOpts, batchID)
+		// Same checks QueueJob runs, before any insert: an unsupported
+		// container and a missing snapshot are both per-book rejections
+		// that would otherwise leave the batch half-queued.
+		if unsupported := firstUnsupportedMergePath(inputPaths); unsupported != "" {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("unsupported input format %q: m4b-merge accepts .mp3, .m4a, .m4b only", unsupported))
+			return
+		}
+		if bookID > 0 {
+			captured, err := h.svc.ProcessingSvc.loadSnapshotForQueue(bookID, queueQue)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("load snapshot for queue: %v", err))
+				return
+			}
+			if captured == nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("book %d has no captured snapshot: re-match or re-preview it before processing", bookID))
+				return
+			}
+			if h.svc.ProcessingSvc.hasActiveJobForBook(bookID) {
+				// The book already has a queued/running job: re-queuing
+				// would double-process the same source, so refuse.
+				writeError(w, http.StatusConflict, fmt.Sprintf("book %d already has an active processing job", bookID))
+				return
+			}
+		}
+		items = append(items, batchItem{bookID: bookID, srcDir: srcDir, inputPaths: inputPaths})
+	}
+
+	jobs := make([]ProcessingJobCreated, 0, len(items))
+	for _, item := range items {
+		jobID, err := h.svc.ProcessingSvc.QueueJob(r.Context(), item.bookID, item.inputPaths, runOpts, batchID)
 		switch {
 		case errors.Is(err, errActiveJobForBook):
-			// The book already has a queued/running job: re-queuing would
-			// double-process the same source, so refuse.
-			writeError(w, http.StatusConflict, fmt.Sprintf("book %d already has an active processing job", bookID))
+			// The active-job guard is the advisory fast path in the
+			// pre-pass; the atomic INSERT here is authoritative. A 409
+			// after the pre-pass means a concurrent enqueue won in the
+			// small window between the check and this insert — the batch
+			// is no longer fully atomic (that is the guard's documented
+			// contract, not a hidden-accepted-jobs bug).
+			writeError(w, http.StatusConflict, fmt.Sprintf("book %d already has an active processing job", item.bookID))
 			return
 		case err != nil:
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("queue job: %v", err))
@@ -1630,8 +1689,28 @@ func (h *Handler) StartProcessing(w http.ResponseWriter, r *http.Request) {
 
 		jobs = append(jobs, ProcessingJobCreated{
 			ID:     jobID,
-			BookID: bookID,
+			BookID: item.bookID,
 		})
+	}
+
+	// Close the batch NOW that every job the request will enqueue has been
+	// inserted. The latest-batch aggregate's all_terminal (the completion
+	// banner) is computed over whatever rows currently share this batch_id,
+	// so a read that lands mid-enqueue — early jobs already terminal, the
+	// rest not yet inserted — would otherwise report all_terminal=true with
+	// a PARTIAL total and announce a batch that is not yet whole. Setting
+	// the closure marker last makes a mid-enqueue aggregate in-flight until
+	// the enqueue is complete. A failure here only leaves the marker unset
+	// (the banner stays in-flight a touch longer, then the marker is never
+	// observed for a batch whose rows are all terminal); it does not
+	// affect the jobs, so it is not surfaced as an error.
+	if len(jobs) > 0 {
+		if _, err := h.svc.DB.Exec(
+			"UPDATE processing_jobs SET batch_closed = 1 WHERE batch_id = ?",
+			batchID,
+		); err != nil {
+			log.Printf("close batch %s: %v", batchID, err)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, StartProcessingResponse{
@@ -1873,8 +1952,13 @@ func (h *Handler) GetBookReprocess(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]any{"available": true}
+	// The live global is captured here (for the legacy-row fallback below)
+	// but is NOT what the response ships: the response names the directory
+	// the reprocess lookup actually searches (the run's frozen value), and
+	// that is computed after latestMergeJob.
+	liveCompletedDir := ""
 	if h.svc.Config != nil {
-		resp["completed_dir"] = strings.TrimSpace(h.svc.Config.Config().Directories.CompletedDir)
+		liveCompletedDir = strings.TrimSpace(h.svc.Config.Config().Directories.CompletedDir)
 	}
 
 	args, job, err := h.latestMergeJob(bookID)
@@ -1902,8 +1986,14 @@ func (h *Handler) GetBookReprocess(w http.ResponseWriter, r *http.Request) {
 	// a directory the run never used.
 	completedDir := args.CompletedDir
 	if args.Snapshot == nil && completedDir == "" {
-		completedDir, _ = resp["completed_dir"].(string)
+		completedDir = liveCompletedDir
 	}
+	// The response names the directory THIS lookup searches (the frozen
+	// value, or the live global for a legacy row), not the live global
+	// itself: when the two differ and an input is missing, telling the
+	// operator to restore it in the live directory would not satisfy a
+	// lookup that keeps searching the frozen one.
+	resp["completed_dir"] = completedDir
 	resolved, foundCompleted, foundOriginal, missing := locateInputs(args.SrcPaths, completedDir)
 	found := len(resolved)
 	// The wire contract is an array (possibly empty), never null: the dialog
@@ -2270,8 +2360,13 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 	// idx_processing_jobs_batch_id index (queue order, deduped against
 	// the window).
 	if bookID > 0 && batchID != "" {
+		// queue_seq DESC (not ASC): the book page renders this list as
+		// "Recorded activity, newest first". The recent window is already
+		// newest-first and these rows are the batch rows it no longer
+		// reaches (older), so the appended block must itself be newest-
+		// first — ASC would put the batch's oldest merge after its newest.
 		batchRows, err := h.queryJobs(
-			"SELECT "+jobsColumns+" FROM processing_jobs WHERE batch_id = ? AND book_id = ? ORDER BY queue_seq ASC",
+			"SELECT "+jobsColumns+" FROM processing_jobs WHERE batch_id = ? AND book_id = ? ORDER BY queue_seq DESC",
 			[]any{batchID, bookID},
 		)
 		if err != nil {
@@ -2312,7 +2407,8 @@ SELECT COUNT(*),
        SUM(CASE WHEN status IN ('queued', 'running') THEN 1 ELSE 0 END),
        MIN(COALESCE(started_at, created_at)),
        MAX(completed_at),
-       MAX(queue_seq)
+       MAX(queue_seq),
+       MIN(COALESCE(batch_closed, 0))
 FROM processing_jobs` + where
 	// One read transaction: the count/rollup and the id list must see
 	// the same snapshot. StartProcessing enqueues a batch's jobs
@@ -2328,9 +2424,15 @@ FROM processing_jobs` + where
 	var total, done, failed, cancelled, inFlight int
 	var startedAt, finishedAt sql.NullString
 	var lastSeq int64
+	// closed is 1 only when EVERY row in the batch carries the closure
+	// marker (StartProcessing sets it after its final enqueue). 0 means the
+	// request that created this batch has not finished enqueuing — a
+	// mid-enqueue read — so the batch is not yet whole and must not report
+	// as fully terminal even if the rows present so far are.
+	var closed int
 	if err := tx.QueryRow(query, args...).Scan(
 		&total, &done, &failed, &cancelled, &inFlight,
-		&startedAt, &finishedAt, &lastSeq,
+		&startedAt, &finishedAt, &lastSeq, &closed,
 	); err != nil {
 		return nil, err
 	}
@@ -2370,13 +2472,16 @@ FROM processing_jobs` + where
 	}
 
 	agg := &BatchAggregate{
-		BatchID:     batchID,
-		Total:       total,
-		Done:        done,
-		Failed:      failed,
-		Cancelled:   cancelled,
-		InFlight:    inFlight,
-		AllTerminal: inFlight == 0,
+		BatchID:   batchID,
+		Total:     total,
+		Done:      done,
+		Failed:    failed,
+		Cancelled: cancelled,
+		InFlight:  inFlight,
+		// The closure marker, not just the current rows: a mid-enqueue read
+		// can have every present row terminal (early jobs finished, the rest
+		// not yet inserted) while the batch is not yet whole.
+		AllTerminal: inFlight == 0 && closed == 1,
 		LastSeq:     lastSeq,
 		JobIDs:      jobIDs,
 	}

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bragibooks/bragibooks/internal/audio"
 )
@@ -285,7 +286,14 @@ func jsonChapters(raw string) ([]SnapshotChapter, error) {
 // indistinguishable from "no overrides" on the next load, and the
 // reset-to-catalog action is exactly that deletion.
 func (h *Handler) saveMetadataOverride(o *MetadataOverride) error {
-	if o == nil || overrideIsEmpty(o) {
+	// A nil override is a programming error, not a "delete this book's
+	// overrides" signal: the deletion branch below reads o.BookID, so the
+	// nil guard must be its own rejection, never folded into the empty
+	// check (which would enter the delete branch and dereference nil).
+	if o == nil {
+		return errors.New("save metadata override: nil override")
+	}
+	if overrideIsEmpty(o) {
 		if _, err := h.svc.DB.Exec("DELETE FROM book_metadata_overrides WHERE book_id = ?", o.BookID); err != nil {
 			return fmt.Errorf("delete metadata overrides: %w", err)
 		}
@@ -943,17 +951,23 @@ func (h *Handler) UploadBookMetadataCover(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]string{"cover_file": name})
 }
 
-// isValidJPEG reports whether the file at path is a decodable JPEG image:
-// the asset is served by <img> and staged into the engine as cover art,
-// so a text file named .jpg must not enter the asset store.
+// isValidJPEG reports whether the file at path is a fully decodable JPEG
+// image: the asset is served by <img> and staged into the engine as cover
+// art, so a text file named .jpg must not enter the asset store. A full
+// decode (not DecodeConfig, which reads only the header) is required: a
+// truncated or corrupt JPEG with a valid header would pass a header-only
+// check, be stored as the cover, and fail later in preview/staging,
+// degrading a processing job.
 func isValidJPEG(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
 		return false
 	}
 	defer f.Close()
-	_, _, err = image.DecodeConfig(f)
-	return err == nil
+	if _, _, err := image.Decode(f); err != nil {
+		return false
+	}
+	return true
 }
 
 // overrideChangeSummary names the editor sections the saved draft
@@ -1043,11 +1057,19 @@ const pendingCoverTTL = 24 * time.Hour
 // persists the reference (or the entry expires).
 // reapPendingCovers removes expired entries. The caller must hold
 // pendingCoversMu; calling it from every registry access bounds growth even
-// when uploads never reach a draft save.
+// when uploads never reach a draft save. Expiration deletes the FILE as
+// well as the registry entry: the registry entry alone does not reclaim the
+// disk an admitted caller can reserve by uploading fresh assets and never
+// saving a draft (each is below the per-upload limit, but unbounded in
+// number). The remove is best-effort — a prune sweep (save/reset of the same
+// book) may already have deleted the file, and a missing file is the goal.
 func (s *Services) reapPendingCovers(now time.Time) {
 	for name, exp := range s.pendingCovers {
 		if !now.Before(exp) {
 			delete(s.pendingCovers, name)
+			if s.CoversDir != "" {
+				_ = os.Remove(filepath.Join(s.CoversDir, name))
+			}
 		}
 	}
 }
@@ -1194,16 +1216,19 @@ const (
 // ctx bounds the cover-URL host resolution (a stuck DNS lookup dies on the
 // request clock, not the resolver's).
 func validateMetadataOverride(ctx context.Context, coversDir string, o *MetadataOverride) error {
-	if len(o.Title) > maxOverrideTitleChars {
+	// The limits are CHARACTER limits (the messages say so); len() counts
+	// UTF-8 bytes, so a multi-byte title (e.g. 200 three-byte characters)
+	// would be rejected below the advertised cap. Count runes.
+	if utf8.RuneCountInString(o.Title) > maxOverrideTitleChars {
 		return fmt.Errorf("title is too long (max %d characters)", maxOverrideTitleChars)
 	}
-	if len(o.Subtitle) > maxOverrideSubtitleChars {
+	if utf8.RuneCountInString(o.Subtitle) > maxOverrideSubtitleChars {
 		return fmt.Errorf("subtitle is too long (max %d characters)", maxOverrideSubtitleChars)
 	}
-	if len(o.SeriesName) > maxOverrideSeriesChars || len(o.SeriesPos) > maxOverrideSeriesChars {
+	if utf8.RuneCountInString(o.SeriesName) > maxOverrideSeriesChars || utf8.RuneCountInString(o.SeriesPos) > maxOverrideSeriesChars {
 		return fmt.Errorf("series name/position is too long (max %d characters)", maxOverrideSeriesChars)
 	}
-	if len(o.Description) > maxOverrideDescription {
+	if utf8.RuneCountInString(o.Description) > maxOverrideDescription {
 		return fmt.Errorf("description is too long (max %d characters)", maxOverrideDescription)
 	}
 	if o.Year != nil && (*o.Year < maxOverrideYearLow || *o.Year > maxOverrideYearHigh) {

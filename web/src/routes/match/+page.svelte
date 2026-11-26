@@ -11,7 +11,9 @@
 		AudiobookDBRelease,
 		Settings,
 		SourceASINEvidence,
-		UpdateBookRequest
+		UpdateBookRequest,
+		BookMetadataSnapshot,
+		BookMetadataResponse
 	} from '#lib/types.js';
 	import {
 		extractAsin,
@@ -1184,24 +1186,56 @@
 	// skips the slots that still stand (unchanged payload), and dispatches
 	// the next queued rows.
 	let previewBatchVersion = $state(0);
+	// The server-computed effective metadata (snapshot + overrides) per
+	// local book id, fetched once per book. The preview payload must use
+	// the SAME effective metadata the queue path uses (processing.go
+	// overlays the saved manual overrides before freezing the job); a
+	// catalog-only preview would show the catalog title even though the
+	// job names the file from the override.
+	const effectiveMetaCache = $state<Record<number, BookMetadataSnapshot | null>>({});
+	let effectiveMetaVersion = $state(0);
+	async function ensureEffectiveMeta(bookId: number) {
+		if (bookId in effectiveMetaCache) return;
+		try {
+			const resp = await get<BookMetadataResponse>(`/books/${bookId}/metadata`);
+			effectiveMetaCache[bookId] = resp.effective;
+		} catch {
+			effectiveMetaCache[bookId] = null;
+		}
+		effectiveMetaVersion++;
+	}
 
 	$effect(() => {
 		void previewBatchVersion;
+		void effectiveMetaVersion;
 		const wanted = new Map<number, string>();
 		for (const c of candidates) {
 			if (c.details.book && outputScheme) {
-				wanted.set(
-					c.bookId,
-					JSON.stringify({
-						metadata: captureMetadata(c.details.book, c.details.release),
-						path_format: outputScheme
-					})
-				);
+				const eff = effectiveMetaCache[c.bookId] ?? null;
+				const meta = eff
+					? effectivePreviewMeta(eff, c.details.book, c.details.release)
+					: captureMetadata(c.details.book, c.details.release);
+				wanted.set(c.bookId, JSON.stringify({ metadata: meta, path_format: outputScheme }));
+				if (!(c.bookId in effectiveMetaCache)) {
+					void ensureEffectiveMeta(c.bookId);
+				}
 			}
 		}
 		const dispatched = plan(batch, wanted, PREVIEW_CONCURRENCY);
+		// Pick up the stale-value clears plan made for queued (undispatched)
+		// rows: a settled path for a PREVIOUS edition must not render while
+		// its replacement waits for a free slot (the render cache is cleared
+		// only for dispatched rows, so a payload change under a saturated cap
+		// would leave the old path visible until a slot frees).
+		outputPreviews = { ...batch.previews };
 		for (const d of dispatched) {
-			outputPreviews[d.id] = '';
+			// Back off repeated failures: a persistently failing preview
+			// (the engine is down, the format is invalid for this engine)
+			// must not re-dispatch every 250 ms forever. The delay doubles
+			// with each consecutive failure, capped at 5 s, and resets on a
+			// success (settle clears the failCount).
+			const fails = batch.failCount.get(d.id) ?? 0;
+			const delay = Math.min(250 * 2 ** fails, 5000);
 			setTimeout(async () => {
 				let ok = false;
 				let value = '';
@@ -1219,13 +1253,50 @@
 					// Sync the render state: settled values and pending
 					// slots both live in the module's bookkeeping now.
 					outputPreviews = { ...batch.previews };
-					// Wake the effect so the freed slot advances the
-					// queue (plan() skips the slots that stand).
+				// Wake the effect so the freed slot advances the
+				// queue (plan() skips the slots that stand).
 					previewBatchVersion++;
 				}
-			}, 250);
+			}, delay);
 		}
 	});
+
+	/** The preview payload's metadata: the server-computed EFFECTIVE snapshot
+	 *  (catalog capture + saved manual overrides, the same view the queue
+	 *  path freezes) when available, falling back to the catalog-only
+	 *  capture while the effective fetch is in flight. The effective
+	 *  snapshot's cover/chapters are not preview inputs (the engine preview
+	 *  resolves name tokens only), so the name-bearing fields are taken
+	 *  verbatim; the fallback keeps the preview working before the fetch
+	 *  lands (and when the book has no override row). */
+	function effectivePreviewMeta(
+		eff: BookMetadataSnapshot,
+		book: AudiobookDBBook,
+		release: AudiobookDBRelease | null
+	): Record<string, unknown> {
+		const base = captureMetadata(book, release);
+		// The effective values win for the name-bearing fields the engine
+		// resolves: title, subtitle, people, series, year, genres.
+		if (eff.title) base.title = eff.title;
+		if (eff.subtitle) base.subtitle = eff.subtitle;
+		else delete base.subtitle;
+		if (eff.authors?.length) base.authors = eff.authors;
+		else delete base.authors;
+		if (eff.narrators?.length) base.narrators = eff.narrators;
+		else delete base.narrators;
+		if (eff.series_name) {
+			base.series_name = eff.series_name;
+			base.series_position = eff.series_position;
+		} else {
+			delete base.series_name;
+			delete base.series_position;
+		}
+		if (eff.year) base.year = eff.year;
+		else delete base.year;
+		if (eff.genres?.length) base.genres = eff.genres;
+		else delete base.genres;
+		return base;
+	}
 
 	// Trims the rune set Go's unicode.IsSpace covers (what
 	// strings.TrimSpace in genreTitles, internal/api/snapshot.go,

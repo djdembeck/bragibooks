@@ -14,6 +14,9 @@
 	import { ChevronUp, ChevronDown, Folder, FileAudio, File } from '@lucide/svelte';
 
 	let currentPath = $state('');
+	// Monotonic identity for in-flight directory listings: a response
+	// commits only if it is still the newest request (see fetchListing).
+	let listingSeq = 0;
 	let entries: IndexedDirectoryEntry[] = $state([]);
 	let filtered: IndexedDirectoryEntry[] = $state([]);
 	let settings: Settings | null = $state(null);
@@ -81,21 +84,41 @@
 	// With indexing on, the server answers from the index (fast, with
 	// evidence); the plain filesystem shape is the fallback. Both normalize
 	// into the same entry state, so selection/sort/columns work unchanged.
+	//
+	// Navigation ownership: the live path at FETCH START is the token. A
+	// late response must not commit entries/currentPath when a newer
+	// navigation has since moved the live path (a background re-list of
+	// /in landing after the user opened /in/book would send them back to
+	// the root), so the commit is refused when the token no longer
+	// matches. The INDEX state is a server-global, not a per-navigation
+	// value: it is committed even when the navigation is refused, so a
+	// superseded re-list still refreshes the freshness the banner reads.
 	async function fetchListing(path: string): Promise<void> {
+		// Monotonic request identity: a commit is valid only for the LATEST
+		// request, not merely one whose captured path still matches. Two
+		// navigations started before currentPath changes capture the same
+		// path; if the earlier response lands first it moves currentPath,
+		// and a path-token check would then refuse the LATER (newer)
+		// response too, leaving the user at the older destination.
+		const seq = ++listingSeq;
 		const useIndex = settings?.indexing_enabled === true;
 		if (useIndex) {
 			const response = await get<IndexedDirectoriesResponse>(
 				`/directories?path=${encodeURIComponent(path)}&index=1`
 			);
+			if (response.index !== undefined) indexState = response.index ?? null;
+			if (seq !== listingSeq) return;
 			entries = validEntries(response.entries || []);
 			currentPath = response.path || path;
-			indexState = response.index ?? null;
 			return;
 		}
+		// The filesystem shape has no index state: clear it so a stale
+		// indexed freshness cannot survive a turn of the indexing toggle.
 		const response = await get<DirectoriesResponse>(`/directories?path=${encodeURIComponent(path)}`);
+		indexState = null;
+		if (seq !== listingSeq) return;
 		entries = validEntries(response.entries || []);
 		currentPath = response.path || path;
-		indexState = null;
 	}
 
 	async function initPath() {
@@ -160,15 +183,26 @@
 				if (refreshCancelled) return; // page unmounted
 				const cur = await get<{ state: IndexState }>('/index');
 				const s = cur?.state;
-				// A terminal at a NEWER generation supersedes ours: a root
-				// change queuing a rescan while our scan runs lets its
-				// terminal land under the rescan's generation, after which
-				// our exact generation is never visible again (an exact
-				// equality here would then poll to the 30-minute timeout).
-				if (s && s.generation >= gen &&
+				// Only OUR generation's terminal ends the wait. Accepting a
+				// newer generation's terminal (the prior >= gen) let a root
+				// change queue generation N+1 while our N ran: when N
+				// published its terminal the guard accepted it, the single
+				// re-list ran before N+1 finished, and indexed evidence was
+				// absent until a later visit. A newer generation means the
+				// root moved and a superseding scan is in flight; keep
+				// polling for our terminal (the server publishes it even
+				// when a rescan is queued behind it).
+				if (s && s.generation === gen &&
 					['done', 'truncated', 'interrupted', 'error'].includes(s.status)) {
 					indexState = s;
-					await fetchListing(currentPath);
+					// Re-list the directory the user is on NOW: the path
+					// is captured immediately before the fetch (navigation
+					// ownership), and commitListing re-verifies it before
+					// committing — a navigation that lands in the meantime
+					// owns the current listing, so the late response is
+					// refused.
+					const reListPath = currentPath;
+					await fetchListing(reListPath);
 					return;
 				}
 			}

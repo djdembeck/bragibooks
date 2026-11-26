@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -504,6 +505,16 @@ func TestMetadataOverrideWriteURLCover(t *testing.T) {
 		return nil, fmt.Errorf("no address for %s", host)
 	}
 	t.Cleanup(func() { lookupCoverHost = oldLookup })
+	// Stub the pinned dial so the fetch fails at the connection, not on the
+	// luck of a live address being (un)reachable: the test is offline and
+	// deterministic, and the job degrades to "clear" (the fetch-failure
+	// path). The success path (a local staged file) is the same code branch
+	// the override-asset test already covers.
+	oldDial := coverDialContext
+	coverDialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
+		return nil, fmt.Errorf("connection refused")
+	}
+	t.Cleanup(func() { coverDialContext = oldDial })
 
 	h, svc := newTestJobsHandler(t)
 	db := h.svc.DB
@@ -545,10 +556,9 @@ func TestMetadataOverrideWriteURLCover(t *testing.T) {
 	// cover) or degrades to "clear". The ENGINE JOB must never carry the
 	// raw URL: the engine would re-resolve the host over live DNS, and a
 	// name that passed the save-time guard can rebind to a private address
-	// by run time. The stubbed host (203.0.113.10, TEST-NET) is
-	// unroutable, so the fetch fails and the job degrades — the key
-	// contract is that the write_url form is gone from the engine
-	// boundary.
+	// by run time. The dial is stubbed to refuse, so the fetch fails and
+	// the job degrades to "clear" — the key contract is that the write_url
+	// form is gone from the engine boundary.
 	jf, _, err := buildEngineJob(context.Background(), args, id, args.Snapshot.Snapshot, t.TempDir(), args.OutputScheme)
 	if err != nil {
 		t.Fatalf("buildEngineJob: %v", err)

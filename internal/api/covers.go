@@ -1,9 +1,14 @@
 package api
 
 import (
+	"context"
+	"fmt"
 	"net/http"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // CoverHandler serves the extracted source cover art kept in dir.
@@ -70,4 +75,53 @@ func allDigitsLen(s string) bool {
 		}
 	}
 	return true
+}
+
+// coverPreviewTimeout bounds a single preview fetch: the preview is a
+// decorative thumbnail, so it must not hold the request (or the pinned
+// connection) for as long as a full cover download would.
+const coverPreviewTimeout = 10 * time.Second
+
+// CoverPreviewHandler serves a draft cover URL through the SAME validated
+// fetch path the save/run paths use (public-HTTPS guard re-asserted on
+// every redirect hop, dialing only the validated address) into a temp
+// file, then serves THAT file. The editor's <img> must never load the
+// raw URL directly: a saved external URL would then be resolved and
+// followed by the browser independently of the server's destination and
+// redirect checks, letting a destination reachable from the operator's
+// network be contacted on page load. Mount it at /covers/preview,
+// behind the same auth as the rest of /covers (an <img> cannot attach a
+// bearer header, so it rides the no-key loopback/LAN fallback).
+func CoverPreviewHandler(h *Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw := strings.TrimSpace(r.URL.Query().Get("url"))
+		if raw == "" {
+			http.Error(w, "url parameter is required", http.StatusBadRequest)
+			return
+		}
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			http.Error(w, "invalid cover URL", http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), coverPreviewTimeout)
+		defer cancel()
+		tmp, err := os.CreateTemp("", "bragi-cover-preview-*")
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		tmpPath := tmp.Name()
+		tmp.Close()
+		defer os.Remove(tmpPath)
+		if err := downloadCoverFile(ctx, raw, tmpPath); err != nil {
+			http.Error(w, fmt.Sprintf("cover preview unavailable: %s", redactCoverURL(raw)), http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		// The preview is a per-request fetch of a draft URL: no caching,
+		// so an edited draft always re-renders from the current value.
+		w.Header().Set("Cache-Control", "no-store")
+		http.ServeFile(w, r, tmpPath)
+	})
 }

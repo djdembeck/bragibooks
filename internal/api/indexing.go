@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -157,7 +159,10 @@ func (s *IndexService) RequestScan() IndexStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	root := canonicalRoot(s.cfg.Config().Directories.InputDir)
+	// Resolved form: the coalescing comparison below must match the root
+	// the scan worker actually targets (resolveScanRoot), so a symlink
+	// retarget queues a rescan instead of coalescing into the stale root.
+	root := resolvedRoot(s.cfg.Config().Directories.InputDir)
 	switch {
 	case s.last.Status != "running" && s.last.Status != "queued":
 		// Idle: accept a fresh scan.
@@ -362,12 +367,11 @@ func (s *IndexService) scan(ctx context.Context) {
 	// a same-root refresh landing while the rescan runs would miss the
 	// "running on the same root" coalesce and queue a full extra
 	// generation. Setting it here, under the same lock as the running
-	// status, closes that gap for the whole walk. It stores the LEXICAL
-	// canonical form, not the symlink-resolved scan root: RequestScan
-	// compares activeRoot against canonicalRoot of the configured InputDir,
-	// so a resolved form would never match for a symlinked dir and every
-	// refresh during the walk would miss the coalesce.
-	s.activeRoot = canonicalRoot(s.cfg.Config().Directories.InputDir)
+	// status, closes that gap for the whole walk. It stores the RESOLVED
+	// form (the root the scan worker targets), matching RequestScan's
+	// resolvedRoot comparison: a symlinked dir compares by its resolved
+	// target, so a retarget during the walk queues a rescan.
+	s.activeRoot = resolvedRoot(s.cfg.Config().Directories.InputDir)
 	s.persistLocked()
 	s.mu.Unlock()
 
@@ -626,13 +630,22 @@ func (s *IndexService) setTerminal(gen int64, status, detail string, entries int
 	s.last.Total = 0
 	s.last.Added = 0
 	s.activeRoot = ""
-	// A clean terminal on this root means its table is fully written:
-	// release the partial-write mark for THIS root only (an error
-	// terminal must NOT clear it — that is the partially-written state
-	// the guard exists to keep out of the listings; a mark on an
-	// unrelated root stays). The clear runs in place: this holds s.mu,
-	// and the persistLocked below writes the released mark.
-	if status == "done" || status == "truncated" {
+	// A CLEAN terminal on this root means its table is fully written:
+	// release the partial-write mark for THIS root only (an error terminal
+	// must NOT clear it — that is the partially-written state the guard
+	// exists to keep out of the listings; a mark on an unrelated root
+	// stays). The clear runs in place: this holds s.mu, and the
+	// persistLocked below writes the released mark.
+	//
+	// "truncated" is NOT a clean terminal: the scan stopped at the entry or
+	// depth cap, so directories beyond the cutoff have NO rows in the
+	// table. Releasing the mark for a truncated scan would make
+	// listIndexedChildren serve that incomplete table as a complete
+	// listing (zero rows for a real directory the walk never reached),
+	// hiding files the operator can reach from the filesystem. Keep the
+	// mark on a truncated root so listings fall back to the filesystem
+	// until a scan completes the whole root.
+	if status == "done" {
 		out := s.writeFailedRoots[:0]
 		for _, r := range s.writeFailedRoots {
 			if r != root {
@@ -644,81 +657,229 @@ func (s *IndexService) setTerminal(gen int64, status, detail string, entries int
 	s.persistLocked()
 }
 
-// walk collects the index rows for the tree under root, applying the
-// depth/entry caps and skipping dotfiles (matching readDirectory).
-func (s *IndexService) walk(ctx context.Context, root string) (rows []indexRow, truncated bool, detail string, cancelled bool) {
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
-		if ctx.Err() != nil {
-			cancelled = true
-			return filepath.SkipAll
+// indexChildrenRows returns the source_index rows whose path is a child of
+// stored, SERIALIZED with the partial-write guard: the guard check AND the
+// query run under one s.mu hold. The old shape checked the in-memory guard
+// under the mutex, released it, and only then queried the table — so a
+// scanner that persisted the guard and committed a 500-row write batch in
+// that window made the listing serve a partially updated table as a
+// complete indexed response instead of falling back to the filesystem.
+// Holding the mutex across the query closes that window: a listing either
+// sees the guard (and falls back) or runs its query in a gap the scanner
+// cannot have used to mark-and-write. ok is false when the root is guarded
+// (the caller falls back to the filesystem).
+func (s *IndexService) indexChildrenRows(stored, root string) (rows []indexChildRow, ok bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.writeFailedRoots {
+		if r == root {
+			return nil, false, nil
 		}
-		if walkErr != nil {
-			truncated = true
-			detail = fmt.Sprintf("walk error: %v", walkErr)
-			return filepath.SkipAll
-		}
-		depth, _ := filepath.Rel(root, p)
-		if depth == "." {
-			return nil // root itself
-		}
-		if strings.Count(depth, string(os.PathSeparator))+1 > indexMaxDepth {
-			if !truncated {
-				truncated = true
-				detail = fmt.Sprintf("depth cap %d exceeded", indexMaxDepth)
-			}
-			// Stop descending into over-depth directories: a plain nil
-			// would keep walking their (unindexed) contents forever.
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if strings.HasPrefix(d.Name(), ".") {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if len(rows) >= indexMaxEntries {
-			truncated = true
-			detail = fmt.Sprintf("entry cap %d exceeded", indexMaxEntries)
-			return filepath.SkipAll
-		}
-		// A file-symlink named like audio is walked as a regular file and
-		// its TARGET is probed (ffprobe follows the link) and extracted:
-		// a link leaving the input root would probe, enumerate, and
-		// persist metadata for a location the index does not cover. Skip
-		// it (d.Type() is the LSTAT mode; directory symlinks are not
-		// followed by WalkDir, so only file-type rows can be links).
-		if d.Type()&os.ModeSymlink != 0 {
-			resolved, rerr := filepath.EvalSymlinks(p)
-			if rerr != nil {
-				return nil // dangling link: nothing to probe
-			}
-			if rel, rerr := filepath.Rel(root, resolved); rerr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-				return nil // link escapes the input root
-			}
-		}
-		row := indexRow{Path: p, Name: d.Name(), Type: "file"}
-		if d.IsDir() {
-			row.Type = "dir"
-		}
-		if info, err := d.Info(); err == nil {
-			row.Size = info.Size()
-			// Nanosecond precision: a same-size rewrite within the same
-			// second must still be detected as a change. A directory's
-			// modtime moves on entry add/remove — the signal classify
-			// relies on — so dir rows carry real signals, not zeros.
-			row.ModTime = info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z")
-		}
-		rows = append(rows, row)
-		return nil
-	})
+	}
+	q := fmt.Sprintf(`SELECT path, name, type, size, modtime, payload FROM source_index WHERE path LIKE ? ESCAPE '\'`)
+	dbRows, err := s.db.Query(q, likeEscape(indexChildPrefix(stored))+"%")
 	if err != nil {
+		return nil, false, err
+	}
+	defer dbRows.Close()
+	for dbRows.Next() {
+		var (
+			path, name, typ, payload string
+			size                     int64
+			modtime                  string
+		)
+		if err := dbRows.Scan(&path, &name, &typ, &size, &modtime, &payload); err != nil {
+			return nil, false, err
+		}
+		rows = append(rows, indexChildRow{path: path, name: name, typ: typ, size: size, modtime: modtime, payload: payload})
+	}
+	return rows, true, dbRows.Err()
+}
+
+// indexChildRow is one source_index row as read by indexChildrenRows.
+type indexChildRow struct {
+	path    string
+	name    string
+	typ     string
+	size    int64
+	modtime string
+	payload string
+}
+
+// walk collects the index rows for the tree under root, applying the
+// depth/entry caps and skipping dotfiles (matching readDirectory). It is a
+// MANUAL bounded walk, not filepath.WalkDir: WalkDir reads and sorts an
+// ENTIRE directory before invoking the callback, so the indexMaxEntries
+// check inside the callback cannot bound the memory (or the sort) of a
+// single very large directory — a 1M-entry directory would exhaust memory
+// during the startup scan despite the 20,000-entry cap. Reading each
+// directory in bounded chunks (indexReadDirChunk) caps the per-directory
+// allocation, and the entry cap stops the walk once the table is full.
+func (s *IndexService) walk(ctx context.Context, root string) (rows []indexRow, truncated bool, detail string, cancelled bool) {
+	st := &walkState{
+		ctx:       ctx,
+		root:      root,
+		rows:      &rows,
+		truncated: &truncated,
+		detail:    &detail,
+		cancelled: &cancelled,
+	}
+	if err := st.readDir(root, 0); err != nil {
 		truncated = true
 		detail = fmt.Sprintf("walk error: %v", err)
 	}
 	return rows, truncated, detail, cancelled
+}
+
+// indexReadDirChunk bounds how many entries a single directory read is
+// allowed to materialize: the manual walk reads a directory in chunks of
+// this size so a very large directory cannot exhaust memory in one ReadDir.
+const indexReadDirChunk = 4096
+
+// walkState carries the walk's running state through the manual recursion.
+type walkState struct {
+	ctx       context.Context
+	root      string
+	rows      *[]indexRow
+	truncated *bool
+	detail    *string
+	cancelled *bool
+	// capped is set by addRow once the entry cap is reached; readDir checks
+	// it to stop iterating and recursing, so the walk does not traverse far
+	// beyond the bound (marking truncation alone does not stop the descent).
+	capped bool
+}
+
+// markTruncated records the first truncation reason.
+func (st *walkState) markTruncated(reason string) {
+	if !*st.truncated {
+		*st.truncated = true
+		*st.detail = reason
+	}
+}
+
+// readDir walks the directory at dir (at the given depth below root),
+// reading it in bounded chunks. A directory whose entries exceed the chunk
+// size is read in slices: the excess is recorded as truncation (the rows
+// past the cap are dropped, matching the entry-cap behavior) but the read
+// stays bounded. Returns a read error (the caller marks it truncated).
+func (st *walkState) readDir(dir string, depth int) error {
+	if st.ctx.Err() != nil {
+		*st.cancelled = true
+		return nil
+	}
+	// f.ReadDir(n) reads AT MOST n entries and returns (the key difference
+	// from os.ReadDir, which materializes the WHOLE directory before
+	// returning): a single very large directory therefore allocates at
+	// most n entries, not its full listing. A directory with more than n
+	// entries is truncated (the excess is dropped, like the entry cap);
+	// the entry cap stops the whole walk long before a second read of the
+	// same directory would be needed.
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	entries, rerr := f.ReadDir(indexReadDirChunk)
+	if rerr != nil && !errors.Is(rerr, io.EOF) {
+		return rerr
+	}
+	if len(entries) == indexReadDirChunk {
+		// The read hit the cap: the directory may have more entries than
+		// we walked. Record truncation (the drop is bounded, the read was
+		// bounded — the two caps are the same n).
+		if more, _ := f.ReadDir(1); len(more) > 0 {
+			st.markTruncated(fmt.Sprintf("directory %s has more than %d entries", dir, indexReadDirChunk))
+		}
+	}
+	for _, d := range entries {
+		if st.capped {
+			// The entry cap was reached by an earlier row: stop iterating
+			// AND recursing so the walk does not descend into child
+			// directories long after the table is full.
+			return nil
+		}
+		if st.ctx.Err() != nil {
+			*st.cancelled = true
+			return nil
+		}
+		name := d.Name()
+		// Depth is checked BEFORE the dotfile test, matching the original
+		// WalkDir callback (depth → dotfile → entry-cap): an over-depth
+		// entry is skipped (and recorded as truncation) before its name is
+		// even looked at, so over-depth dotfiles count toward truncation.
+		if depth+1 > indexMaxDepth {
+			st.markTruncated(fmt.Sprintf("depth cap %d exceeded", indexMaxDepth))
+			continue
+		}
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		p := filepath.Join(dir, name)
+		if d.IsDir() {
+			// A real directory: record it, then descend. Directory
+			// SYMLINKS are not followed (WalkDir parity): d.IsDir() is the
+			// Lstat type, so a symlink to a directory is false here and is
+			// handled as a file-symlink row below (or skipped if it escapes
+			// the root).
+			st.addRow(p, name, "dir", d)
+			if err := st.readDir(p, depth+1); err != nil {
+				return err
+			}
+			continue
+		}
+		// A file-symlink named like audio is walked as a regular file and
+		// its TARGET is probed (ffprobe follows the link) and extracted: a
+		// link leaving the input root would probe, enumerate, and persist
+		// metadata for a location the index does not cover. Skip it
+		// (d.Type() is the LSTAT mode).
+		if d.Type()&os.ModeSymlink != 0 {
+			resolved, rerr := filepath.EvalSymlinks(p)
+			if rerr != nil {
+				continue // dangling link: nothing to probe
+			}
+			if rel, rerr := filepath.Rel(st.root, resolved); rerr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+				continue // link escapes the input root
+			}
+		}
+		st.addRow(p, name, "file", d)
+	}
+	return nil
+}
+
+// addRow appends an index row, enforcing the entry cap (a full table stops
+// the walk by marking truncation; the caller's next iteration sees it).
+func (st *walkState) addRow(p, name, typ string, d fs.DirEntry) {
+	if len(*st.rows) >= indexMaxEntries {
+		st.markTruncated(fmt.Sprintf("entry cap %d exceeded", indexMaxEntries))
+		st.capped = true
+		return
+	}
+	row := indexRow{Path: p, Name: name, Type: typ}
+	var info fs.FileInfo
+	if d.Type()&os.ModeSymlink != 0 {
+		// A file-symlink row is PROBED and EXTRACTED from its TARGET
+		// (ffprobe follows the link). Its change signals must therefore
+		// be the TARGET's, not the link's own: d.Info() on a DirEntry is
+		// an LSTAT (the link's own size is its target-path length, and its
+		// mtime moves only when the link is recreated), so a target edit
+		// that preserved the link's mtime — or a size-preserving rewrite —
+		// would leave the stored (complete) snapshot classified as
+		// unchanged on the next refresh, and the stale ASIN evidence would
+		// be served. os.Stat follows the link, matching what extract sees.
+		info, _ = os.Stat(p)
+	} else if info, _ = d.Info(); info == nil {
+		info = nil
+	}
+	if info != nil {
+		row.Size = info.Size()
+		// Nanosecond precision: a same-size rewrite within the same
+		// second must still be detected as a change. A directory's
+		// modtime moves on entry add/remove — the signal classify relies
+		// on — so dir rows carry real signals, not zeros.
+		row.ModTime = info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z")
+	}
+	*st.rows = append(*st.rows, row)
 }
 
 // storeRoot returns the persisted index root and whether it differs from
@@ -1378,6 +1539,24 @@ func canonicalRoot(p string) string {
 	return abs
 }
 
+// resolvedRoot is canonicalRoot with symlinks resolved — the SAME form the
+// scan worker targets (resolveScanRoot EvalSymlinks the canonical root).
+// RequestScan's coalescing comparison must use this form, not the lexical
+// canonicalRoot: a symlink used as the InputDir that is retargeted while a
+// scan is running keeps its lexical string unchanged, so a lexical
+// comparison would take the "same root" coalescing branch and leave the
+// new target unindexed until another refresh. Resolving makes the retarget
+// change the compared value and queue a rescan. Falls back to the lexical
+// form when the root cannot be resolved (the worker's resolveScanRoot would
+// then find it missing and scan nothing, so the value is not load-bearing).
+func resolvedRoot(p string) string {
+	c := canonicalRoot(p)
+	if r, err := filepath.EvalSymlinks(c); err == nil {
+		return r
+	}
+	return c
+}
+
 // indexChildPrefix is the LIKE prefix for a directory's children:
 // dir + separator, without doubling at the filesystem root ("//" never)
 // or a Windows volume root ("D:////" never). A volume root canonicalizes
@@ -1527,27 +1706,24 @@ func (h *Handler) listIndexedChildren(dir string) ([]IndexedDirectoryEntry, bool
 	// depleted it) left the table partially written (bounded batches
 	// commit independently): missing new paths and stale evidence for
 	// the rest. Serve the filesystem until a clean scan completes on
-	// every marked root.
-	if h.svc.IndexSvc.writeFailedRootContains(root) {
-		return nil, false, nil // partial table: fall back to the filesystem
-	}
-	q := fmt.Sprintf(`SELECT path, name, type, size, modtime, payload FROM source_index WHERE path LIKE ? ESCAPE '\'`)
-	rows, err := h.svc.DB.Query(q, likeEscape(indexChildPrefix(stored))+"%")
+	// every marked root. The guard check AND the query run under one lock
+	// (indexChildrenRows), so a scanner cannot mark-and-write between the
+	// check and the read and hand back a partial table.
+	indexRows, ok, err := h.svc.IndexSvc.indexChildrenRows(stored, root)
 	if err != nil {
 		return nil, false, err
 	}
-	defer rows.Close()
+	if !ok {
+		return nil, false, nil // partial table: fall back to the filesystem
+	}
 	var out []IndexedDirectoryEntry
 	decodeFail := 0
-	for rows.Next() {
+	for _, row := range indexRows {
 		var (
-			path, name, typ, payload string
-			size                     int64
-			modtime                  string
+			path, name, typ, payload = row.path, row.name, row.typ, row.payload
+			size                     = row.size
+			modtime                  = row.modtime
 		)
-		if err := rows.Scan(&path, &name, &typ, &size, &modtime, &payload); err != nil {
-			return nil, false, err
-		}
 		if !indexImmediateChild(stored, path) {
 			continue
 		}
@@ -1568,12 +1744,9 @@ func (h *Handler) listIndexedChildren(dir string) ([]IndexedDirectoryEntry, bool
 		ie.Evidence = ev
 		out = append(out, ie)
 	}
-	// A late read error reads as "the directory has only these rows": a
-	// partially read table served as a complete listing hides entries from
-	// the operator. Propagate it like the sibling listing paths do.
-	if err := rows.Err(); err != nil {
-		return nil, false, err
-	}
+	// (A late read error is already propagated by indexChildrenRows, which
+	// returns dbRows.Err(); a partial read must not be served as a
+	// complete listing.)
 	if decodeFail > 0 {
 		log.Printf("index: %d entries with undecodable payloads in %s", decodeFail, dir)
 	}

@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/bragibooks/bragibooks/internal/audio"
@@ -444,6 +445,21 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			// server's cwd the same way the launch will. The verified
 			// capabilities are retained: step 3 publishes them together
 			// with the binary swap (no second probe after the swap).
+			//
+			// The probe EXECUTES the path: a failing version check, an
+			// incompatible format, or a failed save cannot protect against
+			// that execution. Restrict the candidate to an absolute path
+			// that is a regular file before the probe runs — a relative
+			// path (resolved against the server's cwd) or a non-regular
+			// file (directory, device) is not a valid engine binary.
+			if !filepath.IsAbs(*req.M4bMergeBinary) {
+				writeError(w, http.StatusBadRequest, "engine binary must be an absolute path")
+				return
+			}
+			if fi, serr := os.Stat(*req.M4bMergeBinary); serr != nil || !fi.Mode().IsRegular() {
+				writeError(w, http.StatusBadRequest, "engine binary is not a regular file: "+*req.M4bMergeBinary)
+				return
+			}
 			caps, err := h.svc.Processor.CheckCapabilitiesFor(r.Context(), *req.M4bMergeBinary)
 			if err != nil {
 				writeError(w, http.StatusBadRequest, "engine check failed for "+*req.M4bMergeBinary+": "+err.Error())
@@ -603,18 +619,18 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// A swapped engine binary means a new protocol surface: the
 	// capabilities stored for the previous binary are stale, and the
 	// Settings picker + every save-time format validation render from
-	// them. Publish the pre-save-verified document and the token registry
-	// BEFORE the binary swap below: a reader then pairs either the complete
-	// old state (old binary + old capabilities) or the new capabilities
-	// with the old binary — never the new binary with the previous
-	// binary's capabilities. The latter pairing would record a stale
-	// engine identity at queue time that the new binary's run cannot match;
-	// the former fails closed and recovers by re-queue: a job captured
-	// under the old identity that runs on the new binary trips the
-	// identity check, errors with a re-preview/re-queue instruction, and
-	// the re-queued job captures the new identity.
+	// them. The capabilities AND the binary must publish under ONE
+	// processor lock: a queue in the interval between two separate
+	// publishes would freeze the NEW engine identity (from the
+	// capabilities) with the OLD binary (the snapshot's Binary), and a
+	// worker that runs before the binary half lands trips the pre-launch
+	// identity gate. ApplyConfigAndSelectionWithCapabilities sets both at
+	// once, so every reader pairs a matching (identity, binary). The
+	// token registry refresh and the invalid-profile re-derivation run
+	// after the processor publish: they are read-side conveniences for
+	// the Settings page, not part of the job's frozen identity.
 	if newBinaryCaps != nil {
-		h.svc.Processor.StoreCapabilities(newBinaryCaps)
+		h.svc.Processor.ApplyConfigAndSelectionWithCapabilities(h.svc.Config.Config(), newBinaryCaps)
 		tokenNames := make([]string, 0, len(newBinaryCaps.PathTokens))
 		for _, t := range newBinaryCaps.PathTokens {
 			tokenNames = append(tokenNames, t.Name)
@@ -626,13 +642,14 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		// list against the new registry so the Settings page tracks the
 		// live engine, not the boot-time verdict.
 		refreshInvalidProfiles(h.svc.DB)
+	} else {
+		// No binary swap: the mutable settings AND the write selection
+		// refresh under ONE processor lock: the save changes both, and a
+		// queue snapshot taken between two separate applies would freeze
+		// a mixed generation into the job args. Queued jobs keep their
+		// frozen policy; new jobs pick up the complete saved state.
+		h.svc.Processor.ApplyConfigAndSelection(h.svc.Config.Config())
 	}
-	// The mutable settings AND the write selection refresh under ONE
-	// processor lock: the save changes both, and a queue snapshot taken
-	// between two separate applies would freeze a mixed generation into
-	// the job args. Queued jobs keep their frozen policy; new jobs pick
-	// up the complete saved state.
-	h.svc.Processor.ApplyConfigAndSelection(h.svc.Config.Config())
 	h.svc.AudiobookDB.Store(audiobookdb.NewClient(live.APIKey.APIKey, live.APIKey.BaseURL))
 
 	// Scan trigger: turning the index on, or re-pointing the input root

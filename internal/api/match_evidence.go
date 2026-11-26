@@ -716,31 +716,41 @@ func compareDates(sourceValue, selectedValue, provenance string) models.FieldCom
 	if source.year != catalog.year {
 		return comparisonDifferent(sourceValue, selectedValue, provenance, "Release years differ.")
 	}
+	// Match at the SAME precision: a year-only source date matches only a
+	// year-only catalog date (and so on for month/day). A precision
+	// MISMATCH is not_comparable, not a match: a year-only "2020" and a
+	// day-precise "2020-05-10" agree on the year, but the source carries no
+	// month/day evidence, so the dates are not comparable at the precision
+	// the source asserts. Within one precision, any component disagreement
+	// is a difference.
+	precision := "year"
 	if source.hasMonth && catalog.hasMonth {
 		if source.month != catalog.month {
 			return comparisonDifferent(sourceValue, selectedValue, provenance, "Release months differ.")
 		}
+		precision = "month"
 		if source.hasDay && catalog.hasDay {
 			if source.day != catalog.day {
 				return comparisonDifferent(sourceValue, selectedValue, provenance, "Release dates differ.")
 			}
-			return comparisonMatch(sourceValue, selectedValue, provenance, "Same release date.")
+			precision = "day"
 		}
+	}
+	if (source.hasDay && !catalog.hasDay) || (!source.hasDay && catalog.hasDay) ||
+		(source.hasMonth && !catalog.hasMonth) || (!source.hasMonth && catalog.hasMonth) {
 		return models.FieldComparison{
 			State:      models.ComparisonNotComparable,
-			Source:     new(sourceValue),
-			Selected:   new(selectedValue),
+			Source:     &sourceValue,
+			Selected:   &selectedValue,
 			Provenance: provenance,
 			Reason:     "Source and catalog dates have different precision.",
 		}
 	}
-	return models.FieldComparison{
-		State:      models.ComparisonNotComparable,
-		Source:     new(sourceValue),
-		Selected:   new(selectedValue),
-		Provenance: provenance,
-		Reason:     "Source and catalog dates have different precision.",
+	reason := "Same release date."
+	if precision != "day" {
+		reason = "Same release date at " + precision + " precision."
 	}
+	return comparisonMatch(sourceValue, selectedValue, provenance, reason)
 }
 
 // runtimeCloseToleranceMs is the widest difference still reported as
@@ -1017,7 +1027,10 @@ func (h *Handler) fetchMatchCatalog(ctx context.Context, catalogBookID, releaseI
 
 	book, err := client.GetBook(ctx, catalogBookID, "external,people,releases")
 	if err != nil {
-		log.Printf("match evidence: audiobookdb book %s: %v", catalogBookID, err)
+		// %q (not %s): catalogBookID is caller-controlled from a query
+		// parameter; an embedded newline in an unquoted %s would split the
+		// log record and let a caller forge following log entries.
+		log.Printf("match evidence: audiobookdb book %q: %v", catalogBookID, err)
 		return &matchCatalog{LookupErr: "AudiobookDB book lookup failed."}
 	}
 	catalog := &matchCatalog{Book: book}
@@ -1026,10 +1039,18 @@ func (h *Handler) fetchMatchCatalog(ctx context.Context, catalogBookID, releaseI
 	}
 	release, err := client.GetRelease(ctx, releaseID, "people,publisher,language")
 	if err != nil {
-		log.Printf("match evidence: audiobookdb release %s: %v", releaseID, err)
+		log.Printf("match evidence: audiobookdb release %q: %v", releaseID, err)
 		catalog.LookupErr = "AudiobookDB release lookup failed."
 		return catalog
 	}
-	catalog.Release = release
+	// Do not use a release's data for comparisons when the expanded book
+	// POSITIVELY excludes it: title, credits, date, language, and runtime
+	// would then all be compared against an unrelated edition, letting a
+	// different edition produce matching badges. An unknown membership
+	// (releases not expanded) keeps the release — it is the best available
+	// edition data, and resolveReleaseID already reports it unverified.
+	if catalogEditionMembership(book, releaseID) != editionMembershipDisproven {
+		catalog.Release = release
+	}
 	return catalog
 }

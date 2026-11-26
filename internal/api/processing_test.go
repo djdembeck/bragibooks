@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
 	queue_seq INTEGER,
 	book_pre_status TEXT,
 	batch_id TEXT,
+	batch_closed INTEGER NOT NULL DEFAULT 0,
 	snapshot_version INTEGER NOT NULL DEFAULT 0
 );
 
@@ -174,7 +175,7 @@ func writeStreamingSleepBinary(t *testing.T, dir string) string {
 	// gate: the mock must report a version at or above the floor and the
 	// schema/resolver identity the test seeded into the processor, or
 	// RunJob refuses to start it.
-	script := "#!/bin/sh\ncase \"$*\" in *--version*) echo 'm4b-merge 2.2.0'; exit 0;; *--capabilities*) echo '{\"schema_version\":1,\"resolver_version\":\"1\",\"default_path_format\":\"{author}/{title}\",\"path_tokens\":[{\"name\":\"title\",\"value\":\"t\",\"example\":\"T\"}],\"field_policies\":{\"values\":[\"write\",\"preserve\"],\"scalar_fields\":[\"title\"]},\"cover_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"preserve\",\"clear\"]},\"chapter_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"preserve\",\"clear\"]}}'; exit 0;; esac\nprintf 'partial live line\\n' 1>&2\nexec sleep 300 1>&- 2>&-\n"
+	script := "#!/bin/sh\ncase \"$*\" in *--version*) echo 'm4b-merge 2.2.0'; exit 0;; *--capabilities*) echo '{\"schema_version\":1,\"resolver_version\":\"1\",\"default_path_format\":\"{author}/{title}\",\"path_tokens\":[{\"name\":\"book_id\",\"value\":\"b\",\"example\":\"B\"},{\"name\":\"authors\",\"value\":\"a\",\"example\":\"A\"},{\"name\":\"narrators\",\"value\":\"n\",\"example\":\"N\"},{\"name\":\"title\",\"value\":\"t\",\"example\":\"T\"}],\"field_policies\":{\"values\":[\"write\",\"preserve\",\"clear\"],\"scalar_fields\":[\"title\",\"subtitle\",\"authors\",\"narrators\",\"series\",\"description\",\"genres\",\"year\"]},\"cover_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"preserve\",\"clear\"]},\"chapter_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"preserve\",\"clear\"]}}'; exit 0;; esac\nprintf 'partial live line\\n' 1>&2\nexec sleep 300 1>&- 2>&-\n"
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatalf("write streaming sleeping binary: %v", err)
 	}
@@ -2107,9 +2108,11 @@ func TestQueueJobDuplicateRejected(t *testing.T) {
 	}
 }
 
-// TestStartProcessingDuplicateBook409 exercises the same guard through the
-// handler: a repeated book_id in one request body is a 409, not a double run.
-func TestStartProcessingDuplicateBook409(t *testing.T) {
+// TestStartProcessingDuplicateBookRejected exercises the duplicate guard
+// through the handler: a repeated book_id in one request body is refused in
+// the preflight loop (400) BEFORE any insert, so a valid first occurrence is
+// never left with a queued job and an unclosed batch.
+func TestStartProcessingDuplicateBookRejected(t *testing.T) {
 	h, _ := newTestJobsHandler(t)
 
 	if _, err := h.svc.DB.Exec(
@@ -2128,8 +2131,15 @@ func TestStartProcessingDuplicateBook409(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.StartProcessing(w, req)
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("duplicate book status = %d; want 409 — body: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate book status = %d; want 400 (preflight rejects before any insert) — body: %s", w.Code, w.Body.String())
+	}
+	var n int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&n); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("jobs created = %d; want 0 (the duplicate must be refused before any insert)", n)
 	}
 }
 
@@ -2918,7 +2928,7 @@ func TestListJobsServesLatestBatchAggregate(t *testing.T) {
 		// 01:59:00 so they are the NEWEST rows and also the newest batch.
 		for i := 1; i <= 120; i++ {
 			if _, err := h.svc.DB.Exec(
-				"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 1, 'done', 'merge', ?, ?, 'b1')",
+				"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id, batch_closed) VALUES (?, 1, 'done', 'merge', ?, ?, 'b1', 1)",
 				fmt.Sprintf("b1-%03d", i), fmt.Sprintf("2026-01-01 %02d:%02d:00", (i-1)/60, (i-1)%60), i,
 			); err != nil {
 				t.Fatalf("seed batch job %d: %v", i, err)
@@ -3003,7 +3013,7 @@ func TestListJobsServesLatestBatchAggregate(t *testing.T) {
 		// A finished 3-job batch created on 01-01.
 		for i := 1; i <= 3; i++ {
 			if _, err := h.svc.DB.Exec(
-				"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 1, 'done', 'merge', '2026-01-01 00:00:00', ?, 'b1')",
+				"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id, batch_closed) VALUES (?, 1, 'done', 'merge', '2026-01-01 00:00:00', ?, 'b1', 1)",
 				fmt.Sprintf("b1-%d", i), i,
 			); err != nil {
 				t.Fatalf("seed batch job %d: %v", i, err)
@@ -3040,6 +3050,44 @@ func TestListJobsServesLatestBatchAggregate(t *testing.T) {
 			t.Fatalf("aggregate job ids = %d; want 3", n)
 		}
 	})
+}
+
+// Regression: a LATER book's validation failure (here: a missing snapshot)
+// must reject the WHOLE request before any insert, so a valid first book is
+// not left with a queued job and an unclosed batch. The preflight loop
+// validates every book before the enqueue loop runs (StartProcessing), so a
+// mid-batch failure cannot hide an already-accepted job.
+func TestStartProcessingPreflightRejectsWholeBatch(t *testing.T) {
+	fx := setupProfileSuite(t)
+	// Book 3 exists but has no captured snapshot: loadSnapshotForQueue
+	// returns a nil capture, the cheapest deterministic per-book rejection.
+	if _, err := fx.h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (3, 'Gamma', 'matched')",
+	); err != nil {
+		t.Fatalf("seed book 3: %v", err)
+	}
+	srcA := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcA, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source A: %v", err)
+	}
+	srcB := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcB, "b.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source B: %v", err)
+	}
+	// Book 1 is valid (snapshot seeded by the suite); book 3 is not.
+	w := fx.postProcess(t, []string{srcA, srcB}, nil, 1, 3)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("process status = %d; want 500 (book 3 has no snapshot) — body: %s", w.Code, w.Body.String())
+	}
+	// The valid first book must NOT have been enqueued: the whole batch is
+	// rejected, so the queue is empty and no batch was created.
+	var n int
+	if err := fx.h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&n); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("jobs created = %d; want 0 (the preflight rejection must leave no accepted job)", n)
+	}
 }
 
 // Regression: the aggregate's count/rollup and its id list must come from

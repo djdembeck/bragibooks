@@ -27,9 +27,13 @@ if "--version" in sys.argv:
 if "--capabilities" in sys.argv:
     print(json.dumps({"schema_version": 1, "resolver_version": "1",
         "default_path_format": "{author}/{title}",
-        "path_tokens": [{"name": "title", "value": "t", "example": "T"}],
-        "field_policies": {"values": ["write", "preserve"],
-            "scalar_fields": ["title"]},
+        "path_tokens": [{"name": "book_id", "value": "b", "example": "B"},
+            {"name": "authors", "value": "a", "example": "A"},
+            {"name": "narrators", "value": "n", "example": "N"},
+            {"name": "title", "value": "t", "example": "T"}],
+        "field_policies": {"values": ["write", "preserve", "clear"],
+            "scalar_fields": ["title", "subtitle", "authors", "narrators",
+                "series", "description", "genres", "year"]},
         "cover_policies": {"constraint": "str", "variants": ["write", "preserve", "clear"]},
         "chapter_policies": {"constraint": "str", "variants": ["write", "preserve", "clear"]}}))
     sys.exit(0)

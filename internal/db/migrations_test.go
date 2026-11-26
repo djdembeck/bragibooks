@@ -492,6 +492,69 @@ func TestRunMigrationsV14AddsInputDirectoryIndex(t *testing.T) {
 	}
 }
 
+// TestRunMigrationsV20ToV21PinsTheOnUpgradePath pins the v21 cutover from a
+// pre-closure-mark DB (processing_jobs rows WITH a batch_id, no
+// batch_closed column) to v21: the new column is added AND the backfill
+// marks every pre-existing batched row closed (batch_closed = 1), so a
+// completed batch is not reported in-flight forever after an upgrade. Rows
+// without a batch (legacy/audit) keep the default 0.
+func TestRunMigrationsV20ToV21PinsTheOnUpgradePath(t *testing.T) {
+	// v20 shape: apply the production migrations up to (excluding) v21.
+	old := migrations
+	migrations = migrations[:20]
+	defer func() { migrations = old }()
+
+	db := openTestDB(t)
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations to v20: %v", err)
+	}
+	// The fixture must be the pre-closure shape, or the test proves nothing.
+	if hasColumn(t, db, "processing_jobs", "batch_closed") {
+		t.Fatal("v20 fixture already has the batch_closed column")
+	}
+	// One batched row (the backfill target) and one unbatched row (the
+	// control that must keep the default 0). The book row satisfies the
+	// foreign key (the db package enables foreign keys).
+	if _, err := db.Exec(`INSERT INTO books (id, title, status) VALUES (1, 'Legacy Book', 'done')`); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id)
+		 VALUES ('b1-1', 1, 'done', 'merge', '2026-01-01 00:00:00', 1, 'b1')`,
+	); err != nil {
+		t.Fatalf("seed batched row: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq)
+		 VALUES ('audit-1', 1, 'done', 'merge', '2026-01-01 00:00:00', 1)`,
+	); err != nil {
+		t.Fatalf("seed unbatched row: %v", err)
+	}
+
+	// Upgrade: restore the full list; only v21 is pending.
+	migrations = old
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations v20->v21: %v", err)
+	}
+
+	if !hasColumn(t, db, "processing_jobs", "batch_closed") {
+		t.Fatal("batch_closed missing after v21")
+	}
+	var batched, unbatched int
+	if err := db.QueryRow(`SELECT batch_closed FROM processing_jobs WHERE id = 'b1-1'`).Scan(&batched); err != nil {
+		t.Fatalf("read batched row: %v", err)
+	}
+	if batched != 1 {
+		t.Errorf("pre-existing batched row batch_closed = %d, want 1 (backfilled closed)", batched)
+	}
+	if err := db.QueryRow(`SELECT batch_closed FROM processing_jobs WHERE id = 'audit-1'`).Scan(&unbatched); err != nil {
+		t.Fatalf("read unbatched row: %v", err)
+	}
+	if unbatched != 0 {
+		t.Errorf("unbatched row batch_closed = %d, want 0 (the default, not backfilled)", unbatched)
+	}
+}
+
 // captureMigrations temporarily swaps the package's migration list so a
 // failing migration can be injected. Returns a restore function.
 func captureMigrations(t *testing.T) func() {

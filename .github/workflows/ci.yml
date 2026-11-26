@@ -73,6 +73,16 @@ jobs:
       - name: Build
         run: make build
 
+      # The Windows release target compiles four windows-only files
+      # (process_tree_windows, openat_windows, open_root_windows,
+      # prober_path_windows) that no other job here touches: vet and test
+      # on ubuntu-latest skip them behind //go:build windows, so this
+      # cross-compile is their first build. Failing here (before the
+      # immutable release tag is reserved) beats failing in goreleaser
+      # after it.
+      - name: Cross-compile Windows
+        run: GOOS=windows GOARCH=amd64 go build ./...
+
   test:
     name: Test
     needs: [build]

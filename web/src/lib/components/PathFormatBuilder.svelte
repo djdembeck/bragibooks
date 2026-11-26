@@ -39,9 +39,21 @@
 		exampleRel ? (outputDir ? `${outputDir.replace(/\/+$/, '')}/${exampleRel}` : exampleRel) : ''
 	);
 
+	// A signature of the token examples the preview resolves with: an engine
+	// swap refreshes the token registry, and an unchanged format must still
+	// re-run this effect (the preview would otherwise show the old engine's
+	// example until the format is edited). Reading it inside the effect makes
+	// it a tracked dependency.
+	const tokenSig = $engineTokens.map((t) => `${t.name}:${t.value}`).join('|');
 	$effect(() => {
 		const format = serializeParts(parts);
+		void tokenSig; // tracked dependency: re-run on capability change (F-41)
 		if (!format) {
+			// Invalidate any in-flight preview: the cleanup only clears the
+			// debounce timer, so a POST that already started would still pass
+			// the sequence check and restore a path or error for the cleared
+			// format. Advancing previewSeq here drops it.
+			previewSeq++;
 			exampleRel = '';
 			exampleError = null;
 			exampleLoading = false;

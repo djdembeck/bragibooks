@@ -379,7 +379,17 @@
 	const coverPreviewUrl = $derived.by(() => {
 		if (!draft) return null;
 		if (draft.cover_source === 'file' && draft.cover_file) return `/covers/${draft.cover_file}`;
-		if (draft.cover_source === 'url' && draft.cover_url) return draft.cover_url;
+		if (draft.cover_source === 'url' && draft.cover_url) {
+			// A URL cover is previewed through the server's validated fetch
+			// path, not loaded directly by the browser: a raw external URL as
+			// an <img> src is resolved and followed by the browser
+			// independently of the server's public-destination and redirect
+			// checks, so a saved URL could make this operator's browser
+			// contact a destination reachable from their network. The
+			// endpoint re-asserts the same guard on every hop and serves the
+			// fetched bytes.
+			return `/covers/preview?url=${encodeURIComponent(draft.cover_url)}`;
+		}
 		if (draft.cover_source === 'clear' || isCleared('cover')) return null;
 		return snapshot?.cover_file ? `/covers/${snapshot.cover_file}` : null;
 	});
@@ -604,6 +614,13 @@
 				draft[key] = list;
 			}
 		}
+		// The year input commits on change/blur like the person inputs, so a
+		// Ctrl/Cmd+S mid-typing would save a stale draft (or the response
+		// rebuild would overwrite the typed value). Flush it here too.
+		const yearEl = document.querySelector<HTMLInputElement>('.meditor__input--year');
+		if (yearEl && yearEl.value !== String(draft.year ?? '')) {
+			draft.year = yearEl.value === '' ? null : Number(yearEl.value);
+		}
 		for (const el of document.querySelectorAll<HTMLInputElement>('.meditor__chapter-title, .meditor__chapter-start, .meditor__chapter-duration')) {
 			const row = el.closest('.meditor__chapter');
 			if (!row) continue;
@@ -754,7 +771,13 @@
 		const seconds = Number(secondsText);
 		if (minutes > 59 || seconds > 59) return null;
 		const fraction = fractionText ? Number(fractionText.padEnd(3, '0')) : 0;
-		return (hours * 3600 + minutes * 60 + seconds) * 1000 + fraction;
+		// The same safe-integer check the raw-millisecond branch applies: an
+		// oversized hours component (the regex allows any digit count) would
+		// otherwise produce an unsafe integer — or Infinity — that JSON
+		// serialization converts to null instead of rejecting the value
+		// locally. The offset result inherits the check (sign * parsed).
+		const millis = (hours * 3600 + minutes * 60 + seconds) * 1000 + fraction;
+		return Number.isSafeInteger(millis) ? millis : null;
 	}
 
 	function parseChapterOffset(value: string): number | null {
@@ -813,9 +836,24 @@
 		confirmingDiscard = false;
 		try {
 			// The inputs stay enabled while the PUT is in flight, so the
-			// live draft can change mid-flight: snapshot exactly what is
-			// about to be sent (savePayload serializes the same
-			// snapshotOf(draft) view) and diff against it after the save.
+			// live draft can change mid-flight. The change-only inputs
+			// (person, year, chapter title/time) commit to the draft only on
+			// blur, so a value still being typed lives only in its input:
+			// flush them into the draft NOW so the submitted snapshot carries
+			// them and the post-submission overlay (which diffs live draft
+			// against submitted) keeps them through the response rebuild —
+			// without this, a response that changes the author/chapter row
+			// the key or replaces the year value overwrites the typed edit.
+			flushChangeOnlyInputs();
+			// The flush validates chapter-time inputs: an invalid value that
+			// was still unblurred is detected HERE (the pre-save check above
+			// ran before the flush). Bail with the error visible — the
+			// Ctrl/Cmd+S path already does this — so the old draft is not
+			// submitted and the invalid value stays shown in its input.
+			if (chapterTimeError) return;
+			// Snapshot exactly what is about to be sent (savePayload
+			// serializes the same snapshotOf(draft) view) and diff against
+			// it after the save.
 			const submitted = snapshotOf(draft);
 			const resp = await put<BookMetadataResponse>(`/books/${startBook}/metadata`, savePayload());
 			if (bookId !== startBook || bookFetchSeq !== startGen) return;

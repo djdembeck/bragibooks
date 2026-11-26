@@ -218,15 +218,23 @@ describe('summarizeLegacyRun (queue-order adjacency)', () => {
 		expect(gapped?.jobIds).toEqual(['m2']);
 	});
 
-	it('breaks a run when a batched row sits in the walk', () => {
-		// A batched row (any id) breaks the adjacency walk: its run is
-		// owned by the aggregate.
+	it('excludes batched rows from the legacy walk (they break it)', () => {
+		// A batched row (any id) means the page holds a run the aggregate
+		// owns: while the aggregate is absent (the window right after
+		// start() clears it), the batched rows must not be summarized as a
+		// legacy run — a single batched row would show a terminal banner
+		// while its siblings are still in flight. So the walk EXCLUDES
+		// batched rows (they break adjacency) and rolls up the remaining
+		// non-batched pre-batch history only. Here b1 (q2) is dropped,
+		// leaving m1 (q1) and m3 (q3): the gap at q2 breaks the walk, so
+		// only the newest contiguous run (m3) summarizes.
 		const mixed = summarizeLegacyRun([
 			job({ id: 'm1', queueOrder: 1 }),
 			job({ id: 'b1', queueOrder: 2, batchId: 'req-1' }),
 			job({ id: 'm3', queueOrder: 3 })
 		]);
 		expect(mixed?.jobIds).toEqual(['m3']);
+		expect(mixed?.isBatch).toBe(false);
 	});
 
 	it('keeps a batched run out of the legacy rollup when it is the newest', () => {
@@ -234,11 +242,11 @@ describe('summarizeLegacyRun (queue-order adjacency)', () => {
 			job({ id: 'b1-a', queueOrder: 1, batchId: 'req-1' }),
 			job({ id: 'b1-b', queueOrder: 2, batchId: 'req-1' })
 		]);
-		// The walk starts at the newest merge row (batched) and cannot
-		// reach back across batched rows: the legacy summary is that
-		// single row, not the whole request.
-		expect(summary?.jobIds).toEqual(['b1-b']);
-		expect(summary?.total).toBe(1);
+		// Every row is batched: the run is the aggregate's, not a legacy
+		// run, so there is no legacy summary at all (a single batched row
+		// summarized alone would show a terminal banner while its
+		// siblings run).
+		expect(summary).toBeNull();
 	});
 });
 

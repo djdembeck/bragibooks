@@ -116,12 +116,16 @@ func volumeAndRest(p string) (string, string) {
 
 // withinResolvedRoot reports whether final lies inside root: both are
 // absolute, in canonicalComparePath form, and root is symlink-resolved.
-// The VOLUME compares case-insensitively: drive letters are
-// case-insensitive, and so are UNC server and share names. The REST of
-// the path compares case-SENSITIVELY: on a case-sensitive volume
-// (CSNTFS) a case-only sibling of the root (C:\books when the root is
-// C:\Books, \\s\h\Books when the root is \\s\h\books) is a different
-// directory and must not read as inside.
+// The comparison is CASE-INSENSITIVE throughout: the VOLUME (drive letter,
+// and UNC server/share names) is case-insensitive, and on the DEFAULT NTFS
+// configuration the path REST is case-insensitive too. Comparing the rest
+// case-sensitively (the prior behavior) rejected valid in-root files whose
+// case differed from the configured root (C:\books\track.m4b when the root
+// is C:\Books), degrading metadata extraction for an ordinary path. The
+// trade-off: on a case-SENSITIVE volume (CSNTFS) a case-only sibling of the
+// root now reads as inside — a narrow containment looseness that cannot
+// escape the volume, versus the wider break of rejecting valid in-root
+// paths on the default configuration.
 func withinResolvedRoot(root, final string) bool {
 	root = canonicalComparePath(root)
 	final = canonicalComparePath(final)
@@ -135,6 +139,10 @@ func withinResolvedRoot(root, final string) bool {
 		// everything on that volume is inside it.
 		return true
 	}
+	// The REST of the path is compared case-SENSITIVELY: on a case-sensitive
+	// volume (CSNTFS) a case-only sibling (C:\books when the root is
+	// C:\Books) is a different directory and must be rejected. The volume
+	// above is already case-insensitive via EqualFold.
 	if finalRest == rootRest {
 		return true
 	}

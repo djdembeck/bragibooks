@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -79,8 +80,27 @@ func (h *Handler) EnginePreview(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	resp, err := h.svc.Processor.Preview(r.Context(), req.Metadata, req.PathFormat)
+	// Bound the preview subprocess: a concurrency slot (the cap is small —
+	// previews are short, non-mutating, and off the worker pool) and a
+	// server-side deadline (r.Context() alone only fires when the client
+	// gives up, so a client holding its connection open would pin a
+	// slow/stuck engine for as long as it wished). The slot is released
+	// when the preview returns, even on the deadline path.
+	select {
+	case h.previewSlots <- struct{}{}:
+		defer func() { <-h.previewSlots }()
+	default:
+		writeError(w, http.StatusTooManyRequests, "too many concurrent engine previews; retry shortly")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), enginePreviewDeadline)
+	defer cancel()
+	resp, err := h.svc.Processor.Preview(ctx, req.Metadata, req.PathFormat)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			writeError(w, http.StatusGatewayTimeout, "engine preview timed out")
+			return
+		}
 		writeError(w, http.StatusBadGateway, "engine preview failed: "+err.Error())
 		return
 	}

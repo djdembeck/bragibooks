@@ -111,9 +111,14 @@ export function plan(
 			// payload is wanted. The in-flight slot is RETAINED: the
 			// superseded request stays in the concurrency accounting
 			// until it settles, so the id holds one slot while two of its
-			// requests are outstanding.
+			// requests are outstanding. Clear the settled value too: while
+			// the replacement waits for a free slot (the render cache is
+			// cleared only for DISPATCHED rows), a settled path for the
+			// PREVIOUS edition must not stay visible — the row reads as
+			// pending until the new payload settles.
 			state.genFor.set(id, (state.genFor.get(id) ?? 0) + 1);
 			state.queue.add(id);
+			state.previews[id] = '';
 			continue;
 		}
 		// No request outstanding. Already settled for THIS payload: the

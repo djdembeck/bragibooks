@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 // rootContains reports whether target lies inside root: the same
@@ -70,9 +69,17 @@ func openInsideRoot(path, root string, allowDir bool) (*os.File, error) {
 		// changed out from under the walk.
 		return nil, fmt.Errorf("opened path is not a regular file: %s", path)
 	}
-	// Nonblocking: a writerless FIFO at this name (direct, or behind the
-	// just-verified target) opens instead of blocking the worker.
-	f, err := os.OpenFile(openPath, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	// The open is ANCHORED to the root on every platform: non-Linux has
+	// no procfs, so a plain O_NOFOLLOW open of the name (which guards
+	// only the final component) would follow an intermediate directory
+	// swapped to an escaping file after the walk. openRootAnchored walks
+	// each component relative to a verified parent descriptor (openat +
+	// O_NOFOLLOW), so the parent-swap case is refused at open time; on
+	// Linux it is the equivalent of the plain open the /proc re-read
+	// below would verify anyway. Nonblocking where it matters (a
+	// writerless FIFO at the name opens instead of blocking the
+	// worker); the opened descriptor's own type is re-checked below.
+	f, err := openRootAnchored(root, openPath, allowDir)
 	if err != nil {
 		return nil, err
 	}
@@ -90,9 +97,8 @@ func openInsideRoot(path, root string, allowDir bool) (*os.File, error) {
 	// Final verification on the opened descriptor. On Linux this re-reads
 	// the resolved target (/proc/self/fd/<fd>) so the descriptor's file
 	// is verified to be the one the mode/symlink checks accepted; on
-	// other Unix platforms there is no procfs, and the O_NOFOLLOW open
-	// of the verified path above IS the binding (walk-time check plus
-	// this open-time check; no procfs dependency off Linux).
+	// other Unix platforms the anchored open above IS the binding (no
+	// procfs dependency off Linux).
 	if target, cerr := openRootFinalCheck(f); cerr != nil {
 		f.Close()
 		return nil, cerr

@@ -1097,3 +1097,89 @@ func TestCoverFetchErrorRedactsPathQueryAndCredentials(t *testing.T) {
 		}
 	}
 }
+
+// ── Engine preview bounds: the concurrency cap and the server-side deadline ──
+
+// previewHandler builds a jobs handler whose engine is the given binary and
+// whose capabilities are stored, the same pair the real startup path
+// produces. The preview endpoint refuses a nil-capabilities processor, so
+// the test processor must be seeded.
+func previewHandler(t *testing.T, bin string) *Handler {
+	t.Helper()
+	h, _ := newTestJobsHandler(t)
+	// newTestJobsHandler leaves previewSlots nil (a nil channel makes the
+	// slot select always take the default → 429); init it as NewHandler does.
+	h.previewSlots = make(chan struct{}, enginePreviewConcurrency)
+	h.svc.Processor = testProcessor(&audio.Processor{Binary: bin, LogLevel: "info"})
+	return h
+}
+
+// writeSleepingPreviewBinary writes a fake engine that sleeps (so the
+// server-side deadline fires before it answers) and is then killed.
+func writeSleepingPreviewBinary(t *testing.T, dir string) string {
+	t.Helper()
+	p := filepath.Join(dir, "sleep-preview-bin")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\nexec sleep 30 1>&- 2>&-\n"), 0o755); err != nil {
+		t.Fatalf("write sleeping preview binary: %v", err)
+	}
+	return p
+}
+
+// TestEnginePreviewSlotFullRefusesWith429 pins the concurrency cap: with
+// every preview slot occupied, a new request is refused with 429 BEFORE an
+// engine process is launched (the cap is what keeps a LAN caller from
+// exhausting process resources with concurrent previews).
+func TestEnginePreviewSlotFullRefusesWith429(t *testing.T) {
+	t.Parallel()
+	h := previewHandler(t, writeSleepingPreviewBinary(t, t.TempDir()))
+	// Occupy every slot, as enginePreviewConcurrency in-flight previews would.
+	for i := 0; i < cap(h.previewSlots); i++ {
+		h.previewSlots <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < cap(h.previewSlots); i++ {
+			<-h.previewSlots
+		}
+	}()
+	body := `{"path_format":"{title}","metadata":{"title":"T"}}`
+	req := httptest.NewRequest("POST", "/api/engine/preview", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.EnginePreview(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("slot-full preview = %d, want 429 — %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEnginePreviewDeadlineIsServerSideAndReleasesTheSlot pins the
+// server-side deadline: a client that keeps its connection open (no client
+// timeout) still gets a 504 when the engine outlives enginePreviewDeadline,
+// and the preview slot is released afterwards, so the next request is not
+// starved by the timed-out one.
+func TestEnginePreviewDeadlineIsServerSideAndReleasesTheSlot(t *testing.T) {
+	t.Parallel()
+	h := previewHandler(t, writeSleepingPreviewBinary(t, t.TempDir()))
+	body := `{"path_format":"{title}","metadata":{"title":"T"}}`
+	req := httptest.NewRequest("POST", "/api/engine/preview", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// Shorten the deadline for the test: the handler reads the constant, so
+	// bound the REQUEST context instead — the handler's WithTimeout takes the
+	// MINIMUM of its own deadline and the request context, so a 300ms client
+	// context fires first and the handler's ctx.Err() reports
+	// DeadlineExceeded.
+	deadlineCtx, deadlineCancel := context.WithTimeout(req.Context(), 300*time.Millisecond)
+	defer deadlineCancel()
+	req = req.WithContext(deadlineCtx)
+	w := httptest.NewRecorder()
+	h.EnginePreview(w, req)
+	if w.Code != http.StatusGatewayTimeout {
+		t.Fatalf("stalled preview = %d, want 504 — %s", w.Code, w.Body.String())
+	}
+	// The slot must be released: a fresh request must be able to take one.
+	select {
+	case h.previewSlots <- struct{}{}:
+		<-h.previewSlots
+	default:
+		t.Fatal("slot still occupied after the deadline path; the timed-out preview must release it")
+	}
+}

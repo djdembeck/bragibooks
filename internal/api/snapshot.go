@@ -281,9 +281,14 @@ func (h *Handler) captureSnapshotUnlocked(ctx context.Context, bookID int64, cha
 		}
 		if sameBook && existing.ADBReleaseID != "" && existing.ADBReleaseID == snap.ADBReleaseID {
 			snap.Chapters = existing.Chapters
-			// The subtitle is RELEASE-level content (the release's own value
-			// wins in the precedence below): retain it under the same
-			// unchanged-selection rule as chapters.
+		}
+		// The subtitle is retained for the SAME BOOK (not gated on the
+		// release id): a matched book WITHOUT a selected release captures
+		// its subtitle from the book itself, and a status-only update
+		// (changed=false, no enrichment) must not erase it — the
+		// enrichment precedence below still lets the selected release's
+		// OWN subtitle win when a release is set and carries one.
+		if sameBook {
 			snap.Subtitle = existing.Subtitle
 		}
 	}
@@ -1158,6 +1163,16 @@ func isNonPublicCoverAddress(ip net.IP) bool {
 		// 255.255.255.255/32 limited broadcast.
 		case v4[0] == 255 && v4[1] == 255 && v4[2] == 255 && v4[3] == 255:
 			return true
+		// 0.0.0.0/8 "this network" (RFC 1122): beyond the unspecified
+		// address (IsUnspecified) these are locally routed, not a public
+		// destination.
+		case v4[0] == 0:
+			return true
+		// 240.0.0.0/4 reserved (RFC 9196) and beyond, 241.0.0.0/8: not
+		// assigned to any public destination; 255.255.255.255/32 already
+		// returned above, so the whole remaining 240/4 is local.
+		case v4[0] >= 240:
+			return true
 		}
 		return false
 	}
@@ -1201,6 +1216,11 @@ func isNonPublicCoverAddress(ip net.IP) bool {
 				return true
 			}
 			return isNonPublicCoverAddress(net.IP{ip6[12], ip6[13], ip6[14], ip6[15]})
+		}
+		// fec0::/10 site-local (RFC 3879): a local prefix, not an
+		// assigned public destination.
+		if ip6[0]&0xfe == 0xfc {
+			return true
 		}
 		if ip6[0] == 0 && ip6[1] == 0 && ip6[2] == 0 && ip6[3] == 0 &&
 			ip6[4] == 0 && ip6[5] == 0 && ip6[6] == 0 && ip6[7] == 0 &&
@@ -1374,6 +1394,11 @@ func writeCoverBody(ctx context.Context, resp *http.Response, dest string) error
 		os.Remove(tmpPath)
 		return fmt.Errorf("cover exceeds %d bytes", coverMaxBytes)
 	}
+	// A failed final rename must not leave the fully written temp file
+	// behind: the caller knows only the destination name, so without this
+	// the random temp path is unreachable. After a successful rename the
+	// path no longer exists and the remove is a no-op.
+	defer os.Remove(tmpPath)
 	return os.Rename(tmpPath, dest)
 }
 

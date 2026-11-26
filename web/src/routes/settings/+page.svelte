@@ -102,16 +102,25 @@
 				try {
 					const cur = await get<IndexStatus>('/index');
 					if (cancelled) return;
-					indexStatus = cur;
 					// A terminal at a NEWER generation supersedes ours (a
 					// root-change rescan republishes the mirror under its
 					// own generation, after which ours is never visible
 					// again): accept it, or "Refresh now" stays spinning
-					// past its scan.
-					if (cur.state.generation >= gen &&
-						!['queued', 'running'].includes(cur.state.status)) {
-						indexRefreshing = false;
-						return;
+					// past its scan. An OLDER generation's terminal must
+					// NOT be assigned to indexStatus: that write re-runs
+					// this effect (indexStatus is a tracked dependency),
+					// tears down the poller, and the replacement effect
+					// sees a terminal status and exits WITHOUT starting a
+					// new poller — leaving indexRefreshing true and
+					// Refresh disabled for a scan that is still running.
+					// Skip the assignment and keep polling for our
+					// generation's (or a newer one's) terminal.
+					if (cur.state.generation >= gen) {
+						indexStatus = cur;
+						if (!['queued', 'running'].includes(cur.state.status)) {
+							indexRefreshing = false;
+							return;
+						}
 					}
 				} catch {
 					// transient read failure: keep polling
@@ -287,10 +296,28 @@
 		const cpusErr = validateNonNegativeInt(settings.num_cpus);
 		if (cpusErr) { fieldErrors.num_cpus = cpusErr; valid = false; }
 
-		const schemeErr = validateScheme(parseParts(settings.output_scheme)).errors[0];
+			// A binary swap in this save changes the engine's token vocabulary:
+		// the client's live registry is the CURRENT engine's, so a token
+		// supported only by the NEW engine would be rejected in the browser
+		// and never reach the server's candidate-engine check. Skip the
+		// token-vocabulary errors only when the binary is changing; keep
+		// every structural error (forbidden chars, reserved names, empty
+		// format) and let the server validate the candidate's vocabulary.
+		const swappingBinary = settings.m4b_merge_binary !== serverConfirmedBinary;
+		const schemeErrors = validateScheme(parseParts(settings.output_scheme)).errors;
+		const schemeErr = swappingBinary
+			? schemeErrors.find((e) => !e.includes('unsupported token'))
+			: schemeErrors[0];
 		if (schemeErr) { fieldErrors.output_scheme = schemeErr; valid = false; }
 
-		const selErr = validateWriteSelection();
+		// An UNAVAILABLE capabilities document (the fetch failed, or the
+		// engine is not verified) is not the same as a known-unsupported
+		// field: with engineFields empty, validateWriteSelection would
+		// block EVERY settings save — even a directory-only change — and
+		// the resulting error is hidden (fieldErrors.metadata_selection
+		// renders only when capabilities are available). Distinguish the
+		// two and leave validation of the untouched values to the server.
+		const selErr = engineFields.length === 0 ? null : validateWriteSelection();
 		if (selErr) { fieldErrors.metadata_selection = selErr; valid = false; }
 
 		return valid;
