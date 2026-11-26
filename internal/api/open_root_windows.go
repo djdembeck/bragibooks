@@ -17,7 +17,7 @@ import (
 // needs them; the walk already confined them) — and a DIRECTORY row is
 // contained-verified too: a directory replaced by a junction/reparse point
 // to an outside directory before the open would otherwise be accepted
-// before finalPathByHandle runs, and folder discovery would enumerate the
+// before rawPathByHandle runs, and folder discovery would enumerate the
 // outside directory. A FILE row must open as a regular file whose resolved
 // final path stays inside the input root: os.Open follows reparse points,
 // so the check runs on the handle's final name (the same resolution
@@ -43,7 +43,7 @@ func openInsideRoot(path, root string, allowDir bool) (*os.File, error) {
 		f.Close()
 		return nil, fmt.Errorf("opened path is not a regular file: %s", path)
 	}
-	final, ok := finalPathByHandle(f)
+	finalRaw, ok := rawPathByHandle(f)
 	if !ok {
 		// Containment must be PROVEN on every row: a resolution
 		// failure is a refusal, not a fallback to the original pathname
@@ -51,70 +51,93 @@ func openInsideRoot(path, root string, allowDir bool) (*os.File, error) {
 		f.Close()
 		return nil, fmt.Errorf("resolve opened path for containment: %s", path)
 	}
-	final = normalizeDrivePath(final)
+	final := canonicalComparePath(finalRaw)
 	resolvedRoot, rerr := filepath.EvalSymlinks(root)
 	if rerr != nil {
 		f.Close()
 		return nil, rerr
 	}
-	if !withinResolvedRoot(resolvedRoot, final) {
+	if !withinResolvedRoot(canonicalComparePath(resolvedRoot), final) {
 		f.Close()
 		return nil, fmt.Errorf("opened file escapes input root: %s", final)
 	}
 	return f, nil
 }
 
-// normalizeDrivePath converts a GetFinalPathNameByHandle result into the
-// form the containment check compares: it drops the \\?\ prefix from a
-// drive-letter path (\\?\C:\… → C:\…), so the comparison runs on the
-// same form as the resolved root. A \\?\UNC\ name is left alone:
-// finalPathByHandle already converted it to \\host\share form.
-func normalizeDrivePath(s string) string {
-	if strings.HasPrefix(s, `\\?\`) && !strings.HasPrefix(s, `\\?\UNC\`) {
-		return s[len(`\\?\`):]
+// canonicalComparePath converts a path into the form the containment
+// check compares: it trims whitespace, rewrites \\?\UNC\host\share\… to
+// the standard \\host\share\… form, drops the \\?\ prefix from a
+// drive-letter path (\\?\C:\… → C:\…), and leaves every other form
+// untouched. The result is Clean-ed, so a root configured with the
+// extended prefix (\\?\C:\Books) and a handle resolved to the bare
+// form (C:\Books) share one spelling. The conversion is pure string
+// handling (no syscall), so the tests run it directly.
+func canonicalComparePath(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, `\\?\UNC\`) {
+		// Slice past the ENTIRE `\\?\UNC\` prefix (all 8 chars), not
+		// just `\\?\UNC`: keeping the trailing backslash would leave
+		// THREE leading backslashes (\\ + \host\share\…).
+		s = `\\` + s[len(`\\?\UNC\`):]
+	} else if strings.HasPrefix(s, `\\?\`) {
+		s = s[len(`\\?\`):]
 	}
-	return s
+	return filepath.Clean(s)
+}
+
+// volumeAndRest splits a canonical Windows path into the part that
+// compares case-insensitively and the part that compares
+// case-sensitively. On a drive path the volume is the drive letter and
+// colon (C:); on a UNC path it is the server and share
+// (\\server\share); on a relative or other path the whole path is the
+// volume and the rest is empty.
+func volumeAndRest(p string) (string, string) {
+	if strings.HasPrefix(p, `\\`) {
+		// \\server\share\rest: the volume is the first two components
+		// after the leading backslash pair.
+		serverEnd := strings.Index(p[2:], `\`)
+		if serverEnd < 0 {
+			return p, ``
+		}
+		shareEnd := strings.Index(p[serverEnd+3:], `\`)
+		if shareEnd < 0 {
+			return p, ``
+		}
+		return p[:serverEnd+3+shareEnd], p[serverEnd+3+shareEnd:]
+	}
+	if len(p) < 2 || p[1] != ':' {
+		return p, ``
+	}
+	return p[:2], p[2:]
 }
 
 // withinResolvedRoot reports whether final lies inside root: both are
-// absolute and root is symlink-resolved. Drive letters compare
-// case-insensitively (Windows drive letters are case-insensitive), but
-// the rest of the path compares case-SENSITIVELY: on a case-sensitive
-// volume (CSNTFS) a case-only sibling of the root (C:\books when the
-// root is C:\Books) is a different directory and must not read as
-// inside. UNC roots stay fully case-insensitive: server and share
-// names are case-insensitive.
+// absolute, in canonicalComparePath form, and root is symlink-resolved.
+// The VOLUME compares case-insensitively: drive letters are
+// case-insensitive, and so are UNC server and share names. The REST of
+// the path compares case-SENSITIVELY: on a case-sensitive volume
+// (CSNTFS) a case-only sibling of the root (C:\books when the root is
+// C:\Books, \\s\h\Books when the root is \\s\h\books) is a different
+// directory and must not read as inside.
 func withinResolvedRoot(root, final string) bool {
-	root = filepath.Clean(root)
-	final = filepath.Clean(final)
-	if strings.HasPrefix(root, `\\`) || strings.HasPrefix(root, `\\?\UNC\`) {
-		rootL := strings.ToLower(root)
-		finalL := strings.ToLower(final)
-		if rootL == finalL {
-			return true
-		}
-		prefix := rootL
-		if !strings.HasSuffix(prefix, string(filepath.Separator)) {
-			prefix += string(filepath.Separator)
-		}
-		return strings.HasPrefix(finalL, prefix)
-	}
-	if len(root) < 2 || len(final) < 2 {
+	root = canonicalComparePath(root)
+	final = canonicalComparePath(final)
+	rootVol, rootRest := volumeAndRest(root)
+	finalVol, finalRest := volumeAndRest(final)
+	if !strings.EqualFold(rootVol, finalVol) {
 		return false
 	}
-	if !strings.EqualFold(root[:2], final[:2]) {
-		return false
-	}
-	// Reuse the root's drive-letter spelling in final so the prefix
-	// check compares the remainder case-sensitively while the drive
-	// letter stays case-insensitive (c:\Books\x is inside C:\Books).
-	folded := root[:2] + final[2:]
-	if folded == root {
+	if rootRest == "" {
+		// The root IS the volume (C:\ or a bare \\server\share):
+		// everything on that volume is inside it.
 		return true
 	}
-	prefix := root
+	if finalRest == rootRest {
+		return true
+	}
+	prefix := rootRest
 	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
 		prefix += string(filepath.Separator)
 	}
-	return strings.HasPrefix(folded, prefix)
+	return strings.HasPrefix(finalRest, prefix)
 }

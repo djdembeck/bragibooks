@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// TestNormalizeFinalPath pins the pure string conversion finalPathByHandle
-// applies to GetFinalPathNameByHandle results (the syscall itself stays
+// TestNormalizeFinalPath pins the pure string conversion proberPath
+// applies to rawPathByHandle results (the syscall itself stays
 // windows-bound). It only runs on Windows; on the Linux/macOS CI it does
 // not build, so this is the coverage for: a UNC share handle converting to
 // exactly the two-leading-backslash form the containment check compares

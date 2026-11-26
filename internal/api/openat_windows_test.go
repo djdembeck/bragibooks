@@ -9,25 +9,26 @@ import (
 	"testing"
 )
 
-// TestNormalizeDrivePath pins the shared prefix stripping that
-// openInsideRoot and openPartInDir apply before the containment check:
-// GetFinalPathNameByHandle yields \\?\C:\… for a local drive, and the
-// containment check compares against a root without that prefix. The
-// \\?\UNC\ form is already rewritten to \\host\share by
-// normalizeFinalPath, so it passes through untouched (stripping it a
-// second time would drop the server name).
-func TestNormalizeDrivePath(t *testing.T) {
+// TestCanonicalComparePath pins the shared normalization that
+// openInsideRoot and openPartInDir apply to BOTH containment operands:
+// GetFinalPathNameByHandle yields \\?\C:\… for a local drive and
+// \\?\UNC\host\share\… for a share, and the containment check compares
+// against a root without the extended prefix.
+func TestCanonicalComparePath(t *testing.T) {
 	for in, want := range map[string]string{
 		`\\?\C:\dir\file`: `C:\dir\file`,
-		// UNC: already converted by normalizeFinalPath; must not be
-		// stripped again.
+		// Extended UNC: the raw form the handle resolution returns;
+		// rewritten to the standard UNC form.
+		`\\?\UNC\server\share\dir\file`: `\\server\share\dir\file`,
+		// Standard UNC: untouched (rewriting it again would drop the
+		// server name).
 		`\\server\share\dir\file`: `\\server\share\dir\file`,
 		// Already-normal: untouched.
 		`C:\dir\file`: `C:\dir\file`,
 		`D:\vol\file`: `D:\vol\file`,
 	} {
-		if got := normalizeDrivePath(in); got != want {
-			t.Errorf("normalizeDrivePath(%q) = %q; want %q", in, got, want)
+		if got := canonicalComparePath(in); got != want {
+			t.Errorf("canonicalComparePath(%q) = %q; want %q", in, got, want)
 		}
 	}
 }
@@ -67,13 +68,13 @@ func TestOpenPartInDirAcceptsPrefixedDrivePath(t *testing.T) {
 		t.Errorf("openPartInDir = %q; does not identify the fixture %q", f.Name(), part)
 	}
 	// Pin the DOS device form when the volume uses it: on a local drive
-	// the part's final path must be the drive-letter form \\?\C:\… (the
-	// old comparison rejected the prefix; the old flag returned the
-	// Volume{GUID} form, which the containment check cannot compare
-	// against a drive-letter root at all). On a UNC volume the final
-	// path is already \\host\share form, and the same containment path
-	// applies.
-	if final, ok := finalPathByHandle(f); ok && !strings.HasPrefix(root, `\\`) {
+	// the part's raw handle path must be the drive-letter form \\?\C:\…
+	// (the old comparison rejected the prefix; the old flag returned
+	// the Volume{GUID} form, which the containment check cannot
+	// compare against a drive-letter root at all). On a UNC volume the
+	// raw path is \\?\UNC\host\share form, and the same containment
+	// path applies.
+	if final, ok := rawPathByHandle(f); ok && !strings.HasPrefix(root, `\\`) {
 		if !strings.HasPrefix(final, `\\?\`) {
 			t.Errorf("final path %q lacks the \\?\\ drive prefix on a local volume; the regression case is not pinned", final)
 		}
@@ -83,10 +84,12 @@ func TestOpenPartInDirAcceptsPrefixedDrivePath(t *testing.T) {
 	}
 }
 
-// TestWithinResolvedRoot pins the CSNTFS boundary: drive letters are
-// case-insensitive (c:\Books is the same drive as C:\Books), the rest
-// of the path is case-sensitive (C:\books is a different directory on a
-// case-sensitive volume), and UNC roots stay fully case-insensitive.
+// TestWithinResolvedRoot pins the CSNTFS boundary: the VOLUME
+// (drive letter, UNC server and share) compares case-insensitively
+// (c:\Books is the same drive as C:\Books, \\Server\Share is the same
+// share as \\server\share), and the REST of the path is
+// case-sensitive (C:\books and \\s\h\Books are different directories
+// on a case-sensitive volume).
 func TestWithinResolvedRoot(t *testing.T) {
 	for name, tc := range map[string]struct {
 		root  string
@@ -103,6 +106,9 @@ func TestWithinResolvedRoot(t *testing.T) {
 		"drive-root other drive":     {`C:\`, `D:\file.mp3`, false},
 		"unc in-root":                {`\\server\share\books`, `\\server\share\books\vol1\part.mp3`, true},
 		"unc case-insensitive":       {`\\Server\Share`, `\\server\share\vol1\part.mp3`, true},
+		"unc case-only dir rejected": {`\\s\h\books`, `\\s\h\Books\x`, false},
+		"extended drive root":        {`\\?\C:\Books`, `C:\Books\vol1\part.mp3`, true},
+		"extended unc root":          {`\\?\UNC\s\h`, `\\s\h\file`, true},
 	} {
 		if got := withinResolvedRoot(tc.root, tc.final); got != tc.want {
 			t.Errorf("withinResolvedRoot(%q, %q) = %v; want %v (%s)", tc.root, tc.final, got, tc.want, name)

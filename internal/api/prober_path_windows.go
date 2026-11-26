@@ -16,16 +16,16 @@ import (
 // form instead, which cannot be compared against a drive-letter root.
 const finalPathFlags = 0x0
 
-// finalPathByHandle resolves the normalized final path of the file the
-// handle refers to (GetFinalPathNameByHandle). It is the handle-bound
-// form of a pathname: a reparse point swapped after the open cannot
-// repoint it. The \\?\UNC\ host form is converted back to the
-// \\host\share form that ffprobe accepts. ok is false when the
-// resolution fails. Shared with openInsideRoot, which uses the same
-// resolution to PROVE containment (it refuses on failure, where
-// proberPath reports ok=false and the caller degrades the row instead of
-// falling back to the un-checked original pathname).
-func finalPathByHandle(f *os.File) (string, bool) {
+// rawPathByHandle resolves the final path of the file the handle refers
+// to (GetFinalPathNameByHandle) in the DOS device form the syscall
+// returns: \\?\C:\… for a local drive, \\?\UNC\host\share\… for a
+// share. It is the handle-bound form of a pathname: a reparse point
+// swapped after the open cannot repoint it. ok is false when the
+// resolution fails. Shared with openInsideRoot and openPartInDir, which
+// use the same resolution to PROVE containment (they refuse on failure,
+// where proberPath reports ok=false and the caller degrades the row
+// instead of falling back to the un-checked original pathname).
+func rawPathByHandle(f *os.File) (string, bool) {
 	// Two calls: the first sizes the buffer, the second fills it.
 	n, err := windows.GetFinalPathNameByHandle(windows.Handle(f.Fd()), nil, 0, finalPathFlags)
 	if err != nil || n == 0 {
@@ -40,14 +40,12 @@ func finalPathByHandle(f *os.File) (string, bool) {
 	// FILE_NAME_NORMALIZED returns the handle's normalized name, so the
 	// result points at the same file even when casing differs from the
 	// original pathname (NTFS is case-insensitive).
-	s := windows.UTF16ToString(buf)
-	return normalizeFinalPath(s), true
+	return windows.UTF16ToString(buf), true
 }
 
 // normalizeFinalPath converts a GetFinalPathNameByHandle result into the
-// form the containment check and the probe accept. The conversion is pure
-// string handling (the syscall stays in finalPathByHandle), so the tests
-// run it directly.
+// form the probe accepts. The conversion is pure string handling (the
+// syscall stays in rawPathByHandle), so the tests run it directly.
 func normalizeFinalPath(s string) string {
 	if strings.HasPrefix(s, `\\?\UNC\`) {
 		// Slice past the ENTIRE `\\?\UNC\` prefix (all 8 chars), not just
@@ -74,6 +72,6 @@ func normalizeFinalPath(s string) string {
 // signature consistency with the other platforms; the handle's final
 // path resolves the descriptor regardless of its type.
 func proberPath(f *os.File, original string, isDir bool) (string, bool) {
-	s, ok := finalPathByHandle(f)
-	return s, ok
+	p, ok := rawPathByHandle(f)
+	return normalizeFinalPath(p), ok
 }
