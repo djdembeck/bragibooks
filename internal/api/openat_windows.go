@@ -11,16 +11,25 @@ import (
 )
 
 // openPartInDir opens a folder part for probing, binding the probe to
-// the file at open time. Windows has no openat in the standard library;
-// the part is opened by its full path, and the binding is the handle's
-// resolved NT device path (the same resolution proberPath uses), which
-// a reparse-point swap after the open cannot repoint. The opened
-// descriptor's OWN type (fstat of the handle) is the verdict. dir is
-// the directory row's verified descriptor, accepted for signature
-// consistency with the Unix implementation; the part's name is joined
-// to the row's pathname, which the walk confined.
+// the file at open time. Windows has no openat in the standard library,
+// so the part is opened by its full path. The part is opened relative to
+// the verified directory's RESOLVED location, not the row's original
+// name. dir is the directory descriptor openInsideRoot verified, and its
+// handle's resolved NT device path (the same resolution proberPath uses)
+// is the base the part name joins onto. Joining to the row's pathname
+// would follow a directory swap (rename, junction) that landed after the
+// walk; resolving the handle cannot be repointed by a swap after the
+// open. If the directory handle cannot be resolved, the part is refused:
+// the row's pathname is a name-based fallback that was never verified at
+// open time. The opened descriptor's OWN type (fstat of the handle) is
+// the verdict, and the part's resolved final path must stay inside the
+// input root.
 func openPartInDir(dir *os.File, name, root string) (*os.File, error) {
-	full := filepath.Join(dir.Name(), name)
+	dirPath, ok := finalPathByHandle(dir)
+	if !ok {
+		return nil, fmt.Errorf("resolve directory path for part open: %s", dir.Name())
+	}
+	full := filepath.Join(normalizeDrivePath(dirPath), name)
 	h, err := windows.Open(full, windows.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
@@ -40,6 +49,7 @@ func openPartInDir(dir *os.File, name, root string) (*os.File, error) {
 		osf.Close()
 		return nil, fmt.Errorf("resolve opened path for containment: %s", full)
 	}
+	final = normalizeDrivePath(final)
 	resolvedRoot, rerr := filepath.EvalSymlinks(root)
 	if rerr != nil {
 		osf.Close()

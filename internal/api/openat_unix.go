@@ -17,10 +17,12 @@ import (
 // (a writerless FIFO at the name would stall the worker until a reader
 // appears that never will), and the opened descriptor's OWN type
 // (fstat of the fd) is the verdict, so a special-file swap lands on the
-// descriptor, not a pre-open stat. dir must be a directory row's
+// descriptor, not a pre-open stat. The fd is created close-on-exec: when
+// a probe subprocess execs, the fd closes automatically, so it is not
+// passed to the ffprobe process. dir must be a directory row's
 // verified descriptor (allowDir in openInsideRoot).
 func openPartInDir(dir *os.File, name, root string) (*os.File, error) {
-	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}

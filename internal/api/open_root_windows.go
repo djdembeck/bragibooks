@@ -51,13 +51,7 @@ func openInsideRoot(path, root string, allowDir bool) (*os.File, error) {
 		f.Close()
 		return nil, fmt.Errorf("resolve opened path for containment: %s", path)
 	}
-	// GetFinalPathNameByHandle yields \\?\C:\… device paths; drop the
-	// prefix so the comparison runs on the same form as the resolved
-	// root (a \\?\UNC\ name is already converted to \\host\share form
-	// by finalPathByHandle).
-	if strings.HasPrefix(final, `\\?\`) && !strings.HasPrefix(final, `\\?\UNC\`) {
-		final = final[len(`\\?\`):]
-	}
+	final = normalizeDrivePath(final)
 	resolvedRoot, rerr := filepath.EvalSymlinks(root)
 	if rerr != nil {
 		f.Close()
@@ -68,6 +62,18 @@ func openInsideRoot(path, root string, allowDir bool) (*os.File, error) {
 		return nil, fmt.Errorf("opened file escapes input root: %s", final)
 	}
 	return f, nil
+}
+
+// normalizeDrivePath converts a GetFinalPathNameByHandle result into the
+// form the containment check compares: it drops the \\?\ prefix from a
+// drive-letter path (\\?\C:\… → C:\…), so the comparison runs on the
+// same form as the resolved root. A \\?\UNC\ name is left alone:
+// finalPathByHandle already converted it to \\host\share form.
+func normalizeDrivePath(s string) string {
+	if strings.HasPrefix(s, `\\?\`) && !strings.HasPrefix(s, `\\?\UNC\`) {
+		return s[len(`\\?\`):]
+	}
+	return s
 }
 
 // withinResolvedRoot reports whether final lies inside root: both are
