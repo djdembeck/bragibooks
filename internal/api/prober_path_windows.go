@@ -67,8 +67,10 @@ func normalizeFinalPath(s string) string {
 // false when the resolution fails: the original pathname is NOT a valid
 // fallback (it was never approved for reopening by the open-time
 // containment check), so the caller must degrade the row rather than send
-// an un-checked pathname to the extractor.
-func proberPath(f *os.File, original string) (string, bool) {
+// an un-checked pathname to the extractor. isDir is accepted for
+// signature consistency with the other platforms; the handle's final
+// path resolves the descriptor regardless of its type.
+func proberPath(f *os.File, original string, isDir bool) (string, bool) {
 	s, ok := finalPathByHandle(f)
 	return s, ok
 }

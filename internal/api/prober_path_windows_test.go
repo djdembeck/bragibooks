@@ -50,7 +50,7 @@ func TestProberPathWindowsFailsClosed(t *testing.T) {
 	// A zero-Fd file: Fd() is 0, an invalid handle, so the resolution
 	// fails. Closing it is a no-op (the os.File owns no real descriptor).
 	f := &os.File{}
-	got, ok := proberPath(f, original)
+	got, ok := proberPath(f, original, false)
 	if ok {
 		t.Fatalf("proberPath ok = true for an unresolvable handle; want false (no silent fallback to the original)")
 	}
@@ -81,7 +81,7 @@ func TestProberPathWindowsFailsClosed(t *testing.T) {
 		t.Fatalf("open fixture: %v", err)
 	}
 	defer live.Close()
-	got, ok = proberPath(live, other)
+	got, ok = proberPath(live, other, false)
 	if !ok {
 		t.Fatalf("proberPath ok = false for a resolvable handle; want true")
 	}

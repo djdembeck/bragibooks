@@ -5,12 +5,13 @@ package api
 import "os"
 
 // proberPath returns the pathname to hand to the probe for f: the
-// ORIGINAL pathname, but only once it is verified at probe time to be a
-// regular file naming the same filesystem object as the open descriptor.
-// The open-time containment check binds the descriptor, not the name: the
-// extractor reopens the name for the ffprobe probes and folder discovery,
-// so a pathname swapped after that check would be probed and persisted as
-// the source.
+// ORIGINAL pathname, but only once it is verified at probe time to name
+// the same filesystem object as the open descriptor, with a type that
+// matches the row's kind: a regular file for a file row, a directory
+// for a folder row. The open-time containment check binds the
+// descriptor, not the name: the extractor reopens the name for the
+// ffprobe probes and folder discovery, so a pathname swapped after that
+// check would be probed and persisted as the source.
 //
 // This platform has no /proc, so the OS cannot keep the name bound until
 // the consumer opens it. The binding is an identity check at probe time:
@@ -22,11 +23,11 @@ import "os"
 // file. A hardlink of the SAME inode keeps the name resolving to the
 // verified inode, so it stays in force.
 //
-// Any failed step (the lstat, the regular-file check, the comparison)
-// returns ok=false. The callers (extractOne, pinPart) take the refusal
-// path and degrade the row/part. The remaining micro-window between the
-// lstat and the consumer's open is a documented platform limitation.
-func proberPath(f *os.File, original string) (string, bool) {
+// Any failed step (the lstat, the type check, the comparison) returns
+// ok=false. The callers (extractOne, pinPart) take the refusal path and
+// degrade the row/part. The remaining micro-window between the lstat and
+// the consumer's open is a documented platform limitation.
+func proberPath(f *os.File, original string, isDir bool) (string, bool) {
 	finfo, err := f.Stat()
 	if err != nil {
 		return "", false
@@ -35,10 +36,14 @@ func proberPath(f *os.File, original string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if !oinfo.Mode().IsRegular() {
-		// A symlink, device, FIFO, or socket. O_NOFOLLOW at open time
-		// rejects only the final-component symlink; a same-inode symlink
-		// target would pass a stat-based identity check.
+	// A symlink, device, FIFO, or socket is refused: O_NOFOLLOW at open
+	// time rejects only the final-component symlink; a same-inode symlink
+	// target would pass a stat-based identity check.
+	if isDir {
+		if !oinfo.IsDir() {
+			return "", false
+		}
+	} else if !oinfo.Mode().IsRegular() {
 		return "", false
 	}
 	if !os.SameFile(finfo, oinfo) {

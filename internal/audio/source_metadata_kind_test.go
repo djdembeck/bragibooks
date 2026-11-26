@@ -27,7 +27,7 @@ func TestExtractSourceMetadataFileKindDoesNotEnterFolderDiscovery(t *testing.T) 
 	probeFile := filepath.Join(t.TempDir(), "pinned.bin")
 	writeProbeResponse(t, respDir, "pinned", `{"format":{"tags":{},"duration":"1.0"},"streams":[]}`)
 
-	snap, err := ExtractSourceMetadata(t.Context(), ffprobe, srcDir, probeFile, "file", nil)
+	snap, err := ExtractSourceMetadata(t.Context(), ffprobe, srcDir, probeFile, "file", nil, nil)
 	if err != nil {
 		t.Fatalf("ExtractSourceMetadata: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestExtractSourceMetadataFolderDiscoveryUsesPinnedPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snap, err := ExtractSourceMetadata(t.Context(), ffprobe, srcName, pinnedDir, "folder", nil)
+	snap, err := ExtractSourceMetadata(t.Context(), ffprobe, srcName, pinnedDir, "folder", nil, nil)
 	if err != nil {
 		t.Fatalf("ExtractSourceMetadata: %v", err)
 	}
@@ -105,14 +105,14 @@ func TestExtractSourceMetadataRefusedPartDoesNotCountProbed(t *testing.T) {
 	}
 	writeProbeResponse(t, respDir, "a", `{"format":{"tags":{},"duration":"1.0"},"streams":[]}`)
 
-	pinPart := func(part string) (string, func(), bool) {
+	pinPart := func(part string) (string, *os.File, func(), bool) {
 		if filepath.Base(part) == "a.mp3" {
-			return part, func() {}, true
+			return part, nil, func() {}, true
 		}
-		return "", nil, false // b.mp3: pin refused
+		return "", nil, nil, false // b.mp3: pin refused
 	}
 
-	snap, err := ExtractSourceMetadata(t.Context(), ffprobe, srcDir, srcDir, "folder", pinPart)
+	snap, err := ExtractSourceMetadata(t.Context(), ffprobe, srcDir, srcDir, "folder", pinPart, nil)
 	if err != nil {
 		t.Fatalf("ExtractSourceMetadata: %v", err)
 	}

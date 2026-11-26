@@ -15,7 +15,9 @@ import (
 // check could repoint. The caller must keep f open for the probe's
 // duration: a closed fd would make the path resolve to nothing and the
 // probe would degrade. ok is always true: the /proc path is built from
-// the live descriptor, so there is no lookup that can fail.
-func proberPath(f *os.File, original string) (string, bool) {
+// the live descriptor, so there is no lookup that can fail. isDir is
+// accepted for signature consistency with the other platforms; the
+// /proc path resolves the descriptor regardless of its type.
+func proberPath(f *os.File, original string, isDir bool) (string, bool) {
 	return fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), f.Fd()), true
 }

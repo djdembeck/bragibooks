@@ -1087,12 +1087,17 @@ func (s *IndexService) extractOne(ctx context.Context, r indexRow) *audio.Source
 	// The probe is then handed a path bound to the OPENED descriptor
 	// (linux: /proc/self/fd/<n>, which resolves to the verified target;
 	// darwin/bsd: the original pathname, once proberPath verifies at
-	// probe time that it is a regular file naming the same filesystem
-	// object as the descriptor; windows: the NT device path resolved
-	// from the handle), with the file kept open for the probe's
-	// duration. Keeping f open does not bind the name on darwin/bsd
-	// (no procfs), so the identity check narrows the swap window to
-	// the few syscalls between the final stat and ffprobe's open.
+	// probe time that it names the same filesystem object as the
+	// descriptor and its type matches the row's kind (regular file for
+	// a file row, directory for a folder row); windows: the NT device
+	// path resolved from the handle), with the file kept open for the
+	// probe's duration. On darwin/bsd the verified descriptor is
+	// handed to the ffprobe child via cmd.ExtraFiles (fd 3) so the
+	// child probes /dev/fd/3, the inherited descriptor, instead of
+	// reopening the mutable name; where /dev/fd is unavailable the
+	// child probes the verified pathname, and the identity check
+	// narrows the swap window to the few syscalls between the final
+	// stat and ffprobe's open.
 	allowDir := r.Type == "dir"
 	probeFile, oerr := openInsideRoot(r.Path, root, allowDir)
 	if oerr != nil {
@@ -1107,22 +1112,22 @@ func (s *IndexService) extractOne(ctx context.Context, r indexRow) *audio.Source
 	// same open-time containment rule before it reaches ffprobe; a part
 	// that fails to pin (or whose descriptor cannot be named) degrades
 	// as ONE errored file, not the whole folder.
-	var pinPart func(part string) (string, func(), bool)
+	var pinPart func(part string) (string, *os.File, func(), bool)
 	if allowDir {
-		pinPart = func(part string) (string, func(), bool) {
+		pinPart = func(part string) (string, *os.File, func(), bool) {
 			f, err := openInsideRoot(part, root, false)
 			if err != nil {
 				log.Printf("index: pin part %s: %v", part, err)
-				return "", nil, false
+				return "", nil, nil, false
 			}
-			p, ok := proberPath(f, part)
+			p, ok := proberPath(f, part, false)
 			if !ok {
 				_ = f.Close()
 				log.Printf("index: pin part %s: %v", part, fmt.Errorf("name pinned descriptor for probe"))
-				return "", nil, false
+				return "", nil, nil, false
 			}
 			close := func() { _ = f.Close() }
-			return p, close, true
+			return p, f, close, true
 		}
 	}
 	// r.Path is the source's IDENTITY (the ASIN filename fallback and
@@ -1137,18 +1142,19 @@ func (s *IndexService) extractOne(ctx context.Context, r indexRow) *audio.Source
 	if allowDir {
 		srcKind = "folder"
 	}
-	probePath, ok := proberPath(probeFile, r.Path)
+	probePath, ok := proberPath(probeFile, r.Path, allowDir)
 	if !ok {
 		// The probe's pathname is not bound to the opened descriptor
 		// (windows: the handle's final path cannot be resolved;
-		// darwin/bsd: the pathname no longer names the opened file):
-		// the open-time containment check proved the file is inside the
-		// root, but the probe must not be handed an un-checked pathname
-		// — degrade the row.
+		// darwin/bsd: the pathname no longer names the opened file, or
+		// its type no longer matches the row's kind): the open-time
+		// containment check proved the file is inside the root, but the
+		// probe must not be handed an un-checked pathname — degrade the
+		// row.
 		log.Printf("index: extract %s: %v", r.Path, fmt.Errorf("name pinned descriptor for probe"))
 		return audio.DegradedSourceMetadata("extraction refused: name pinned descriptor for probe")
 	}
-	snap, err := audio.ExtractSourceMetadata(ctx, s.ffprobe, r.Path, probePath, srcKind, pinPart)
+	snap, err := audio.ExtractSourceMetadata(ctx, s.ffprobe, r.Path, probePath, srcKind, pinPart, probeFile)
 	if err != nil || snap == nil {
 		log.Printf("index: extract %s: %v", r.Path, err)
 		return audio.DegradedSourceMetadata(fmt.Sprintf("extraction failed: %v", err))
