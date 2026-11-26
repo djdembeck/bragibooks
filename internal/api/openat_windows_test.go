@@ -26,6 +26,10 @@ func TestCanonicalComparePath(t *testing.T) {
 		// Already-normal: untouched.
 		`C:\dir\file`: `C:\dir\file`,
 		`D:\vol\file`: `D:\vol\file`,
+		// Whitespace is preserved: a trailing NBSP is part of a
+		// resolved directory's identity (configuration trimming
+		// happens before resolution in resolveScanRoot).
+		"C:\\Books\\vol1\u00a0": "C:\\Books\\vol1\u00a0",
 	} {
 		if got := canonicalComparePath(in); got != want {
 			t.Errorf("canonicalComparePath(%q) = %q; want %q", in, got, want)

@@ -65,15 +65,18 @@ func openInsideRoot(path, root string, allowDir bool) (*os.File, error) {
 }
 
 // canonicalComparePath converts a path into the form the containment
-// check compares: it trims whitespace, rewrites \\?\UNC\host\share\… to
-// the standard \\host\share\… form, drops the \\?\ prefix from a
-// drive-letter path (\\?\C:\… → C:\…), and leaves every other form
-// untouched. The result is Clean-ed, so a root configured with the
-// extended prefix (\\?\C:\Books) and a handle resolved to the bare
-// form (C:\Books) share one spelling. The conversion is pure string
-// handling (no syscall), so the tests run it directly.
+// check compares: it rewrites \\?\UNC\host\share\… to the standard
+// \\host\share\… form, drops the \\?\ prefix from a drive-letter path
+// (\\?\C:\… → C:\…), and leaves every other form untouched. The result
+// is Clean-ed, so a root configured with the extended prefix
+// (\\?\C:\Books) and a handle resolved to the bare form (C:\Books)
+// share one spelling. Whitespace is preserved: both operands are
+// filesystem-resolved names (post-EvalSymlinks /
+// post-GetFinalPathNameByHandle), where trailing whitespace is part of
+// a Windows directory's identity; configuration trimming happens before
+// resolution in resolveScanRoot. The conversion is pure string handling
+// (no syscall), so the tests run it directly.
 func canonicalComparePath(s string) string {
-	s = strings.TrimSpace(s)
 	if strings.HasPrefix(s, `\\?\UNC\`) {
 		// Slice past the ENTIRE `\\?\UNC\` prefix (all 8 chars), not
 		// just `\\?\UNC`: keeping the trailing backslash would leave
