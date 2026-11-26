@@ -94,8 +94,9 @@ type ProcessingJob struct {
 	// BatchID is the queue request that created the job, shared by every
 	// job one request enqueues. The queue page's completion banner reports
 	// per request, so back-to-back requests never merge into one batch.
-	// NULL for pre-v15 rows, which the banner groups by queue_seq
-	// adjacency; the jobs API omits the field for those.
+	// NULL for pre-v19 rows (batch_id was introduced by migration v19),
+	// which the banner groups by queue_seq adjacency; the jobs API omits
+	// the field for those.
 	BatchID *string `db:"batch_id" json:"-"`
 	// BookPreStatus is the book's status at queue time; cancelling a running
 	// job restores the book to this (not a hard-coded 'matched'), so a

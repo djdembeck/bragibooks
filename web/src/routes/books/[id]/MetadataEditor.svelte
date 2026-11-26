@@ -81,6 +81,11 @@
 		previewSeq++;
 		previewPath = '';
 		loadError = null;
+		// A save failure on the previous book must not show in this book's
+		// toolbar; an unapplied chapter offset must not be applied to (and
+		// saved with) the new book.
+		saveError = null;
+		chapterOffset = '';
 		meta = null;
 		draft = null;
 		baseline = null;
@@ -573,6 +578,89 @@
 		document.querySelector<HTMLButtonElement>(`[data-chapter-grip="${target}"]`)?.focus();
 	}
 
+	// The people and chapter-timing inputs commit to the draft only on
+	// change/blur (onchange), so a Ctrl/Cmd+S mid-typing would save a
+	// stale draft (or the response rebuild would overwrite the typed
+	// value). Flush the open input's value into the draft before the
+	// dirty check and the save.
+	function flushChangeOnlyInputs() {
+		if (!draft) return;
+		// Set when a chapter-time input holds an invalid value; after the
+		// chapter loop, a chapter-time error from a PRIOR flush clears
+		// once every input is valid again (see below the chapter loop).
+		// A fresh invalid flush re-sets the error, so the clear only
+		// applies to a stale one.
+		let chapterTimeInvalid = false;
+		for (const el of document.querySelectorAll<HTMLInputElement>('.meditor__input--person')) {
+			const label = el.getAttribute('aria-label') ?? '';
+			const m = label.match(/^(\w+) (\d+)$/);
+			if (!m) continue;
+			const noun = m[1];
+			const idx = Number(m[2]) - 1;
+			const key = noun === 'author' ? 'authors' : 'narrators';
+			const list = [...(draft[key] ?? [])];
+			if (idx >= 0 && idx < list.length && list[idx] !== el.value) {
+				list[idx] = el.value;
+				draft[key] = list;
+			}
+		}
+		for (const el of document.querySelectorAll<HTMLInputElement>('.meditor__chapter-title, .meditor__chapter-start, .meditor__chapter-duration')) {
+			const row = el.closest('.meditor__chapter');
+			if (!row) continue;
+			const rows = Array.from(row.parentElement?.querySelectorAll('.meditor__chapter') ?? []);
+			const idx = rows.indexOf(row);
+			if (idx < 0) continue;
+			const displayed = chapterList[idx];
+			if (!displayed) continue;
+			// Only a value that ACTUALLY differs from what the draft
+			// (or the catalog baseline, while draft.chapters is still
+			// null) already represents is flushed. Materializing
+			// draft.chapters for an untouched input would turn the null
+			// baseline into a copied catalog list and pin the catalog
+			// chapters as an override on the next save.
+			if (el.classList.contains('meditor__chapter-title')) {
+				if (el.value !== displayed.title) {
+					const list = ensureChapters();
+					list[idx] = { ...list[idx], title: el.value };
+					draft.chapters = [...list];
+				}
+			} else {
+				const field = el.classList.contains('meditor__chapter-start') ? 'start_millis' : 'duration_millis';
+				// chapterTimeInvalid is sticky for the whole loop: a valid
+				// (or unchanged) input never clears it, so an invalid
+				// earlier input followed by a valid later one still
+				// blocks the shortcut save and keeps the stale-error
+				// clear from running on the unflushed invalid value.
+				if (el.value !== formatChapterTime(displayed[field])) {
+					const parsed = parseChapterTime(el.value);
+					if (parsed === null) {
+						// The onchange path's gate: an invalid time must
+						// not be silently dropped from the shortcut
+						// save — the shortcut is blocked on it below.
+						chapterTimeInvalid = true;
+						chapterTimeError = 'Use h:mm:ss or milliseconds for chapter times.';
+						continue;
+					}
+					if (parsed !== displayed[field]) {
+						const list = ensureChapters();
+						list[idx] = { ...list[idx], [field]: parsed };
+						draft.chapters = [...list];
+					}
+				}
+			}
+		}
+		if (!chapterTimeInvalid &&
+			chapterTimeError === 'Use h:mm:ss or milliseconds for chapter times.') {
+			// Every pending chapter-time input is valid: an error set by
+			// an EARLIER flush (the user since corrected the value
+			// without blurring, so onchange never ran to clear it) would
+			// otherwise keep refusing the shortcut save forever. Only the
+			// chapter-time message clears here — the offset input owns a
+			// distinct message and must survive the flush.
+			chapterTimeError = '';
+		}
+	}
+
 	function handleGlobalKeydown(event: KeyboardEvent) {
 		if (event.isComposing) return;
 		if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return;
@@ -582,7 +670,8 @@
 		if (confirmingReset || confirmingDiscard) return;
 		event.preventDefault();
 		if (saving || uploading || resetting) return;
-		if (!dirty || chapterErrors.length > 0) return;
+		flushChangeOnlyInputs();
+		if (!dirty || chapterErrors.length > 0 || chapterTimeError) return;
 		void save();
 	}
 
@@ -867,7 +956,23 @@
 								if (e.currentTarget.checked) {
 									setClear('chapters', true);
 								} else {
-									if (draft) draft.chapters = null;
+									// Unchecking only drops the clear marker,
+									// NOT the list: ensureChapters may have
+									// populated draft.chapters (from the
+									// catalog) while the marker was set, and
+									// an edited list must survive unchecking.
+									// Exception: an EMPTY edited list has
+									// nothing to restore TO. Return to the
+									// INHERITED state (draft.chapters =
+									// null) rather than re-assigning a
+									// copied catalog list: null un-sticks
+									// chaptersCleared, and a save sends
+									// neither a pin (a copied list) nor a
+									// clear marker (an empty list) — the
+									// catalog chapters simply apply again.
+									if (draft && draft.chapters !== null && draft.chapters.length === 0) {
+										draft.chapters = null;
+									}
 									setClear('chapters', false);
 								}
 							}}
@@ -2411,7 +2516,11 @@
 
 	@media (max-width: 720px) {
 		.meditor__commit {
-			position: static;
+			/* display:contents lifts the toolbar's containing block from
+			     this short wrapper (toolbar+preview only) to .meditor,
+			     so the sticky toolbar pins through the whole form
+			     instead of scrolling away after the preview. */
+			display: contents;
 		}
 
 		.meditor__toolbar {

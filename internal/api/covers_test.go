@@ -1,16 +1,107 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bragibooks/bragibooks/internal/config"
 
 	"github.com/go-chi/chi/v5"
 )
+
+// TestSanitizeTransportErrorFixedDiagnostic guards the cover-log
+// redaction: a *url.Error embeds the full request URL (path + query) in
+// its message, and its nested message can name any hop's URL — including
+// a malformed/relative Location whose signed query is not an http(s) URL
+// and survives substring-scanning redaction. The fix replaces the fragile
+// substring recovery with a fixed diagnostic that cannot leak the raw
+// URL/path/query; the caller already reports the redacted host.
+func TestSanitizeTransportErrorFixedDiagnostic(t *testing.T) {
+	const wantFixed = "cover request failed (URL details redacted)"
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "relative location with signed query",
+			err: &url.Error{
+				Op:  "GET",
+				URL: "https://covers.example/seed.jpg",
+				Err: errors.New(`Get "https://covers.example/seed.jpg": redirect: relative Location "cdn.example/cover.jpg?sig=abc123" is not a valid redirect target`),
+			},
+			want: wantFixed,
+		},
+		{
+			name: "unquoted value with semicolon parameter",
+			err: &url.Error{
+				Op:  "GET",
+				URL: "https://covers.example/seed.jpg",
+				Err: errors.New(`Get "https://covers.example/seed.jpg": redirect to Location: /cover;v=1?sig=abc failed`),
+			},
+			want: wantFixed,
+		},
+		{
+			name: "url.Parse form quoted relative",
+			err: &url.Error{
+				Op:  "GET",
+				URL: "https://covers.example/seed.jpg",
+				Err: errors.New(`parse "cdn.example/cover.jpg?sig=abc123": first path segment in relative URL cannot be absolute`),
+			},
+			want: wantFixed,
+		},
+		{
+			name: "quoted value with escaped quote",
+			err: &url.Error{
+				Op:  "GET",
+				URL: "https://covers.example/seed.jpg",
+				Err: errors.New(`parse "/cover\"broken%zz?sig=SECRET": invalid URL escape "%zz"`),
+			},
+			want: wantFixed,
+		},
+		{
+			name: "absolute location",
+			err: &url.Error{
+				Op:  "GET",
+				URL: "https://covers.example/seed.jpg",
+				Err: errors.New(`redirect to Location: https://cdn.example/cover.jpg?sig=abc123 failed`),
+			},
+			want: wantFixed,
+		},
+		{
+			name: "plain message with URL wrapper",
+			err: &url.Error{
+				Op:  "GET",
+				URL: "https://covers.example/seed.jpg",
+				Err: errors.New("connection reset by peer"),
+			},
+			want: wantFixed,
+		},
+		{
+			name: "non-url error passes through",
+			err:  errors.New("connection reset by peer"),
+			want: "connection reset by peer",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeTransportError(tc.err)
+			if got != tc.want {
+				t.Errorf("sanitize = %q; want %q", got, tc.want)
+			}
+			// The fixed diagnostic must never leak URL fragments.
+			if strings.Contains(got, "sig=") || strings.Contains(got, "cdn.example") || strings.Contains(got, "covers.example") {
+				t.Errorf("sanitize = %q; must not contain URL fragments", got)
+			}
+		})
+	}
+}
 
 func TestCoverHandlerServesExtractedCoversOnly(t *testing.T) {
 	dir := t.TempDir()

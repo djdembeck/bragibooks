@@ -3,7 +3,7 @@
 	import { Pencil, Trash2 } from '@lucide/svelte';
 	import { PageHeader, Button, Alert, ErrorDetail, Skeleton, Spinner, DirPicker, Modal, PathFormatBuilder } from '#lib/components/index.js';
 	import { parseParts, validateScheme, trimSegment } from '#lib/scheme.js';
-	import { getEngineCapabilities, refreshEngineCapabilities } from '#lib/engineCapabilities.js';
+	import { getEngineCapabilities, refreshEngineCapabilities } from '#lib/engineCapabilities.svelte.js';
 	import type { Settings, OutputProfile, IndexStatus, IndexState } from '#lib/types.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
@@ -309,6 +309,13 @@
 			if (updated) {
 				settings.bragibooks_version = updated.bragibooks_version;
 				settings.m4b_merge_version = updated.m4b_merge_version;
+				// An engine-binary swap in this save re-derives the
+				// invalid-profile list server-side; copy it so the repair
+				// list tracks the live engine (the PUT response carries it
+				// now, matching GET's shape).
+				if (Array.isArray(updated.invalid_output_profiles)) {
+					settings.invalid_output_profiles = updated.invalid_output_profiles;
+				}
 			}
 			// The server's response is the saved truth, not the draft.
 			indexingSaved = (updated ?? settings).indexing_enabled === true;
@@ -575,10 +582,30 @@
 		try {
 			const res = await get<{ profiles: OutputProfile[] }>('/output-profiles');
 			profiles = res.profiles;
+			// A profile edit/delete can change which stored schemes the
+			// live engine accepts, so the repair list re-fetches on the
+			// same reload path (it is server-derived, not client-tracked).
+			await refreshInvalidProfiles();
 		} catch (e) {
 			profileError = e instanceof ApiError ? e.message : 'Could not load output profiles.';
 		} finally {
 			profileLoading = false;
+		}
+	}
+
+	// Re-fetch the invalid-profile list from GET /settings so the repair
+	// list tracks the server's current verdict after a profile mutation
+	// (the initial load and the PUT save handler set it directly; this is
+	// the post-edit/delete path). A failed refresh keeps the last good
+	// list (the profile list itself already surfaced the error).
+	async function refreshInvalidProfiles() {
+		try {
+			const res = await get<Settings>('/settings');
+			if (settings && Array.isArray(res.invalid_output_profiles)) {
+				settings.invalid_output_profiles = res.invalid_output_profiles;
+			}
+		} catch {
+			// keep the last good list
 		}
 	}
 
@@ -973,6 +1000,25 @@
 												</Button>
 											</div>
 										{/if}
+									</li>
+								{/each}
+							</ul>
+						{/if}
+						{#if (settings.invalid_output_profiles?.length ?? 0) > 0}
+							<p class="settings-help mt-4">
+								These saved profiles use a path format the current m4b-merge engine rejects. Edit each
+								profile to a format the engine accepts, or delete it.
+							</p>
+							<ul class="profile-list profile-list--invalid" aria-label="Profiles the current engine rejects">
+								{#each settings.invalid_output_profiles as invalid (invalid.id)}
+									<li class="profile-row">
+										<div class="profile-row__info">
+											<span class="profile-row__name">{invalid.name}</span>
+											<span class="profile-row__values">
+												<code>{invalid.format}</code>
+												<span class="profile-row__error">{invalid.error}</span>
+											</span>
+										</div>
 									</li>
 								{/each}
 							</ul>
@@ -1605,6 +1651,10 @@
 
 	.profile-row__values code {
 		overflow-wrap: anywhere;
+	}
+
+	.profile-row__error {
+		color: var(--text-muted);
 	}
 
 	.profile-row__actions {

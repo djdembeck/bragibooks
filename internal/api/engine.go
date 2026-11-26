@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/bragibooks/bragibooks/internal/audio"
@@ -47,13 +48,21 @@ const maxEnginePreviewBodyBytes = 1 << 20
 
 func (h *Handler) EnginePreview(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxEnginePreviewBodyBytes)
-	var req enginePreviewRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Read the FULL bounded body before unmarshalling: a decoder stops at
+	// the first JSON value, so a valid preview object with trailing data
+	// would slip past the cap (the 413 must cover the whole request).
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		var mbErr *http.MaxBytesError
 		if errors.As(err, &mbErr) {
 			writeError(w, http.StatusRequestEntityTooLarge, "preview request body exceeds the limit")
 			return
 		}
+		writeError(w, http.StatusBadRequest, "invalid preview request: "+err.Error())
+		return
+	}
+	var req enginePreviewRequest
+	if err := json.Unmarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid preview request: "+err.Error())
 		return
 	}

@@ -49,6 +49,11 @@ type ProcessingService struct {
 	// loadSnapshotForQueue and its job-row insert, and the job would then
 	// name a file that is gone.
 	bookCoversMu sync.Map // bookID (int64) -> *sync.Mutex
+	// bookCoverLockFn (test-only, production nil) lets a test wrap the
+	// per-book lock acquisition (e.g. to hold the lock past a capture's
+	// upsert+prune and pin the enqueue serialization). Nil = the direct
+	// mutex lock below.
+	bookCoverLockFn func(bookID int64) (unlock func())
 }
 
 // lockBookCover returns unlock, the per-book lock that pairs a capture's
@@ -57,6 +62,14 @@ type ProcessingService struct {
 // reused after the first unlock, so a second call for the same book
 // re-locks the same mutex instance.
 func (s *ProcessingService) lockBookCover(bookID int64) (unlock func()) {
+	if s.bookCoverLockFn != nil {
+		return s.bookCoverLockFn(bookID)
+	}
+	return s.lockBookCoverDirect(bookID)
+}
+
+// lockBookCoverDirect is the per-book mutex acquisition the hook wraps.
+func (s *ProcessingService) lockBookCoverDirect(bookID int64) (unlock func()) {
 	v, _ := s.bookCoversMu.LoadOrStore(bookID, &sync.Mutex{})
 	m := v.(*sync.Mutex)
 	m.Lock()
@@ -1371,6 +1384,15 @@ func (s *ProcessingService) processJob(ctx context.Context, job *models.Processi
 		defer os.Remove(stagedCover)
 	}
 	if err != nil {
+		// A cancellation during build (MkdirAll, cover staging, policy
+		// encoding) is 'cancelled', not 'error': the engine never
+		// started, so finalizeCancelled with an empty stdout matches the
+		// run-time cancel path. (The write_url cover fetch degrades
+		// rather than fails, so it is not a cancel source here.)
+		if state != nil && state.jobCtx != nil && state.jobCtx.Err() != nil {
+			s.finalizeCancelled(job, "")
+			return
+		}
 		buildErr := fmt.Errorf("build engine job: %v", err)
 		if job.BookID.Valid {
 			s.db.Exec(

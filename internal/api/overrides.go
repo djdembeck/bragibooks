@@ -34,10 +34,12 @@ import (
 // override — the opposite of clearing a tag.
 //
 // Effective metadata = catalog capture with the override layer applied
-// (applyMetadataOverride). Only the effective values name the output and
-// feed the selected writes; a cleared field is blanked from the effective
-// metadata AND pinned to the engine's clear policy, so its tag is removed
-// from the output even though the write selection still lists it.
+// (applyMetadataOverride). Only the effective values feed the selected
+// writes; a cleared field is pinned to the engine's clear policy, so its
+// tag is removed from the output even though the write selection still
+// lists it. The pre-clear value is kept by output naming (a cleared
+// title's output file is named from the catalog title, not the blank
+// effective one).
 
 // MetadataOverride is the durable per-book override row. Per-field storage
 // conventions (the zero value is "no override" for every field):
@@ -725,7 +727,7 @@ func (h *Handler) UpdateBookMetadata(w http.ResponseWriter, r *http.Request) {
 		CoverFile: req.CoverFile, CoverURL: req.CoverURL, Chapters: req.Chapters,
 	}
 	o.Cleared = normalizeClearedFields(o.Cleared, o.Chapters)
-	if err := validateMetadataOverride(r.Context(), o); err != nil {
+	if err := validateMetadataOverride(r.Context(), h.svc.CoversDir, o); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -750,16 +752,32 @@ func (h *Handler) UpdateBookMetadata(w http.ResponseWriter, r *http.Request) {
 	// then deletes (finding: prune vs save). The lock is released before
 	// the audit insert and the response build, which do not touch covers.
 	unlock := h.svc.ProcessingSvc.lockBookCover(bookID)
+	// The cover file's existence is re-checked INSIDE this critical
+	// section, not by the pre-lock validation above: a concurrent
+	// save/reset can prune the referenced asset between a pre-lock Stat
+	// and this row's persist, and the prune below runs under the same
+	// lock, so the check must too.
+	if o.CoverSource == "file" && o.CoverFile != "" {
+		if _, serr := os.Stat(filepath.Join(h.svc.CoversDir, o.CoverFile)); serr != nil {
+			unlock()
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("cover file %q is not on disk — upload it again", o.CoverFile))
+			return
+		}
+	}
 	if err := h.saveMetadataOverride(o); err != nil {
 		unlock()
 		writeError(w, http.StatusInternalServerError, "save metadata overrides: "+err.Error())
 		return
 	}
 	// The row about to be pruned against is now the authoritative reference
-	// for this book's covers; drop the pending-upload entries so this save's
-	// own sweep prunes an upload the saved row does NOT reference (an upload
-	// that IS referenced stays via the row's keep-set).
-	h.svc.dropPendingCoversFor(bookID)
+	// for this book's covers. Drop ONLY the pending entry for the cover the
+	// saved row references (if any), so this save's sweep can prune an
+	// upload the row does NOT reference. Other pending entries (concurrent
+	// drafts' uploads) stay: dropping them would let the sweep delete a
+	// file a not-yet-saved draft still references.
+	if o.CoverSource == "file" && o.CoverFile != "" {
+		h.svc.dropPendingCover(o.CoverFile)
+	}
 	if keepFile, ok := h.persistedOverrideCoverFile(bookID); ok {
 		h.pruneOrphanedOverrideCovers(bookID, keepFile)
 	} else {
@@ -861,6 +879,14 @@ func (h *Handler) UploadBookMetadataCover(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid upload: "+err.Error())
 		return
 	}
+	// ParseMultipartForm spools >5 MiB parts to temp files; RemoveAll on
+	// every exit path so a just-over-limit upload (spooled before the size
+	// check rejects it) does not leave a spool file behind.
+	defer func() {
+		if r.MultipartForm != nil {
+			r.MultipartForm.RemoveAll()
+		}
+	}()
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "missing file field in upload: "+err.Error())
@@ -1057,18 +1083,15 @@ func (s *Services) pendingOverrideCoversFor(bookID int64) map[string]struct{} {
 	return out
 }
 
-// dropPendingCoversFor forgets this book's pending cover entries (the draft
-// save persisted the row, so the keep-set now comes from the row itself).
-// Expired entries for other books are reaped on every registry access.
-func (s *Services) dropPendingCoversFor(bookID int64) {
+// dropPendingCover forgets one pending cover entry by name (the draft save
+// persisted the row referencing that asset, so the keep-set now comes from
+// the row itself). Other pending entries for the same book (concurrent
+// drafts' uploads) are left alone: dropping them would let the save's sweep
+// delete a file a not-yet-saved draft still references.
+func (s *Services) dropPendingCover(name string) {
 	s.pendingCoversMu.Lock()
 	defer s.pendingCoversMu.Unlock()
-	prefix := fmt.Sprintf("ovr-%d-", bookID)
-	for name := range s.pendingCovers {
-		if strings.HasPrefix(name, prefix) {
-			delete(s.pendingCovers, name)
-		}
-	}
+	delete(s.pendingCovers, name)
 }
 
 // pruneOrphanedOverrideCovers removes this book's override cover assets
@@ -1170,7 +1193,7 @@ const (
 // the operator-facing, actionable gate; the engine re-validates at run time.
 // ctx bounds the cover-URL host resolution (a stuck DNS lookup dies on the
 // request clock, not the resolver's).
-func validateMetadataOverride(ctx context.Context, o *MetadataOverride) error {
+func validateMetadataOverride(ctx context.Context, coversDir string, o *MetadataOverride) error {
 	if len(o.Title) > maxOverrideTitleChars {
 		return fmt.Errorf("title is too long (max %d characters)", maxOverrideTitleChars)
 	}
@@ -1222,6 +1245,17 @@ func validateMetadataOverride(ctx context.Context, o *MetadataOverride) error {
 		}
 		seen[c] = true
 	}
+	// A cleared cover and a file/URL cover are mutually exclusive: the
+	// clear wins at run time, so a draft carrying both would save a
+	// file/URL override that reports a cover the output does not carry.
+	// Refuse the combination at validation time.
+	if o.CoverSource == "file" || o.CoverSource == "url" {
+		for _, c := range o.Cleared {
+			if c == "cover" {
+				return fmt.Errorf("a %s cover cannot also be cleared — remove \"cover\" from the cleared fields", o.CoverSource)
+			}
+		}
+	}
 	switch o.CoverSource {
 	case "":
 		if o.CoverFile != "" || o.CoverURL != "" {
@@ -1240,6 +1274,16 @@ func validateMetadataOverride(ctx context.Context, o *MetadataOverride) error {
 		}
 		if o.CoverURL != "" {
 			return errors.New("a file cover must not also reference a URL")
+		}
+		// The name check is the pre-lock gate: it admits only this
+		// book's override assets. Existence is re-checked under the
+		// per-book lock at persist time (UpdateBookMetadata), where it
+		// cannot race the orphan prune — a pre-lock Stat would leave a
+		// window in which a concurrent save's sweep deletes the asset
+		// between the Stat and this row's persist, creating exactly the
+		// dangling reference the prune exists to prevent.
+		if coversDir == "" {
+			return errors.New("covers directory is not configured")
 		}
 	case "url":
 		if o.CoverURL == "" {

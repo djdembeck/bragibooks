@@ -45,7 +45,7 @@ func writeProbeResponse(t *testing.T, dir, name, doc string) {
 
 func runExtraction(t *testing.T, ffprobe, srcPath string) *SourceMetadata {
 	t.Helper()
-	snap, err := ExtractSourceMetadata(context.Background(), ffprobe, srcPath)
+	snap, err := ExtractSourceMetadata(context.Background(), ffprobe, srcPath, srcPath, "unknown", nil, nil)
 	if err != nil {
 		t.Fatalf("ExtractSourceMetadata: %v", err)
 	}

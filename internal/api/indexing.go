@@ -92,11 +92,24 @@ type IndexService struct {
 	// last.Generation, which a mid-scan root change may have already
 	// bumped for the queued rescan — the running scan must still
 	// terminate under ITS OWN generation.
-	nextGen         int64
-	activeRoot      string        // root the accepted (active or queued) scan will target
-	done            chan struct{} // closed when Run returns; Wait() blocks on it
-	last            IndexState    // in-memory mirror of index_state for fast reads
-	writeFailedRoot string        // root whose table state a failed upsert left partially written
+	nextGen    int64
+	activeRoot string        // root the accepted (active or queued) scan will target
+	done       chan struct{} // closed when Run returns; Wait() blocks on it
+	last       IndexState    // in-memory mirror of index_state for fast reads
+	// Roots the in-flight scan's destructive batches may have left
+	// partially written: the current root, plus the OLD root on a
+	// root-switch (deletePrefix empties the old root's rows while
+	// last.Root is still the old one). The listing guard serves the
+	// filesystem for ANY of them; a clean terminal on a root releases
+	// just that root.
+	writeFailedRoots []string
+	// durableWriteFailedRoots is the subset of writeFailedRoots that a
+	// PERSISTED guard write actually covers: the in-memory mark alone is
+	// not durable (a crash before the guard write would lose it), so the
+	// arm's write-skip decision must key on this set, not on
+	// writeFailedRoots. Seeded from the persisted column at boot, and
+	// grown by every successful guard persist.
+	durableWriteFailedRoots []string
 }
 
 // NewIndexService builds the service and seeds the in-memory state mirror
@@ -183,13 +196,45 @@ func (s *IndexService) sendLocked() {
 	}
 }
 
-// WriteFailedRoot returns the root whose source_index rows a failed scan
-// left partially written ("", when none): the indexed-listing guard serves
-// the filesystem for that root until a clean scan completes on it.
-func (s *IndexService) WriteFailedRoot() string {
+// writeFailedRootAdd marks root as partially written (idempotent). Must
+// NOT hold s.mu.
+func (s *IndexService) writeFailedRootAdd(root string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.writeFailedRoot
+	for _, r := range s.writeFailedRoots {
+		if r == root {
+			return
+		}
+	}
+	s.writeFailedRoots = append(s.writeFailedRoots, root)
+}
+
+// writeFailedRootClear releases the partial-write mark for root (a clean
+// terminal on it). Must NOT hold s.mu.
+func (s *IndexService) writeFailedRootClear(root string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.writeFailedRoots[:0]
+	for _, r := range s.writeFailedRoots {
+		if r != root {
+			out = append(out, r)
+		}
+	}
+	s.writeFailedRoots = out
+}
+
+// writeFailedRootContains reports whether root's table state is marked
+// partially written: the indexed-listing guard serves the filesystem for
+// it until a clean scan completes on it.
+func (s *IndexService) writeFailedRootContains(root string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.writeFailedRoots {
+		if r == root {
+			return true
+		}
+	}
+	return false
 }
 
 // Status returns the in-memory mirror, authoritative while the process is
@@ -341,30 +386,9 @@ func (s *IndexService) scan(ctx context.Context) {
 		return
 	}
 
-	// Root change: clear old-root rows before treating everything as new.
-	// Separator-aware prefix + bounded batches (one giant DELETE would pin
-	// the writer past the busy timeout). A failure here is terminal —
-	// the mixed old/new rows would be served as the index.
-	if oldRoot, changed := s.storeRoot(); changed && oldRoot != root {
-		if err := s.deletePrefix(oldRoot); err != nil {
-			s.setTerminal(gen, "error", fmt.Sprintf("clear old root %s: %v", oldRoot, err), 0, s.last.Root)
-			return
-		}
-	}
-
 	walked := make(map[string]bool, len(rows))
 	for _, r := range rows {
 		walked[r.Path] = true
-	}
-
-	// Prune only a complete walk: an incomplete walked-set would delete
-	// previously indexed paths beyond the cutoff. Failure is terminal:
-	// vanished rows would be served as if still present.
-	if !truncated {
-		if err := s.pruneVanished(walked); err != nil {
-			s.setTerminal(gen, "error", fmt.Sprintf("prune: %v", err), 0, s.last.Root)
-			return
-		}
 	}
 
 	// Classify walked rows: unchanged (size+modtime match AND stored
@@ -449,12 +473,12 @@ func (s *IndexService) scan(ctx context.Context) {
 				// storing the degraded marker — without this the row
 				// re-extracts and re-degrades on every refresh, and the
 				// folder snapshot stays permanently incomplete for it.
-				r.Payload = mustJSON(s.extractOne(ctx, r.Path))
+				r.Payload = mustJSON(s.extractOne(ctx, *r))
 			} else {
-				r.Payload = mustJSON(s.extractOne(ctx, r.Path))
+				r.Payload = mustJSON(s.extractOne(ctx, *r))
 			}
 		default:
-			snap := s.extractOne(ctx, r.Path)
+			snap := s.extractOne(ctx, *r)
 			r.Payload = mustJSON(snap)
 			if snap.Complete() {
 				snapshotByParent[r.Path] = snap
@@ -476,35 +500,60 @@ func (s *IndexService) scan(ctx context.Context) {
 		}
 	}
 
-	// The partial-write guard is persisted BEFORE the first batch commits:
-	// upsertAll commits in bounded batches, so a crash (or a process kill)
-	// after an early batch leaves the table half-written, and the persisted
-	// guard — not the in-memory one — is what makes a restarted process
-	// keep serving the filesystem (not the half-written table) until the
-	// next clean scan. A clean done/truncated terminal on this root
-	// releases it (below, in setTerminal); an error terminal keeps it.
-	s.mu.Lock()
-	if s.writeFailedRoot != root {
-		// Persist the guard BEFORE claiming it in memory: a failed write
-		// means the guard is not durable, so the half-written table this
-		// scan is about to commit is exactly what a restart would serve —
-		// the failure the guard exists to prevent. Abort (same terminal
-		// "error" treatment as a failed upsert) instead of exposing it.
-		s.writeFailedRoot = root
-		perr := s.persistLocked()
-		if perr != nil {
-			s.writeFailedRoot = ""
-			s.mu.Unlock()
-			s.setTerminal(gen, "error", fmt.Sprintf("persist write-failed guard: %v", perr), 0, s.last.Root)
+	// The partial-write guard is armed AFTER extraction (the slow phase
+	// mutates no rows — arming earlier would serve the filesystem for
+	// the whole walk and extraction on a same-root refresh) and
+	// BEFORE the first destructive batch below: a crash (or process
+	// kill) after an early batch must leave the guard set so a
+	// restarted process serves the filesystem, not a table with
+	// old-root rows deleted or new rows half-written. On a root switch
+	// the guard covers BOTH roots — deletePrefix empties the old
+	// root's rows while last.Root is still the old one, so a guard on
+	// the new root alone would serve the depleted old root's rows if
+	// the config pointed back before the rescan landed.
+	oldRoot, changed := s.storeRoot()
+	if changed {
+		if !s.armWriteFailedRoots(gen, root, oldRoot) {
+			return
+		}
+	} else {
+		if !s.armWriteFailedRoots(gen, root) {
 			return
 		}
 	}
-	s.mu.Unlock()
+	// Root change: clear old-root rows before treating everything as new.
+	// Separator-aware prefix + bounded batches (one giant DELETE would pin
+	// the writer past the busy timeout). A failure here is terminal —
+	// the mixed old/new rows would be served as the index. Rows under the
+	// NEW root survive: on a parent→child switch the child's existing
+	// rows are the new root's unchanged rows, and deleting them here
+	// would leave the overlap unserved (upsertAll only bumps seen_at for
+	// unchanged rows; it cannot restore a deleted one).
+	if changed && oldRoot != root {
+		if err := s.deletePrefix(oldRoot, root); err != nil {
+			s.setTerminal(gen, "error", fmt.Sprintf("clear old root %s: %v", oldRoot, err), 0, s.last.Root)
+			return
+		}
+	}
+
+	// Prune only a complete walk: an incomplete walked-set would delete
+	// previously indexed paths beyond the cutoff. Failure is terminal:
+	// vanished rows would be served as if still present.
+	if !truncated {
+		if err := s.pruneVanished(walked); err != nil {
+			s.setTerminal(gen, "error", fmt.Sprintf("prune: %v", err), 0, s.last.Root)
+			return
+		}
+	}
+
+	// upsertAll commits in bounded batches, so a crash (or a process
+	// kill) after an early batch leaves the table half-written, and the
+	// persisted guard — not the in-memory one — is what makes a
+	// restarted process keep serving the filesystem (not the
+	// half-written table) until the next clean scan. A clean
+	// done/truncated terminal on a root releases just that root (below,
+	// in setTerminal); an error terminal keeps the mark.
 	if err := s.upsertAll(append(unchanged, extract...)); err != nil {
-		s.mu.Lock()
-		s.writeFailedRoot = root
-		s.persistLocked()
-		s.mu.Unlock()
 		s.setTerminal(gen, "error", fmt.Sprintf("persist index: %v", err), 0, s.last.Root)
 		return
 	}
@@ -577,14 +626,20 @@ func (s *IndexService) setTerminal(gen int64, status, detail string, entries int
 	s.last.Total = 0
 	s.last.Added = 0
 	s.activeRoot = ""
-	// A clean terminal on this root means the table is fully written:
-	// release the partial-write listing guard (an error terminal on the
-	// root must NOT clear it — that is the partially-written state the
-	// guard exists to keep out of the listings).
+	// A clean terminal on this root means its table is fully written:
+	// release the partial-write mark for THIS root only (an error
+	// terminal must NOT clear it — that is the partially-written state
+	// the guard exists to keep out of the listings; a mark on an
+	// unrelated root stays). The clear runs in place: this holds s.mu,
+	// and the persistLocked below writes the released mark.
 	if status == "done" || status == "truncated" {
-		if s.writeFailedRoot == root {
-			s.writeFailedRoot = ""
+		out := s.writeFailedRoots[:0]
+		for _, r := range s.writeFailedRoots {
+			if r != root {
+				out = append(out, r)
+			}
 		}
+		s.writeFailedRoots = out
 	}
 	s.persistLocked()
 }
@@ -629,6 +684,21 @@ func (s *IndexService) walk(ctx context.Context, root string) (rows []indexRow, 
 			detail = fmt.Sprintf("entry cap %d exceeded", indexMaxEntries)
 			return filepath.SkipAll
 		}
+		// A file-symlink named like audio is walked as a regular file and
+		// its TARGET is probed (ffprobe follows the link) and extracted:
+		// a link leaving the input root would probe, enumerate, and
+		// persist metadata for a location the index does not cover. Skip
+		// it (d.Type() is the LSTAT mode; directory symlinks are not
+		// followed by WalkDir, so only file-type rows can be links).
+		if d.Type()&os.ModeSymlink != 0 {
+			resolved, rerr := filepath.EvalSymlinks(p)
+			if rerr != nil {
+				return nil // dangling link: nothing to probe
+			}
+			if rel, rerr := filepath.Rel(root, resolved); rerr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+				return nil // link escapes the input root
+			}
+		}
 		row := indexRow{Path: p, Name: d.Name(), Type: "file"}
 		if d.IsDir() {
 			row.Type = "dir"
@@ -663,12 +733,36 @@ func (s *IndexService) storeRoot() (string, bool) {
 }
 
 // deletePrefix removes all index rows under oldRoot (separator-aware:
-// "root" itself plus "root/..."), in bounded batches.
-func (s *IndexService) deletePrefix(oldRoot string) error {
-	sep := string(os.PathSeparator)
+// "root" itself plus "root/..."), in bounded batches, EXCEPT rows under
+// keepPrefix ("" keeps nothing): on a parent→child root switch the child
+// root's existing rows are NOT old-root residue — they are the new root's
+// unchanged rows, and deleting them would leave the scan serving a
+// depleted index for the overlap (upsertAll only bumps seen_at for
+// unchanged rows, so it cannot restore a deleted one). The exclusion is
+// in the query itself, so a batch never reads as empty over keep rows
+// and the bounded loop terminates on true exhaustion.
+func (s *IndexService) deletePrefix(oldRoot, keepPrefix string) error {
+	// The old-root predicate is PARENTHESIZED: SQL AND binds tighter than
+	// OR, so an appended keep-exclusion without the grouping would
+	// apply only to the LIKE arm, and the root row itself (path =
+	// oldRoot) would still be deleted when it sits under keepPrefix —
+	// leaving the child root without its root row on switch-back.
+	query := `SELECT path FROM source_index WHERE (path = ? OR path LIKE ? ESCAPE '\')`
+	args := []any{oldRoot, likeEscape(indexChildPrefix(oldRoot)) + "%"}
+	// indexChildPrefix builds the single-separator child prefix
+	// (oldRoot+sep for a non-root dir, oldRoot unchanged for a Windows
+	// volume root like D:\): a hand-rolled oldRoot+sep would double the
+	// separator on a volume root and LIKE would match no stored rows,
+	// leaving old-root rows behind a root switch. The keep prefix is
+	// built the same way.
+	if keepPrefix != "" {
+		query += ` AND NOT (path = ? OR path LIKE ? ESCAPE '\')`
+		args = append(args, keepPrefix, likeEscape(indexChildPrefix(keepPrefix))+"%")
+	}
+	query += ` LIMIT ?`
+	args = append(args, indexWriteBatch)
 	for {
-		rows, err := s.db.Query(`SELECT path FROM source_index WHERE path = ? OR path LIKE ? ESCAPE '\' LIMIT ?`,
-			oldRoot, likeEscape(oldRoot+sep)+"%", indexWriteBatch)
+		rows, err := s.db.Query(query, args...)
 		if err != nil {
 			return err
 		}
@@ -974,14 +1068,96 @@ func (s *IndexService) classify(rows []indexRow, root string) (unchanged, extrac
 }
 
 // extractOne runs the existing extractor (or the degraded cause-string
-// form when ffprobe is unavailable). It never returns nil.
-func (s *IndexService) extractOne(ctx context.Context, path string) *audio.SourceMetadata {
+// form when ffprobe is unavailable). It never returns nil. r carries the
+// walked row's KIND: a dir row opens with directories allowed (folder
+// aggregation needs them) and pins each discovered audio part before it
+// is probed; a file row opens the file only.
+func (s *IndexService) extractOne(ctx context.Context, r indexRow) *audio.SourceMetadata {
 	if s.ffprobe == "" {
 		return audio.DegradedSourceMetadata("ffprobe binary unavailable; extraction not run")
 	}
-	snap, err := audio.ExtractSourceMetadata(ctx, s.ffprobe, path)
+	root := s.resolveScanRoot()
+	// The walk's symlink-confinement check is a WALK-TIME verdict: a
+	// regular file replaced by an escaping symlink in between would
+	// otherwise be re-followed by the probe. Open with the containment
+	// check bound to the file at open time (unix: mode check, then
+	// O_NOFOLLOW + resolved-target inside the input root; windows:
+	// regular-file check + the handle's final name inside the root); a
+	// file that escapes now degrades rather than probed-and-persisted.
+	// The probe is then handed a path bound to the OPENED descriptor
+	// (linux: /proc/self/fd/<n>, which resolves to the verified target;
+	// darwin/bsd: the original pathname, once proberPath verifies at
+	// probe time that it names the same filesystem object as the
+	// descriptor and its type matches the row's kind (regular file for
+	// a file row, directory for a folder row); windows: the NT device
+	// path resolved from the handle), with the file kept open for the
+	// probe's duration. On darwin/bsd bindProbe hands the verified
+	// descriptor to the ffprobe child via cmd.ExtraFiles (fd 3), and
+	// the child probes /dev/fd/3, the inherited descriptor, instead of
+	// reopening the mutable name. The hand-off is unconditional and
+	// fail-closed: if the child cannot resolve /dev/fd/3, ffprobe
+	// fails and the row degrades, so a verified descriptor never falls
+	// back to the pathname. On linux and windows the probe path
+	// already names the descriptor, so the child probes it directly.
+	allowDir := r.Type == "dir"
+	probeFile, oerr := openInsideRoot(r.Path, root, allowDir)
+	if oerr != nil {
+		log.Printf("index: extract %s: %v", r.Path, oerr)
+		return audio.DegradedSourceMetadata(fmt.Sprintf("extraction refused: %v", oerr))
+	}
+	defer probeFile.Close()
+	// For a dir row the directory descriptor is pinned, but the parts
+	// are discovered INSIDE the extractor and probed by name: a part
+	// swapped to an escaping (or special) file between discovery and
+	// probe would then be probed and persisted. Pin every part with the
+	// same open-time containment rule before it reaches ffprobe; a part
+	// that fails to pin (or whose descriptor cannot be named) degrades
+	// as ONE errored file, not the whole folder.
+	var pinPart func(part string) (string, *os.File, func(), bool)
+	if allowDir {
+		pinPart = func(part string) (string, *os.File, func(), bool) {
+			f, err := openPartInDir(probeFile, filepath.Base(part), root)
+			if err != nil {
+				log.Printf("index: pin part %s: %v", part, err)
+				return "", nil, nil, false
+			}
+			p, ok := proberPath(f, part, false)
+			if !ok {
+				_ = f.Close()
+				log.Printf("index: pin part %s: %v", part, fmt.Errorf("refused to name the pinned descriptor for the probe"))
+				return "", nil, nil, false
+			}
+			close := func() { _ = f.Close() }
+			return p, f, close, true
+		}
+	}
+	// r.Path is the source's IDENTITY (the ASIN filename fallback and
+	// file naming run from its basename); the probe itself reads the
+	// pinned descriptor's path, so a /proc/fd or device path never
+	// leaks into the stored metadata.
+	// r.Type is the row's KIND and the extractor's file/folder verdict:
+	// the source must not be reclassified from its mutable name (a swap
+	// to a directory after the walk would enter folder discovery with
+	// unpinned child paths).
+	srcKind := "file"
+	if allowDir {
+		srcKind = "folder"
+	}
+	probePath, ok := proberPath(probeFile, r.Path, allowDir)
+	if !ok {
+		// The probe's pathname is not bound to the opened descriptor
+		// (windows: the handle's final path cannot be resolved;
+		// darwin/bsd: the pathname no longer names the opened file, or
+		// its type no longer matches the row's kind): the open-time
+		// containment check proved the file is inside the root, but the
+		// probe must not be handed an un-checked pathname — degrade the
+		// row.
+		log.Printf("index: extract %s: %v", r.Path, fmt.Errorf("name pinned descriptor for probe"))
+		return audio.DegradedSourceMetadata("extraction refused: name pinned descriptor for probe")
+	}
+	snap, err := audio.ExtractSourceMetadata(ctx, s.ffprobe, r.Path, probePath, srcKind, pinPart, probeFile)
 	if err != nil || snap == nil {
-		log.Printf("index: extract %s: %v", path, err)
+		log.Printf("index: extract %s: %v", r.Path, err)
 		return audio.DegradedSourceMetadata(fmt.Sprintf("extraction failed: %v", err))
 	}
 	return snap
@@ -1035,14 +1211,30 @@ func (s *IndexService) loadState() error {
 	var st IndexState
 	var gen int64
 	var lastRunAt sql.NullString
+	var writeFailedRootCol string
 	err := s.db.QueryRow(`SELECT root, entries, last_run_at, status, detail, generation, write_failed_root FROM index_state WHERE id = 1`).
-		Scan(&st.Root, &st.Entries, &lastRunAt, &st.Status, &st.Detail, &gen, &s.writeFailedRoot)
+		Scan(&st.Root, &st.Entries, &lastRunAt, &st.Status, &st.Detail, &gen, &writeFailedRootCol)
 	if err == sql.ErrNoRows {
 		s.persistLocked()
 		return nil
 	}
 	if err != nil {
 		return err
+	}
+	// The guard column is a JSON root list (persistLocked writes one).
+	// A non-empty non-JSON value is a legacy single-root marker: honor
+	// it as one root so a marker written by an older build is not
+	// dropped at restart.
+	if writeFailedRootCol != "" {
+		var roots []string
+		if jerr := json.Unmarshal([]byte(writeFailedRootCol), &roots); jerr != nil {
+			roots = []string{writeFailedRootCol}
+		}
+		s.writeFailedRoots = roots
+		// The persisted column IS the durable set at boot: every mark
+		// in it survived a guard write, so a same-root arm on top of
+		// it may skip the persist.
+		s.durableWriteFailedRoots = append([]string(nil), roots...)
 	}
 	st.LastRunAt = lastRunAt.String
 	st.Generation = gen
@@ -1079,11 +1271,100 @@ func (s *IndexService) persistLocked() error {
 			detail = excluded.detail,
 			generation = excluded.generation,
 			write_failed_root = excluded.write_failed_root`,
-		s.last.Root, s.last.Entries, nullableString(s.last.LastRunAt), s.last.Status, s.last.Detail, s.last.Generation, s.writeFailedRoot)
+		s.last.Root, s.last.Entries, nullableString(s.last.LastRunAt), s.last.Status, s.last.Detail, s.last.Generation, mustJSON(s.writeFailedRoots))
 	if err != nil {
 		log.Printf("index: persist state: %v", err)
 	}
 	return err
+}
+
+// armWriteFailedRoots persists the partial-write guard for EVERY root
+// this scan's destructive batches (deletePrefix, pruneVanished, upsertAll)
+// will touch BEFORE the first one commits: a crash (or process kill)
+// after an early batch must leave the guard set so a restarted process
+// serves the filesystem, not a table with old-root rows deleted or new
+// rows half-written. On a root switch the affected set is the NEW root
+// AND the old one (deletePrefix deletes the old root's rows while
+// last.Root is still the old one, so a guard on the new root alone would
+// serve the depleted old root's rows if the config pointed back). A
+// clean done/truncated terminal on a root releases just that root
+// (setTerminal); an error terminal keeps the mark. Returns false (and
+// records the terminal) when the guard cannot be made durable.
+func (s *IndexService) armWriteFailedRoots(gen int64, roots ...string) bool {
+	s.mu.Lock()
+	// Snapshot the TRUE pre-scan lists BEFORE any append: a failed
+	// persist must restore what the guard held before this scan armed,
+	// not a post-append list (restoring the append would leave the new
+	// mark in memory as if durable, and the terminal's persistLocked
+	// would then persist the false mark).
+	prev := append([]string(nil), s.writeFailedRoots...)
+	prevDurable := append([]string(nil), s.durableWriteFailedRoots...)
+	changed := false
+	for _, r := range roots {
+		found := false
+		for _, marked := range s.writeFailedRoots {
+			if marked == r {
+				found = true
+				break
+			}
+		}
+		if !found {
+			s.writeFailedRoots = append(s.writeFailedRoots, r)
+			changed = true
+		}
+	}
+	// The write-skip decision keys on the DURABLE set, not the in-memory
+	// marks: an in-memory-only mark (added by a prior arm whose persist
+	// failed, or by loadState before its first write) is not durable —
+	// skipping the persist for it would claim a guard a restart would
+	// not see, and the half-written table would then be served.
+	allDurable := true
+	for _, r := range roots {
+		inDurable := false
+		for _, d := range s.durableWriteFailedRoots {
+			if d == r {
+				inDurable = true
+				break
+			}
+		}
+		if !inDurable {
+			allDurable = false
+			break
+		}
+	}
+	if !changed && allDurable {
+		s.mu.Unlock()
+		return true
+	}
+	// Persist the guard BEFORE it is claimed durable: a failed write
+	// means the guard is not durable, so the table state this scan is
+	// about to mutate is exactly what a restart would serve — the
+	// failure the guard exists to prevent. Abort (same terminal "error"
+	// treatment as a failed upsert) instead of exposing it, restoring
+	// the PRE-SCAN marks so a stale guard on an unrelated root is not
+	// silently dropped.
+	perr := s.persistLocked()
+	if perr != nil {
+		s.writeFailedRoots = prev
+		s.durableWriteFailedRoots = prevDurable
+		s.mu.Unlock()
+		s.setTerminal(gen, "error", fmt.Sprintf("persist write-failed guard: %v", perr), 0, s.last.Root)
+		return false
+	}
+	for _, r := range roots {
+		inDurable := false
+		for _, d := range s.durableWriteFailedRoots {
+			if d == r {
+				inDurable = true
+				break
+			}
+		}
+		if !inDurable {
+			s.durableWriteFailedRoots = append(s.durableWriteFailedRoots, r)
+		}
+	}
+	s.mu.Unlock()
+	return true
 }
 
 // canonicalRoot is the one canonical form every index-mode path handling
@@ -1242,11 +1523,12 @@ func (h *Handler) listIndexedChildren(dir string) ([]IndexedDirectoryEntry, bool
 	if state := h.svc.IndexSvc.Status().State; state.Root != root {
 		return nil, false, nil // rows are from a previous root (or no scan yet)
 	}
-	// A scan that failed mid-upsert on this root left the table partially
-	// written (bounded batches commit independently): missing new paths
-	// and stale evidence for the rest. Serve the filesystem until a
-	// clean scan completes on this root.
-	if failed := h.svc.IndexSvc.WriteFailedRoot(); failed == root {
+	// A scan that failed mid-write on this root (or a root switch that
+	// depleted it) left the table partially written (bounded batches
+	// commit independently): missing new paths and stale evidence for
+	// the rest. Serve the filesystem until a clean scan completes on
+	// every marked root.
+	if h.svc.IndexSvc.writeFailedRootContains(root) {
 		return nil, false, nil // partial table: fall back to the filesystem
 	}
 	q := fmt.Sprintf(`SELECT path, name, type, size, modtime, payload FROM source_index WHERE path LIKE ? ESCAPE '\'`)

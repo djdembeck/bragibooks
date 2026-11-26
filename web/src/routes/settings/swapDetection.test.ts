@@ -37,7 +37,7 @@ vi.mock('#lib/components/index.js', () => {
 });
 // The real capabilities module caches app-wide; the swap test only needs
 // refreshEngineCapabilities to be observable.
-vi.mock('#lib/engineCapabilities.js', () => ({
+vi.mock('#lib/engineCapabilities.svelte.js', () => ({
 	getEngineCapabilities: () => null,
 	loadEngineCapabilities: async () => {},
 	refreshEngineCapabilities: refreshMock

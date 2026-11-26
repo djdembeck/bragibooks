@@ -1165,16 +1165,20 @@ func TestDeletePrefixRemovesDescendants(t *testing.T) {
 	cm.Store(cm.Config())
 	svc := NewIndexService(db, cm, "")
 
-	oldRoot := "/data/old root"
+	// Native separators: deletePrefix builds its descendant LIKE pattern
+	// with the platform's separator (indexChildPrefix), so the fixture
+	// rows must use the same form to be matched (on Windows a "/"-joined
+	// row would sit outside the pattern and survive).
+	oldRoot := filepath.Join("/data", "old root")
 	paths := []string{
 		oldRoot,
-		oldRoot + "/x.mp3",
-		oldRoot + "/a%b/c.mp3", // metacharacters in a descendant name
+		filepath.Join(oldRoot, "x.mp3"),
+		filepath.Join(oldRoot, "a%b", "c.mp3"), // metacharacters in a descendant name
 	}
 	for _, p := range paths {
 		storeIndexRow(t, db, p, 1, "2026-01-01T00:00:00.000000000Z", completeSnapPayload())
 	}
-	if err := svc.deletePrefix(oldRoot); err != nil {
+	if err := svc.deletePrefix(oldRoot, ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range paths {
@@ -1184,6 +1188,127 @@ func TestDeletePrefixRemovesDescendants(t *testing.T) {
 		}
 		if n != 0 {
 			t.Errorf("row %s survived deletePrefix", p)
+		}
+	}
+}
+
+// TestDeletePrefixKeepPrefixPreservesRootRow pins the predicate grouping:
+// the keep exclusion must apply to the path = oldRoot arm too, not only
+// the LIKE arm (SQL AND binds tighter than OR). A child→parent root
+// switch (switch-back) whose child-root scan was truncated leaves the
+// child's root row behind; deletePrefix must keep it — a deleted root row
+// is classified unchanged and upsertAll only bumps seen_at, so the
+// directory would be absent from the index. The fixtures use native
+// separators: deletePrefix builds its descendant LIKE pattern with the
+// platform's separator (indexChildPrefix), so "/"-joined rows would sit
+// outside the pattern on Windows and survive there.
+func TestDeletePrefixKeepPrefixPreservesRootRow(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := dbpkg.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := dbpkg.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	cm := config.NewConfigManager()
+	cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	cm.Config().Directories.InputDir = root
+	cm.Store(cm.Config())
+	svc := NewIndexService(db, cm, "")
+
+	// Child→parent switch: the old root sits UNDER the keep prefix, so
+	// every old-root row is a kept row — including the old root's own
+	// row, which only the parenthesized predicate keeps (an ungrouped
+	// keep exclusion binds to the LIKE arm alone and deletes it).
+	oldRoot := filepath.Join("/data", "books", "favorites")
+	keepRoot := filepath.Join("/data", "books")
+	kept := []string{
+		oldRoot, // the old root's own row: path = oldRoot arm under keep
+		filepath.Join(oldRoot, "c.mp3"),
+		keepRoot, // the new root's row: path = keepPrefix arm
+	}
+	for _, p := range kept {
+		storeIndexRow(t, db, p, 1, "2026-01-01T00:00:00.000000000Z", completeSnapPayload())
+	}
+	if err := svc.deletePrefix(oldRoot, keepRoot); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range kept {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM source_index WHERE path = ?`, p).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Errorf("row %s = %d, want 1 (the keep exclusion must cover the path = oldRoot arm too)", p, n)
+		}
+	}
+}
+
+// TestDeletePrefixKeepPrefixDeletesOutsideKeep pins the selective-deletion
+// half of the keep contract: with keepPrefix set, deletePrefix must DELETE
+// old-root rows that sit OUTSIDE the keep subtree (including the old root's
+// own row and metacharacter descendants) while PRESERVING the rows INSIDE
+// it. The child→parent test above keeps every old-root row, so without this
+// case a broken keep prefix (never matching, or matching everything) would
+// pass both deletion tests.
+func TestDeletePrefixKeepPrefixDeletesOutsideKeep(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := dbpkg.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := dbpkg.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	cm := config.NewConfigManager()
+	cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	cm.Config().Directories.InputDir = root
+	cm.Store(cm.Config())
+	svc := NewIndexService(db, cm, "")
+
+	// Parent→child switch: the keep prefix sits UNDER the old root, so
+	// the old root's rows split into a kept subtree and residue. Native
+	// separators: deletePrefix builds its LIKE patterns with the
+	// platform's separator (indexChildPrefix), so the fixture rows must
+	// match that form.
+	oldRoot := filepath.Join("/data", "old")
+	keepRoot := filepath.Join(oldRoot, "keep")
+	kept := []string{
+		keepRoot,                         // the keep root's own row: path = keepPrefix arm
+		filepath.Join(keepRoot, "k.mp3"), // a kept descendant
+	}
+	deleted := []string{
+		oldRoot, // the old root's own row: NOT under the keep prefix
+		filepath.Join(oldRoot, "x.mp3"),
+		filepath.Join(oldRoot, "a%b", "c.mp3"), // metacharacters in a descendant name
+	}
+	for _, p := range append(append([]string{}, kept...), deleted...) {
+		storeIndexRow(t, db, p, 1, "2026-01-01T00:00:00.000000000Z", completeSnapPayload())
+	}
+	if err := svc.deletePrefix(oldRoot, keepRoot); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range kept {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM source_index WHERE path = ?`, p).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Errorf("row %s = %d, want 1 (the keep prefix must preserve rows inside the keep subtree)", p, n)
+		}
+	}
+	for _, p := range deleted {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM source_index WHERE path = ?`, p).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Errorf("row %s = %d, want 0 (rows outside the keep prefix must be deleted)", p, n)
 		}
 	}
 }
@@ -1395,8 +1520,8 @@ func TestListIndexedChildrenFallsBackAfterPartialWrite(t *testing.T) {
 	if st.Root != root {
 		t.Fatalf("failed scan root = %q, want the retained root %q", st.Root, root)
 	}
-	if got := svc.WriteFailedRoot(); got != root {
-		t.Fatalf("WriteFailedRoot = %q, want %q after the failed scan", got, root)
+	if got := svc.writeFailedRootContains(root); !got {
+		t.Fatalf("writeFailedRoots missing %q after the failed scan", root)
 	}
 	// The listing must fall back to the filesystem for the half-written
 	// root: no index entries served.
@@ -1413,8 +1538,8 @@ func TestListIndexedChildrenFallsBackAfterPartialWrite(t *testing.T) {
 	if st.Status != "done" {
 		t.Fatalf("healing scan status = %s, want done", st.Status)
 	}
-	if got := svc.WriteFailedRoot(); got != "" {
-		t.Fatalf("WriteFailedRoot = %q, want cleared after a clean scan on the root", got)
+	if got := svc.writeFailedRootContains(root); got {
+		t.Fatalf("writeFailedRoots still marks %q after a clean scan on the root", root)
 	}
 	if entries, ok, err := h.listIndexedChildren(root); err != nil || !ok || len(entries) != 1 {
 		t.Fatalf("healed listing = ok=%v n=%d err=%v, want the index served again", ok, len(entries), err)
@@ -1754,13 +1879,30 @@ func TestListDirectoriesIndexMode(t *testing.T) {
 	})
 }
 
-// countingFFprobeStub writes an ffprobe stub that appends each input path
-// to logPath and answers with a valid, complete probe document, so callers
-// can count how many times the scanner probed.
+// countingFFprobeStub writes an ffprobe stub that reads the input it is
+// given and appends a marker derived from the CONTENT it read (not the
+// path argument) to logPath, then answers with a valid, complete probe
+// document, so callers can count how many times the scanner probed a
+// given file. The marker is the file's content: each fixture carries a
+// distinct byte string, so the log proves the child read the right file
+// through whatever path it was handed. On Linux the scanner hands the
+// probe the opened descriptor's /proc/<pid>/fd/<n> path (the
+// symlink-confinement fix), so the stub resolves that back to the real
+// path before reading it. On darwin/BSD the probe receives /dev/fd/3
+// (the inherited descriptor) and reads it directly. A plain pathname is
+// read as-is.
 func countingFFprobeStub(t *testing.T, logPath string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ffprobe")
-	script := "#!/bin/sh\nfor last; do :; done\necho \"$last\" >> " + logPath + "\n" +
+	script := "#!/bin/bash\nfor last; do :; done\n" +
+		"case \"$last\" in /proc/[0-9]*/fd/*)\n" +
+		"  pid=${last#/proc/}; pid=${pid%%/*}\n" +
+		"  after=${last#*/fd/}; n=${after%%/*}\n" +
+		"  rest=${after#*/}; [ \"$rest\" = \"$after\" ] && rest=\"\"\n" +
+		"  dir=$(readlink \"/proc/$pid/fd/$n\")\n" +
+		"  [ -n \"$rest\" ] && last=\"$dir/$rest\" || last=\"$dir\"\n" +
+		"  ;;\nesac\n" +
+		"echo \"$(cat \"$last\")\" >> " + logPath + "\n" +
 		`echo '{"format":{"duration":"10","tags":{"title":"T"}}, "streams":[]}'
 `
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
@@ -1778,18 +1920,25 @@ func TestIndexScanProbesEachFileOnce(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "book"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"01.m4b", "02.m4b"} {
-		if err := os.WriteFile(filepath.Join(root, "book", name), []byte("x"), 0o644); err != nil {
+	// Each audio fixture carries a DISTINCT content marker: the stub
+	// logs what it reads, so the log proves the child read each file
+	// (through a /proc path, a /dev/fd/3 descriptor, or a plain
+	// pathname) exactly once.
+	for _, name := range []struct{ name, marker string }{
+		{"01.m4b", "marker-a"},
+		{"02.m4b", "marker-b"},
+	} {
+		if err := os.WriteFile(filepath.Join(root, "book", name.name), []byte(name.marker), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(root, "book", "README.txt"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "book", "README.txt"), []byte("readme"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "top.m4b"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "top.m4b"), []byte("marker-c"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("notes"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1806,36 +1955,33 @@ func TestIndexScanProbesEachFileOnce(t *testing.T) {
 
 	// Probes: the book dir's single pass probes each of its audio children
 	// ONCE, and top.m4b probes once (its parent is the input root, which
-	// has no indexed row, so it cannot derive). Every audio child appears
-	// exactly once — a standalone probe of an already-covered child would
-	// show it twice. Non-audio files never appear.
+	// has no indexed row, so it cannot derive). Every audio file's CONTENT
+	// MARKER appears exactly once in the log — a standalone probe of an
+	// already-covered child would show its marker twice. Non-audio files
+	// never appear. The markers are read from the input the probe actually
+	// opens (a /proc path, a /dev/fd/3 descriptor, or a plain pathname),
+	// not from the path argument, so the dedup holds on every platform.
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	probed := strings.Fields(string(data))
 	count := map[string]int{}
-	for _, p := range probed {
-		count[p]++
+	for _, m := range probed {
+		count[m]++
 	}
 	if len(probed) != 3 {
 		t.Fatalf("probed %d invocations %v, want 3 (one per audio file total)", len(probed), probed)
 	}
-	for _, p := range []string{
-		filepath.Join(root, "book", "01.m4b"),
-		filepath.Join(root, "book", "02.m4b"),
-		filepath.Join(root, "top.m4b"),
-	} {
-		if count[p] != 1 {
-			t.Errorf("%s probed %d times, want exactly 1 (all: %v)", p, count[p], probed)
+	for _, m := range []string{"marker-a", "marker-b", "marker-c"} {
+		if count[m] != 1 {
+			t.Errorf("%s probed %d times, want exactly 1 (all: %v)", m, count[m], probed)
 		}
 	}
-	for _, p := range []string{
-		filepath.Join(root, "book", "README.txt"),
-		filepath.Join(root, "notes.txt"),
-	} {
-		if count[p] != 0 {
-			t.Errorf("%s probed %d times, want 0 (non-audio)", p, count[p])
+
+	for _, m := range []string{"readme", "notes"} {
+		if count[m] != 0 {
+			t.Errorf("%s probed %d times, want 0 (non-audio; all: %v)", m, count[m], probed)
 		}
 	}
 
@@ -1895,22 +2041,26 @@ func TestIndexScanProbesEachFileOnce(t *testing.T) {
 	for _, p := range probed {
 		count[p]++
 	}
-	// First scan: 3 probes (book/01, book/02, top). Rewrite pass: the
-	// rewritten child is covered by its parent's single folder pass,
-	// which probes the dir's audio children (01 and 02) — and the child
-	// must NOT be probed standalone a second time on top of that. top.m4b
-	// and everything else is untouched.
+	// First scan: 3 probes (book/01 as marker-a, book/02 as marker-b,
+	// top as marker-c). Rewrite pass: the rewritten child is covered by
+	// its parent's single folder pass, which probes the dir's audio
+	// children (01 and 02) — and the child must NOT be probed standalone
+	// a second time on top of that. top.m4b and everything else is
+	// untouched. The rewrite changes 01.m4b's content, so the two folder
+	// passes read it as marker-a (before) and 0123456789 (after): together
+	// that is the child probed exactly ONCE per folder pass, never
+	// standalone.
 	if n := len(probed); n != 5 {
 		t.Fatalf("total probes after in-place rewrite = %d (%v), want 5 (one folder pass: 01+02)", n, probed)
 	}
-	if count[filepath.Join(root, "book", "01.m4b")] != 2 {
-		t.Errorf("rewritten child probed %d times, want 2 (initial folder pass + rewrite folder pass; a standalone probe would make it 3)", count[filepath.Join(root, "book", "01.m4b")])
+	if count["marker-a"]+count["0123456789"] != 2 {
+		t.Errorf("rewritten child probed %d times (marker-a=%d, 0123456789=%d), want 2 (one per folder pass; a standalone probe would make it 3)", count["marker-a"]+count["0123456789"], count["marker-a"], count["0123456789"])
 	}
-	if count[filepath.Join(root, "book", "02.m4b")] != 2 {
-		t.Errorf("unrewritten child probed %d times, want 2 (folder pass re-probes the dir's children)", count[filepath.Join(root, "book", "02.m4b")])
+	if count["marker-b"] != 2 {
+		t.Errorf("unrewritten child probed %d times, want 2 (folder pass re-probes the dir's children)", count["marker-b"])
 	}
-	if count[filepath.Join(root, "top.m4b")] != 1 {
-		t.Errorf("top.m4b probed %d times, want 1", count[filepath.Join(root, "top.m4b")])
+	if count["marker-c"] != 1 {
+		t.Errorf("top.m4b probed %d times, want 1", count["marker-c"])
 	}
 }
 

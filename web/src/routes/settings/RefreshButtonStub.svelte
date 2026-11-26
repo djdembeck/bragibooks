@@ -5,15 +5,23 @@
 		children,
 		loading = false,
 		disabled = false,
-		onclick
+		onclick,
+		type = 'button',
+		...rest
 	}: {
 		children?: Snippet;
 		loading?: boolean;
 		disabled?: boolean;
 		onclick?: (event: MouseEvent) => void;
-	} = $props();
+		type?: 'button' | 'submit' | 'reset';
+	} & Record<string, unknown> = $props();
 </script>
 
-<button type="button" disabled={disabled || loading} onclick={onclick}>
+<button
+	type={type}
+	disabled={disabled || loading}
+	{...rest}
+	onclick={onclick}
+>
 	{#if children}{@render children()}{/if}
 </button>

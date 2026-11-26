@@ -280,6 +280,50 @@ func TestDeleteOutputProfileUnknownAndInvalidID(t *testing.T) {
 	}
 }
 
+// TestSettingsInvalidOutputProfilesEmptyNotNull pins the settings JSON
+// contract: after a clean boot (no invalid profiles, i.e. a nil slice is
+// recorded) the settings response must carry invalid_output_profiles as an
+// EMPTY ARRAY, not null — the Settings UI counts on a list shape. The
+// assertion is on the RAW body: decoding null into a map yields nil, so
+// only the text distinguishes [] from null.
+func TestSettingsInvalidOutputProfilesEmptyNotNull(t *testing.T) {
+	h := newSettingsTestService(t, newSettingsTestDB(t))
+	SetBootInvalidProfiles(nil)
+	t.Cleanup(func() { SetBootInvalidProfiles(nil) })
+
+	req := httptest.NewRequest("GET", "/api/settings", nil)
+	w := httptest.NewRecorder()
+	h.GetSettings(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET settings = %d — body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"invalid_output_profiles":[]`) {
+		t.Fatalf("settings body = %q; want the invalid_output_profiles field as an empty array, not null", w.Body.String())
+	}
+
+	// The non-empty case must survive too: a recorded profile reaches the
+	// UI verbatim (the repair list is the point of the field).
+	SetBootInvalidProfiles([]InvalidOutputProfile{{ID: 7, Name: "bad", Format: "../x", Error: "escapes"}})
+	req = httptest.NewRequest("GET", "/api/settings", nil)
+	w = httptest.NewRecorder()
+	h.GetSettings(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET settings = %d — body: %s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	list, ok := got["invalid_output_profiles"].([]any)
+	if !ok || len(list) != 1 {
+		t.Fatalf("invalid_output_profiles = %#v; want the one recorded profile", got["invalid_output_profiles"])
+	}
+	prof, _ := list[0].(map[string]any)
+	if prof["id"] != float64(7) || prof["name"] != "bad" {
+		t.Fatalf("recorded profile not surfaced: %#v", list[0])
+	}
+}
+
 // TestOutputProfileWriteAccess covers the save-time rule: a submitted
 // destination the server cannot create subdirectories in is a 400 naming the
 // path, while an unchanged stored value is not re-probed (a mount that went

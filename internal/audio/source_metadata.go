@@ -167,7 +167,33 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 // deadline expiry, empty source — is expressed inside the returned
 // snapshot; the returned error is non-nil only for programming-level
 // faults.
-func ExtractSourceMetadata(ctx context.Context, ffprobe, srcPath string) (*SourceMetadata, error) {
+//
+// srcName is the source's IDENTITY: the original path the operator sees,
+// used for the ASIN filename fallback and file naming. srcKind is the
+// row's KIND, decided by the caller ("file" or "folder"): an indexed
+// source's kind is the walk's row type, NOT a fresh stat of srcName —
+// the name is mutable, and re-statting it would let a source swapped to
+// a directory after the walk enter folder discovery with unpinned child
+// paths. "unknown" (standalone callers with no row) classifies by
+// stat, as before.
+// probePath is what ffprobe actually reads: for an indexed source this is
+// the PINNED descriptor's path (the resolved target inside the input
+// root), so a symlink swap after the open-time check cannot repoint the
+// probe, while srcName keeps the stored metadata naming the real source.
+// The two are equal for the standalone (intake) path. srcFile is the
+// verified open descriptor for probePath (nil on the standalone path,
+// where no descriptor is available): for a file it is handed to the
+// ffprobe child via cmd.ExtraFiles so the child probes /dev/fd/3, the
+// inherited descriptor, instead of reopening the mutable name; for a
+// folder it is the verified directory descriptor that folder discovery
+// enumerates through. pinPart,
+// when set, is called for each discovered audio part of a folder and
+// returns the part's pinned probe path, the part's verified descriptor
+// (nil when the part is probed by name), plus a release func (and false
+// when the part cannot be pinned, in which case the part is recorded as
+// one errored file rather than probing it by name); nil probes every
+// part by name.
+func ExtractSourceMetadata(ctx context.Context, ffprobe, srcName, probePath, srcKind string, pinPart func(part string) (string, *os.File, func(), bool), srcFile *os.File) (*SourceMetadata, error) {
 	passCtx, cancel := context.WithTimeout(ctx, sourceMetadataTimeout)
 	defer cancel()
 
@@ -177,37 +203,67 @@ func ExtractSourceMetadata(ctx context.Context, ffprobe, srcPath string) (*Sourc
 		Fields:     make(map[string]SourceField, len(tagPrecedence)),
 	}
 
-	stat, err := os.Stat(srcPath)
-	if err != nil {
-		snap = degradedSnapshot(snap, err.Error())
-		// Filename extraction needs no successful probe: a stat failure
-		// (renamed source, vanished file) still leaves a scannable name.
-		// Set the field only when a value is found so a clean degradation
-		// stays all-error.
-		if values := findASINs([]string{filepath.Base(srcPath)}); len(values) > 0 {
-			snap.Fields[FieldASIN] = SourceField{Values: values, Source: SourceFilename, Status: StatusPresent}
+	isDir := srcKind == "folder"
+	if srcKind != "folder" && srcKind != "file" {
+		// No row kind (standalone caller): classify by the source's own
+		// stat, the pre-index behavior. A stat failure degrades exactly
+		// as before — a vanished source is a degraded snapshot, not a
+		// probe of a name that resolves to nothing.
+		stat, serr := os.Stat(srcName)
+		if serr != nil {
+			snap = degradedSnapshot(snap, serr.Error())
+			// Filename extraction needs no successful probe: a stat
+			// failure (renamed source, vanished file) still leaves a
+			// scannable name. Set the field only when a value is found
+			// so a clean degradation stays all-error.
+			if values := findASINs([]string{filepath.Base(srcName)}); len(values) > 0 {
+				snap.Fields[FieldASIN] = SourceField{Values: values, Source: SourceFilename, Status: StatusPresent}
+			}
+			return snap, nil
 		}
-		return snap, nil
+		isDir = stat.IsDir()
 	}
 
-	var paths []string
-	if stat.IsDir() {
+	var paths, probePaths []string
+	var probeFds []*os.File
+	var pinClosers []func()
+	defer func() {
+		for i := len(pinClosers) - 1; i >= 0; i-- {
+			pinClosers[i]()
+		}
+	}()
+	if isDir {
 		snap.SourceKind = "folder"
-		paths, err = discoverAudioFiles(passCtx, srcPath, snap)
-		if err != nil {
-			return degradedSnapshot(snap, err.Error()), nil
+		var derr error
+		// Discover through the PINNED directory path (probePath), not
+		// srcName: for an indexed folder, srcName is the row's mutable
+		// pathname, and a symlink swap of that name to an outside
+		// directory after openInsideRoot verified it would otherwise be
+		// ENUMERATED here — the parts' basenames and count would land in
+		// Files/FilesTotal before the part pins refuse the outside files.
+		// srcName stays the source's IDENTITY (the stored naming, the
+		// ASIN fallback). The two are equal on the standalone path.
+		// srcFile is the verified directory descriptor when the caller
+		// pinned one (an indexed folder): discovery enumerates through
+		// it, so a name swap cannot redirect the walk. nil on the
+		// standalone path, which opens the name as before.
+		paths, probePaths, probeFds, pinClosers, derr = discoverAndPinAudioFiles(passCtx, probePath, srcFile, snap, pinPart)
+		if derr != nil {
+			return degradedSnapshot(snap, derr.Error()), nil
 		}
 	} else {
 		snap.SourceKind = "file"
-		paths = []string{srcPath}
+		paths = []string{srcName}
+		probePaths = []string{probePath}
+		probeFds = []*os.File{srcFile}
 	}
 	snap.FilesTotal = len(paths)
 
 	if len(paths) == 0 {
-		return finalizeEmpty(snap, srcPath), nil
+		return finalizeEmpty(snap, srcName), nil
 	}
 
-	merged, mergedTruncated, probedErrs := probeFiles(passCtx, ffprobe, paths, snap)
+	merged, mergedTruncated, probedErrs := probeFiles(passCtx, ffprobe, paths, probePaths, probeFds, snap)
 	if probedErrs == len(paths) {
 		firstErr := ""
 		if len(snap.Files) > 0 {
@@ -217,12 +273,12 @@ func ExtractSourceMetadata(ctx context.Context, ffprobe, srcPath string) (*Sourc
 		// degraded override so a found value is not written over by the
 		// all-error marking.
 		snap = degradedSnapshot(snap, fmt.Sprintf("all %d probed files failed: %s", len(paths), firstErr))
-		applyASINFallback(snap, srcPath)
+		applyASINFallback(snap, srcName)
 		return snap, nil
 	}
 
 	mergeFields(snap, merged, mergedTruncated)
-	applyASINFallback(snap, srcPath)
+	applyASINFallback(snap, srcName)
 	return finalize(snap), nil
 }
 
@@ -283,15 +339,29 @@ func finalizeEmpty(snap *SourceMetadata, srcPath string) *SourceMetadata {
 // batches) keeping regular audio files, bounded by maxDiscoveredEntries
 // scanned entries, maxProbedParts matched files, and the pass deadline.
 // The kept paths are sorted so probe and merge order is deterministic.
-func discoverAudioFiles(ctx context.Context, dir string, snap *SourceMetadata) ([]string, error) {
-	d, err := os.Open(dir)
-	if err != nil {
-		return nil, err
+// truncated reports that a bound (or the deadline) cut the walk short:
+// the kept set is then a first-N projection, not the whole folder.
+// dirFile is the verified directory descriptor to enumerate through
+// (nil: open the name, the standalone pre-index behavior).
+func discoverAudioFiles(ctx context.Context, dir string, dirFile *os.File) ([]string, bool, error) {
+	// Enumerate THROUGH the verified directory descriptor when one is
+	// available (an indexed folder): the entries come from the pinned fd,
+	// so a swap of the directory's name cannot redirect the walk. With no
+	// descriptor (the standalone path) we open the name, the documented
+	// pre-index behavior, and own that open for the duration of the walk.
+	d := dirFile
+	if d == nil {
+		opened, err := os.Open(dir)
+		if err != nil {
+			return nil, false, err
+		}
+		defer opened.Close()
+		d = opened
 	}
-	defer d.Close()
 
 	var kept []string
 	scanned := 0
+	truncated := false
 	for {
 		batch, readErr := d.ReadDir(64)
 		for _, e := range batch {
@@ -304,10 +374,10 @@ func discoverAudioFiles(ctx context.Context, dir string, snap *SourceMetadata) (
 			if readErr == io.EOF {
 				break
 			}
-			return nil, readErr
+			return nil, false, readErr
 		}
 		if ctx.Err() != nil || scanned >= maxDiscoveredEntries || len(kept) >= maxProbedParts {
-			snap.Truncated = true
+			truncated = true
 			break
 		}
 	}
@@ -315,29 +385,102 @@ func discoverAudioFiles(ctx context.Context, dir string, snap *SourceMetadata) (
 	if len(kept) > maxProbedParts {
 		kept = kept[:maxProbedParts]
 	}
-	return kept, nil
+	return kept, truncated, nil
+}
+
+// discoverAndPinAudioFiles discovers the folder's audio parts and, when
+// pinPart is set, pins EVERY part (same open-time containment rule the
+// source's own open used) before any probe runs: a part swapped to an
+// escaping (or special) file between discovery and probe would otherwise
+// be probed by its name and persisted. probePaths[i] is what ffprobe
+// reads for paths[i] (the pinned descriptor's path when pinned, the
+// part's own name when pinPart is nil, and the EMPTY sentinel when the
+// part failed to pin — a failed pin is recorded as one errored file and
+// NOT probed, so one bad part degrades one file, not the folder).
+// probeFds[i] is the verified descriptor for probePaths[i] (nil when the
+// part is probed by name, so no descriptor can be handed to the child).
+// The returned closers release the pinned descriptors; the caller owns
+// them for the pass's duration. Truncation (a discovery/probe bound or
+// the deadline) is derived from the kept set, so a pin that adds no
+// discovery of its own cannot masquerade as one. dirFile is the
+// verified directory descriptor to enumerate through (nil: the
+// standalone path opens the name).
+func discoverAndPinAudioFiles(ctx context.Context, dir string, dirFile *os.File, snap *SourceMetadata, pinPart func(part string) (string, *os.File, func(), bool)) ([]string, []string, []*os.File, []func(), error) {
+	kept, truncated, err := discoverAudioFiles(ctx, dir, dirFile)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if truncated {
+		snap.Truncated = true
+	}
+	probePaths := make([]string, len(kept))
+	for i, part := range kept {
+		probePaths[i] = part
+	}
+	if pinPart == nil {
+		return kept, probePaths, nil, nil, nil
+	}
+	probeFds := make([]*os.File, len(kept))
+	var closers []func()
+	for i, part := range kept {
+		p, f, closer, ok := pinPart(part)
+		if !ok {
+			// The pin refused this part: probe it by name would
+			// re-follow the swap, so it is recorded as one errored
+			// file (the empty probePath sentinel) instead.
+			probePaths[i] = ""
+			continue
+		}
+		probePaths[i] = p
+		probeFds[i] = f
+		closers = append(closers, closer)
+	}
+	return kept, probePaths, probeFds, closers, nil
 }
 
 // probeFiles runs ffprobe over every path in order, recording per-file
 // duration and effective tags, and returns the merged per-field value
 // lists plus the set of fields whose list the per-field cap cut short.
-// Returns the number of files whose probe failed.
-func probeFiles(ctx context.Context, ffprobe string, paths []string, snap *SourceMetadata) (map[string][]string, map[string]bool, int) {
+// Returns the number of files whose probe failed. paths are the
+// source-identity names (stored in the snapshot's Files/RawTags);
+// probePaths is what ffprobe actually reads — the pinned descriptor's
+// path for an indexed part, the part's own name otherwise — and is
+// parallel to paths (equal when nothing was pinned). An EMPTY probePath
+// marks a part that could not be pinned (vanished, or swapped to an
+// escaping/special file between discovery and pin): it is recorded as
+// one errored file and NOT probed by name — probing the name would
+// re-follow exactly the swap the pin refused. probeFds, when parallel
+// to paths, carries each part's verified descriptor for the fd hand-off
+// (bindProbe); a nil slot means the part is probed by name.
+func probeFiles(ctx context.Context, ffprobe string, paths, probePaths []string, probeFds []*os.File, snap *SourceMetadata) (map[string][]string, map[string]bool, int) {
 	merged := make(map[string][]string, len(tagPrecedence))
 	seen := make(map[string]map[string]bool, len(tagPrecedence))
 	truncated := make(map[string]bool, len(tagPrecedence))
 	probedErrs := 0
 	rawBytes := 0
 
-	for _, path := range paths {
+	for i, path := range paths {
 		if ctx.Err() != nil || rawBytes > maxRawTagBytes {
 			snap.Truncated = true
 			break
 		}
-		snap.FilesProbed++
+		probePath := probePaths[i]
 		snap.Files = append(snap.Files, SourceFile{File: filepath.Base(path)})
-
-		tags, duration, probeErr := probeOne(ctx, ffprobe, path)
+		if probePath == "" {
+			// Refused pin: recorded as one errored file and NOT probed —
+			// it must not count as probed, or a folder with one probed +
+			// one refused part would report zero unprobed files,
+			// contradicting the per-file error.
+			snap.Files[len(snap.Files)-1].Error = "part not pinned (vanished or escaped the input root); not probed"
+			probedErrs++
+			continue
+		}
+		snap.FilesProbed++
+		var fd *os.File
+		if len(probeFds) == len(paths) {
+			fd = probeFds[i]
+		}
+		tags, duration, probeErr := probeOne(ctx, ffprobe, probePath, fd)
 		if probeErr != "" {
 			snap.Files[len(snap.Files)-1].Error = probeErr
 			probedErrs++
@@ -415,14 +558,22 @@ func addValue(merged map[string][]string, seen map[string]map[string]bool, trunc
 // normalized tag map (format tags overlaid by the first audio stream's
 // tags, case-folded with stream scope winning same-lowercase-key
 // collisions — the same map mergeDoc projects from), the parsed
-// duration, and an error message ("" on success).
-func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, float64, string) {
+// duration, and an error message ("" on success). f is the verified
+// open descriptor for path (nil: probe by name); on darwin/BSD it is
+// handed to the child via cmd.ExtraFiles so the child probes
+// /dev/fd/3, the inherited descriptor, instead of reopening the
+// mutable name.
+func probeOne(ctx context.Context, ffprobe, path string, f *os.File) (map[string]string, float64, string) {
+	probePath, extra := bindProbe(path, f)
 	cmd := exec.CommandContext(ctx, ffprobe,
 		// ffprobe infers the format from file content, so a crafted
 		// playlist or container can reference remote resources; restrict
 		// it to local protocols.
 		"-protocol_whitelist", "file,pipe,data",
-		"-v", "error", "-print_format", "json", "-show_format", "-show_streams", path)
+		"-v", "error", "-print_format", "json", "-show_format", "-show_streams", probePath)
+	if extra != nil {
+		cmd.ExtraFiles = []*os.File{extra}
+	}
 	stderr := &limitedWriter{}
 	cmd.Stderr = stderr
 	stdout, err := cmd.StdoutPipe()

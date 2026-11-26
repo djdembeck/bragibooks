@@ -35,6 +35,19 @@ func pathTokenSet() map[string]struct{} {
 	return *tokenRegistry.Load()
 }
 
+// CapturedPathFormatTokens returns the live path-format token registry's
+// contents, so a caller that republishes it (a settings swap, via
+// SetPathFormatTokens) can restore the state it found. Tests use it to
+// keep the process-global registry suite-safe.
+func CapturedPathFormatTokens() []string {
+	reg := pathTokenSet()
+	tokens := make([]string, 0, len(reg))
+	for name := range reg {
+		tokens = append(tokens, name)
+	}
+	return tokens
+}
+
 func init() {
 	tokenRegistry.Store(&map[string]struct{}{})
 }
@@ -130,6 +143,19 @@ func NormalizeEnginePathFormat(template string) string {
 // output-profile writes, queue-time resolution, and worker validation so a
 // stored snapshot can never steer writes outside the resolved destination.
 func ValidateRelativePathFormat(template string) error {
+	if err := ValidateRelativePathStructure(template); err != nil {
+		return err
+	}
+	return ValidatePathFormat(template)
+}
+
+// ValidateRelativePathStructure checks only the engine-independent
+// relative-path rules (no leading "/", no ".." segments) without
+// consulting the token registry. Used when the engine binary is being
+// swapped in the same request: the token vocabulary is validated against
+// the candidate's registry later, so the pre-check must not reject a
+// legitimate candidate-specific token.
+func ValidateRelativePathStructure(template string) error {
 	if strings.HasPrefix(template, "/") {
 		return fmt.Errorf("relative path format must not start with '/'")
 	}
@@ -139,7 +165,7 @@ func ValidateRelativePathFormat(template string) error {
 			return fmt.Errorf("relative path format must not contain '..' path segments")
 		}
 	}
-	return ValidatePathFormat(template)
+	return nil
 }
 
 // ValidatePathFormatForRegistry runs the same rules as ValidatePathFormat

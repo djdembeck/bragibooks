@@ -1,19 +1,21 @@
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { IndexState, IndexStatus, Settings } from '#lib/types.js';
+import type { IndexState, IndexStatus, InvalidOutputProfile, OutputProfile, Settings } from '#lib/types.js';
 // vi.mock hoists above these, so the factory can name them directly.
 import RefreshButtonStub from './RefreshButtonStub.svelte';
 
-const { getMock, postMock } = vi.hoisted(() => ({
+const { getMock, postMock, putMock, delMock } = vi.hoisted(() => ({
 	getMock: vi.fn(),
-	postMock: vi.fn()
+	postMock: vi.fn(),
+	putMock: vi.fn(),
+	delMock: vi.fn()
 }));
 
 vi.mock('#lib/api.js', () => ({
 	get: getMock,
 	post: postMock,
-	put: vi.fn(),
-	del: vi.fn(),
+	put: putMock,
+	del: delMock,
 	ApiError: class ApiError extends Error {}
 }));
 
@@ -33,6 +35,19 @@ vi.mock('#lib/components/index.js', () => ({
 	PathFormatBuilder: () => null
 }));
 
+// The real scheme module's token store is app-wide state the page tests
+// never seed (the app's capabilities loader does). Without a token, every
+// placeholder in a scheme reads as an unsupported token and the form
+// validation gates the save — so stub the validator with permissive,
+// test-controlled functions and keep the parse/serialize contract real.
+vi.mock('#lib/scheme.js', () => ({
+	parseParts: (t: string) => [{ kind: 'text', value: t }],
+	serializeParts: (parts: { kind: string; key?: string; value?: string }[]) =>
+		parts.map((p) => (p.kind === 'sep' ? '/' : p.kind === 'token' ? `{${p.key}}` : p.value)).join(''),
+	validateScheme: () => ({ errors: [], warnings: [] }),
+	trimSegment: (s: string) => s.trim()
+}));
+
 // The real capabilities module caches app-wide (one load per app). The
 // tests need a KNOWN, resettable state — including the failure shape the
 // real module produces when the fetch fails (null) — so stub it with a
@@ -49,7 +64,7 @@ const engineCaps = vi.hoisted(() => {
 		}
 	};
 });
-vi.mock('#lib/engineCapabilities.js', () => ({
+vi.mock('#lib/engineCapabilities.svelte.js', () => ({
 	getEngineCapabilities: () => engineCaps.holder.value,
 	loadEngineCapabilities: async () => {}
 }));
@@ -406,5 +421,127 @@ describe('settings metadata write selection rendering', () => {
 			expect(r.disabled).toBe(true);
 		expect(target.textContent).toContain('PROCESSING_METADATA_FIELDS');
 		expect(target.textContent).toContain('PROCESSING_METADATA_CHAPTERS');
+	});
+});
+
+// The repair list (profiles the current engine rejects) is server-derived:
+// the page must mirror it from the wire, not track it client-side. The PUT
+// save copies the list from the response (an engine swap re-derives it
+// server-side in the same save), and a profile mutation re-fetches GET
+// /settings on the same reload path.
+describe('settings invalid output profiles repair list', () => {
+	let target: HTMLElement;
+	let component: Record<string, any>;
+
+	const invalidProfile: InvalidOutputProfile = {
+		id: 7,
+		name: 'Wide',
+		format: '{series_position}/{title}',
+		error: 'unsupported token'
+	};
+	const validProfile: OutputProfile = {
+		id: 8,
+		name: 'Shelf',
+		output_dir: '/shelf',
+		output_scheme: '{author}/{title}',
+		created_at: '2026-01-01T00:00:00Z',
+		updated_at: '2026-01-01T00:00:00Z'
+	};
+
+	function invalidListRows(): number {
+		return target.querySelectorAll('.profile-list--invalid .profile-row').length;
+	}
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		getMock.mockReset();
+		postMock.mockReset();
+		putMock.mockReset();
+		delMock.mockReset();
+		// {author} is in the engine token vocabulary, so the default
+		// {author}/{title} scheme passes the form validation that gates
+		// the save; the PUT/DEL mocks answer the profile mutations.
+		engineCaps.set({
+			field_policies: { scalar_fields: ['title'] },
+			path_tokens: [
+				{ name: 'title', value: 'title', example: 'The Book' },
+				{ name: 'author', value: 'author', example: 'The Author' }
+			]
+		});
+		getMock.mockImplementation(async (path: string) => {
+			if (path === '/settings') return settingsFixture();
+			if (path === '/output-profiles') return { profiles: [] };
+			return {};
+		});
+		putMock.mockResolvedValue({});
+		delMock.mockResolvedValue({});
+		target = document.createElement('div');
+		document.body.appendChild(target);
+	});
+
+	afterEach(() => {
+		unmount(component);
+		target.remove();
+		vi.useRealTimers();
+	});
+
+	async function mountPage() {
+		component = mount(SettingsPage, { target });
+		flushSync();
+		await vi.advanceTimersByTimeAsync(250); // delayedLoad
+	}
+
+	it('copies invalid_output_profiles from the PUT response into the repair list', async () => {
+		await mountPage();
+		// Clean start: the repair list is not rendered.
+		expect(invalidListRows()).toBe(0);
+
+		// The save (e.g. an engine-binary swap) re-derives the list
+		// server-side and returns it in the PUT response; the page must
+		// copy it into the visible repair list from that response, not
+		// wait for a follow-up GET.
+		putMock.mockResolvedValue({ ...settingsFixture(), invalid_output_profiles: [invalidProfile] });
+		const save = [...target.querySelectorAll<HTMLButtonElement>('button')].find(
+			(b) => b.textContent?.includes('Save settings')
+		);
+		if (!save) throw new Error('Save settings button not rendered');
+		save.click();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(putMock).toHaveBeenCalledWith('/settings', expect.anything());
+		expect(invalidListRows()).toBe(1);
+		expect(target.textContent).toContain('Wide');
+		expect(target.textContent).toContain('{series_position}/{title}');
+	});
+
+	it('refreshes the repair list from GET /settings after a profile mutation', async () => {
+		// The server's verdict tracks the delete: one rejected profile
+		// until the profile is gone, then clean.
+		getMock.mockImplementation(async (path: string) => {
+			const deleted = delMock.mock.calls.length > 0;
+			if (path === '/settings')
+				return { ...settingsFixture(), invalid_output_profiles: deleted ? [] : [invalidProfile] };
+			if (path === '/output-profiles')
+				return { profiles: deleted ? [] : [validProfile] };
+			return {};
+		});
+		await mountPage();
+		expect(invalidListRows()).toBe(1);
+
+		// Delete the only profile: the mutation path must re-fetch
+		// /output-profiles AND /settings, and the repair list must drop to
+		// the server's new (empty) verdict.
+		const deleteBtn = target.querySelector<HTMLButtonElement>(
+			'button[aria-label="Delete profile Shelf"]'
+		);
+		if (!deleteBtn) throw new Error('Delete profile button not rendered');
+		deleteBtn.click();
+		await vi.advanceTimersByTimeAsync(0);
+		const confirm = target.querySelector<HTMLButtonElement>('#profile-delete-confirm');
+		if (!confirm) throw new Error('delete confirmation not rendered');
+		confirm.click();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(delMock).toHaveBeenCalledWith('/output-profiles/8');
+		expect(invalidListRows()).toBe(0);
+		expect(target.textContent).not.toContain('Wide');
 	});
 });

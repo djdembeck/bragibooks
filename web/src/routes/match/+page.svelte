@@ -1253,8 +1253,11 @@
 		// it, a {subtitle} scheme resolves a different path in the preview
 		// than in the queued job (the snapshot carries the value, the
 		// preview payload did not).
+		// trimSegment (not .trim): the server's TrimSpace capture strips
+		// the Go unicode.IsSpace set (U+0085, U+00A0, ...), which JS
+		// .trim leaves in — the preview payload must match the snapshot.
 		const subtitle = [release?.subtitle, book.subtitle, book.disambiguation]
-			.map((v) => (v ?? '').trim())
+			.map((v) => trimSegment(v ?? ''))
 			.find((v) => v !== '');
 		if (subtitle) meta.subtitle = subtitle;
 		if (book.id) meta.book_id = book.id;

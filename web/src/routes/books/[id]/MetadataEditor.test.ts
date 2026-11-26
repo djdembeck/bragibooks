@@ -1078,6 +1078,76 @@ describe('MetadataEditor genre add control', () => {
 	});
 });
 
+describe('MetadataEditor chapter-flush shortcut save', () => {
+	// The chapter-time inputs commit on CHANGE (blur), so a value typed and
+	// left unblurred only reaches the draft via the Ctrl+S flush. (a) An
+	// invalid unblurred value must keep its error and BLOCK the shortcut
+	// save (no PUT); (b) correcting the value in place (still no blur)
+	// must clear the stale error on the next flush so the shortcut save
+	// proceeds and carries the corrected time.
+	it('blocks the shortcut save on an invalid unblurred chapter time, then saves after an in-place correction', async () => {
+		getImpl = (url) =>
+			url === '/books/1/metadata' ? Promise.resolve(resA) : Promise.reject(new Error(`GET ${url}`));
+		const { promise: save, resolve: releaseSave } = Promise.withResolvers<BookMetadataResponse>();
+		putImpl = (url) => {
+			if (url === '/books/1/metadata') return save;
+			throw new Error(`unexpected PUT ${url}`);
+		};
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const comp = mountEditor(target, 1, null);
+		flushSync();
+		await settle();
+		const findButton = (text: string) =>
+			Array.from(target.querySelectorAll<HTMLButtonElement>('button')).find((b) =>
+				b.textContent?.includes(text)
+			);
+		findButton('Add chapter')!.click();
+		flushSync();
+		// A valid chapter apart from the start time (title + duration
+		// committed on change) so the ONLY blocker for the shortcut save
+		// is the chapter-time state.
+		const title = target.querySelector<HTMLInputElement>('.meditor__chapter-title');
+		expect(title, 'chapter title input not rendered').not.toBeNull();
+		title!.value = 'Ch One';
+		title!.dispatchEvent(new Event('change', { bubbles: true }));
+		const duration = target.querySelector<HTMLInputElement>('.meditor__chapter-duration');
+		duration!.value = '0:04:00';
+		duration!.dispatchEvent(new Event('change', { bubbles: true }));
+		flushSync();
+		const start = target.querySelector<HTMLInputElement>('.meditor__chapter-start');
+		expect(start, 'chapter start input not rendered').not.toBeNull();
+
+		// (a) Invalid value, typed and left unblurred (no change event).
+		start!.value = '12:75';
+		window.dispatchEvent(
+			new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true })
+		);
+		flushSync();
+		expect(calls.filter((c) => c.method === 'put' && c.url === '/books/1/metadata').length).toBe(0);
+		const alert = target.querySelector('.meditor__chapter-time-error');
+		expect(alert, 'chapter time error not shown for the invalid flush').not.toBeNull();
+		expect(alert!.textContent).toContain('Use h:mm:ss or milliseconds for chapter times.');
+
+		// (b) Correct the value in place — no blur, so onchange never ran.
+		start!.value = '0:02:00';
+		window.dispatchEvent(
+			new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true })
+		);
+		flushSync();
+		const puts = calls.filter((c) => c.method === 'put' && c.url === '/books/1/metadata');
+		expect(puts.length, 'stale chapter-time error must clear once the value is valid').toBe(1);
+		expect(target.querySelector('.meditor__chapter-time-error'), 'stale error still shown').toBeNull();
+		const body = puts[0].body as Record<string, unknown>;
+		expect(body.chapters).toEqual([{ title: 'Ch One', start_millis: 120000, duration_millis: 240000 }]);
+		releaseSave(resA);
+		await settle();
+
+		unmount(comp);
+		target.remove();
+	});
+});
+
 describe('MetadataEditor omission summary', () => {
 	it('names every omitted field past three', async () => {
 		getImpl = (url) =>

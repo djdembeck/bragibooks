@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -12,8 +13,29 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// drainTimeout bounds the post-exit wait for the stdout and stderr
+// readers: a background descendant that inherits a pipe's write side can
+// hold it open long after the direct child exits, and an unbounded drain
+// would stall the job worker on the inherited descriptor. After the bound,
+// the process group is killed (the inherited-fd holder dies with it) AND
+// the read ends are closed, so each reader's copy errors out even when the
+// holder escaped the group (a descendant that started its own session):
+// each reader is stoppable on its own, so the drain can never outlive the
+// bound.
+const drainTimeout = 2 * time.Second
+
+// onceClose wraps f.Close so a pair of callers (a reader's deferred close
+// and a drain-timeout close) can both call it without double-closing the
+// fd: the second call is a no-op, not an EBADF.
+func onceClose(f *os.File) func() {
+	var once sync.Once
+	return func() { once.Do(func() { _ = f.Close() }) }
+}
 
 // newEngineCommand builds the m4b-merge child for a structured job file.
 // preview selects --job-preview (non-mutating) vs. execution. ctx must come
@@ -149,13 +171,38 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	// run's residue (see removeStagingSiblings).
 	preExisting := existingStagingSiblings(absRoot)
 
-	// Job-owned job file inside the claim root: the job's own tree, no
-	// shared /tmp naming. Removed in a defer on every path. O_EXCL on the
-	// create is the symlink guard: a pre-existing path at this name
-	// (regular file OR symlink) makes the open fail instead of letting a
-	// write follow the link to a target outside the claim root — 0o600
-	// only protects a file Bragi itself created.
-	jobFile := filepath.Join(absRoot, ".bragi-job-"+jobID+".json")
+	// Job-owned manifest in a job-scoped 0700 directory under the
+	// system temp root, OUT of the shared writable claim root: a
+	// principal with write (rename) rights on the claim root could
+	// replace the directory the engine later opens by pathname — 0700
+	// protects the directory's contents, not the directory entry itself.
+	// The system temp root is not writable by the output root's
+	// principals, so the entry sits behind a directory they cannot
+	// rename. The directory is removed in a defer on every path.
+	jobDir := filepath.Join(os.TempDir(), "bragi-job-"+jobID)
+	if err := os.Mkdir(jobDir, 0o700); err != nil {
+		if os.IsExist(err) {
+			// Residue from a crashed run: the directory is named by
+			// jobID, so removing and recreating cannot touch a live
+			// run's manifest. os.Remove fails on a non-empty directory,
+			// keeping the check fail-closed.
+			if rerr := os.Remove(jobDir); rerr != nil {
+				return nil, fmt.Errorf("create job dir %s: %w", jobDir, rerr)
+			}
+			if err = os.Mkdir(jobDir, 0o700); err != nil {
+				return nil, fmt.Errorf("create job dir %s: %w", jobDir, err)
+			}
+		} else {
+			return nil, fmt.Errorf("create job dir %s: %w", jobDir, err)
+		}
+	}
+	defer os.Remove(jobDir)
+
+	// O_EXCL on the create is the symlink guard: a pre-existing path at
+	// this name (regular file OR symlink) makes the open fail instead of
+	// letting a write follow the link to a target outside the job dir --
+	// 0o600 only protects a file Bragi itself created.
+	jobFile := filepath.Join(jobDir, ".bragi-job-"+jobID+".json")
 	jobFileHandle, err := os.OpenFile(jobFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("write job file: %w", err)
@@ -165,11 +212,25 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 		os.Remove(jobFile)
 		return nil, fmt.Errorf("write job file: %w", werr)
 	}
+	created, statErr := jobFileHandle.Stat()
 	if cerr := jobFileHandle.Close(); cerr != nil {
 		os.Remove(jobFile)
 		return nil, fmt.Errorf("write job file: %w", cerr)
 	}
 	defer os.Remove(jobFile)
+
+	// Same-uid re-check against the entry Bragi just created: the 0700
+	// directory excludes other principals, and this closes the residual
+	// same-user window between close and the engine's open of --job.
+	if statErr == nil {
+		launched, lerr := os.Stat(jobFile)
+		if lerr != nil {
+			return nil, fmt.Errorf("job file vanished before launch: %w", lerr)
+		}
+		if launched.Size() != created.Size() || !launched.ModTime().Equal(created.ModTime()) {
+			return nil, fmt.Errorf("job file %q was modified between write and launch", jobFile)
+		}
+	}
 
 	cmd := newEngineCommand(ctx, binary, jobFile, logLevel, numCPUs, false)
 	tree, err := newProcessTree(cmd)
@@ -182,25 +243,135 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	cmd.Cancel = func() error {
 		return tree.kill()
 	}
-	cmd.WaitDelay = 5 * time.Second
+	// os/exec enforces WaitDelay as an I/O-completion bound measured from
+	// the child's exit: a background descendant holding an inherited
+	// stream's write side can push the I/O copy past a too-short bound and
+	// cmd.Wait returns "WaitDelay expired before I/O complete" (not an
+	// exit outcome). Both streams are Bragi-owned pipes (no exec copier
+	// goroutines) and the bounded drain below kills the group up to
+	// drainTimeout after the child exits, so the bound must outlive it.
+	cmd.WaitDelay = 5*time.Second + drainTimeout
 
 	var stdoutBuf, stderrBuf bytes.Buffer
-	var stream *lineStreamWriter
 	// Machine mode: stdout is the result document, stderr is the log/progress
 	// stream. This is the inverse of the legacy CLI invocation, where stdout
 	// carried human progress.
-	cmd.Stdout = &stdoutBuf
+	//
+	// stdout is a pipe drained by a reader goroutine launched AFTER
+	// cmd.Start, not a buffer: the reader parses the machine document the
+	// moment its first line is available and, if it carries a pid,
+	// verifies that pid against the direct child's LIVE /proc ppid chain
+	// (unix) and stores the verified pid in earlyPID. The verification is
+	// BEST-EFFORT and runs as early as the pid is readable — on the first
+	// complete document line (ReadString on '\n'), not at document EOF —
+	// so it lands while the engine is still observable. This is what lets
+	// a wrapped (non-exec) run keep its engine's staging files: with a
+	// wrapper the wrapper reaps the engine before the wrapper itself
+	// exits, so a verification after cmd.Wait cannot read the engine's
+	// /proc entry and falls back to the wrapper's pid — leaving the
+	// engine's staging siblings behind. The RESIDUAL RACE IS ACCEPTED:
+	// if the wrapper reaps the engine before the reader runs the
+	// verification, the /proc chain is already gone and the fallback to
+	// the wrapper PID is the correct degraded behavior (a pid that cannot
+	// be proven to belong to this run's tree must not authorize cleanup).
+	// The post-Wait drain wait is bounded (drainTimeout) precisely to give
+	// the reader its one chance to verify before that fallback is
+	// committed. earlyPID stays 0 when the document reports no pid or the
+	// pid cannot be proven to belong to this run's tree; the post-Wait
+	// resolution then falls back to the known child pid.
+	//
+	// stderr is a pipe too, drained by its own reader into stderrBuf (and
+	// the on-output stream, when set): with a Go writer on cmd.Stderr,
+	// os/exec would spawn a copier goroutine of its own and cmd.Wait would
+	// block on it (bounded only by cmd.WaitDelay), so a background child
+	// inheriting both descriptors would make Wait report an I/O-completion
+	// failure before the bounded drain below ever ran. Owning the pipe
+	// puts stderr's drain under the same bound as stdout's.
+	stdoutRead, stdoutWrite, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		// The child never started and the readers are not running; finish
+		// releases the tree's job object (windows) so a repeated pipe
+		// failure does not leak the handle.
+		tree.finish()
+		return nil, fmt.Errorf("stdout pipe: %w", pipeErr)
+	}
+	cmd.Stdout = stdoutWrite
+	stderrRead, stderrWrite, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		tree.finish()
+		_ = stdoutWrite.Close()
+		_ = stdoutRead.Close()
+		return nil, fmt.Errorf("stderr pipe: %w", pipeErr)
+	}
+	cmd.Stderr = stderrWrite
+	var stream *lineStreamWriter
 	if opts.OnOutput != nil {
 		stream = &lineStreamWriter{onLine: opts.OnOutput}
-		cmd.Stderr = io.MultiWriter(&stderrBuf, stream)
-	} else {
-		cmd.Stderr = &stderrBuf
 	}
+	// onceClose closes a pipe's read end exactly once: the reader's
+	// deferred close and the drain-timeout close share it, so a timeout
+	// that lands while the reader is still in flight never double-closes
+	// the fd (a second Close would only return EBADF, but the fd is then
+	// gone from the process's table regardless of which caller asked).
+	closeStdoutRead := onceClose(stdoutRead)
+	closeStderrRead := onceClose(stderrRead)
+	// 0 = the read-time verification found nothing usable (the post-Wait
+	// resolution falls back to the known child pid).
+	var earlyPID atomic.Int64
 
 	if err := cmd.Start(); err != nil {
 		tree.finish()
+		// The child never ran and never inherited the write sides; the
+		// readers are not started until Start succeeds, so closing both
+		// ends releases the pipes.
+		_ = stdoutWrite.Close()
+		_ = stdoutRead.Close()
+		_ = stderrWrite.Close()
+		_ = stderrRead.Close()
 		return nil, fmt.Errorf("m4b-merge start: %w", err)
 	}
+	// The direct child's pid, captured ONCE at Start: the stdout reader
+	// verifies the document's pid against it, and the post-Wait resolution
+	// falls back to it. Capturing it here keeps the readers off the
+	// Process field.
+	childPID := cmd.Process.Pid
+	// Both readers are stoppable: each closes its own read end on return,
+	// and the drain-timeout close below forces a return when an inherited
+	// write side survives the group kill.
+	var drainWG sync.WaitGroup
+	drainWG.Add(2)
+	go func() {
+		defer drainWG.Done()
+		defer closeStdoutRead()
+		r := bufio.NewReader(stdoutRead)
+		// Read the machine document (one line of JSON) as it streams in and
+		// verify its pid against the LIVE tree the moment the line is
+		// complete. ReadString returns the partial line on EOF, so a
+		// document written without a trailing newline is still parsed.
+		line, lerr := r.ReadString('\n')
+		if doc, perr := parseMachineResult([]byte(strings.TrimSpace(line))); perr == nil && doc.Pid != nil && *doc.Pid > 0 {
+			earlyPID.Store(int64(verifyEnginePID(childPID, *doc.Pid)))
+		}
+		stdoutBuf.WriteString(line)
+		if lerr == nil || lerr == io.EOF {
+			// Drain anything after the document line (a clean document
+			// writes nothing more), then let the pipe close normally.
+			if _, derr := io.Copy(&stdoutBuf, r); derr != nil && derr != io.EOF {
+				_ = derr
+			}
+		}
+	}()
+	go func() {
+		defer drainWG.Done()
+		defer closeStderrRead()
+		sink := io.Writer(&stderrBuf)
+		if stream != nil {
+			sink = io.MultiWriter(&stderrBuf, stream)
+		}
+		if _, derr := io.Copy(sink, stderrRead); derr != nil && derr != io.EOF {
+			_ = derr
+		}
+	}()
 	// Constrain the child to the tree NOW, before it can spawn
 	// descendants that would escape a cancel-time assignment. A failed
 	// confinement aborts the run: an unconfined m4b-merge tree must not
@@ -209,9 +380,47 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 		tree.finish()
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
+		// The killed child released its write sides; close ours too and
+		// drain the readers before returning.
+		_ = stdoutWrite.Close()
+		_ = stderrWrite.Close()
+		drainWG.Wait()
 		return nil, fmt.Errorf("confine process tree: %w", err)
 	}
 	waitErr := cmd.Wait()
+	// Close the write sides so the readers see EOF: a run that exits
+	// without writing a document (crash, OOM, kill before output) would
+	// otherwise leave a reader blocked in ReadString forever. cmd.Wait has
+	// reaped the child, so no further writes from the direct child are
+	// possible.
+	_ = stdoutWrite.Close()
+	_ = stderrWrite.Close()
+	// Bounded drain for BOTH readers: the pid verification is best-effort,
+	// so the stdout reader gets its one chance to parse the document line
+	// and run it before the fallback is committed — but an INHERITED write
+	// side held by a background descendant (the direct child exits without
+	// killing its group) must not stall the worker, on stdout or stderr.
+	// On the bound, kill the process group: the holder dies with it, the
+	// readers see EOF, and a document without a trailing newline is still
+	// parsed from the partial line.
+	drainDone := make(chan struct{})
+	go func() { drainWG.Wait(); close(drainDone) }()
+	select {
+	case <-drainDone:
+	case <-time.After(drainTimeout):
+		// Kill the group first (the primary release: the inherited-fd
+		// holder dies with it). Then close the read ends: a holder that
+		// escaped the group (its own session, SIGKILL ignored) keeps the
+		// write side open, so without this a reader would sit in its
+		// copy until that holder exits — the <drainDone> below would
+		// block past the bound. The closes make the copies error and the
+		// readers return; the onceClose wrappers are idempotent with the
+		// readers' own deferred closes.
+		_ = tree.kill()
+		closeStdoutRead()
+		closeStderrRead()
+		<-drainDone
+	}
 	tree.finish()
 	if stream != nil {
 		stream.Flush()
@@ -239,10 +448,29 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	if perr != nil {
 		return result, fmt.Errorf("m4b-merge exited %d with an unreadable machine result: %w", result.ExitCode, perr)
 	}
-	// Staging siblings are named with THIS engine process's pid; the pid
+	// Staging siblings are named with the ENGINE process's pid; the pid
 	// plus the pre-run snapshot (preExisting) are what scope cleanup to
-	// this run (see removeStagingSiblings).
+	// this run (see removeStagingSiblings). With a wrapper (non-exec)
+	// command, cmd.Process.Pid is the WRAPPER's pid, so the engine's own
+	// pid (reported by the machine document) is what the staging naming
+	// used — a success scan by the wrapper pid would miss the engine's
+	// siblings. Fall back to the direct child's pid when the document
+	// does not report one (a bare engine IS the direct child).
+	//
+	// The reported pid authorizes deletion, so it is ownership-verified:
+	// it must be this run's child or a verified descendant (the /proc ppid
+	// chain on unix); anything else falls back to the known child pid
+	// rather than deleting siblings it does not own. The verification
+	// happened in the reader goroutine at document-read time (earlyPID) —
+	// while the process tree is still alive — because a wrapped run's
+	// wrapper reaps the engine before it exits, so a post-Wait /proc read
+	// would find the engine gone and fall back to the wrapper's pid.
+	// earlyPID already carries the verified pid, or 0 when the document
+	// reported none / it was unverifiable (the child-pid fallback).
 	engPID := cmd.Process.Pid
+	if early := int(earlyPID.Load()); early > 0 {
+		engPID = early
+	}
 	return p.finishJobRun(result, doc, opts, absRoot, engPID, preExisting)
 }
 
@@ -280,6 +508,16 @@ func (p *Processor) finishJobRun(result *JobRunResult, doc machineResult, opts J
 			result.GroupErrors = []string{result.Stderr}
 		}
 		return result, fmt.Errorf("engine run %s (exit %d)", doc.Status, result.ExitCode)
+	}
+	if result.ExitCode != 0 {
+		// The machine document says succeeded but the process exited
+		// nonzero: a contradiction the document alone cannot settle. Treat
+		// it as a failure (the artifact stays recoverable in staging).
+		result.StagingPreserved = root
+		if len(result.GroupErrors) == 0 {
+			result.GroupErrors = []string{result.Stderr}
+		}
+		return result, fmt.Errorf("engine exited %d with a succeeded document", result.ExitCode)
 	}
 
 	// Success: validate every artifact, then remove leftover staging siblings.

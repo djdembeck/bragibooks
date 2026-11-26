@@ -218,6 +218,9 @@ export interface Settings {
 	metadata_fields_pinned?: boolean;
 	/** True while PROCESSING_METADATA_CHAPTERS pins the policy deployment-side. */
 	metadata_chapters_pinned?: boolean;
+	/** Stored profiles the current engine rejects (empty when clean). The
+	 *  Settings page renders this as a fixable list. */
+	invalid_output_profiles?: InvalidOutputProfile[];
 	created_at?: string;
 	updated_at?: string;
 	bragibooks_version?: string;
@@ -481,6 +484,16 @@ export interface OutputProfile {
 	output_scheme: string;
 	created_at: string;
 	updated_at: string;
+}
+
+/** A stored output profile whose format the current engine rejects, as
+ *  found at boot (or after a profile mutation). The server starts anyway;
+ *  the Settings UI is the repair path, so the list is surfaced there. */
+export interface InvalidOutputProfile {
+	id: number;
+	name: string;
+	format: string;
+	error: string;
 }
 
 export interface OutputProfilesResponse {

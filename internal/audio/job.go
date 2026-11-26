@@ -200,6 +200,11 @@ type machineResult struct {
 	SchemaVersion   int    `json:"schema_version"`
 	ResolverVersion string `json:"resolver_version"`
 	Status          string `json:"status"`
+	// Pid is the engine process's own pid, which is what it names its
+	// staging siblings with. Absent (nil) when the engine does not
+	// report it; the caller then falls back to the direct child's pid
+	// (correct for a bare engine, wrong for a wrapper — see RunJob).
+	Pid *int `json:"pid"`
 	// Error is the setup-level diagnosed error when the run failed before
 	// producing any group outcome.
 	Error  *string  `json:"error"`

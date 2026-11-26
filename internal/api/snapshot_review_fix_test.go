@@ -20,18 +20,22 @@ func TestIsNonPublicCoverAddress(t *testing.T) {
 		ip   string
 		want bool
 	}{
-		{"0.0.0.0", true},         // unspecified
-		{"::", true},              // unspecified
-		{"100.64.0.1", true},      // CGNAT start
-		{"100.127.255.254", true}, // CGNAT end
-		{"100.63.0.1", false},     // just below CGNAT
-		{"100.128.0.1", false},    // just above CGNAT
-		{"127.0.0.1", true},       // loopback
-		{"192.168.1.1", true},     // private
-		{"10.0.0.1", true},        // private
-		{"169.254.1.1", true},     // link-local
-		{"93.184.216.34", false},  // public
-		{"8.8.8.8", false},        // public
+		{"0.0.0.0", true},                       // unspecified
+		{"::", true},                            // unspecified
+		{"100.64.0.1", true},                    // CGNAT start
+		{"100.127.255.254", true},               // CGNAT end
+		{"100.63.0.1", false},                   // just below CGNAT
+		{"100.128.0.1", false},                  // just above CGNAT
+		{"100::1", true},                        // local-use NAT64 (RFC 8215)
+		{"100:0:0:0:ffff:ffff:ffff:ffff", true}, // 100::/64 end
+		{"100:1::1", false},                     // just above 100::/64
+		{"1::1", false},                         // not 100::/64 (first hextet 0x0001)
+		{"127.0.0.1", true},                     // loopback
+		{"192.168.1.1", true},                   // private
+		{"10.0.0.1", true},                      // private
+		{"169.254.1.1", true},                   // link-local
+		{"93.184.216.34", false},                // public
+		{"8.8.8.8", false},                      // public
 	}
 	for _, tt := range tests {
 		got := isNonPublicCoverAddress(net.ParseIP(tt.ip))
