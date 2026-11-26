@@ -182,9 +182,11 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 // probe, while srcName keeps the stored metadata naming the real source.
 // The two are equal for the standalone (intake) path. srcFile is the
 // verified open descriptor for probePath (nil on the standalone path,
-// where no descriptor is available): on darwin/BSD it is handed to the
+// where no descriptor is available): for a file it is handed to the
 // ffprobe child via cmd.ExtraFiles so the child probes /dev/fd/3, the
-// inherited descriptor, instead of reopening the mutable name. pinPart,
+// inherited descriptor, instead of reopening the mutable name; for a
+// folder it is the verified directory descriptor that folder discovery
+// enumerates through. pinPart,
 // when set, is called for each discovered audio part of a folder and
 // returns the part's pinned probe path, the part's verified descriptor
 // (nil when the part is probed by name), plus a release func (and false
@@ -241,7 +243,11 @@ func ExtractSourceMetadata(ctx context.Context, ffprobe, srcName, probePath, src
 		// Files/FilesTotal before the part pins refuse the outside files.
 		// srcName stays the source's IDENTITY (the stored naming, the
 		// ASIN fallback). The two are equal on the standalone path.
-		paths, probePaths, probeFds, pinClosers, derr = discoverAndPinAudioFiles(passCtx, probePath, snap, pinPart)
+		// srcFile is the verified directory descriptor when the caller
+		// pinned one (an indexed folder): discovery enumerates through
+		// it, so a name swap cannot redirect the walk. nil on the
+		// standalone path, which opens the name as before.
+		paths, probePaths, probeFds, pinClosers, derr = discoverAndPinAudioFiles(passCtx, probePath, srcFile, snap, pinPart)
 		if derr != nil {
 			return degradedSnapshot(snap, derr.Error()), nil
 		}
@@ -335,12 +341,23 @@ func finalizeEmpty(snap *SourceMetadata, srcPath string) *SourceMetadata {
 // The kept paths are sorted so probe and merge order is deterministic.
 // truncated reports that a bound (or the deadline) cut the walk short:
 // the kept set is then a first-N projection, not the whole folder.
-func discoverAudioFiles(ctx context.Context, dir string) ([]string, bool, error) {
-	d, err := os.Open(dir)
-	if err != nil {
-		return nil, false, err
+// dirFile is the verified directory descriptor to enumerate through
+// (nil: open the name, the standalone pre-index behavior).
+func discoverAudioFiles(ctx context.Context, dir string, dirFile *os.File) ([]string, bool, error) {
+	// Enumerate THROUGH the verified directory descriptor when one is
+	// available (an indexed folder): the entries come from the pinned fd,
+	// so a swap of the directory's name cannot redirect the walk. With no
+	// descriptor (the standalone path) we open the name, the documented
+	// pre-index behavior, and own that open for the duration of the walk.
+	d := dirFile
+	if d == nil {
+		opened, err := os.Open(dir)
+		if err != nil {
+			return nil, false, err
+		}
+		defer opened.Close()
+		d = opened
 	}
-	defer d.Close()
 
 	var kept []string
 	scanned := 0
@@ -385,9 +402,11 @@ func discoverAudioFiles(ctx context.Context, dir string) ([]string, bool, error)
 // The returned closers release the pinned descriptors; the caller owns
 // them for the pass's duration. Truncation (a discovery/probe bound or
 // the deadline) is derived from the kept set, so a pin that adds no
-// discovery of its own cannot masquerade as one.
-func discoverAndPinAudioFiles(ctx context.Context, dir string, snap *SourceMetadata, pinPart func(part string) (string, *os.File, func(), bool)) ([]string, []string, []*os.File, []func(), error) {
-	kept, truncated, err := discoverAudioFiles(ctx, dir)
+// discovery of its own cannot masquerade as one. dirFile is the
+// verified directory descriptor to enumerate through (nil: the
+// standalone path opens the name).
+func discoverAndPinAudioFiles(ctx context.Context, dir string, dirFile *os.File, snap *SourceMetadata, pinPart func(part string) (string, *os.File, func(), bool)) ([]string, []string, []*os.File, []func(), error) {
+	kept, truncated, err := discoverAudioFiles(ctx, dir, dirFile)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

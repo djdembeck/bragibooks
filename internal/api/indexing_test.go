@@ -1879,13 +1879,18 @@ func TestListDirectoriesIndexMode(t *testing.T) {
 	})
 }
 
-// countingFFprobeStub writes an ffprobe stub that appends each input path
-// to logPath and answers with a valid, complete probe document, so callers
-// can count how many times the scanner probed. On Linux the scanner hands
-// the probe the opened descriptor's /proc/self/fd/<n> path (the
+// countingFFprobeStub writes an ffprobe stub that reads the input it is
+// given and appends a marker derived from the CONTENT it read (not the
+// path argument) to logPath, then answers with a valid, complete probe
+// document, so callers can count how many times the scanner probed a
+// given file. The marker is the file's content: each fixture carries a
+// distinct byte string, so the log proves the child read the right file
+// through whatever path it was handed. On Linux the scanner hands the
+// probe the opened descriptor's /proc/<pid>/fd/<n> path (the
 // symlink-confinement fix), so the stub resolves that back to the real
-// path before logging it. On other unix hosts the probe already receives
-// the real pathname, so the stub logs it as-is.
+// path before reading it. On darwin/BSD the probe receives /dev/fd/3
+// (the inherited descriptor) and reads it directly. A plain pathname is
+// read as-is.
 func countingFFprobeStub(t *testing.T, logPath string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ffprobe")
@@ -1897,7 +1902,7 @@ func countingFFprobeStub(t *testing.T, logPath string) string {
 		"  dir=$(readlink \"/proc/$pid/fd/$n\")\n" +
 		"  [ -n \"$rest\" ] && last=\"$dir/$rest\" || last=\"$dir\"\n" +
 		"  ;;\nesac\n" +
-		"echo \"$last\" >> " + logPath + "\n" +
+		"echo \"$(cat \"$last\")\" >> " + logPath + "\n" +
 		`echo '{"format":{"duration":"10","tags":{"title":"T"}}, "streams":[]}'
 `
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
@@ -1915,18 +1920,25 @@ func TestIndexScanProbesEachFileOnce(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "book"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"01.m4b", "02.m4b"} {
-		if err := os.WriteFile(filepath.Join(root, "book", name), []byte("x"), 0o644); err != nil {
+	// Each audio fixture carries a DISTINCT content marker: the stub
+	// logs what it reads, so the log proves the child read each file
+	// (through a /proc path, a /dev/fd/3 descriptor, or a plain
+	// pathname) exactly once.
+	for _, name := range []struct{ name, marker string }{
+		{"01.m4b", "marker-a"},
+		{"02.m4b", "marker-b"},
+	} {
+		if err := os.WriteFile(filepath.Join(root, "book", name.name), []byte(name.marker), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(root, "book", "README.txt"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "book", "README.txt"), []byte("readme"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "top.m4b"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "top.m4b"), []byte("marker-c"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("notes"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1943,36 +1955,33 @@ func TestIndexScanProbesEachFileOnce(t *testing.T) {
 
 	// Probes: the book dir's single pass probes each of its audio children
 	// ONCE, and top.m4b probes once (its parent is the input root, which
-	// has no indexed row, so it cannot derive). Every audio child appears
-	// exactly once — a standalone probe of an already-covered child would
-	// show it twice. Non-audio files never appear.
+	// has no indexed row, so it cannot derive). Every audio file's CONTENT
+	// MARKER appears exactly once in the log — a standalone probe of an
+	// already-covered child would show its marker twice. Non-audio files
+	// never appear. The markers are read from the input the probe actually
+	// opens (a /proc path, a /dev/fd/3 descriptor, or a plain pathname),
+	// not from the path argument, so the dedup holds on every platform.
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	probed := strings.Fields(string(data))
 	count := map[string]int{}
-	for _, p := range probed {
-		count[p]++
+	for _, m := range probed {
+		count[m]++
 	}
 	if len(probed) != 3 {
 		t.Fatalf("probed %d invocations %v, want 3 (one per audio file total)", len(probed), probed)
 	}
-	for _, p := range []string{
-		filepath.Join(root, "book", "01.m4b"),
-		filepath.Join(root, "book", "02.m4b"),
-		filepath.Join(root, "top.m4b"),
-	} {
-		if count[p] != 1 {
-			t.Errorf("%s probed %d times, want exactly 1 (all: %v)", p, count[p], probed)
+	for _, m := range []string{"marker-a", "marker-b", "marker-c"} {
+		if count[m] != 1 {
+			t.Errorf("%s probed %d times, want exactly 1 (all: %v)", m, count[m], probed)
 		}
 	}
-	for _, p := range []string{
-		filepath.Join(root, "book", "README.txt"),
-		filepath.Join(root, "notes.txt"),
-	} {
-		if count[p] != 0 {
-			t.Errorf("%s probed %d times, want 0 (non-audio)", p, count[p])
+
+	for _, m := range []string{"readme", "notes"} {
+		if count[m] != 0 {
+			t.Errorf("%s probed %d times, want 0 (non-audio; all: %v)", m, count[m], probed)
 		}
 	}
 
@@ -2032,22 +2041,26 @@ func TestIndexScanProbesEachFileOnce(t *testing.T) {
 	for _, p := range probed {
 		count[p]++
 	}
-	// First scan: 3 probes (book/01, book/02, top). Rewrite pass: the
-	// rewritten child is covered by its parent's single folder pass,
-	// which probes the dir's audio children (01 and 02) — and the child
-	// must NOT be probed standalone a second time on top of that. top.m4b
-	// and everything else is untouched.
+	// First scan: 3 probes (book/01 as marker-a, book/02 as marker-b,
+	// top as marker-c). Rewrite pass: the rewritten child is covered by
+	// its parent's single folder pass, which probes the dir's audio
+	// children (01 and 02) — and the child must NOT be probed standalone
+	// a second time on top of that. top.m4b and everything else is
+	// untouched. The rewrite changes 01.m4b's content, so the two folder
+	// passes read it as marker-a (before) and 0123456789 (after): together
+	// that is the child probed exactly ONCE per folder pass, never
+	// standalone.
 	if n := len(probed); n != 5 {
 		t.Fatalf("total probes after in-place rewrite = %d (%v), want 5 (one folder pass: 01+02)", n, probed)
 	}
-	if count[filepath.Join(root, "book", "01.m4b")] != 2 {
-		t.Errorf("rewritten child probed %d times, want 2 (initial folder pass + rewrite folder pass; a standalone probe would make it 3)", count[filepath.Join(root, "book", "01.m4b")])
+	if count["marker-a"]+count["0123456789"] != 2 {
+		t.Errorf("rewritten child probed %d times (marker-a=%d, 0123456789=%d), want 2 (one per folder pass; a standalone probe would make it 3)", count["marker-a"]+count["0123456789"], count["marker-a"], count["0123456789"])
 	}
-	if count[filepath.Join(root, "book", "02.m4b")] != 2 {
-		t.Errorf("unrewritten child probed %d times, want 2 (folder pass re-probes the dir's children)", count[filepath.Join(root, "book", "02.m4b")])
+	if count["marker-b"] != 2 {
+		t.Errorf("unrewritten child probed %d times, want 2 (folder pass re-probes the dir's children)", count["marker-b"])
 	}
-	if count[filepath.Join(root, "top.m4b")] != 1 {
-		t.Errorf("top.m4b probed %d times, want 1", count[filepath.Join(root, "top.m4b")])
+	if count["marker-c"] != 1 {
+		t.Errorf("top.m4b probed %d times, want 1", count["marker-c"])
 	}
 }
 

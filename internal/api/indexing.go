@@ -1091,13 +1091,14 @@ func (s *IndexService) extractOne(ctx context.Context, r indexRow) *audio.Source
 	// descriptor and its type matches the row's kind (regular file for
 	// a file row, directory for a folder row); windows: the NT device
 	// path resolved from the handle), with the file kept open for the
-	// probe's duration. On darwin/bsd the verified descriptor is
-	// handed to the ffprobe child via cmd.ExtraFiles (fd 3) so the
-	// child probes /dev/fd/3, the inherited descriptor, instead of
-	// reopening the mutable name; where /dev/fd is unavailable the
-	// child probes the verified pathname, and the identity check
-	// narrows the swap window to the few syscalls between the final
-	// stat and ffprobe's open.
+	// probe's duration. On darwin/bsd bindProbe hands the verified
+	// descriptor to the ffprobe child via cmd.ExtraFiles (fd 3), and
+	// the child probes /dev/fd/3, the inherited descriptor, instead of
+	// reopening the mutable name. The hand-off is unconditional and
+	// fail-closed: if the child cannot resolve /dev/fd/3, ffprobe
+	// fails and the row degrades, so a verified descriptor never falls
+	// back to the pathname. On linux and windows the probe path
+	// already names the descriptor, so the child probes it directly.
 	allowDir := r.Type == "dir"
 	probeFile, oerr := openInsideRoot(r.Path, root, allowDir)
 	if oerr != nil {
@@ -1115,7 +1116,7 @@ func (s *IndexService) extractOne(ctx context.Context, r indexRow) *audio.Source
 	var pinPart func(part string) (string, *os.File, func(), bool)
 	if allowDir {
 		pinPart = func(part string) (string, *os.File, func(), bool) {
-			f, err := openInsideRoot(part, root, false)
+			f, err := openPartInDir(probeFile, filepath.Base(part), root)
 			if err != nil {
 				log.Printf("index: pin part %s: %v", part, err)
 				return "", nil, nil, false
@@ -1123,7 +1124,7 @@ func (s *IndexService) extractOne(ctx context.Context, r indexRow) *audio.Source
 			p, ok := proberPath(f, part, false)
 			if !ok {
 				_ = f.Close()
-				log.Printf("index: pin part %s: %v", part, fmt.Errorf("name pinned descriptor for probe"))
+				log.Printf("index: pin part %s: %v", part, fmt.Errorf("refused to name the pinned descriptor for the probe"))
 				return "", nil, nil, false
 			}
 			close := func() { _ = f.Close() }
