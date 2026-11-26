@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +25,33 @@ type Client struct {
 	csrfMu  sync.Mutex
 	csrfTok string
 }
+
+// StatusError carries an upstream HTTP status code and response body.
+// do() returns one for every response with status >= 400.
+type StatusError struct {
+	Code int
+	Body string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("audiobookdb %d: %s", e.Code, e.Body)
+}
+
+// ErrNotFound is returned by GetBookByASIN when the upstream catalog has
+// no record for the given ASIN (HTTP 404).
+var ErrNotFound = errors.New("audiobookdb: not found")
+
+// ErrInvalidASIN is returned by GetBookByASIN when the ASIN does not have
+// the Audible shape (10 uppercase alphanumeric characters) and so must not
+// be interpolated into the upstream URL.
+var ErrInvalidASIN = errors.New("audiobookdb: invalid ASIN")
+
+// asinPattern matches an Audible ASIN: 10 uppercase alphanumeric
+// characters (e.g. B00B5HZGUG).
+var asinPattern = regexp.MustCompile(`^[0-9A-Z]{10}$`)
+
+// IsValidASIN reports whether asin is a structurally valid Audible ASIN.
+func IsValidASIN(asin string) bool { return asinPattern.MatchString(asin) }
 
 // NewClient creates an audiobookdb client. An empty apiKey is valid for
 // keyless/Guest requests; a non-empty one is sent as X-API-Key. If baseURL
@@ -107,7 +136,7 @@ func (c *Client) do(ctx context.Context, req *http.Request, v interface{}) error
 	}
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("audiobookdb %d: %s", resp.StatusCode, body)
+		return &StatusError{Code: resp.StatusCode, Body: string(body)}
 	}
 
 	if v == nil {
@@ -295,4 +324,30 @@ func (c *Client) GetRelease(ctx context.Context, id string, include string) (*Re
 		return nil, err
 	}
 	return &release, nil
+}
+
+// GetBookByASIN calls GET /audiobooks/external/audible/{asin} and returns
+// the book. The upstream endpoint returns a full book payload (releases,
+// people, genres, tags, images) by default; the ?include= param has no
+// effect. An ASIN that does not match the Audible shape returns
+// ErrInvalidASIN before any request is sent. A 404 (ASIN not in the
+// catalog) returns ErrNotFound; any other status returns the *StatusError.
+func (c *Client) GetBookByASIN(ctx context.Context, asin string) (*Book, error) {
+	if !IsValidASIN(asin) {
+		return nil, fmt.Errorf("%w: %q", ErrInvalidASIN, asin)
+	}
+	url := fmt.Sprintf("%s/audiobooks/external/audible/%s", c.baseURL, asin)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build ASIN request: %v", err)
+	}
+	var book Book
+	if err := c.do(ctx, req, &book); err != nil {
+		var se *StatusError
+		if errors.As(err, &se) && se.Code == http.StatusNotFound {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &book, nil
 }

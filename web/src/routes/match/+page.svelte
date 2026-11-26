@@ -66,6 +66,8 @@
 		/** Every book/release request increments this; only the newest may apply. */
 		seq: number;
 		manualPick: boolean;
+		/** Auto-selection via the source ASIN fast path (not title search). */
+		asinPick: boolean;
 		removing: boolean;
 		removingConfirming: boolean;
 		descriptionOpen: boolean;
@@ -285,6 +287,7 @@
 					included: true,
 					seq: 0,
 					manualPick: false,
+					asinPick: false,
 					removing: false,
 					removingConfirming: false,
 					descriptionOpen: false,
@@ -306,6 +309,44 @@
 	async function autoMatch(candidate: MatchCandidate) {
 		const seq = ++candidate.seq;
 		try {
+			// ASIN fast path: resolve directly when the source carries a
+			// present, unambiguous ASIN. An empty/missing value (status
+			// 'present' is never paired with one, but 'ambiguous'/'missing'/
+			// 'unknown' carry no value) falls through to title search.
+			const asin = candidate.sourceAsin?.status === 'present'
+				? candidate.sourceAsin.value
+				: undefined;
+			if (asin) {
+				const hit = await searchByASIN(asin);
+				if (seq !== candidate.seq) return;
+				if (hit) {
+					candidate.selectedBookId = hit.id;
+					candidate.details = { book: null, release: null };
+					// The by-asin payload lacks `external` and `series`, which
+					// the save derives the asin and series from. Fetch the
+					// canonical detail (the title path's include set) so the
+					// save carries both; a detail-fetch failure keeps the
+					// already-resolved by-asin book.
+					let book = hit;
+					try {
+						book = await getBookDetail(hit.id);
+					} catch {
+						book = hit;
+					}
+					if (seq !== candidate.seq) return;
+					candidate.searchResults = [book];
+					const releaseId = book.releases?.[0]?.id;
+					const release = releaseId ? await getReleaseDetail(releaseId) : null;
+					if (seq !== candidate.seq) return;
+					candidate.details = { book, release };
+					candidate.selectedReleaseId = release?.id ?? null;
+					candidate.manualPick = false;
+					candidate.asinPick = true;
+					void loadEvidence(candidate);
+					return;
+				}
+			}
+			// Title search fallback (existing path, unchanged below).
 			const hits = await searchBooks(stripExtension(candidate.title));
 			if (seq !== candidate.seq) return;
 			candidate.searchResults = hits;
@@ -374,6 +415,16 @@
 		return n;
 	}
 
+	async function searchByASIN(asin: string): Promise<AudiobookDBBook | null> {
+		try {
+			return await get<AudiobookDBBook>(`/search/by-asin/${encodeURIComponent(asin)}`);
+		} catch {
+			// 404 = ASIN not in catalog; any other error = network/upstream
+			// failure. Both fall back to title search.
+			return null;
+		}
+	}
+
 	async function searchBooks(query: string): Promise<AudiobookDBBook[]> {
 		if (!query.trim()) return [];
 		const response = await get<SearchResponse>(
@@ -390,7 +441,7 @@
 		const cached = bookRequests.get(bookId);
 		if (cached) return cached;
 		const request = get<AudiobookDBBook>(
-			`/search/books/${bookId}?include=releases,people,series,images,external`
+			`/search/books/${bookId}?include=releases,people,series,images,external,genres`
 		);
 		bookRequests.set(bookId, request);
 		void request.catch(() => {
@@ -1176,6 +1227,17 @@
 		}
 	});
 
+	// Trims the rune set Go's unicode.IsSpace covers (what
+	// strings.TrimSpace in genreTitles, internal/api/snapshot.go,
+	// trims); the class mirrors IsSpace, which excludes U+FEFF.
+	// JS String.prototype.trim's whitespace set differs — e.g. U+0085 —
+	// and a title JS would leave would diverge the preview from the
+	// saved snapshot.
+	function goTrim(s: string): string {
+		const ws = '[\t\n\u000B\f\r \u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]';
+		return s.replace(new RegExp('^' + ws + '+'), '').replace(new RegExp(ws + '+$'), '');
+	}
+
 	/** The snapshot shape a save captures for this selection — ordered
 	 *  people arrays, canonical ADB book id (#480), release year. */
 	function captureMetadata(book: AudiobookDBBook, release: AudiobookDBRelease | null): Record<string, unknown> {
@@ -1215,8 +1277,15 @@
 		const [firstSeriesName, firstSeriesPosition] = splitSeries(seriesName);
 		if (firstSeriesName) meta.series_name = firstSeriesName;
 		if (firstSeriesPosition) meta.series_position = firstSeriesPosition;
-		const genre = (book.genres ?? [])[0]?.title;
-		if (genre) meta.genres = [genre];
+		// Same genre normalization the saved snapshot uses (genreTitles in
+		// internal/api/snapshot.go): the FULL ordered list, each title
+		// trimmed by goTrim (Go's unicode.IsSpace set), blanks dropped.
+		// A first-genre-only preview diverged from the queued job whenever
+		// the first title was blank.
+		const genres = (book.genres ?? [])
+			.map((g) => goTrim(g.title))
+			.filter((t) => t !== '');
+		if (genres.length) meta.genres = genres;
 		return meta;
 	}
 
@@ -1417,8 +1486,9 @@
 				: { kind: 'low', text: 'No close title match' };
 		}
 		if (!isReady(candidate)) return { kind: 'loading', text: 'Loading edition…' };
-		return candidate.manualPick
-			? { kind: 'manual', text: 'Selected manually' }
+		if (candidate.manualPick) return { kind: 'manual', text: 'Selected manually' };
+		return candidate.asinPick
+			? { kind: 'auto', text: 'Selected by source ASIN' }
 			: { kind: 'auto', text: 'Selected by title' };
 	}
 
@@ -1678,7 +1748,7 @@
 	{@const kind = statusKind(c)}
 	{#if kind === 'auto' || kind === 'manual'}
 		{@const report = selectedEvidence(c)}
-		{@const badge = evidenceBadge(report, c.manualPick)}
+		{@const badge = evidenceBadge(report, c.manualPick, c.asinPick)}
 		{@const fields = badge.kind === 'conflict' ? conflictingEvidenceFields(report) : []}
 		{@const identifiers = report && (report.sourceRead.status === 'read' || report.sourceRead.status === 'partial') ? report.identifiers : []}
 		<span class="match__explanation" data-evidence-origin={badge.kind}>
@@ -1694,7 +1764,7 @@
 					{#if fields.length}<span class="match__explanation-line">Fields differ: {fields.map((field) => evidenceFieldLabels[field]).join(', ')}.</span>{/if}
 					{#if identifiers.some((identifier) => identifier.state === 'conflict')}<span class="match__explanation-line">The source identifier points to a different record.</span>{/if}
 				{:else}
-					<span class="match__explanation-line">{#if badge.identityScope === 'edition'}Source identifier matches this edition.{:else if badge.identityScope === 'book'}Identifies the book, not the edition.{:else if c.manualPick}You chose this record; check its narrator and edition.{:else}Title-based suggestion; check narrator and edition.{/if}</span>
+					<span class="match__explanation-line">{#if badge.identityScope === 'edition'}Source identifier matches this edition.{:else if badge.identityScope === 'book'}{#if c.asinPick && !c.manualPick}Matched by the source file's ASIN. Identifies the book, not the edition.{:else}Identifies the book, not the edition.{/if}{:else if c.manualPick}You chose this record; check its narrator and edition.{:else if c.asinPick}Matched by the source file's ASIN; check narrator and edition.{:else}Title-based suggestion; check narrator and edition.{/if}</span>
 				{/if}
 			</span>
 		</span>

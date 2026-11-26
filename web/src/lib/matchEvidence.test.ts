@@ -25,6 +25,17 @@ describe('candidate-scoped source evidence', () => {
 		expect(evidenceComparison(undefined, 'title')).toBeUndefined();
 	});
 
+	it('labels an ASIN pick in the neutral fallback when the report is inconclusive', () => {
+		// The visible badge must reflect the ASIN pick source, not fall back
+		// to the title wording, when no report is available or it is inconclusive.
+		expect(evidenceBadge(undefined, false, true)).toEqual({ label: 'Selected by source ASIN', kind: 'neutral' });
+		const inconclusive = editionReport();
+		inconclusive.sourceRead = { status: 'not_read', detail: '' };
+		expect(evidenceBadge(inconclusive, false, true)).toEqual({ label: 'Selected by source ASIN', kind: 'neutral' });
+		// Manual still wins over the ASIN label.
+		expect(evidenceBadge(undefined, true, true)).toEqual({ label: 'Chosen manually', kind: 'neutral' });
+	});
+
 	it.each([
 		{ ...selection, bookId: 'book-b' },
 		{ ...selection, releaseId: 'release-b' },
@@ -67,6 +78,21 @@ describe('candidate-scoped source evidence', () => {
 			expect(evidenceBadge(report, false)).toEqual({ label: 'Title suggestion', kind: 'neutral' });
 			expect(evidenceBadge(report, true)).toEqual({ label: 'Chosen manually', kind: 'neutral' });
 		}
+	});
+
+	it.each([
+		{ origin: 'book_id', scope: 'book', manual: { label: 'Exact book ID · edition unverified', kind: 'neutral', identityScope: 'book' } },
+		{ origin: 'edition_id', scope: 'edition', manual: { label: 'Exact edition ID', kind: 'verified', identityScope: 'edition' } }
+	] as const)('keeps the ASIN attribution over the identity label for a verified $origin pick', ({ origin, scope, manual }) => {
+		// The canonical detail fetch verifies the identity for exactly the
+		// ASIN-resolved case; the identity label must not replace the
+		// source-ASIN attribution in the visible badge.
+		const report = editionReport();
+		report.origin = origin;
+		report.identifiers[0].scope = scope;
+		expect(evidenceBadge(report, false, true)).toEqual({ label: 'Selected by source ASIN', kind: manual.kind, identityScope: manual.identityScope });
+		// A manual pick keeps the pre-existing identity label.
+		expect(evidenceBadge(report, true, true)).toEqual(manual);
 	});
 
 	it('cannot verify an edition from partial extraction or a book-only selection', () => {
