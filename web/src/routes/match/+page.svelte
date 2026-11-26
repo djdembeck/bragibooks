@@ -1227,13 +1227,14 @@
 		}
 	});
 
-	// Trims exactly the rune set Go's unicode.IsSpace covers (what
-	// strings.TrimSpace in genreTitles, internal/api/snapshot.go, trims).
+	// Trims the rune set Go's unicode.IsSpace covers (what
+	// strings.TrimSpace in genreTitles, internal/api/snapshot.go,
+	// trims); the class mirrors IsSpace, which excludes U+FEFF.
 	// JS String.prototype.trim's whitespace set differs — e.g. U+0085 —
 	// and a title JS would leave would diverge the preview from the
 	// saved snapshot.
 	function goTrim(s: string): string {
-		const ws = '[\t\n\u000B\f\r \u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]';
+		const ws = '[\t\n\u000B\f\r \u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]';
 		return s.replace(new RegExp('^' + ws + '+'), '').replace(new RegExp(ws + '+$'), '');
 	}
 

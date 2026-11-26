@@ -481,4 +481,36 @@ describe('match ASIN fast path', () => {
 		);
 		expect(genres).toEqual(['Mystery']);
 	});
+
+	it('keeps U+FEFF genre titles (Go unicode.IsSpace excludes it)', async () => {
+		// Go's strings.TrimSpace does not treat U+FEFF as whitespace, so
+		// the snapshot keeps it: a U+FEFF-only title is not dropped and
+		// a U+FEFF-padded title is not trimmed. The preview must match.
+		wireApi(
+			{
+				genres: [
+					{ id: 'g1', name: '', title: '\uFEFF' },
+					{ id: 'g2', name: 'Mystery', title: '\uFEFFMystery' }
+				]
+			},
+			{},
+			{ source_asin: { status: 'present', value: 'B00B5HZGUG' } },
+			undefined,
+			{ genres: [] }
+		);
+		await mountAndSettle();
+		let genres: unknown;
+		await vi.waitUntil(
+			() => {
+				const body = postMock.mock.calls
+					.map((c) => c[1] as { metadata?: Record<string, unknown> })
+					.find((b) => b.metadata && b.metadata.genres !== undefined);
+				if (!body) return false;
+				genres = body.metadata!.genres;
+				return true;
+			},
+			{ timeout: 4000, interval: 5 }
+		);
+		expect(genres).toEqual(['\uFEFF', '\uFEFFMystery']);
+	});
 });
