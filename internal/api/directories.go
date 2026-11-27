@@ -63,13 +63,13 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 	// ONCE here — the same value that decides index-mode eligibility —
 	// and reused by the fallback metadata gate below: a config change
 	// mid-request must not let a filesystem listing served for the old
-	// root carry the NEW root's status. servedRoot is the captured root's
-	// symlink-resolved form, the form scan() stores as IndexState.Root,
-	// so the gate compares like with like for a symlink-configured
-	// InputDir too.
+	// root carry the NEW root's status. The gate itself compares against
+	// the SYMLINK-RESOLVED directory the fallback read below (resolved
+	// AFTER the read) — the form scan() stores as IndexState.Root — so
+	// the status binds to the tree actually served, not the configured
+	// root captured before the read.
 	var fallbackIndex bool
 	root := canonicalRoot(h.svc.Config.Config().Directories.InputDir)
-	servedRoot := resolvedRoot(root)
 	if r.URL.Query().Has("index") && h.svc.IndexSvc != nil && h.svc.IndexSvc.Enabled() {
 		cleanPath := canonicalRoot(path)
 		if cleanPath == root || strings.HasPrefix(cleanPath, indexChildPrefix(root)) {
@@ -107,18 +107,33 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 		Path:    path,
 		Entries: entries,
 	}
-	// Index-mode fallback: serve the SAME-root index status alongside the
-	// filesystem entries (state, not rows — the entries stay
+	// Index-mode fallback: serve the same-READ-root index status alongside
+	// the filesystem entries (state, not rows — the entries stay
 	// filesystem-sourced). A fresh page visit then sees the just-finished
 	// scan's freshness (no spurious rescan queued for a cap-truncated
 	// root) and the incomplete-index warning; a state from ANOTHER root
 	// (a re-pointed input) is not served for this path. The gate compares
-	// against the root captured at the top of the handler — the root this
-	// request was served from — not a re-resolved CurrentRoot: if the
-	// config changed mid-request, the re-resolution would bind the NEW
-	// root's status to a listing of the old root's tree.
+	// against the resolved directory the read above ACTUALLY opened
+	// (EvalSymlinks of the path readDirectory used) — the form scan()
+	// stores as IndexState.Root, so the gate compares like with like.
+	// A symlink below the guarded root resolves to the tree the walk
+	// stores as file-symlink rows (never descended), and a
+	// symlink-configured root can retarget between the eligibility check
+	// and this read; either way the served tree is the RESOLVED target's,
+	// and the status must bind to it. The binding is CONTAINMENT, not
+	// equality: a fallback read of a DESCENDANT of the indexed root
+	// serves the indexed tree's subtree, so it carries the status too —
+	// while a sibling that merely shares the root's string prefix is not
+	// contained. The gate compares against the resolved directory, not
+	// the configured root captured at the top, nor a re-resolved
+	// CurrentRoot: the read happened in this request for this path, so a
+	// mid-request config change cannot bind the NEW root's status to a
+	// listing of the old root's tree. Path resolution runs ONLY here —
+	// plain (non-?index) requests and index requests that did not fall
+	// back pay zero path-resolution I/O.
 	if fallbackIndex {
-		if state := h.svc.IndexSvc.Status().State; state.Root != "" && state.Root == servedRoot {
+		state := h.svc.IndexSvc.Status().State
+		if state.Root != "" && indexedRootContains(state.Root, resolvedRoot(path)) {
 			resp.Index = &state
 		}
 	}

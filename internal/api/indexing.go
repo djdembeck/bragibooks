@@ -1530,9 +1530,15 @@ func (s *IndexService) loadState() error {
 	// phase (table intact). Without the seed the stale root would pass
 	// indexChildrenRows's root+guard checks and serve incomplete rows as
 	// authoritative until a scan reaches the write phase. The column is
-	// the durable set at boot (as above), so a mark seeded here is durable
-	// too; a later clean "done" on the root releases it (setTerminal's
-	// clear-on-done, which runs before the terminal's persistLocked).
+	// the durable set at boot (as above); a mark seeded here is durable
+	// only once the boot persist below writes it to write_failed_root —
+	// the seed's UPDATE runs before any later scan, so a second boot
+	// before a scan re-seeds from the persisted column. On a persist
+	// failure the in-memory mark stays (listings fall back to the
+	// filesystem) but the root is NOT claimed durable. A later clean
+	// "done" on the root releases it (setTerminal's clear-on-done, which
+	// runs before the terminal's persistLocked).
+	seeded := false
 	if (st.Status == "truncated" || st.Status == "queued" || st.Status == "running") && st.Root != "" {
 		marked := false
 		for _, r := range s.writeFailedRoots {
@@ -1543,7 +1549,7 @@ func (s *IndexService) loadState() error {
 		}
 		if !marked {
 			s.writeFailedRoots = append(s.writeFailedRoots, st.Root)
-			s.durableWriteFailedRoots = append(s.durableWriteFailedRoots, st.Root)
+			seeded = true
 		}
 	}
 	st.LastRunAt = lastRunAt.String
@@ -1553,13 +1559,38 @@ func (s *IndexService) loadState() error {
 	// request time, before the scan's terminal write). Treat it as
 	// interrupted so the next refresh supersedes it instead of a future
 	// RequestScan coalescing into the dead generation and never running.
+	// The UPDATE folds in write_failed_root too: a root seeded above
+	// (queued/running with an EMPTY guard column) must be durable in the
+	// SAME write — a second boot before any scan re-seeds from the
+	// persisted column, and the seed only matches truncated/queued/
+	// running, never the interrupted this write records. A seeded mark is
+	// durable ONLY once this write lands; on failure the in-memory mark
+	// stays (listings fall back to the filesystem) but is not claimed
+	// durable.
 	if st.Status == "running" || st.Status == "queued" {
 		st.Status = "interrupted"
 		st.Detail = "previous run ended abruptly"
-		_, _ = s.db.Exec(
-			`UPDATE index_state SET status = ?, detail = ? WHERE id = 1`,
-			st.Status, st.Detail,
-		)
+		if _, err := s.db.Exec(
+			`UPDATE index_state SET status = ?, detail = ?, write_failed_root = ? WHERE id = 1`,
+			st.Status, st.Detail, mustJSON(s.writeFailedRoots),
+		); err != nil {
+			log.Printf("index: persist crash-recovered state: %v", err)
+		} else if seeded {
+			s.durableWriteFailedRoots = append(s.durableWriteFailedRoots, st.Root)
+		}
+	} else if seeded {
+		// A persisted `truncated` has no crash-recovery UPDATE to fold
+		// the guard into — the seeded mark is durable only once this
+		// write lands (before any later scan, so a second boot before a
+		// scan re-seeds from the persisted column).
+		if _, err := s.db.Exec(
+			`UPDATE index_state SET write_failed_root = ? WHERE id = 1`,
+			mustJSON(s.writeFailedRoots),
+		); err == nil {
+			s.durableWriteFailedRoots = append(s.durableWriteFailedRoots, st.Root)
+		} else {
+			log.Printf("index: persist seeded guard: %v", err)
+		}
 	}
 	s.last = st
 	return nil
@@ -1719,6 +1750,17 @@ func indexChildPrefix(dir string) string {
 		return dir
 	}
 	return dir + sep
+}
+
+// indexedRootContains reports whether dir is the indexed root itself or a
+// descendant of it — the containment form of the "same root" binding the
+// ListDirectories fallback gate applies: the served read was the indexed
+// tree itself or a subtree of it. The prefix is built through
+// indexChildPrefix so the separator is never doubled and a SIBLING that
+// merely shares the root's string prefix (root2 next to root) is NOT
+// contained.
+func indexedRootContains(root, dir string) bool {
+	return dir == root || strings.HasPrefix(dir, indexChildPrefix(root))
 }
 
 // indexImmediateChild reports whether candidate sits directly under dir.

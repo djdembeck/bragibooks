@@ -1321,9 +1321,38 @@ func TestLoadStateSeedsGuardFromCrashRecoveredQueuedRoot(t *testing.T) {
 	if !durable {
 		t.Fatalf("seeded guard is not in durableWriteFailedRoots (the boot-durability contract is broken)")
 	}
+
+	// SECOND BOOT before any scan: the seeded mark must be persisted to
+	// write_failed_root — the in-memory slice dies with the process, and
+	// a second boot sees `interrupted` (not truncated/queued/running), so
+	// the seed condition no longer matches; only the persisted column can
+	// carry the mark. Close the handle and boot a fresh service on the
+	// SAME DB path.
+	var persisted string
+	if err := db.QueryRow(`SELECT write_failed_root FROM index_state WHERE id = 1`).Scan(&persisted); err != nil {
+		t.Fatalf("read write_failed_root: %v", err)
+	}
+	var persistedRoots []string
+	if err := json.Unmarshal([]byte(persisted), &persistedRoots); err != nil {
+		t.Fatalf("decode persisted write_failed_root %q: %v", persisted, err)
+	}
+	if len(persistedRoots) != 1 || persistedRoots[0] != root {
+		t.Fatalf("persisted write_failed_root = %q (decoded %v), want [%q] (the seeded guard must be durable, not in-memory only)", persisted, persistedRoots, root)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = dbpkg.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc = NewIndexService(db, cm, "")
+	if !svc.writeFailedRootContains(root) {
+		t.Fatalf("second boot did not seed the guard from the persisted column (an interrupted row with an empty guard would serve the incomplete table as authoritative)")
+	}
 	h := &Handler{svc: &Services{DB: db, Config: cm, IndexSvc: svc}}
 	if entries, ok, err := h.listIndexedChildren(root); err != nil || ok || len(entries) != 0 {
-		t.Fatalf("seeded-guard listing = ok=%v n=%d err=%v, want the filesystem fallback (no index rows served for the incomplete root)", ok, len(entries), err)
+		t.Fatalf("second-boot listing = ok=%v n=%d err=%v, want the filesystem fallback (no index rows served for the incomplete root)", ok, len(entries), err)
 	}
 
 	// A clean "done" on the root releases the SEEDED mark.
@@ -1416,6 +1445,28 @@ func TestListDirectoriesFallbackServesSameRootIndexStatus(t *testing.T) {
 	}
 	if _, hasEvidence := first["evidence"]; hasEvidence {
 		t.Fatalf("fallback entry carries index evidence (filesystem entries must stay plain): %v", first)
+	}
+
+	// Descendant fallback: a read BELOW the indexed root serves the
+	// indexed tree's subtree, so the SAME-root status binds to it too
+	// (containment, not root equality).
+	descPath := filepath.Join(root, "a")
+	req = httptest.NewRequest(http.MethodGet, "/api/directories?path="+url.QueryEscape(descPath)+"&index=1", nil)
+	rec = httptest.NewRecorder()
+	h.ListDirectories(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET descendant fallback: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var bodyDesc map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &bodyDesc); err != nil {
+		t.Fatalf("decode descendant: %v", err)
+	}
+	idxDesc, ok := bodyDesc["index"].(map[string]any)
+	if !ok {
+		t.Fatalf("descendant fallback response has no index state: %s", rec.Body.String())
+	}
+	if idxDesc["status"] != "truncated" {
+		t.Fatalf("descendant index.status = %v, want truncated", idxDesc["status"])
 	}
 
 	// Re-pointed root: the OTHER root's status is not served for it.
