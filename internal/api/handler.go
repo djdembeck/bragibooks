@@ -88,8 +88,11 @@ const enginePreviewConcurrency = 4
 // enginePreviewDeadline bounds a single preview's server-side execution
 // independent of the client's connection: r.Context() only fires when the
 // client gives up, so a client that keeps its connection open would pin a
-// slow/stuck engine process for as long as it wished.
-const enginePreviewDeadline = 30 * time.Second
+// slow/stuck engine process for as long as it wished. A var (not a const)
+// so a test can shorten it to exercise the deadline path in milliseconds
+// (EnginePreview's WithTimeout takes the MINIMUM of this and the request
+// context, so a request-side timeout would mask the server-side one).
+var enginePreviewDeadline = 30 * time.Second
 
 // NewHandler creates a new Handler with the given services.
 func NewHandler(svc *Services) *Handler {

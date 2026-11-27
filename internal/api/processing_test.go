@@ -3492,3 +3492,103 @@ func TestListJobsBookScopeReincludesLatestBatchRows(t *testing.T) {
 		}
 	}
 }
+
+// seedBatchBooks creates n books, each with a capture row and an on-disk
+// source file, so QueueBatch's prepare pass (snapshot load + destination
+// freeze) succeeds for every item.
+func seedBatchBooks(t *testing.T, h *Handler, n int) []queueBatchItem {
+	t.Helper()
+	items := make([]queueBatchItem, 0, n)
+	for i := range n {
+		id := int64(i + 1)
+		if _, err := h.svc.DB.Exec(
+			`INSERT INTO books (id, title, status) VALUES (?, ?, 'pending')`, id, fmt.Sprintf("Book %d", id)); err != nil {
+			t.Fatalf("seed book %d: %v", id, err)
+		}
+		seedSnapshot(t, h.svc.DB, id)
+		src := filepath.Join(t.TempDir(), fmt.Sprintf("src-%d.m4b", i))
+		if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		items = append(items, queueBatchItem{BookID: id, SrcPaths: []string{src}})
+	}
+	return items
+}
+
+func jobsMapSize(s *ProcessingService) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.jobs)
+}
+
+// TestQueueBatchMidInsertFailureRollsBackRowsAndStates pins the batch
+// rollback contract: a mid-batch insert failure rejects the whole request,
+// leaves NO committed rows (the transaction rolls back), and removes the
+// in-memory job states that were registered before the commit (a worker
+// never runs a job whose row was not committed, so the registrations would
+// otherwise stay in the map for the process's lifetime).
+func TestQueueBatchMidInsertFailureRollsBackRowsAndStates(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	items := seedBatchBooks(t, h, 3)
+	if _, err := h.svc.DB.Exec(
+		`CREATE TRIGGER fail_batch_insert AFTER INSERT ON processing_jobs
+		 FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := svc.QueueBatch(t.Context(), "batch-rb", queueDestination{}, svc.proc.QueueSnapshot(), items)
+	if err == nil {
+		t.Fatalf("QueueBatch succeeded; want the injected insert failure")
+	}
+	if ids != nil {
+		t.Errorf("ids = %v; want nil on failure", ids)
+	}
+	var n int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("processing_jobs rows = %d; want 0 (the batch transaction must roll back)", n)
+	}
+	if got := jobsMapSize(svc); got != 0 {
+		t.Errorf("service.jobs size = %d; want 0 (unregisterStates must remove the pre-committed registrations)", got)
+	}
+}
+
+// TestQueueBatchRegistersStatesBeforeRowsClaimable pins the publication
+// ordering: after QueueBatch returns, every queued job ID has a state in
+// s.jobs (a row is claimable the instant the transaction commits, so the
+// registration must already have landed under the service mutex), and a
+// failing insert leaves NO registrations for that batch behind.
+func TestQueueBatchRegistersStatesBeforeRowsClaimable(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	items := seedBatchBooks(t, h, 4)
+	ids, err := svc.QueueBatch(t.Context(), "batch-order-1", queueDestination{}, svc.proc.QueueSnapshot(), items[:2])
+	if err != nil {
+		t.Fatalf("QueueBatch: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("ids = %v; want 2", ids)
+	}
+	svc.mu.RLock()
+	for _, id := range ids {
+		if st := svc.jobs[id]; st == nil {
+			svc.mu.RUnlock()
+			t.Fatalf("queued job %s has no state in service.jobs; the registration must land before the commit makes the row claimable", id)
+		}
+	}
+	svc.mu.RUnlock()
+
+	// A second batch whose insert fails must not leave ITS registrations
+	// in the map: the first batch's states remain, and nothing more.
+	if _, err := h.svc.DB.Exec(
+		`CREATE TRIGGER fail_batch_insert2 AFTER INSERT ON processing_jobs
+		 FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.QueueBatch(t.Context(), "batch-order-2", queueDestination{}, svc.proc.QueueSnapshot(), items[2:4]); err == nil {
+		t.Fatalf("second QueueBatch succeeded; want the injected insert failure")
+	}
+	if got := jobsMapSize(svc); got != 2 {
+		t.Errorf("service.jobs size = %d; want 2 (the first batch's states only — the failed batch's registrations must be rolled back)", got)
+	}
+}

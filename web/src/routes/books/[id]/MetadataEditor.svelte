@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick } from 'svelte';
-	import { get, put, post } from '#lib/api.js';
+	import { get, put, post, authHeaders } from '#lib/api.js';
 	import {
 		type BookMetadataResponse,
 		type BookMetadataDraft,
@@ -62,6 +62,13 @@
 	let previewError = $state(false);
 	let previewSeq = 0;
 
+	// Cover preview: the static `/covers/...` URL for file/snapshot covers,
+	// or a blob URL for URL covers (fetched server-side below — an <img>
+	// cannot POST the CSRF token, and the URL must stay out of the request
+	// target). null = placeholder.
+	let coverPreviewUrl = $state<string | null>(null);
+	let coverPreviewSeq = 0;
+
 	// Fetch generation (finding: SvelteKit reuses this component when
 	// navigating /books/1 -> /books/2, and a draft loaded for book A must
 	// never be submitted for book B — every save/upload URL is built from
@@ -89,6 +96,7 @@
 		meta = null;
 		draft = null;
 		baseline = null;
+		coverPreviewUrl = null;
 		coverOpen = false;
 		confirmingReset = false;
 		confirmingDiscard = false;
@@ -376,22 +384,68 @@
 	});
 
 	// ── Cover handling ───────────────────────────────────────────
-	const coverPreviewUrl = $derived.by(() => {
+	// Static cover sources (uploaded file, snapshot art) render straight
+	// from the covers directory.
+	const coverPreviewStatic = $derived.by<string | null>(() => {
 		if (!draft) return null;
 		if (draft.cover_source === 'file' && draft.cover_file) return `/covers/${draft.cover_file}`;
-		if (draft.cover_source === 'url' && draft.cover_url) {
-			// A URL cover is previewed through the server's validated fetch
-			// path, not loaded directly by the browser: a raw external URL as
-			// an <img> src is resolved and followed by the browser
-			// independently of the server's public-destination and redirect
-			// checks, so a saved URL could make this operator's browser
-			// contact a destination reachable from their network. The
-			// endpoint re-asserts the same guard on every hop and serves the
-			// fetched bytes.
-			return `/covers/preview?url=${encodeURIComponent(draft.cover_url)}`;
-		}
+		if (draft.cover_source === 'url') return null; // fetched below
 		if (draft.cover_source === 'clear' || isCleared('cover')) return null;
 		return snapshot?.cover_file ? `/covers/${snapshot.cover_file}` : null;
+	});
+
+	// A URL cover is previewed through the server's validated fetch path,
+	// not loaded directly by the browser: a raw external URL as an <img>
+	// src is resolved and followed by the browser independently of the
+	// server's public-destination and redirect checks, so a saved URL
+	// could make this operator's browser contact a destination reachable
+	// from their network. The endpoint re-asserts the same guard on every
+	// hop and serves the fetched bytes. The URL travels in the POST body
+	// (never the query string — a draft URL can carry credentials in its
+	// path or a signed query, and query strings end up in proxy
+	// request-target logs), and the POST puts the fetch under the CSRF
+	// guard (an <img> load is a GET and would be exempt). The response
+	// becomes a blob URL the <img> can load same-origin.
+	//
+	// Blob URLs are tracked per effect run and revoked in the cleanup:
+	// the cleanup runs when the effect re-runs (a new preview replaces the
+	// old, or a book reset/draft change wipes the state) and on unmount,
+	// so a navigation that clears coverPreviewUrl cannot strand the
+	// previous book's blob for the page's lifetime.
+	$effect(() => {
+		const staticUrl = coverPreviewStatic; // non-URL covers: depend on the static path
+		const draftUrl = draft?.cover_source === 'url' ? (draft?.cover_url ?? '') : '';
+		const seq = ++coverPreviewSeq;
+		let activeBlob: string | null = null;
+		const revoke = () => {
+			if (activeBlob) {
+				URL.revokeObjectURL(activeBlob);
+				activeBlob = null;
+			}
+		};
+		if (!draftUrl) {
+			coverPreviewUrl = staticUrl;
+			return revoke;
+		}
+		fetch('/covers/preview', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', ...authHeaders() },
+			body: JSON.stringify({ url: draftUrl })
+		})
+			.then(async (res) => {
+				if (seq !== coverPreviewSeq) return;
+				if (!res.ok) throw new Error(await res.text());
+				const blob = await res.blob();
+				if (seq !== coverPreviewSeq) return;
+				activeBlob = URL.createObjectURL(blob);
+				coverPreviewUrl = activeBlob;
+			})
+			.catch(() => {
+				if (seq === coverPreviewSeq) {
+					coverPreviewUrl = null;
+				}
+			});
+		return revoke;
 	});
 
 	const coverSource = $derived(draft?.cover_source || (isCleared('cover') ? 'clear' : ''));

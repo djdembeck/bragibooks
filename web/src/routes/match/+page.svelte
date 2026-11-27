@@ -12,7 +12,7 @@
 		Settings,
 		SourceASINEvidence,
 		UpdateBookRequest,
-		BookMetadataSnapshot,
+		BookMetadataOverrides,
 		BookMetadataResponse
 	} from '#lib/types.js';
 	import {
@@ -1192,16 +1192,39 @@
 	// overlays the saved manual overrides before freezing the job); a
 	// catalog-only preview would show the catalog title even though the
 	// job names the file from the override.
-	const effectiveMetaCache = $state<Record<number, BookMetadataSnapshot | null>>({});
+	// The saved OVERRIDE LAYER (pure manual overrides, not the server's
+	// effective snapshot) per local book id, fetched once per book. The
+	// preview applies this layer to the PENDING candidate's base capture
+	// (the currently selected book+release), so a release change re-bases
+	// the preview on the new release's metadata with the same overrides
+	// on top — the old effective snapshot carried the OLD release's base
+	// values, which leaked into a re-matched candidate.
+	const effectiveMetaCache = $state<Record<number, BookMetadataOverrides | null>>({});
+	// In-flight metadata fetches, recorded SYNCHRONOUSLY: the cache only
+	// fills after the GET settles, so every $effect re-run in that window
+	// would otherwise start a second GET for the same book. Reuse the
+	// pending promise until it settles (dedup).
+	const pendingEffectiveMeta = new Map<number, Promise<void>>();
 	let effectiveMetaVersion = $state(0);
 	async function ensureEffectiveMeta(bookId: number) {
 		if (bookId in effectiveMetaCache) return;
-		try {
-			const resp = await get<BookMetadataResponse>(`/books/${bookId}/metadata`);
-			effectiveMetaCache[bookId] = resp.effective;
-		} catch {
-			effectiveMetaCache[bookId] = null;
+		const inFlight = pendingEffectiveMeta.get(bookId);
+		if (inFlight) {
+			void inFlight;
+			return;
 		}
+		const p = (async () => {
+			try {
+				const resp = await get<BookMetadataResponse>(`/books/${bookId}/metadata`);
+				effectiveMetaCache[bookId] = resp.overrides;
+			} catch {
+				effectiveMetaCache[bookId] = null;
+			} finally {
+				pendingEffectiveMeta.delete(bookId);
+			}
+		})();
+		pendingEffectiveMeta.set(bookId, p);
+		await p;
 		effectiveMetaVersion++;
 	}
 
@@ -1261,40 +1284,50 @@
 		}
 	});
 
-	/** The preview payload's metadata: the server-computed EFFECTIVE snapshot
-	 *  (catalog capture + saved manual overrides, the same view the queue
-	 *  path freezes) when available, falling back to the catalog-only
-	 *  capture while the effective fetch is in flight. The effective
-	 *  snapshot's cover/chapters are not preview inputs (the engine preview
-	 *  resolves name tokens only), so the name-bearing fields are taken
-	 *  verbatim; the fallback keeps the preview working before the fetch
-	 *  lands (and when the book has no override row). */
+	/** The preview payload's metadata: the PENDING candidate's base capture
+	 *  (the currently selected book+release) with the saved OVERRIDE LAYER
+	 *  applied on top — the same view the queue path freezes (Go's
+	 *  applyMetadataOverride overlays the manual overrides on the capture
+	 *  before the job is built). Overlaying the layer on the base (not
+	 *  serving the server's effective snapshot verbatim) is what lets a
+	 *  release change re-base the preview: the base is the NEW release's
+	 *  metadata, and only the user's manual overrides ride on top. A null
+	 *  layer (no overrides, or the fetch not yet settled) returns the bare
+	 *  base capture.
+	 *
+	 * Conventions mirror applyMetadataOverride: a non-empty scalar /
+	 * non-null array overrides, and series_name / series_position apply
+	 * INDEPENDENTLY (a position-only override is not gated on the name,
+	 * and a name-only override does not drag the catalog position along).
+	 * A cleared field is NOT removed from the preview: the server keeps
+	 * the captured value in the effective metadata (the output is named
+	 * from it) and pins only the write policy to clear the tag from the
+	 * file, so the preview's path must resolve from the same value.
+	 * Cover and chapters are not preview inputs (the engine resolves name
+	 * tokens only) and are left as the base capture has them. */
 	function effectivePreviewMeta(
-		eff: BookMetadataSnapshot,
+		ov: BookMetadataOverrides | null,
 		book: AudiobookDBBook,
 		release: AudiobookDBRelease | null
 	): Record<string, unknown> {
 		const base = captureMetadata(book, release);
-		// The effective values win for the name-bearing fields the engine
+		if (!ov) return base;
+		// The override values win for the name-bearing fields the engine
 		// resolves: title, subtitle, people, series, year, genres.
-		if (eff.title) base.title = eff.title;
-		if (eff.subtitle) base.subtitle = eff.subtitle;
-		else delete base.subtitle;
-		if (eff.authors?.length) base.authors = eff.authors;
-		else delete base.authors;
-		if (eff.narrators?.length) base.narrators = eff.narrators;
-		else delete base.narrators;
-		if (eff.series_name) {
-			base.series_name = eff.series_name;
-			base.series_position = eff.series_position;
-		} else {
-			delete base.series_name;
-			delete base.series_position;
-		}
-		if (eff.year) base.year = eff.year;
-		else delete base.year;
-		if (eff.genres?.length) base.genres = eff.genres;
-		else delete base.genres;
+		if (ov.title) base.title = ov.title;
+		if (ov.subtitle) base.subtitle = ov.subtitle;
+		if (ov.authors !== null) base.authors = ov.authors;
+		if (ov.narrators !== null) base.narrators = ov.narrators;
+		// Independent of each other, exactly as the server's override
+		// layer composes them: each field applies on its own.
+		if (ov.series_name) base.series_name = ov.series_name;
+		if (ov.series_position) base.series_position = ov.series_position;
+		if (ov.year !== null) base.year = ov.year;
+		if (ov.genres !== null) base.genres = ov.genres;
+		// Cleared fields keep their captured values: the server's
+		// effective metadata does too (the naming source), and only the
+		// write policy pins the tag's removal. Deleting them here would
+		// make the preview resolve a path the queued output does not.
 		return base;
 	}
 

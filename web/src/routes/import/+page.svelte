@@ -17,6 +17,13 @@
 	// Monotonic identity for in-flight directory listings: a response
 	// commits only if it is still the newest request (see fetchListing).
 	let listingSeq = 0;
+	// SEPARATE, lower-priority identity for the background refresh's
+	// re-list: it must not bump listingSeq, or a background re-list that
+	// lands after the user navigated would discard the user's pending
+	// response. A background response commits only if it is still the
+	// newest background request AND no user navigation has since bumped
+	// listingSeq (fetchListing, background = true).
+	let bgListingSeq = 0;
 	let entries: IndexedDirectoryEntry[] = $state([]);
 	let filtered: IndexedDirectoryEntry[] = $state([]);
 	let settings: Settings | null = $state(null);
@@ -93,21 +100,35 @@
 	// matches. The INDEX state is a server-global, not a per-navigation
 	// value: it is committed even when the navigation is refused, so a
 	// superseded re-list still refreshes the freshness the banner reads.
-	async function fetchListing(path: string): Promise<void> {
+	async function fetchListing(path: string, background = false): Promise<void> {
 		// Monotonic request identity: a commit is valid only for the LATEST
 		// request, not merely one whose captured path still matches. Two
 		// navigations started before currentPath changes capture the same
 		// path; if the earlier response lands first it moves currentPath,
 		// and a path-token check would then refuse the LATER (newer)
 		// response too, leaving the user at the older destination.
-		const seq = ++listingSeq;
+		//
+		// A BACKGROUND re-list (the refresh poll) takes a separate,
+		// lower-priority identity: it captures the CURRENT listingSeq
+		// without bumping it, so it cannot discard an in-flight user
+		// navigation. It commits only if no user navigation has since
+		// bumped listingSeq (seq === listingSeq) AND it is still the
+		// newest background request (bg === bgListingSeq).
+		let bg = 0;
+		let seq: number;
+		if (background) {
+			bg = ++bgListingSeq;
+			seq = listingSeq; // read, do NOT bump: user navigation owns it
+		} else {
+			seq = ++listingSeq;
+		}
 		const useIndex = settings?.indexing_enabled === true;
 		if (useIndex) {
 			const response = await get<IndexedDirectoriesResponse>(
 				`/directories?path=${encodeURIComponent(path)}&index=1`
 			);
 			if (response.index !== undefined) indexState = response.index ?? null;
-			if (seq !== listingSeq) return;
+			if (seq !== listingSeq || (background && bg !== bgListingSeq)) return;
 			entries = validEntries(response.entries || []);
 			currentPath = response.path || path;
 			return;
@@ -116,7 +137,7 @@
 		// indexed freshness cannot survive a turn of the indexing toggle.
 		const response = await get<DirectoriesResponse>(`/directories?path=${encodeURIComponent(path)}`);
 		indexState = null;
-		if (seq !== listingSeq) return;
+		if (seq !== listingSeq || (background && bg !== bgListingSeq)) return;
 		entries = validEntries(response.entries || []);
 		currentPath = response.path || path;
 	}
@@ -183,26 +204,28 @@
 				if (refreshCancelled) return; // page unmounted
 				const cur = await get<{ state: IndexState }>('/index');
 				const s = cur?.state;
-				// Only OUR generation's terminal ends the wait. Accepting a
-				// newer generation's terminal (the prior >= gen) let a root
-				// change queue generation N+1 while our N ran: when N
-				// published its terminal the guard accepted it, the single
-				// re-list ran before N+1 finished, and indexed evidence was
-				// absent until a later visit. A newer generation means the
-				// root moved and a superseding scan is in flight; keep
-				// polling for our terminal (the server publishes it even
-				// when a rescan is queued behind it).
-				if (s && s.generation === gen &&
+				// ANY terminal generation >= the one we asked for ends the
+				// wait. The server exposes only the CURRENT status mirror:
+				// a superseding scan replaces generation N's terminal with
+				// N+1's, so requiring strict equality (the prior === gen)
+				// meant a root change that queued N+1 while N ran left us
+				// polling for a terminal the mirror no longer reports — N
+				// finished, but the page never learned it. A NEWER terminal
+				// proves the older scan is no longer running (its evidence
+				// is at least as fresh), so >= is the correct bound.
+				if (s && s.generation >= gen &&
 					['done', 'truncated', 'interrupted', 'error'].includes(s.status)) {
 					indexState = s;
 					// Re-list the directory the user is on NOW: the path
 					// is captured immediately before the fetch (navigation
-					// ownership), and commitListing re-verifies it before
-					// committing — a navigation that lands in the meantime
-					// owns the current listing, so the late response is
-					// refused.
+					// ownership), and fetchListing re-verifies the
+					// background token before committing — a user
+					// navigation that lands in the meantime owns the
+					// current listing, so the late background response is
+					// refused (and it does not bump listingSeq, so the
+					// user's pending response is not discarded either).
 					const reListPath = currentPath;
-					await fetchListing(reListPath);
+					await fetchListing(reListPath, true);
 					return;
 				}
 			}

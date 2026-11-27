@@ -9,6 +9,58 @@ import (
 	"strings"
 )
 
+// openIndexDir opens dir for the index walk's chunked ReadDir. Windows
+// has no O_NOFOLLOW/O_NONBLOCK open flags: FindFirstFile (what ReadDir
+// drives) reports a junction/reparse point as a FILE, not a directory,
+// so the no-follow guarantee the Unix flags give comes from the
+// enumeration itself, and a swapped-in named pipe opens without a writer
+// blocking the worker (a blocking read-open on a pipe waits for a writer,
+// but FindFirstFile on a pipe does not). The plain open is therefore the
+// Windows-equivalent of the Unix directory-only open.
+func openIndexDir(dir string) (*os.File, error) {
+	return os.Open(dir)
+}
+
+// openIndexChildDir opens the child directory name against the ALREADY-
+// OPEN parent descriptor. Windows has no openat (a truly handle-relative
+// open), so the relative open is built from the parent's full path (f.Name()
+// is the path the parent was opened with — the walk never re-points it): a
+// child is opened relative to that same directory, so an ancestor replaced
+// between the entry read and the open cannot redirect the walk outside the
+// root the way a full-path re-open from the walk's original root string can.
+// Two fail-closed checks close the residual path-string window:
+//
+//  1. Lstat the child BEFORE the open: the walk must never follow a
+//     junction/reparse point as a directory (the enumeration reports one as
+//     a file), so a child that is a reparse point at open time is swapped in
+//     after the entry read — refuse it (skip the child) instead of opening
+//     whatever the reparse target points at. The check is against the SAME
+//     joined path the open uses, so it verifies the exact name being opened.
+//
+//  2. The walk's root containment check (openIndexDir's caller-side
+//     validation) still applies to the opened directory: an open that
+//     resolves outside the input root is rejected there.
+//
+// The directory verdict is the enumeration's (FindFirstFile reports a
+// reparse point as a file), same as openIndexDir.
+func openIndexChildDir(parent *os.File, name string) (*os.File, error) {
+	joined := filepath.Join(parent.Name(), name)
+	// Fail closed on a reparse-point child: the walk never follows
+	// junctions, so a reparse point here is a swap-in (the entry read saw a
+	// real directory). Lstat does NOT follow the reparse point — it reports
+	// the link itself — so ModeSymlink is the reparse indicator. Any Lstat
+	// error (vanished, permission) fails the open with that same error:
+	// the plain open below would fail too, so the walk stops on it.
+	if info, err := os.Lstat(joined); err != nil {
+		return nil, err
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		// Reparse point: skip the child (the caller treats the error as a
+		// walk stop for this subtree).
+		return nil, fmt.Errorf("child %q is a reparse point", name)
+	}
+	return os.Open(joined)
+}
+
 // openInsideRoot opens path for probing, binding the probe to the file at
 // open time. The walk's earlier symlink-confinement check is a walk-time
 // verdict — a regular file replaced by an escaping symlink in between
@@ -116,16 +168,13 @@ func volumeAndRest(p string) (string, string) {
 
 // withinResolvedRoot reports whether final lies inside root: both are
 // absolute, in canonicalComparePath form, and root is symlink-resolved.
-// The comparison is CASE-INSENSITIVE throughout: the VOLUME (drive letter,
-// and UNC server/share names) is case-insensitive, and on the DEFAULT NTFS
-// configuration the path REST is case-insensitive too. Comparing the rest
-// case-sensitively (the prior behavior) rejected valid in-root files whose
-// case differed from the configured root (C:\books\track.m4b when the root
-// is C:\Books), degrading metadata extraction for an ordinary path. The
-// trade-off: on a case-SENSITIVE volume (CSNTFS) a case-only sibling of the
-// root now reads as inside — a narrow containment looseness that cannot
-// escape the volume, versus the wider break of rejecting valid in-root
-// paths on the default configuration.
+// The VOLUME (drive letter, and UNC server/share names) is compared
+// case-INSENSITIVELY (drive-letter and server/share case is not
+// meaningful), and the path REST is compared case-SENSITIVELY: on a
+// case-sensitive volume (CSNTFS) a case-only sibling (C:\books when the
+// root is C:\Books) is a different directory and must be rejected, and
+// the strict rule keeps a case-only sibling of the root from reading as
+// inside on every configuration.
 func withinResolvedRoot(root, final string) bool {
 	root = canonicalComparePath(root)
 	final = canonicalComparePath(final)

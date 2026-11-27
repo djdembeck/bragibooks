@@ -361,6 +361,14 @@ func (s *IndexService) scan(ctx context.Context) {
 	s.last.Detail = ""
 	s.last.Extracted = 0
 	s.last.Total = 0
+	// Resolve the scan root ONCE, inside this same lock, and use that
+	// single value for both the coalescing decision (activeRoot) and the
+	// walk: a symlink retarget between two separate resolutions would let
+	// the scan advertise one root while walking another, and a refresh for
+	// the advertised root would coalesce into a scan that never visits it.
+	// (Resolving under the lock is safe: resolveScanRoot reads the config,
+	// not any state this lock guards for writers.)
+	root := s.resolveScanRoot()
 	// Re-establish the accepted root for the coalescing branch: the PRIOR
 	// scan's setTerminal cleared activeRoot (its worker was done), and a
 	// root change that queued THIS rescan then found an empty activeRoot —
@@ -371,20 +379,21 @@ func (s *IndexService) scan(ctx context.Context) {
 	// form (the root the scan worker targets), matching RequestScan's
 	// resolvedRoot comparison: a symlinked dir compares by its resolved
 	// target, so a retarget during the walk queues a rescan.
-	s.activeRoot = resolvedRoot(s.cfg.Config().Directories.InputDir)
+	if root != "" {
+		s.activeRoot = root
+	}
 	s.persistLocked()
 	s.mu.Unlock()
 
-	root := s.resolveScanRoot()
 	if root == "" {
 		s.mu.Lock()
 		missing := s.last.Root
 		s.mu.Unlock()
-		s.setTerminal(gen, "error", "input directory not found", 0, missing)
+		s.setTerminal(gen, "error", "input directory not found", 0, missing, false)
 		return
 	}
 
-	rows, truncated, detail, cancelled := s.walk(ctx, root)
+	rows, truncated, ioFailed, detail, cancelled := s.walk(ctx, root)
 	if cancelled {
 		s.markInterrupted(gen)
 		return
@@ -406,7 +415,7 @@ func (s *IndexService) scan(ctx context.Context) {
 	// complete rows with degraded metadata on budget exhaustion.
 	unchanged, extract, added, cerr := s.classify(rows, root)
 	if cerr != nil {
-		s.setTerminal(gen, "error", fmt.Sprintf("classify: %v", cerr), 0, s.last.Root)
+		s.setTerminal(gen, "error", fmt.Sprintf("classify: %v", cerr), 0, s.last.Root, false)
 		return
 	}
 
@@ -535,7 +544,7 @@ func (s *IndexService) scan(ctx context.Context) {
 	// unchanged rows; it cannot restore a deleted one).
 	if changed && oldRoot != root {
 		if err := s.deletePrefix(oldRoot, root); err != nil {
-			s.setTerminal(gen, "error", fmt.Sprintf("clear old root %s: %v", oldRoot, err), 0, s.last.Root)
+			s.setTerminal(gen, "error", fmt.Sprintf("clear old root %s: %v", oldRoot, err), 0, s.last.Root, false)
 			return
 		}
 	}
@@ -545,7 +554,7 @@ func (s *IndexService) scan(ctx context.Context) {
 	// vanished rows would be served as if still present.
 	if !truncated {
 		if err := s.pruneVanished(walked); err != nil {
-			s.setTerminal(gen, "error", fmt.Sprintf("prune: %v", err), 0, s.last.Root)
+			s.setTerminal(gen, "error", fmt.Sprintf("prune: %v", err), 0, s.last.Root, false)
 			return
 		}
 	}
@@ -558,7 +567,7 @@ func (s *IndexService) scan(ctx context.Context) {
 	// done/truncated terminal on a root releases just that root (below,
 	// in setTerminal); an error terminal keeps the mark.
 	if err := s.upsertAll(append(unchanged, extract...)); err != nil {
-		s.setTerminal(gen, "error", fmt.Sprintf("persist index: %v", err), 0, s.last.Root)
+		s.setTerminal(gen, "error", fmt.Sprintf("persist index: %v", err), 0, s.last.Root, false)
 		return
 	}
 
@@ -569,7 +578,7 @@ func (s *IndexService) scan(ctx context.Context) {
 	if degraded > 0 {
 		detail = appendDetail(detail, fmt.Sprintf("%d paths not extracted (budget)", degraded))
 	}
-	s.setTerminal(gen, status, detail, len(rows), root)
+	s.setTerminal(gen, status, detail, len(rows), root, ioFailed)
 }
 
 // resolveScanRoot returns the canonical directory to scan, or "" when the
@@ -615,7 +624,7 @@ func appendDetail(detail, extra string) string {
 // activeRoot: the worker is no longer mid-walk, so a later RequestScan
 // must not treat a stale root as "scan in flight on a different root"
 // and bump the generation out from under a coalesced caller.
-func (s *IndexService) setTerminal(gen int64, status, detail string, entries int, root string) {
+func (s *IndexService) setTerminal(gen int64, status, detail string, entries int, root string, ioFailed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.last.Generation = gen
@@ -637,15 +646,22 @@ func (s *IndexService) setTerminal(gen int64, status, detail string, entries int
 	// stays). The clear runs in place: this holds s.mu, and the
 	// persistLocked below writes the released mark.
 	//
-	// "truncated" is NOT a clean terminal: the scan stopped at the entry or
-	// depth cap, so directories beyond the cutoff have NO rows in the
-	// table. Releasing the mark for a truncated scan would make
-	// listIndexedChildren serve that incomplete table as a complete
-	// listing (zero rows for a real directory the walk never reached),
-	// hiding files the operator can reach from the filesystem. Keep the
-	// mark on a truncated root so listings fall back to the filesystem
-	// until a scan completes the whole root.
-	if status == "done" {
+	// "truncated" is a clean terminal for the guard's purpose ONLY when
+	// the truncation is cap-only (entry cap / depth bound): the walk
+	// indexed every path it reached (pruning ran over the walked set, the
+	// upserts committed), so the table is exactly what the scan wrote —
+	// the cap is a content bound the status reports, not a mid-write
+	// crash. Releasing the mark here is the recovery path: a root whose
+	// scan structurally ends truncated (a directory past the entry cap)
+	// can never reach "done", and keeping the mark on it would pin the
+	// listings in filesystem-fallback mode across restarts. A directory
+	// the walk never reached reads as empty from the index, which the
+	// operator can verify through the truncation status. An I/O-failed
+	// truncation (a directory open/read error converted to truncated) is
+	// NOT clean: the walk upserted only the rows it reached, so the
+	// table is incomplete in a way the cap is not — the guard stays
+	// until a later scan finishes clean.
+	if (status == "done" || status == "truncated") && !ioFailed {
 		out := s.writeFailedRoots[:0]
 		for _, r := range s.writeFailedRoots {
 			if r != root {
@@ -657,27 +673,47 @@ func (s *IndexService) setTerminal(gen int64, status, detail string, entries int
 	s.persistLocked()
 }
 
-// indexChildrenRows returns the source_index rows whose path is a child of
-// stored, SERIALIZED with the partial-write guard: the guard check AND the
-// query run under one s.mu hold. The old shape checked the in-memory guard
-// under the mutex, released it, and only then queried the table — so a
-// scanner that persisted the guard and committed a 500-row write batch in
-// that window made the listing serve a partially updated table as a
-// complete indexed response instead of falling back to the filesystem.
-// Holding the mutex across the query closes that window: a listing either
-// sees the guard (and falls back) or runs its query in a gap the scanner
-// cannot have used to mark-and-write. ok is false when the root is guarded
+// indexChildrenRows returns the source_index rows whose path is a DIRECT
+// child of stored, SERIALIZED with the published-root validation AND the
+// partial-write guard: all three (stored == last.Root, the guard scan, and
+// the query) run under one s.mu hold. The published-root check must be in
+// this critical section, not a separate Status() snapshot before it: a
+// root switch that finishes between the check and the query would prune
+// the old root's rows and let the query read the old prefix as a valid
+// empty listing. The old shape also checked the guard under the mutex,
+// released it, and only then queried the table — so a scanner that
+// persisted the guard and committed a 500-row write batch in that window
+// made the listing serve a partially updated table as a complete indexed
+// response instead of falling back to the filesystem. Holding the mutex
+// across the query closes that window: a listing either sees a stale
+// root or the guard (and falls back) or runs its query in a gap the
+// scanner cannot have used to mark-and-write. The query selects direct
+// children only (an immediate-child prefix that excludes a second
+// separator), so the mutex is not held while buffering every descendant
+// the caller would discard. ok is false when the root is stale or guarded
 // (the caller falls back to the filesystem).
 func (s *IndexService) indexChildrenRows(stored, root string) (rows []indexChildRow, ok bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// The published-root check compares the PUBLISHED root (root), not the
+	// queried directory (stored): the caller already proved stored is root
+	// or a child of it, and stored only equals last.Root when listing the
+	// root itself — comparing against stored would reject every child
+	// listing as "stale" and fall back to the filesystem.
+	if s.last.Root != root {
+		return nil, false, nil
+	}
 	for _, r := range s.writeFailedRoots {
 		if r == root {
 			return nil, false, nil
 		}
 	}
-	q := fmt.Sprintf(`SELECT path, name, type, size, modtime, payload FROM source_index WHERE path LIKE ? ESCAPE '\'`)
-	dbRows, err := s.db.Query(q, likeEscape(indexChildPrefix(stored))+"%")
+	// Direct children only: the child prefix plus a trailing "%" that
+	// cannot cross a separator (a stored path is dir + sep + name, and a
+	// descendant carries a second separator in that tail).
+	prefix := likeEscape(indexChildPrefix(stored))
+	q := fmt.Sprintf(`SELECT path, name, type, size, modtime, payload FROM source_index WHERE path LIKE ? ESCAPE '\' AND path NOT LIKE ? ESCAPE '\'`)
+	dbRows, err := s.db.Query(q, prefix+"%", prefix+"%"+likeEscape(string(os.PathSeparator))+"%")
 	if err != nil {
 		return nil, false, err
 	}
@@ -715,7 +751,7 @@ type indexChildRow struct {
 // during the startup scan despite the 20,000-entry cap. Reading each
 // directory in bounded chunks (indexReadDirChunk) caps the per-directory
 // allocation, and the entry cap stops the walk once the table is full.
-func (s *IndexService) walk(ctx context.Context, root string) (rows []indexRow, truncated bool, detail string, cancelled bool) {
+func (s *IndexService) walk(ctx context.Context, root string) (rows []indexRow, truncated bool, ioFailed bool, detail string, cancelled bool) {
 	st := &walkState{
 		ctx:       ctx,
 		root:      root,
@@ -726,9 +762,10 @@ func (s *IndexService) walk(ctx context.Context, root string) (rows []indexRow, 
 	}
 	if err := st.readDir(root, 0); err != nil {
 		truncated = true
+		st.ioFailed = true
 		detail = fmt.Sprintf("walk error: %v", err)
 	}
-	return rows, truncated, detail, cancelled
+	return rows, truncated, st.ioFailed, detail, cancelled
 }
 
 // indexReadDirChunk bounds how many entries a single directory read is
@@ -748,6 +785,13 @@ type walkState struct {
 	// it to stop iterating and recursing, so the walk does not traverse far
 	// beyond the bound (marking truncation alone does not stop the descent).
 	capped bool
+	// ioFailed is set when the walk stopped (or lost a subtree) on a
+	// directory open/read error: those truncations leave the table
+	// INCOMPLETE in a way a cap does not — the walked set is not
+	// authoritative, so the scan must keep the partial-write guard
+	// (a cap-only truncation walked everything the cap allows and
+	// releases it).
+	ioFailed bool
 }
 
 // markTruncated records the first truncation reason.
@@ -758,92 +802,159 @@ func (st *walkState) markTruncated(reason string) {
 	}
 }
 
+// errWalkDepthBound signals from walkEntry that the depth cap was hit:
+// every remaining entry in the current chunk (and in later chunks) would
+// be over-depth and unindexable, so readDir stops draining the directory
+// entirely — truncation is already recorded, and no further read can add
+// a row. Not a real failure: the caller treats it as a clean stop.
+var errWalkDepthBound = errors.New("depth cap reached")
+
 // readDir walks the directory at dir (at the given depth below root),
-// reading it in bounded chunks. A directory whose entries exceed the chunk
-// size is read in slices: the excess is recorded as truncation (the rows
-// past the cap are dropped, matching the entry-cap behavior) but the read
-// stays bounded. Returns a read error (the caller marks it truncated).
+// reading it in bounded chunks. f.ReadDir(n) reads AT MOST n entries and
+// returns (the key difference from os.ReadDir, which materializes the
+// WHOLE directory before returning), so a single very large directory
+// allocates at most n entries per read; the loop below drains the
+// directory chunk by chunk until io.EOF, so a directory with more than
+// one chunk of entries is fully walked up to the global entry cap (a
+// single-chunk read would drop every entry past the first
+// indexReadDirChunk). The entry cap stops the whole walk once the table
+// is full (addRow sets st.capped), and only that cap — plus a depth
+// limit — is recorded as truncation, never a single chunk boundary. At
+// the depth limit readDir stops after the first chunk: the entries past
+// the boundary cannot be indexed (walkEntry records the truncation and
+// returns walkDepthBound), so draining more chunks would only enumerate
+// names no row can ever carry. Returns a read error (the caller marks it
+// truncated).
 func (st *walkState) readDir(dir string, depth int) error {
 	if st.ctx.Err() != nil {
 		*st.cancelled = true
 		return nil
 	}
-	// f.ReadDir(n) reads AT MOST n entries and returns (the key difference
-	// from os.ReadDir, which materializes the WHOLE directory before
-	// returning): a single very large directory therefore allocates at
-	// most n entries, not its full listing. A directory with more than n
-	// entries is truncated (the excess is dropped, like the entry cap);
-	// the entry cap stops the whole walk long before a second read of the
-	// same directory would be needed.
-	f, err := os.Open(dir)
+	// Directory-only, no-follow, nonblocking open (openIndexDir): the
+	// entry was observed as a directory a moment ago, and an unrestricted
+	// os.Open would follow a directory symlink swapped in between (the
+	// walk never follows directory symlinks) and block on a FIFO — a
+	// blocking open is not interrupted by the walk's context cancel, so
+	// it would stall the single scan worker and, with it, shutdown.
+	f, err := openIndexDir(dir)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	entries, rerr := f.ReadDir(indexReadDirChunk)
-	if rerr != nil && !errors.Is(rerr, io.EOF) {
-		return rerr
+	return st.readDirWith(f, dir, depth)
+}
+
+// readDirChild descends into a child directory the walk just recorded: it
+// is opened against the PARENT's already-open descriptor (openat, via
+// openIndexChildDir) rather than re-opened by its full path. The entries
+// were read from parent's own directory, so anchoring the descent to that
+// descriptor keeps the walk inside the root even if an ancestor is
+// replaced by a symlink between the entry read and this open — a full-path
+// re-open would follow the swapped ancestor.
+func (st *walkState) readDirChild(parent *os.File, dir string, depth int) error {
+	if st.ctx.Err() != nil {
+		*st.cancelled = true
+		return nil
 	}
-	if len(entries) == indexReadDirChunk {
-		// The read hit the cap: the directory may have more entries than
-		// we walked. Record truncation (the drop is bounded, the read was
-		// bounded — the two caps are the same n).
-		if more, _ := f.ReadDir(1); len(more) > 0 {
-			st.markTruncated(fmt.Sprintf("directory %s has more than %d entries", dir, indexReadDirChunk))
+	child, err := openIndexChildDir(parent, filepath.Base(dir))
+	if err != nil {
+		// A directory open/read error leaves the subtree UNINDEXED:
+		// the walked set is incomplete, not merely capped (a depth-bound
+		// return is a cap and keeps the guard released).
+		if !errors.Is(err, errWalkDepthBound) {
+			st.ioFailed = true
 		}
+		return err
 	}
-	for _, d := range entries {
-		if st.capped {
-			// The entry cap was reached by an earlier row: stop iterating
-			// AND recursing so the walk does not descend into child
-			// directories long after the table is full.
-			return nil
-		}
-		if st.ctx.Err() != nil {
-			*st.cancelled = true
-			return nil
-		}
-		name := d.Name()
-		// Depth is checked BEFORE the dotfile test, matching the original
-		// WalkDir callback (depth → dotfile → entry-cap): an over-depth
-		// entry is skipped (and recorded as truncation) before its name is
-		// even looked at, so over-depth dotfiles count toward truncation.
-		if depth+1 > indexMaxDepth {
-			st.markTruncated(fmt.Sprintf("depth cap %d exceeded", indexMaxDepth))
-			continue
-		}
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
-		p := filepath.Join(dir, name)
-		if d.IsDir() {
-			// A real directory: record it, then descend. Directory
-			// SYMLINKS are not followed (WalkDir parity): d.IsDir() is the
-			// Lstat type, so a symlink to a directory is false here and is
-			// handled as a file-symlink row below (or skipped if it escapes
-			// the root).
-			st.addRow(p, name, "dir", d)
-			if err := st.readDir(p, depth+1); err != nil {
+	defer child.Close()
+	return st.readDirWith(child, dir, depth)
+}
+
+// readDirWith is the chunked drain of an ALREADY-OPEN directory (the
+// parent-fd anchor readDirChild uses); readDir opens by path first and
+// then drains through this.
+func (st *walkState) readDirWith(f *os.File, dir string, depth int) error {
+	for {
+		entries, rerr := f.ReadDir(indexReadDirChunk)
+		for _, d := range entries {
+			if st.capped {
+				// The entry cap was reached by an earlier row: stop
+				// iterating AND recursing so the walk does not descend
+				// into child directories long after the table is full.
+				return nil
+			}
+			if st.ctx.Err() != nil {
+				*st.cancelled = true
+				return nil
+			}
+			if err := st.walkEntry(f, dir, depth, d); err != nil {
+				if errors.Is(err, errWalkDepthBound) {
+					// The depth cap was hit: every remaining entry
+					// in this directory is over-depth and
+					// unindexable. Stop draining — the truncation
+					// is already recorded.
+					return nil
+				}
 				return err
 			}
+		}
+		if rerr == nil {
 			continue
 		}
-		// A file-symlink named like audio is walked as a regular file and
-		// its TARGET is probed (ffprobe follows the link) and extracted: a
-		// link leaving the input root would probe, enumerate, and persist
-		// metadata for a location the index does not cover. Skip it
-		// (d.Type() is the LSTAT mode).
-		if d.Type()&os.ModeSymlink != 0 {
-			resolved, rerr := filepath.EvalSymlinks(p)
-			if rerr != nil {
-				continue // dangling link: nothing to probe
-			}
-			if rel, rerr := filepath.Rel(st.root, resolved); rerr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-				continue // link escapes the input root
-			}
+		if errors.Is(rerr, io.EOF) {
+			return nil
 		}
-		st.addRow(p, name, "file", d)
+		return rerr
 	}
+}
+
+// walkEntry handles one directory entry: the depth and dotfile skips, the
+// directory descent, the file-symlink containment check, and the row
+// append. Split from readDir so the chunk loop stays a plain drain. parent
+// is the directory handle the entry was read from: a child directory is
+// opened RELATIVE TO IT (openat against the parent fd), so an ancestor
+// replaced by a symlink between the entry read and the open cannot
+// redirect the descent outside the root. The return is nil for a plain
+// skip, errWalkDepthBound when the depth cap was hit (the caller stops
+// draining the directory), or an error.
+func (st *walkState) walkEntry(parent *os.File, dir string, depth int, d fs.DirEntry) error {
+	name := d.Name()
+	// Depth is checked BEFORE the dotfile test, matching the original
+	// WalkDir callback (depth → dotfile → entry-cap): an over-depth
+	// entry is skipped (and recorded as truncation) before its name is
+	// even looked at, so over-depth dotfiles count toward truncation.
+	if depth+1 > indexMaxDepth {
+		st.markTruncated(fmt.Sprintf("depth cap %d exceeded", indexMaxDepth))
+		return errWalkDepthBound
+	}
+	if strings.HasPrefix(name, ".") {
+		return nil
+	}
+	p := filepath.Join(dir, name)
+	if d.IsDir() {
+		// A real directory: record it, then descend. Directory
+		// SYMLINKS are not followed (WalkDir parity): d.IsDir() is the
+		// Lstat type, so a symlink to a directory is false here and is
+		// handled as a file-symlink row below (or skipped if it escapes
+		// the root).
+		st.addRow(p, name, "dir", d)
+		return st.readDirChild(parent, p, depth+1)
+	}
+	// A file-symlink named like audio is walked as a regular file and
+	// its TARGET is probed (ffprobe follows the link) and extracted: a
+	// link leaving the input root would probe, enumerate, and persist
+	// metadata for a location the index does not cover. Skip it
+	// (d.Type() is the LSTAT mode).
+	if d.Type()&os.ModeSymlink != 0 {
+		resolved, rerr := filepath.EvalSymlinks(p)
+		if rerr != nil {
+			return nil // dangling link: nothing to probe
+		}
+		if rel, rerr := filepath.Rel(st.root, resolved); rerr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return nil // link escapes the input root
+		}
+	}
+	st.addRow(p, name, "file", d)
 	return nil
 }
 
@@ -1509,7 +1620,7 @@ func (s *IndexService) armWriteFailedRoots(gen int64, roots ...string) bool {
 		s.writeFailedRoots = prev
 		s.durableWriteFailedRoots = prevDurable
 		s.mu.Unlock()
-		s.setTerminal(gen, "error", fmt.Sprintf("persist write-failed guard: %v", perr), 0, s.last.Root)
+		s.setTerminal(gen, "error", fmt.Sprintf("persist write-failed guard: %v", perr), 0, s.last.Root, false)
 		return false
 	}
 	for _, r := range roots {
@@ -1699,22 +1810,20 @@ func (h *Handler) listIndexedChildren(dir string) ([]IndexedDirectoryEntry, bool
 	if stored != root && !strings.HasPrefix(stored, indexChildPrefix(root)) {
 		return nil, false, nil // not under the root
 	}
-	if state := h.svc.IndexSvc.Status().State; state.Root != root {
-		return nil, false, nil // rows are from a previous root (or no scan yet)
-	}
 	// A scan that failed mid-write on this root (or a root switch that
 	// depleted it) left the table partially written (bounded batches
 	// commit independently): missing new paths and stale evidence for
 	// the rest. Serve the filesystem until a clean scan completes on
-	// every marked root. The guard check AND the query run under one lock
-	// (indexChildrenRows), so a scanner cannot mark-and-write between the
-	// check and the read and hand back a partial table.
+	// every marked root. The published-root validation, the guard check,
+	// AND the query run under one lock (indexChildrenRows), so a root
+	// switch cannot prune the old rows between the check and the read,
+	// and a scanner cannot mark-and-write in that window either.
 	indexRows, ok, err := h.svc.IndexSvc.indexChildrenRows(stored, root)
 	if err != nil {
 		return nil, false, err
 	}
 	if !ok {
-		return nil, false, nil // partial table: fall back to the filesystem
+		return nil, false, nil // stale root or partial table: fall back to the filesystem
 	}
 	var out []IndexedDirectoryEntry
 	decodeFail := 0

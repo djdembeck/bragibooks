@@ -790,7 +790,7 @@ func TestClassifyFailureTerminalTableUntouched(t *testing.T) {
 	// classify's ordered read stops at the corrupted row (mid-iteration):
 	// 4th return non-nil, slices empty. The walked set must be real so the
 	// merge cursor advances past the first (uncorrupted) stored row.
-	rows, truncated, _, cancelled := svc.walk(context.Background(), root)
+	rows, truncated, _, _, cancelled := svc.walk(context.Background(), root)
 	if truncated || cancelled {
 		t.Fatalf("walk truncated=%v cancelled=%v, want a complete clean walk", truncated, cancelled)
 	}
@@ -1154,32 +1154,35 @@ func TestEnginePreviewSlotFullRefusesWith429(t *testing.T) {
 // TestEnginePreviewDeadlineIsServerSideAndReleasesTheSlot pins the
 // server-side deadline: a client that keeps its connection open (no client
 // timeout) still gets a 504 when the engine outlives enginePreviewDeadline,
-// and the preview slot is released afterwards, so the next request is not
-// starved by the timed-out one.
+// and EVERY preview slot is released afterwards, so the next request is not
+// starved by the timed-out one. The server deadline is shortened (it is a
+// var, not a const) and the request context is left unbounded, so the 504
+// comes from the SERVER-side WithTimeout, not a request-side timeout that
+// would mask it (WithTimeout takes the earlier of the two deadlines).
 func TestEnginePreviewDeadlineIsServerSideAndReleasesTheSlot(t *testing.T) {
 	t.Parallel()
+	// Shorten the server-side deadline so the test does not wait 30s. The
+	// sleeping binary (sleep 30) outlives it by orders of magnitude.
+	old := enginePreviewDeadline
+	enginePreviewDeadline = 50 * time.Millisecond
+	t.Cleanup(func() { enginePreviewDeadline = old })
+
 	h := previewHandler(t, writeSleepingPreviewBinary(t, t.TempDir()))
 	body := `{"path_format":"{title}","metadata":{"title":"T"}}`
 	req := httptest.NewRequest("POST", "/api/engine/preview", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	// Shorten the deadline for the test: the handler reads the constant, so
-	// bound the REQUEST context instead — the handler's WithTimeout takes the
-	// MINIMUM of its own deadline and the request context, so a 300ms client
-	// context fires first and the handler's ctx.Err() reports
-	// DeadlineExceeded.
-	deadlineCtx, deadlineCancel := context.WithTimeout(req.Context(), 300*time.Millisecond)
-	defer deadlineCancel()
-	req = req.WithContext(deadlineCtx)
+	// Deliberately NO request-side timeout: an unbounded request context
+	// means only the server-side deadline can produce the 504.
 	w := httptest.NewRecorder()
 	h.EnginePreview(w, req)
 	if w.Code != http.StatusGatewayTimeout {
 		t.Fatalf("stalled preview = %d, want 504 — %s", w.Code, w.Body.String())
 	}
-	// The slot must be released: a fresh request must be able to take one.
-	select {
-	case h.previewSlots <- struct{}{}:
-		<-h.previewSlots
-	default:
-		t.Fatal("slot still occupied after the deadline path; the timed-out preview must release it")
+	// Every slot must be released: the channel must be empty, not merely
+	// have room for one more. A single leaked slot would still let one
+	// fresh send succeed while starving the rest, so count the free
+	// slots — all of them must be free.
+	if len(h.previewSlots) != 0 {
+		t.Fatalf("%d preview slot(s) still occupied after the deadline path; the timed-out preview must release it", len(h.previewSlots))
 	}
 }

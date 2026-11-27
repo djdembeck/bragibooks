@@ -148,10 +148,15 @@
 			// "Show all" lifts the render bound (the effect below) — the
 			// initial load keeps the aggregate for counts and defers the
 			// per-row log fetches. The Review-failures action fetches its
-			// single target row separately (fetchJobRow). With no past
-			// jobs there is no "Show all" to defer for, so run the fetch
-			// now (a failure still surfaces its retry control).
-			if (pastJobs.length === 0 && batchAggregate) {
+			// single target row separately (fetchJobRow). Run the fetch
+			// NOW only when there are no past jobs at all (the disclosure
+			// and its "Show all" are absent, so nothing else can page the
+			// tail in) AND the aggregate counts rows the recent window
+			// does not carry (the API caps the row list, so a big batch's
+			// tail rows are unreachable otherwise) — a failure still
+			// surfaces its retry control. With past jobs, "Show all"
+			// reaches the tail, so the fetch stays deferred (F-30).
+			if (pastJobs.length === 0 && batchAggregate && loadedBatchRows < batchAggregate.total) {
 				void loadBatchRows(batchAggregate, batchLoadToken);
 			}
 		});
@@ -697,30 +702,6 @@
 	});
 	const pendingBooks = $derived(books.filter((b) => b.status === 'pending'));
 	const pastJobs = $derived(jobs.filter((job) => !isActiveJob(job)));
-	/** The history rows Recent activity renders: the newest
-	 *  HISTORY_RENDER_LIMIT, plus the banner's run's rows so the
-	 *  Review-failures action always has a row to land on. "Show all"
-	 *  lifts the bound: the batch's rows are paged in by loadBatchRows,
-	 *  so every row the banner counts is reachable from the view. */
-	const renderedHistory = $derived.by(() => {
-		const past = pastJobs;
-		if (showAllHistory || past.length <= HISTORY_RENDER_LIMIT) return past;
-		const ids = new Set(past.slice(0, HISTORY_RENDER_LIMIT).map((job) => job.id));
-		if (batchSummary) for (const id of batchSummary.jobIds) ids.add(id);
-		return past.filter((job) => ids.has(job.id));
-	});
-	const hiddenHistoryCount = $derived(pastJobs.length - renderedHistory.length);
-	// Hydrate the rows the bounded view renders: the render cap for
-	// non-batch history, the batch's rows as they page in (loadBatchRows
-	// re-runs this via the derived), and "Show all" lifting the bound.
-	$effect(() => {
-		hydrateRenderedHistory();
-	});
-	const clock = liveNow(() => activeJobs.length > 0);
-	const failedJobs = $derived(pastJobs.filter((job) => job.status === 'error' || job.status === 'failed').length);
-	const runningJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'running').length);
-	const queuedJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'queued').length);
-
 	// The banner tracks the latest merge run (batch) so a finished queue has
 	// a result to look at, not just Recent activity. It states a result only
 	// — while a batch runs, the live job cards own that state. Dismissal is
@@ -745,6 +726,58 @@
 			}))
 		)
 	);
+	/** The LOADED ROWS THAT BELONG TO THE BATCH: the banner's rollup minus
+	 *  what the list does not carry. A count of the whole list
+	 *  (renderedHistory.length) would include unrelated non-batch jobs, so
+	 *  it is not a count of the batch's rows — the hidden-batch term below
+	 *  must measure the batch's own rows against the aggregate's total, or
+	 *  a failed batch can show no hidden history while its rows were never
+	 *  paged in (and the Review action has no row to land on). */
+	const loadedBatchRows = $derived.by(() => {
+		if (!batchSummary) return 0;
+		if (!batchAggregate) return jobs.filter((job) => batchSummary.jobIds.includes(job.id)).length;
+		const owned = new Set(batchAggregate.job_ids);
+		return jobs.filter((job) => owned.has(job.id)).length;
+	});
+	/** The history rows Recent activity renders: the newest
+	 *  HISTORY_RENDER_LIMIT, plus the banner's run's rows so the
+	 *  Review-failures action always has a row to land on. "Show all"
+	 *  lifts the bound: the batch's rows are paged in by loadBatchRows,
+	 *  so every row the banner counts is reachable from the view. */
+	const renderedHistory = $derived.by(() => {
+		const past = pastJobs;
+		if (showAllHistory || past.length <= HISTORY_RENDER_LIMIT) return past;
+		const ids = new Set(past.slice(0, HISTORY_RENDER_LIMIT).map((job) => job.id));
+		if (batchSummary) for (const id of batchSummary.jobIds) ids.add(id);
+		return past.filter((job) => ids.has(job.id));
+	});
+	// The hidden count is the SUM of the unrendered history rows and the
+	// batch's rows the page has not loaded: the two sets are DISJOINT
+	// (older non-batch rows vs. the batch's unloaded tail — a batch's
+	// loaded rows are always inside the render window, so they never count
+	// in the history term), and Math.max undercounts when both are hidden.
+	// The batch term matters because the API caps the job list: a batch
+	// larger than the window has a tail the page never loaded — without it
+	// hiddenHistoryCount is 0 and "Show all" (which pages in the batch's
+	// remaining rows) has no trigger. It compares the batch's OWN loaded
+	// rows against the aggregate's total (never the whole list, which mixes
+	// in unrelated jobs).
+	const hiddenHistoryCount = $derived.by(() => {
+		const history = pastJobs.length - renderedHistory.length;
+		const batch = batchSummary ? Math.max(0, batchSummary.total - loadedBatchRows) : 0;
+		return history + batch;
+	});
+	// Hydrate the rows the bounded view renders: the render cap for
+	// non-batch history, the batch's rows as they page in (loadBatchRows
+	// re-runs this via the derived), and "Show all" lifting the bound.
+	$effect(() => {
+		hydrateRenderedHistory();
+	});
+	const clock = liveNow(() => activeJobs.length > 0);
+	const failedJobs = $derived(pastJobs.filter((job) => job.status === 'error' || job.status === 'failed').length);
+	const runningJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'running').length);
+	const queuedJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'queued').length);
+
 	let dismissedBatchId = $state<string | null>(null);
 	const batchVisible = $derived(
 		batchSummary !== null && batchSummary.allTerminal && dismissedBatchId !== batchSummary.id

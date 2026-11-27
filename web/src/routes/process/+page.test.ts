@@ -266,19 +266,19 @@ describe('queue page history hydration and render bound', () => {
 
 	it('a large batch pages in bounded and the banner reads the aggregate', async () => {
 		// A 120-job batch: bigger than the 100-row recent window, so the
-		// /jobs response carries the newest 100 batch rows PLUS the
+		// /jobs response carries the newest 100 rows (75 batch rows plus
+		// 25 newer unbatched legacy, queue orders 121-145) PLUS the
 		// aggregate (counts + all 120 row ids), not all 120 full rows.
-		// The page pages the batch in BATCH_PAGE_SIZE-at-a-time and reads
-		// the banner from the aggregate, not the rows it holds. F-30: the
-		// paged fetch is DEFERRED until "Show all" lifts the render bound,
-		// so 25 newer unbatched legacy rows (queue orders 121-145) are
-		// present to make the toggle render, then its click triggers the
-		// fetch.
+		// The batch's 45 tail rows are past the API's row cap, but past
+		// jobs render "Show all", so the tail is deferred until the user
+		// asks for the full history (F-30): the initial load keeps the
+		// aggregate for counts and defers the per-row log fetches.
 		const jobs = [...batchJobList(120, 'req-1'), ...legacyJobList(25, 121)];
 		const batch = batchAggregate('req-1', 120, 120);
 		await mountWith(jobs, batch);
 
-		// No paged fetch on initial load: the batch's rows are deferred.
+		// No paged fetch on initial load: the tail is reachable through
+		// "Show all", so the fetch stays deferred.
 		expect(getMock.mock.calls.some((call) => String(call[0]).includes('batch_id=req-1'))).toBe(false);
 
 		// "Show all" lifts the bound: the deferred paged fetch runs,
@@ -865,14 +865,16 @@ describe('queue page history hydration and render bound', () => {
 	});
 
 	it('renders the batch retry when the batch is all active and no past jobs exist', async () => {
-		// A 32-job batch that is entirely queued: /jobs?limit=100 holds
-		// only active rows, so pastJobs is empty and the Recent activity
-		// disclosure never renders. If the paged batch fetch fails, the
+		// A 120-job batch that is entirely queued: /jobs?limit=100 holds
+		// the newest 100 active rows, so pastJobs is empty and the Recent
+		// activity disclosure never renders, while the batch's 20 tail rows
+		// are past the window — the initial load must page them in (there
+		// is no "Show all" to defer to). If that paged fetch fails, the
 		// missing rows must still be retriable: the error control renders
 		// in the activity region, independent of the disclosure.
-		const jobs = batchJobList(32, 'req-1').map((job) => ({ ...job, status: 'queued' as const }));
+		const jobs = batchJobList(120, 'req-1').map((job) => ({ ...job, status: 'queued' as const }));
 		const batch = {
-			...batchAggregate('req-1', 32, 32),
+			...batchAggregate('req-1', 120, 120),
 			done: 0,
 			in_flight: 0,
 			all_terminal: false,

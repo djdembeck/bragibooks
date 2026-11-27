@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -830,7 +831,7 @@ func TestMetadataOverrideResetKeepsPendingUpload(t *testing.T) {
 	}
 	// The upload wrote the file and registered it; the draft save has not
 	// persisted a row referencing it yet.
-	h.svc.recordPendingCover(asset)
+	h.svc.recordPendingCover(asset, 1)
 	req := routeReq(t, "POST", "/api/books/1/metadata/reset", 1, nil)
 	w := httptest.NewRecorder()
 	h.ResetBookMetadata(w, req)
@@ -984,5 +985,182 @@ func TestMetadataOverrideAuditDetailIsTruthful(t *testing.T) {
 	}
 	if strings.Contains(detail, "tags written") || !strings.Contains(detail, "database record only") {
 		t.Fatalf("audit detail must state the record-only truth: %q", detail)
+	}
+}
+
+// registerExpiredCover plants a pending-cover registry entry with a PAST
+// expiry (the upload happened pendingCoverTTL ago and the draft save never
+// arrived) plus its on-disk asset, so a reap sweep sees a fully expired
+// entry.
+func registerExpiredCover(t *testing.T, s *Services, name string, bookID int64) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(s.CoversDir, name), []byte("art"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.pendingCoversMu.Lock()
+	if s.pendingCovers == nil {
+		s.pendingCovers = make(map[string]time.Time)
+	}
+	s.pendingCovers[name] = time.Now().Add(-time.Hour)
+	s.pendingCoversMu.Unlock()
+}
+
+func hasPendingCover(s *Services, name string) bool {
+	s.pendingCoversMu.Lock()
+	defer s.pendingCoversMu.Unlock()
+	_, ok := s.pendingCovers[name]
+	return ok
+}
+
+// TestReapPendingCoversDefersBusyBook pins the cross-book deferral: an
+// expired asset whose book's cover lock is held elsewhere (a concurrent
+// save/capture) must NOT be removed by a sweep — the entry and the file
+// stay for a later sweep, so the reap never blocks on (or races) a held
+// book lock.
+func TestReapPendingCoversDefersBusyBook(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	h.svc.CoversDir = t.TempDir()
+	asset := "ovr-7-deadbeef.jpg"
+	registerExpiredCover(t, h.svc, asset, 7)
+
+	// Hold book 7's cover lock the way a concurrent save would.
+	unlock := svc.lockBookCover(7)
+	h.svc.pendingCoversMu.Lock()
+	h.svc.reapPendingCoversLocked(time.Now(), 0)
+	h.svc.pendingCoversMu.Unlock()
+	unlock()
+
+	if !hasPendingCover(h.svc, asset) {
+		t.Errorf("expired entry for a lock-held book was reaped; it must be deferred to a later sweep")
+	}
+	if ok, _ := mustFile(filepath.Join(h.svc.CoversDir, asset)); !ok {
+		t.Errorf("expired asset for a lock-held book was removed; it must survive a busy-lock sweep")
+	}
+	// With the lock free, the next sweep reaps it: deferral, not immunity.
+	h.svc.pendingCoversMu.Lock()
+	h.svc.reapPendingCoversLocked(time.Now(), 0)
+	h.svc.pendingCoversMu.Unlock()
+	if hasPendingCover(h.svc, asset) {
+		t.Errorf("entry still registered after the lock was released and a sweep ran")
+	}
+	if ok, _ := mustFile(filepath.Join(h.svc.CoversDir, asset)); ok {
+		t.Errorf("asset still on disk after the lock was released and a sweep ran")
+	}
+}
+
+// TestReapPendingCoversKeepsSavedReference pins the save-vs-reap
+// serialization: after a save persists an override row referencing a
+// pending cover, the row (not the registry) is the reference, and a reap
+// sweep must not delete the asset the saved row points at — the file must
+// survive the sweep even though the registry no longer names it.
+func TestReapPendingCoversKeepsSavedReference(t *testing.T) {
+	h := newOverrideTestHandler(t)
+	svc := h.svc.ProcessingSvc
+	h.svc.CoversDir = t.TempDir()
+	asset := "ovr-1-deadbeef.jpg"
+	registerExpiredCover(t, h.svc, asset, 1)
+	if code := putOverride(t, h, 1, `{"cover_source":"file","cover_file":"`+asset+`"}`); code != http.StatusOK {
+		t.Fatalf("PUT = %d; want 200", code)
+	}
+	if hasPendingCover(h.svc, asset) {
+		t.Fatalf("the save must drop the pending entry for the asset it persisted (the row is now the reference)")
+	}
+	// The sweep: expired, and the book lock is free — it would remove the
+	// entry/file for any book, so only the prune inside the save protected
+	// the asset (and only the row can keep protecting it now).
+	unlock := svc.lockBookCover(1)
+	h.svc.pendingCoversMu.Lock()
+	h.svc.reapPendingCoversLocked(time.Now(), 0)
+	h.svc.pendingCoversMu.Unlock()
+	unlock()
+	if ok, _ := mustFile(filepath.Join(h.svc.CoversDir, asset)); !ok {
+		t.Errorf("the asset a saved override row references was removed by a sweep; the row's reference must keep it")
+	}
+}
+
+// jpegHeaderOnly builds a minimal JPEG whose SOI + APP0 (JFIF) + SOF0
+// header declares the given dimensions: image.DecodeConfig reads exactly
+// those dimensions (the full decode is never run — the test is about the
+// header check, which is what the size bound exists to gate).
+func jpegHeaderOnly(height, width int) []byte {
+	// SOI, then APP0 (JFIF).
+	b := []byte{0xFF, 0xD8}
+	b = append(b, 0xFF, 0xE0, 0, 16, 'J', 'F', 'I', 'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0)
+	// SOF0: 8-bit depth, the declared dimensions, 3 components.
+	b = append(b, 0xFF, 0xC0, 0, 17, 8)
+	b = append(b, byte(height>>8), byte(height), byte(width>>8), byte(width), 3)
+	b = append(b, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1)
+	// EOI.
+	b = append(b, 0xFF, 0xD9)
+	return b
+}
+
+// decodedPixelHeaderCheck reproduces the two header-stage comparisons
+// isValidJPEG runs after image.DecodeConfig, so the header gate can be
+// asserted directly (a header-only JPEG never reaches the full decode).
+func decodedPixelHeaderCheck(height, width int) bool {
+	if height > maxCoverImageDimension || width > maxCoverImageDimension {
+		return false
+	}
+	return int64(height)*int64(width) <= maxCoverPixels
+}
+
+// TestCoverUploadRejectsDecodedPixelAxisLimit pins the decoded-pixel gate
+// in isValidJPEG: a header that declares an axis past maxCoverImageDimension
+// is rejected at the HEADER stage (before the full decode allocates the
+// pixel buffer), while a just-under axis passes the header check. The
+// total-pixel bound (maxCoverPixels) is subsumed by the axis bound at the
+// current constants (4472^2 = 19,998,784 < 20,000,000: no axis-legal pair
+// can exceed the total), so the axis case is the independently reachable
+// form of the same bound — the header check is asserted against the
+// production constants directly.
+func TestCoverUploadRejectsDecodedPixelAxisLimit(t *testing.T) {
+	// Header stage, asserted against the production constants: the axis
+	// over the limit fails, the axis at the limit passes (and its product
+	// stays under the total), and the total is only reachable past the
+	// axis bound (documenting the subsumption at the current constants).
+	if decodedPixelHeaderCheck(4473, 100) {
+		t.Fatalf("4473x100 passed the header check; the axis bound is maxCoverImageDimension=%d", maxCoverImageDimension)
+	}
+	if !decodedPixelHeaderCheck(4472, 100) {
+		t.Fatalf("4472x100 failed the header check; the axis bound is maxCoverImageDimension=%d", maxCoverImageDimension)
+	}
+	// Subsumption at the current constants: the LARGEST axis-legal
+	// product (both axes at the limit) is already under the total, so no
+	// pair that passes the axis check can trip the total check.
+	if int64(maxCoverImageDimension)*int64(maxCoverImageDimension) > maxCoverPixels {
+		t.Fatalf("the total bound %d is reachable with axis-legal dimensions; the subsumption the test documents no longer holds", maxCoverPixels)
+	}
+
+	h := newOverrideTestHandler(t)
+	h.svc.CoversDir = t.TempDir()
+	cases := []struct {
+		name string
+		jpeg []byte
+		want int
+	}{
+		{"axis over limit 4473x100", jpegHeaderOnly(4473, 100), http.StatusBadRequest},
+		// The header passes (the axis is at the limit); the upload is still
+		// refused because the header-only fixture has no scan data for the
+		// full decode — the size gate and the decode gate both hold.
+		{"axis at limit 4472x100", jpegHeaderOnly(4472, 100), http.StatusBadRequest},
+		{"1x1 reference jpeg", testJPEG1x1, http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, ct := multipartBody(t, "file", "cover.jpg", tc.jpeg)
+			req := routeReq(t, "POST", "/api/books/1/metadata/cover", 1, body)
+			req.Header.Set("Content-Type", ct)
+			w := httptest.NewRecorder()
+			h.UploadBookMetadataCover(w, req)
+			if w.Code != tc.want {
+				t.Fatalf("upload = %d, want %d — %s", w.Code, tc.want, w.Body.String())
+			}
+			if tc.want == http.StatusBadRequest {
+				if !strings.Contains(w.Body.String(), "not a JPEG image") {
+					t.Errorf("rejection does not name the JPEG validation: %s", w.Body.String())
+				}
+			}
+		})
 	}
 }

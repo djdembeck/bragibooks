@@ -42,12 +42,14 @@
 	// A signature of the token examples the preview resolves with: an engine
 	// swap refreshes the token registry, and an unchanged format must still
 	// re-run this effect (the preview would otherwise show the old engine's
-	// example until the format is edited). Reading it inside the effect makes
-	// it a tracked dependency.
-	const tokenSig = $engineTokens.map((t) => `${t.name}:${t.value}`).join('|');
+	// example until the format is edited). It is computed INSIDE the effect
+	// body — reading $engineTokens there registers the store as a tracked
+	// dependency (a plain const at component init would be read once and the
+	// effect would never re-run on a registry refresh).
 	$effect(() => {
 		const format = serializeParts(parts);
-		void tokenSig; // tracked dependency: re-run on capability change (F-41)
+		// Tracked dependency: re-run on capability change (F-41).
+		void $engineTokens.map((t) => `${t.name}:${t.value}`).join('|');
 		if (!format) {
 			// Invalidate any in-flight preview: the cleanup only clears the
 			// debounce timer, so a POST that already started would still pass

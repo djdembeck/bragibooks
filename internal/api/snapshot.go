@@ -282,13 +282,20 @@ func (h *Handler) captureSnapshotUnlocked(ctx context.Context, bookID int64, cha
 		if sameBook && existing.ADBReleaseID != "" && existing.ADBReleaseID == snap.ADBReleaseID {
 			snap.Chapters = existing.Chapters
 		}
-		// The subtitle is retained for the SAME BOOK (not gated on the
-		// release id): a matched book WITHOUT a selected release captures
-		// its subtitle from the book itself, and a status-only update
-		// (changed=false, no enrichment) must not erase it — the
-		// enrichment precedence below still lets the selected release's
-		// OWN subtitle win when a release is set and carries one.
-		if sameBook {
+		// The subtitle is RELEASE-level content: retain it only when it
+		// belongs to the SAME release this capture names (both release
+		// ids empty = a book-only selection, which is "the same"). A
+		// re-match to a DIFFERENT release does NOT pre-fill from the old
+		// row: the enrichment precedence below resolves the subtitle for
+		// the selection this capture names — the selected release's own
+		// subtitle, then the book-level fallback — and a pre-filled value
+		// from the previous release would shadow the book fallback and
+		// survive a new release that carries none of its own. For an
+		// UNCHANGED release the retained value is kept across a degraded
+		// capture: a release-detail failure, or a successful release that
+		// carries no subtitle of its own, must not replace the retained
+		// release-specific subtitle with the book fallback.
+		if sameBook && existing.ADBReleaseID == snap.ADBReleaseID {
 			snap.Subtitle = existing.Subtitle
 		}
 	}
@@ -1218,8 +1225,10 @@ func isNonPublicCoverAddress(ip net.IP) bool {
 			return isNonPublicCoverAddress(net.IP{ip6[12], ip6[13], ip6[14], ip6[15]})
 		}
 		// fec0::/10 site-local (RFC 3879): a local prefix, not an
-		// assigned public destination.
-		if ip6[0]&0xfe == 0xfc {
+		// assigned public destination. The first hextet is 0xfec0, so
+		// byte 0 is 0xfe and byte 1's top two bits are 11 (the /10).
+		// fc00::/7 unique-local is already rejected by IsPrivate above.
+		if ip6[0] == 0xfe && ip6[1]&0xc0 == 0xc0 {
 			return true
 		}
 		if ip6[0] == 0 && ip6[1] == 0 && ip6[2] == 0 && ip6[3] == 0 &&
