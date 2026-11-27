@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -116,21 +117,35 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 	// clean collapses link/.. to root and denotes root/subdir; reading
 	// the lexical form would enumerate the wrong directory and let the
 	// gate attach the root's index status to unrelated entries. On
-	// EvalSymlinks error the original path stands (degraded behavior:
-	// read the lexical path, gate degrades as it does today).
+	// EvalSymlinks error the original path stands UNTOUCHED (degraded
+	// behavior: read the lexical path, gate degrades as it does today).
+	// On successful resolution the value is absolutized LEXICALLY
+	// (filepath.Abs on the resolved string — pure string handling, no
+	// re-resolution, no second OS traversal, and the resolved value
+	// carries no `..` so nothing is re-collapsed) so the gate's string
+	// comparison matches the absolute stored root: EvalSymlinks can
+	// return a relative result for a relative request, and a relative
+	// string never containment-matches an absolute root. The Abs step
+	// runs only on the resolved form: on resolution failure it would
+	// lexically clean the original request path (collapsing `..`
+	// through a missing component) and change the read target.
 	var resolved string
 	if fallbackIndex {
 		resolved = path
 		if r, err := filepath.EvalSymlinks(path); err == nil {
 			resolved = r
+			if a, err := filepath.Abs(resolved); err == nil {
+				resolved = a
+			}
 		}
 	}
 	// The SAME resolved target goes to the read: on the fallback path
 	// enumeration and the status gate below bind to one directory, so a
 	// symlink retargeted mid-request cannot pair one target's entries
-	// with the other's status. When resolved equals path (no symlinks)
-	// this is the original read; all other requests keep the original
-	// path exactly as before.
+	// with the other's status. When resolved equals path this is the
+	// original read; when it differs only by lexical absolutization it
+	// is the same directory; all other requests keep the original path
+	// exactly as before.
 	readPath := path
 	if fallbackIndex {
 		readPath = resolved
@@ -138,6 +153,19 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 
 	entries, err := readDirectory(readPath)
 	if err != nil {
+		// readDirectory returns os.Stat/os.ReadDir *os.PathError
+		// verbatim; on the fallback path that pathname is the RESOLVED
+		// target. Rewrite it to the lexical request path so the error,
+		// like the success entries, never discloses the resolved form.
+		// Non-fallback requests and non-PathError values pass through
+		// unchanged.
+		if fallbackIndex {
+			var pe *os.PathError
+			if errors.As(err, &pe) {
+				pe = &os.PathError{Op: pe.Op, Path: path, Err: pe.Err}
+				err = pe
+			}
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -181,7 +209,12 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 	// mid-request config change cannot bind the NEW root's status to a
 	// listing of the old root's tree. Path resolution runs ONLY here —
 	// plain (non-?index) requests and index requests that did not fall
-	// back pay zero path-resolution I/O.
+	// back pay zero path-resolution I/O. Residual TOCTOU, accepted by
+	// design: the gate binds to the resolved string computed before
+	// enumeration; an ancestor component swapped for a symlink before
+	// the read's re-open by name stays a window (out-of-root browsing
+	// is permitted) — a descriptor-level pin would need an fd-based
+	// reader.
 	if fallbackIndex {
 		state := h.svc.IndexSvc.Status().State
 		if state.Root != "" && indexedRootContains(state.Root, resolved) {
