@@ -119,23 +119,32 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 	// gate attach the root's index status to unrelated entries. On
 	// EvalSymlinks error the original path stands UNTOUCHED (degraded
 	// behavior: read the lexical path, gate degrades as it does today).
-	// On successful resolution the value is absolutized LEXICALLY
-	// (filepath.Abs on the resolved string — pure string handling, no
-	// re-resolution, no second OS traversal, and the resolved value
-	// carries no `..` so nothing is re-collapsed) so the gate's string
-	// comparison matches the absolute stored root: EvalSymlinks can
-	// return a relative result for a relative request, and a relative
-	// string never containment-matches an absolute root. The Abs step
-	// runs only on the resolved form: on resolution failure it would
-	// lexically clean the original request path (collapsing `..`
-	// through a missing component) and change the read target.
+	// On successful resolution the value is the fully-resolved absolute
+	// form shared by the read and the containment gate: for a relative
+	// request it is EvalSymlinks on the RAW concatenation of the
+	// process working directory (os.Getwd) and the request path in ONE
+	// pass — no Join, no Clean — so `..` components survive to be
+	// traversed by the OS in order against the real working directory
+	// (a `..` after a resolved component pops the RESOLVED component),
+	// not lexically collapsed against the PWD alias; a lexical Abs of
+	// the EvalSymlinks result would collapse `..` against the
+	// un-resolved $PWD string and can denote a different directory. An
+	// absolute request resolves with a single EvalSymlinks (its result
+	// is already absolute); on Windows a root-relative request (leading
+	// separator, no volume — not absolute by filepath's definition)
+	// takes that same single pass, since the OS resolves it against the
+	// current drive's root. If os.Getwd fails (relative branch) or the
+	// EvalSymlinks pass fails, the original lexical path is used as-is.
 	var resolved string
 	if fallbackIndex {
 		resolved = path
-		if r, err := filepath.EvalSymlinks(path); err == nil {
-			resolved = r
-			if a, err := filepath.Abs(resolved); err == nil {
-				resolved = a
+		if filepath.IsAbs(path) || strings.HasPrefix(path, string(os.PathSeparator)) {
+			if r, err := filepath.EvalSymlinks(path); err == nil {
+				resolved = r
+			}
+		} else if wd, err := os.Getwd(); err == nil {
+			if r, err := filepath.EvalSymlinks(wd + string(os.PathSeparator) + path); err == nil {
+				resolved = r
 			}
 		}
 	}
@@ -143,9 +152,9 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 	// enumeration and the status gate below bind to one directory, so a
 	// symlink retargeted mid-request cannot pair one target's entries
 	// with the other's status. When resolved equals path this is the
-	// original read; when it differs only by lexical absolutization it
-	// is the same directory; all other requests keep the original path
-	// exactly as before.
+	// original read; when it differs only by resolution form it
+	// denotes the same directory; all other requests keep the original
+	// path exactly as before.
 	readPath := path
 	if fallbackIndex {
 		readPath = resolved
