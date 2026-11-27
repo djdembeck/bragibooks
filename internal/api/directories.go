@@ -30,16 +30,24 @@ type DirectoryTreeEntry struct {
 }
 
 // ListDirectoriesResponse is the JSON shape returned by GET /api/directories.
+// Index is set ONLY in the index-mode filesystem fallback (a guarded or
+// truncated root): the entries are filesystem-sourced, the state is the
+// CURRENT root's — so a fresh page visit sees the just-finished scan's
+// freshness instead of treating it as stale.
 type ListDirectoriesResponse struct {
 	Path    string           `json:"path"`
 	Entries []DirectoryEntry `json:"entries"`
+	Index   *IndexState      `json:"index,omitempty"` // same-root index state in the index-mode fallback
 }
 
 // ListDirectories handles GET /api/directories?path=/some/dir.
 // With ?index=1 (and indexing enabled and the path at/below the input
 // root) the listing is served from the source index with per-entry
-// evidence; any other case keeps the existing filesystem read and the
-// existing response shape.
+// evidence; a fallback (stale root, guarded/truncated table, index read
+// error) keeps the filesystem read and, for the SAME root, carries the
+// index status in `index` (state without rows) so the client can keep
+// the freshness/warning the indexed shape shows; any other case keeps
+// the existing filesystem read and the existing response shape.
 func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
@@ -49,16 +57,30 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 
 	// Index mode: the flag is present, the feature is on, and the
 	// requested path equals the canonical root or is below it.
+	// fallbackIndex marks a request that fell back to the filesystem for
+	// a path at/below the current root: the response below then carries
+	// the same-root index status (state, not rows). The root is captured
+	// ONCE here — the same value that decides index-mode eligibility —
+	// and reused by the fallback metadata gate below: a config change
+	// mid-request must not let a filesystem listing served for the old
+	// root carry the NEW root's status. servedRoot is the captured root's
+	// symlink-resolved form, the form scan() stores as IndexState.Root,
+	// so the gate compares like with like for a symlink-configured
+	// InputDir too.
+	var fallbackIndex bool
+	root := canonicalRoot(h.svc.Config.Config().Directories.InputDir)
+	servedRoot := resolvedRoot(root)
 	if r.URL.Query().Has("index") && h.svc.IndexSvc != nil && h.svc.IndexSvc.Enabled() {
 		cleanPath := canonicalRoot(path)
-		root := canonicalRoot(h.svc.Config.Config().Directories.InputDir)
 		if cleanPath == root || strings.HasPrefix(cleanPath, indexChildPrefix(root)) {
 			entries, ok, err := h.listIndexedChildren(cleanPath)
-			if err != nil {
+			switch {
+			case err != nil:
 				// An index read failure falls back to the filesystem read
 				// below — the index is a cache, the tree is the truth.
 				log.Printf("index: list %s: %v (falling back to filesystem)", cleanPath, err)
-			} else if ok {
+				fallbackIndex = true
+			case ok:
 				state := h.svc.IndexSvc.Status().State
 				resp := IndexedDirectoriesResponse{
 					Path:    cleanPath,
@@ -67,6 +89,10 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 				}
 				writeJSON(w, http.StatusOK, resp)
 				return
+			default:
+				// Guarded/truncated/stale table: filesystem entries, with
+				// the same-root index status below.
+				fallbackIndex = true
 			}
 		}
 	}
@@ -77,10 +103,26 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, ListDirectoriesResponse{
+	resp := ListDirectoriesResponse{
 		Path:    path,
 		Entries: entries,
-	})
+	}
+	// Index-mode fallback: serve the SAME-root index status alongside the
+	// filesystem entries (state, not rows — the entries stay
+	// filesystem-sourced). A fresh page visit then sees the just-finished
+	// scan's freshness (no spurious rescan queued for a cap-truncated
+	// root) and the incomplete-index warning; a state from ANOTHER root
+	// (a re-pointed input) is not served for this path. The gate compares
+	// against the root captured at the top of the handler — the root this
+	// request was served from — not a re-resolved CurrentRoot: if the
+	// config changed mid-request, the re-resolution would bind the NEW
+	// root's status to a listing of the old root's tree.
+	if fallbackIndex {
+		if state := h.svc.IndexSvc.Status().State; state.Root != "" && state.Root == servedRoot {
+			resp.Index = &state
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // StreamDirectories handles GET /api/directories/stream?path=/some/dir.

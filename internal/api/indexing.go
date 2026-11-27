@@ -1511,6 +1511,41 @@ func (s *IndexService) loadState() error {
 		// it may skip the persist.
 		s.durableWriteFailedRoots = append([]string(nil), roots...)
 	}
+	// Upgrade + crash-recovery seeding: builds before the truncated-guard
+	// rule cleared the mark on a cap-only truncation, so a DB upgraded
+	// from such a build persists a `truncated` terminal with an EMPTY
+	// guard column for the same root — and the same empty-guard shape
+	// survives a crash: a pre-fix build that queued a rescan after a
+	// cap-truncated scan persisted `queued` (or `running`) before the
+	// write phase armed the guard, and a crash before the worker got
+	// there leaves the source index holding the incomplete EARLIER scan.
+	// The crash-recovery flip below turns `queued`/`running` into
+	// `interrupted`, which a `truncated`-only seed never matches, so the
+	// seed covers every persisted non-clean shape for a root whose index
+	// may be incomplete: a `truncated` terminal, or a `queued`/`running`
+	// state this boot will record as `interrupted`. A persisted `done`,
+	// `never`, `interrupted`, or `error` needs no seed: `done` is clean,
+	// and a persisted `interrupted`/`error` either already carries its
+	// guard (the write phase armed it durably) or never reached the write
+	// phase (table intact). Without the seed the stale root would pass
+	// indexChildrenRows's root+guard checks and serve incomplete rows as
+	// authoritative until a scan reaches the write phase. The column is
+	// the durable set at boot (as above), so a mark seeded here is durable
+	// too; a later clean "done" on the root releases it (setTerminal's
+	// clear-on-done, which runs before the terminal's persistLocked).
+	if (st.Status == "truncated" || st.Status == "queued" || st.Status == "running") && st.Root != "" {
+		marked := false
+		for _, r := range s.writeFailedRoots {
+			if r == st.Root {
+				marked = true
+				break
+			}
+		}
+		if !marked {
+			s.writeFailedRoots = append(s.writeFailedRoots, st.Root)
+			s.durableWriteFailedRoots = append(s.durableWriteFailedRoots, st.Root)
+		}
+	}
 	st.LastRunAt = lastRunAt.String
 	st.Generation = gen
 	// Crash recovery: a process killed without a graceful shutdown can

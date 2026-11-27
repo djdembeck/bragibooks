@@ -1186,3 +1186,257 @@ func TestEnginePreviewDeadlineIsServerSideAndReleasesTheSlot(t *testing.T) {
 		t.Fatalf("%d preview slot(s) still occupied after the deadline path; the timed-out preview must release it", len(h.previewSlots))
 	}
 }
+
+// ── Round-2: the truncated-root guard survives an upgrade, and the
+// index-mode fallback serves the same-root index status ──
+
+// TestLoadStateSeedsGuardFromPersistedTruncatedRoot pins the upgrade gap:
+// builds before the truncated-guard rule persisted a cap-only scan as
+// `truncated` with an EMPTY write_failed_root column. A fresh service on
+// such a DB must seed the guard from the persisted terminal so the
+// incomplete rows are NOT served as authoritative — and a later clean
+// "done" on the root must release the seeded mark.
+func TestLoadStateSeedsGuardFromPersistedTruncatedRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := dbpkg.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := dbpkg.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	// An older build's persisted terminal: truncated, root set, guard
+	// column EMPTY.
+	if _, err := db.Exec(`INSERT INTO index_state (id, root, entries, last_run_at, status, detail, generation, write_failed_root)
+		VALUES (1, ?, 1, datetime('now'), 'truncated', 'entry cap 20000 exceeded', 7, '')`, root); err != nil {
+		t.Fatal(err)
+	}
+	cm := config.NewConfigManager()
+	cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	cm.Config().Directories.InputDir = root
+	cm.Config().Directories.IndexingEnabled = true
+	cm.Store(cm.Config())
+
+	svc := NewIndexService(db, cm, "")
+	if !svc.writeFailedRootContains(root) {
+		t.Fatalf("fresh service did not seed the guard from the persisted truncated root (upgrade gap: incomplete rows would be served as authoritative)")
+	}
+	// The seeded mark must be DURABLE (the column is the durable set at
+	// boot): a same-root arm on top of it may skip its persist.
+	durable := false
+	svc.mu.Lock()
+	for _, r := range svc.durableWriteFailedRoots {
+		if r == root {
+			durable = true
+			break
+		}
+	}
+	svc.mu.Unlock()
+	if !durable {
+		t.Fatalf("seeded guard is not in durableWriteFailedRoots (a same-root arm would persist for nothing, and the boot-durability contract is broken)")
+	}
+	h := &Handler{svc: &Services{DB: db, Config: cm, IndexSvc: svc}}
+	if entries, ok, err := h.listIndexedChildren(root); err != nil || ok || len(entries) != 0 {
+		t.Fatalf("seeded-guard listing = ok=%v n=%d err=%v, want the filesystem fallback (no index rows served for the truncated root)", ok, len(entries), err)
+	}
+
+	// A clean "done" on the root releases the SEEDED mark (setTerminal's
+	// clear-on-done must work with a mark that boot seeding armed, not
+	// only one a scan armed).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go svc.Run(ctx)
+	st := runToTerminal(t, svc)
+	if st.Status != "done" {
+		t.Fatalf("clean scan = %s (detail %q), want done", st.Status, st.Detail)
+	}
+	if svc.writeFailedRootContains(root) {
+		t.Fatalf("clean done on the root did not release the seeded guard mark")
+	}
+	if _, ok, err := h.listIndexedChildren(root); err != nil || !ok {
+		t.Fatalf("post-done listing = ok=%v err=%v, want the index served (the mark is released)", ok, err)
+	}
+}
+
+// TestLoadStateSeedsGuardFromCrashRecoveredQueuedRoot pins the
+// crash-recovery gap a `truncated`-only seed misses: a pre-fix build that
+// queued a rescan after a cap-truncated scan persisted `queued` for the
+// root with an EMPTY guard column (the rescan's write phase never armed
+// it) and then crashed before the worker started. Boot flips `queued` to
+// `interrupted` — a `truncated`-only seed never matches — so a fresh
+// service on such a DB must seed the guard from the persisted non-clean
+// shape too (the source index still holds the incomplete EARLIER scan) —
+// and a later clean "done" must release the seeded mark.
+func TestLoadStateSeedsGuardFromCrashRecoveredQueuedRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := dbpkg.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := dbpkg.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	// A pre-fix build's persisted state: a rescan queued AFTER a
+	// cap-truncated scan, guard column EMPTY (the rescan's write phase
+	// never armed it), then a crash before the worker ran.
+	if _, err := db.Exec(`INSERT INTO index_state (id, root, entries, last_run_at, status, detail, generation, write_failed_root)
+		VALUES (1, ?, 1, datetime('now'), 'queued', '', 8, '')`, root); err != nil {
+		t.Fatal(err)
+	}
+	cm := config.NewConfigManager()
+	cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	cm.Config().Directories.InputDir = root
+	cm.Config().Directories.IndexingEnabled = true
+	cm.Store(cm.Config())
+
+	svc := NewIndexService(db, cm, "")
+	// The crash-recovery flip must have run (the seed fires on the
+	// PRE-flip persisted status).
+	if st := svc.Status().State; st.Status != "interrupted" {
+		t.Fatalf("persisted queued state = %s, want interrupted (crash recovery)", st.Status)
+	}
+	if !svc.writeFailedRootContains(root) {
+		t.Fatalf("fresh service did not seed the guard from the crash-recovered queued root (incomplete rows would be served as authoritative)")
+	}
+	// The seeded mark must be DURABLE, like the truncated upgrade seed.
+	durable := false
+	svc.mu.Lock()
+	for _, r := range svc.durableWriteFailedRoots {
+		if r == root {
+			durable = true
+			break
+		}
+	}
+	svc.mu.Unlock()
+	if !durable {
+		t.Fatalf("seeded guard is not in durableWriteFailedRoots (the boot-durability contract is broken)")
+	}
+	h := &Handler{svc: &Services{DB: db, Config: cm, IndexSvc: svc}}
+	if entries, ok, err := h.listIndexedChildren(root); err != nil || ok || len(entries) != 0 {
+		t.Fatalf("seeded-guard listing = ok=%v n=%d err=%v, want the filesystem fallback (no index rows served for the incomplete root)", ok, len(entries), err)
+	}
+
+	// A clean "done" on the root releases the SEEDED mark.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go svc.Run(ctx)
+	st := runToTerminal(t, svc)
+	if st.Status != "done" {
+		t.Fatalf("clean scan = %s (detail %q), want done", st.Status, st.Detail)
+	}
+	if svc.writeFailedRootContains(root) {
+		t.Fatalf("clean done on the root did not release the seeded guard mark")
+	}
+	if _, ok, err := h.listIndexedChildren(root); err != nil || !ok {
+		t.Fatalf("post-done listing = ok=%v err=%v, want the index served (the mark is released)", ok, err)
+	}
+}
+
+// TestListDirectoriesFallbackServesSameRootIndexStatus pins the
+// round-2 contract: when index mode falls back to the filesystem for a
+// path at/below the CURRENT root (here: a boot-seeded truncated guard),
+// the response carries the same-root index STATUS alongside the
+// filesystem entries — a fresh page visit then sees the just-finished
+// scan's freshness (no spurious rescan queued) and the incomplete-index
+// warning — and a re-pointed root does NOT get the other root's status.
+func TestListDirectoriesFallbackServesSameRootIndexStatus(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a", "x.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	db, err := dbpkg.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := dbpkg.RunMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	// Truncated terminal with an EMPTY guard column (the upgrade shape)
+	// plus a stored row, so the fallback is distinguishable from an
+	// empty-index answer.
+	if _, err := db.Exec(`INSERT INTO source_index (path, name, type, size, modtime, payload, indexed_at, seen_at)
+		VALUES (?, 'a', 'dir', 0, '2026-01-01T00:00:00Z', '', datetime('now'), datetime('now'))`,
+		filepath.Join(root, "a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO index_state (id, root, entries, last_run_at, status, detail, generation, write_failed_root)
+		VALUES (1, ?, 1, datetime('now'), 'truncated', 'entry cap 20000 exceeded', 3, '')`, root); err != nil {
+		t.Fatal(err)
+	}
+	cm := config.NewConfigManager()
+	cm.SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	cm.Config().Directories.InputDir = root
+	cm.Config().Directories.IndexingEnabled = true
+	cm.Store(cm.Config())
+	svc := NewIndexService(db, cm, "")
+	h := newIndexHandler(t, svc, cm, db)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/directories?path="+url.QueryEscape(root)+"&index=1", nil)
+	rec := httptest.NewRecorder()
+	h.ListDirectories(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET fallback: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// The SAME-root index status is present, in the fallback shape.
+	idx, ok := body["index"].(map[string]any)
+	if !ok {
+		t.Fatalf("fallback response has no index state: %s", rec.Body.String())
+	}
+	if idx["status"] != "truncated" {
+		t.Fatalf("index.status = %v, want truncated", idx["status"])
+	}
+	// The entries are FILESYSTEM-sourced (the guard keeps the incomplete
+	// rows out of the listing).
+	entries, _ := body["entries"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1 (a, from the filesystem)", len(entries))
+	}
+	first, _ := entries[0].(map[string]any)
+	if first["name"] != "a" || first["type"] != "dir" {
+		t.Fatalf("first entry = %v, want dir a", first)
+	}
+	if _, hasEvidence := first["evidence"]; hasEvidence {
+		t.Fatalf("fallback entry carries index evidence (filesystem entries must stay plain): %v", first)
+	}
+
+	// Re-pointed root: the OTHER root's status is not served for it.
+	newRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(newRoot, "fresh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := cm.Config()
+	cfg.Directories.InputDir = newRoot
+	cm.Store(cfg)
+	req = httptest.NewRequest(http.MethodGet, "/api/directories?path="+url.QueryEscape(newRoot)+"&index=1", nil)
+	rec = httptest.NewRecorder()
+	h.ListDirectories(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET re-pointed fallback: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body2 map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body2); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := body2["index"]; present {
+		t.Fatalf("re-pointed-root response carries the OTHER root's index state: %s", rec.Body.String())
+	}
+}

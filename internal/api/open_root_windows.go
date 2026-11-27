@@ -17,8 +17,49 @@ import (
 // blocking the worker (a blocking read-open on a pipe waits for a writer,
 // but FindFirstFile on a pipe does not). The plain open is therefore the
 // Windows-equivalent of the Unix directory-only open.
+//
+// The open is NAME-based, so a junction a writer swaps into an ANCESTOR
+// of dir between resolveScanRoot and this open would redirect the handle
+// outside the root, and readDirWith would then enumerate that outside
+// directory (a child-only check never fires for an outside directory that
+// contains only files — the scan could even finish "done"). verifyIndexDirRoot
+// binds the handle to its resolved final path BEFORE the first
+// enumeration and refuses it when it no longer stays inside dir (the
+// scan's original resolved root — the walk opens only the root this way;
+// children go through openIndexChildDir).
 func openIndexDir(dir string) (*os.File, error) {
-	return os.Open(dir)
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyIndexDirRoot(f, dir); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// verifyIndexDirRoot binds an opened walk directory to its resolved
+// target: rawPathByHandle (the same technique openInsideRoot and
+// openIndexChildDir use) reports the file the handle bound to, and
+// withinResolvedRoot verifies it stays inside dir — the walk's root must
+// be PROVEN to be the directory dir names, not assumed from the pathname.
+// Fail-closed: a resolution failure is a refusal, not a fallback.
+//
+// Windows has no per-component anchor (no openat): the resolved-root-
+// STRING binding is the strongest check the platform allows — the same
+// residual note as openIndexChildDir's check 2 (a root re-open by
+// pathname would follow the same junction a writer swapped in, so the
+// string binding is the most the platform can prove).
+func verifyIndexDirRoot(f *os.File, dir string) error {
+	finalRaw, ok := rawPathByHandle(f)
+	if !ok {
+		return fmt.Errorf("resolve opened index directory for containment: %s", dir)
+	}
+	if !withinResolvedRoot(dir, finalRaw) {
+		return fmt.Errorf("opened index directory escapes input root: %s", finalRaw)
+	}
+	return nil
 }
 
 // openIndexChildDir opens the child directory name against the ALREADY-

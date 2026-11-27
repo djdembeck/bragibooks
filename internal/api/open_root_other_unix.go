@@ -232,13 +232,27 @@ func openRootAnchoredAttempt(root, openPath string, allowDir bool) (*os.File, er
 	// An ELOOP here is an ANCESTOR the walk saw as a plain directory:
 	// finalLoop stays false so the caller fails closed instead of
 	// re-resolving the whole path to a swapped ancestor's target.
+	// The access mode is openRootSearchMode: an intermediate directory
+	// only needs to support SEARCH (x) — opening it and Fstatting the
+	// descriptor need no read (r) permission — and requiring r on every
+	// scan-root ancestor fails a service that legitimately has x-without-r
+	// on one (EACCES on every scan, root permanently truncated). On
+	// darwin/freebsd/solaris/illumos/aix that is unix.O_EXEC
+	// (execute-only, so traversal needs only x); on the remaining
+	// non-Linux Unix targets (openbsd, netbsd, dragonfly, zos, and the
+	// wasm ports) x/sys/unix defines no distinct execute-only flag, so
+	// the mode is the open() default, O_RDONLY (0) — those platforms
+	// RESIDUALLY need r as well as x on every intermediate ancestor, and
+	// no flag combination does better. The final component below keeps
+	// O_RDONLY: there the file must actually be readable (or the
+	// directory enumerated).
 	for _, comp := range comps[:len(comps)-1] {
-		fd, err := unix.Openat(dirFD, comp, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		fd, err := unix.Openat(dirFD, comp, openRootSearchMode|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
 			return nil, err, false
 		}
-		st, serr := unix.Fstat(fd)
-		if serr != nil {
+		var st unix.Stat_t
+		if serr := unix.Fstat(fd, &st); serr != nil {
 			unix.Close(fd)
 			return nil, serr, false
 		}
