@@ -64,10 +64,11 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 	// and reused by the fallback metadata gate below: a config change
 	// mid-request must not let a filesystem listing served for the old
 	// root carry the NEW root's status. The gate itself compares against
-	// the SYMLINK-RESOLVED directory the fallback read below (resolved
-	// AFTER the read) — the form scan() stores as IndexState.Root — so
-	// the status binds to the tree actually served, not the configured
-	// root captured before the read.
+	// the SYMLINK-RESOLVED directory the fallback read below opens —
+	// resolved ONCE before the enumeration, and shared with the read —
+	// the form scan() stores as IndexState.Root — so the status binds to
+	// the tree actually served, not the configured root captured before
+	// the read.
 	var fallbackIndex bool
 	root := canonicalRoot(h.svc.Config.Config().Directories.InputDir)
 	if r.URL.Query().Has("index") && h.svc.IndexSvc != nil && h.svc.IndexSvc.Enabled() {
@@ -97,10 +98,57 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	entries, err := readDirectory(path)
+	// The fallback gate below must compare against the target the read
+	// opens, not a fresh post-read lookup: a symlink retargeted between
+	// the enumeration and a late EvalSymlinks would pair the old
+	// target's entries with the new target's status. Resolve ONCE here,
+	// before the read, and let the gate reuse the same value. Only a
+	// request that can reach the gate (fell back for an eligible path)
+	// pays this I/O — plain requests and non-fallback index requests
+	// resolve nothing.
+	//
+	// The resolution is the OS traversal form, not a lexical clean:
+	// EvalSymlinks DIRECTLY on the request path, with no lexical
+	// pre-cleaning (resolvedRoot/canonicalRoot Clean before they
+	// resolve). A request like root/link/../subdir where link symlinks
+	// to /outside/child denotes /outside/subdir at the OS — the
+	// symlink is followed before the .. is taken — while a lexical
+	// clean collapses link/.. to root and denotes root/subdir; reading
+	// the lexical form would enumerate the wrong directory and let the
+	// gate attach the root's index status to unrelated entries. On
+	// EvalSymlinks error the original path stands (degraded behavior:
+	// read the lexical path, gate degrades as it does today).
+	var resolved string
+	if fallbackIndex {
+		resolved = path
+		if r, err := filepath.EvalSymlinks(path); err == nil {
+			resolved = r
+		}
+	}
+	// The SAME resolved target goes to the read: on the fallback path
+	// enumeration and the status gate below bind to one directory, so a
+	// symlink retargeted mid-request cannot pair one target's entries
+	// with the other's status. When resolved equals path (no symlinks)
+	// this is the original read; all other requests keep the original
+	// path exactly as before.
+	readPath := path
+	if fallbackIndex {
+		readPath = resolved
+	}
+
+	entries, err := readDirectory(readPath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// The read above may have enumerated the RESOLVED target; keep the
+	// client-facing entry paths LEXICAL (built from the requested path),
+	// so the resolved form never leaks into the response. A no-op
+	// whenever the read used the original path.
+	if fallbackIndex && resolved != path {
+		for i := range entries {
+			entries[i].Path = filepath.Join(path, entries[i].Name)
+		}
 	}
 
 	resp := ListDirectoriesResponse{
@@ -112,10 +160,13 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 	// filesystem-sourced). A fresh page visit then sees the just-finished
 	// scan's freshness (no spurious rescan queued for a cap-truncated
 	// root) and the incomplete-index warning; a state from ANOTHER root
-	// (a re-pointed input) is not served for this path. The gate compares
-	// against the resolved directory the read above ACTUALLY opened
-	// (EvalSymlinks of the path readDirectory used) — the form scan()
-	// stores as IndexState.Root, so the gate compares like with like.
+	// (a re-pointed input) is not served for this path. The gate
+	// compares against the SAME resolved target the read above
+	// enumerated: the read target is the OS-resolved (symlink-aware,
+	// traversal-order-preserving) form of the request path, computed
+	// ONCE before enumeration and shared by the read and this gate —
+	// the form scan() stores as IndexState.Root, so the gate compares
+	// like with like. Client-facing paths stay lexical.
 	// A symlink below the guarded root resolves to the tree the walk
 	// stores as file-symlink rows (never descended), and a
 	// symlink-configured root can retarget between the eligibility check
@@ -133,7 +184,7 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 	// back pay zero path-resolution I/O.
 	if fallbackIndex {
 		state := h.svc.IndexSvc.Status().State
-		if state.Root != "" && indexedRootContains(state.Root, resolvedRoot(path)) {
+		if state.Root != "" && indexedRootContains(state.Root, resolved) {
 			resp.Index = &state
 		}
 	}

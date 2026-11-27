@@ -1346,6 +1346,10 @@ func TestLoadStateSeedsGuardFromCrashRecoveredQueuedRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The defer above captured the FIRST handle (already closed); close
+	// this second one too — an open SQLite handle can leave index.db
+	// locked through t.TempDir() cleanup on Windows.
+	defer db.Close()
 	svc = NewIndexService(db, cm, "")
 	if !svc.writeFailedRootContains(root) {
 		t.Fatalf("second boot did not seed the guard from the persisted column (an interrupted row with an empty guard would serve the incomplete table as authoritative)")
