@@ -99,11 +99,13 @@ type IndexService struct {
 	done       chan struct{} // closed when Run returns; Wait() blocks on it
 	last       IndexState    // in-memory mirror of index_state for fast reads
 	// Roots the in-flight scan's destructive batches may have left
-	// partially written: the current root, plus the OLD root on a
-	// root-switch (deletePrefix empties the old root's rows while
-	// last.Root is still the old one). The listing guard serves the
-	// filesystem for ANY of them; a clean terminal on a root releases
-	// just that root.
+	// partially written — or whose walk was incomplete (truncated): the
+	// current root, plus the OLD root on a root-switch (deletePrefix
+	// empties the old root's rows while last.Root is still the old one).
+	// The listing guard serves the filesystem for ANY of them; only a
+	// clean "done" terminal on a root releases just that root (a
+	// truncated terminal keeps the mark: the index cannot prove a
+	// complete listing for a directory the walk did not finish).
 	writeFailedRoots []string
 	// durableWriteFailedRoots is the subset of writeFailedRoots that a
 	// PERSISTED guard write actually covers: the in-memory mark alone is
@@ -563,9 +565,10 @@ func (s *IndexService) scan(ctx context.Context) {
 	// kill) after an early batch leaves the table half-written, and the
 	// persisted guard — not the in-memory one — is what makes a
 	// restarted process keep serving the filesystem (not the
-	// half-written table) until the next clean scan. A clean
-	// done/truncated terminal on a root releases just that root (below,
-	// in setTerminal); an error terminal keeps the mark.
+	// half-written table) until the next clean scan. Only a clean
+	// "done" terminal on a root releases just that root (below, in
+	// setTerminal); a truncated (incomplete walk) or error terminal
+	// keeps the mark.
 	if err := s.upsertAll(append(unchanged, extract...)); err != nil {
 		s.setTerminal(gen, "error", fmt.Sprintf("persist index: %v", err), 0, s.last.Root, false)
 		return
@@ -639,29 +642,29 @@ func (s *IndexService) setTerminal(gen int64, status, detail string, entries int
 	s.last.Total = 0
 	s.last.Added = 0
 	s.activeRoot = ""
-	// A CLEAN terminal on this root means its table is fully written:
-	// release the partial-write mark for THIS root only (an error terminal
-	// must NOT clear it — that is the partially-written state the guard
-	// exists to keep out of the listings; a mark on an unrelated root
-	// stays). The clear runs in place: this holds s.mu, and the
-	// persistLocked below writes the released mark.
+	// Only a CLEAN COMPLETE terminal proves its table is fully written:
+	// release the partial-write mark for THIS root only (a truncated or
+	// error terminal must NOT clear it — the table is incomplete for
+	// listings, which is the state the guard exists to keep out; a mark
+	// on an unrelated root stays). The clear runs in place: this holds
+	// s.mu, and the persistLocked below writes the released mark.
 	//
-	// "truncated" is a clean terminal for the guard's purpose ONLY when
-	// the truncation is cap-only (entry cap / depth bound): the walk
-	// indexed every path it reached (pruning ran over the walked set, the
-	// upserts committed), so the table is exactly what the scan wrote —
-	// the cap is a content bound the status reports, not a mid-write
-	// crash. Releasing the mark here is the recovery path: a root whose
-	// scan structurally ends truncated (a directory past the entry cap)
-	// can never reach "done", and keeping the mark on it would pin the
-	// listings in filesystem-fallback mode across restarts. A directory
-	// the walk never reached reads as empty from the index, which the
-	// operator can verify through the truncation status. An I/O-failed
-	// truncation (a directory open/read error converted to truncated) is
-	// NOT clean: the walk upserted only the rows it reached, so the
-	// table is incomplete in a way the cap is not — the guard stays
-	// until a later scan finishes clean.
-	if (status == "done" || status == "truncated") && !ioFailed {
+	// "truncated" is NOT clean for the guard's purpose, cap-only or not:
+	// the walk did not index every directory under the root, and a
+	// directory the walk never reached reads as an AUTHORITATIVE empty
+	// listing from the index (stale rows from an older scan can survive
+	// as well, since scan skips pruneVanished when truncated). Keeping
+	// the mark makes the listings fall back to the filesystem for every
+	// incomplete listing — the cost is filesystem mode for a root whose
+	// scan structurally ends truncated (a directory past the entry cap
+	// can never reach "done"), in exchange for never serving a
+	// half-walked tree as complete. A later clean "done" terminal on
+	// the root (a smaller tree, a raised cap, a cleared directory) is
+	// the recovery path: it releases the mark. An I/O-failed
+	// truncation (a directory open/read error converted to truncated)
+	// is incomplete in the same way — the guard stays until a later
+	// scan finishes clean.
+	if status == "done" && !ioFailed {
 		out := s.writeFailedRoots[:0]
 		for _, r := range s.writeFailedRoots {
 			if r != root {
@@ -856,7 +859,7 @@ func (st *walkState) readDirChild(parent *os.File, dir string, depth int) error 
 		*st.cancelled = true
 		return nil
 	}
-	child, err := openIndexChildDir(parent, filepath.Base(dir))
+	child, err := openIndexChildDir(parent, filepath.Base(dir), st.root)
 	if err != nil {
 		// A directory open/read error leaves the subtree UNINDEXED:
 		// the walked set is incomplete, not merely capped (a depth-bound

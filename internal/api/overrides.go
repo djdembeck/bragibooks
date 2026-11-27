@@ -1183,12 +1183,24 @@ func (s *Services) reapPendingCoversLocked(now time.Time, bookID int64) {
 			// for a later sweep's reap.
 			continue
 		}
+		// Re-validate under BOTH held locks: `rest` was built before
+		// pendingCoversMu was released, and in that gap a same-book save
+		// can persist the cover, drop the pending entry (the saved row is
+		// now the reference), and release its book lock — this sweep then
+		// acquires the lock and, without this check, would remove a file
+		// the row points at. `!ok` (entry dropped) skips the file;
+		// `now.Before(exp)` is the defensive half (a re-registered entry
+		// carries a fresh TTL, so it is not yet expired).
+		if exp, ok := s.pendingCovers[e.name]; !ok || now.Before(exp) {
+			continue
+		}
 		// The entry is deleted under the book lock, and the file follows
 		// in the same critical section: a same-book save (entry drop +
 		// row write) is serialized on this lock, so the entry and the
 		// file never outlive each other. A concurrent drop of the entry
-		// is harmless (delete is idempotent; the file removal is
-		// best-effort and a missing file is the goal).
+		// is caught by the re-validation above (its file is the row's
+		// reference, not a candidate); the file removal is best-effort
+		// and a missing file is the goal.
 		delete(s.pendingCovers, e.name)
 		if e.book > 0 {
 			_ = os.Remove(filepath.Join(s.CoversDir, e.name))

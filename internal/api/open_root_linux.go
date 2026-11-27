@@ -37,8 +37,42 @@ func openRootAnchored(root, path string, allowDir bool) (*os.File, error) {
 // would otherwise block the single scan worker in the open itself —
 // cancelling the walk's context does not interrupt a blocking open, so
 // the scan (and shutdown with it) would stall.
+//
+// O_NOFOLLOW protects only the FINAL component of the pathname: a
+// filesystem writer that replaces a writable ANCESTOR of the root with a
+// symlink between resolveScanRoot and this open would redirect the walk's
+// base to an outside tree, and every later openat would then faithfully
+// stay under the wrong directory. The /proc/self/fd re-read
+// (openRootFinalCheck) verifies the descriptor's resolved target stays
+// inside root (verifyIndexDirRoot, fail-closed) before the enumeration.
 func openIndexDir(dir string) (*os.File, error) {
-	return os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	f, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyIndexDirRoot(f, dir); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// verifyIndexDirRoot binds an opened walk directory to its resolved
+// target: the /proc/self/fd re-read (openRootFinalCheck) reports the
+// file the descriptor bound to, and rootContains verifies it stays
+// inside dir — the same check openInsideRoot runs on probe handles.
+// Fail-closed: a readlink failure refuses the enumeration (the walk's
+// root must be PROVEN to be the configured root, not assumed from the
+// pathname).
+func verifyIndexDirRoot(f *os.File, dir string) error {
+	target, cerr := openRootFinalCheck(f)
+	if cerr != nil {
+		return cerr
+	}
+	if !rootContains(dir, target) {
+		return fmt.Errorf("opened index directory escapes input root: %s", target)
+	}
+	return nil
 }
 
 // openIndexChildDir opens the child directory name against the ALREADY-
@@ -53,7 +87,7 @@ func openIndexDir(dir string) (*os.File, error) {
 // walk's d.Info() change signals resolve against it — a bare name would
 // stat against the process cwd and yield nil (zero signals) for every
 // entry the child holds.
-func openIndexChildDir(parent *os.File, name string) (*os.File, error) {
+func openIndexChildDir(parent *os.File, name, root string) (*os.File, error) {
 	fd, err := syscall.Openat(int(parent.Fd()), name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err

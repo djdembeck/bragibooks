@@ -2286,17 +2286,17 @@ func TestWalkSwappedChildSymlinkFailsClosed(t *testing.T) {
 	}
 	// The openat against the parent fd must fail closed (O_NOFOLLOW): the
 	// name is a symlink now, and the walk never follows directory symlinks.
-	if _, err := openIndexChildDir(parent, "swapped"); err == nil {
+	if _, err := openIndexChildDir(parent, "swapped", root); err == nil {
 		t.Fatal("openIndexChildDir opened the swapped-in symlink; want a failure (O_NOFOLLOW)")
 	}
 	// The controls: the real directory (under its new name) and the other
 	// plain child open fine against the same parent fd.
-	if f, err := openIndexChildDir(parent, "swapped-real"); err != nil {
+	if f, err := openIndexChildDir(parent, "swapped-real", root); err != nil {
 		t.Fatalf("openIndexChildDir failed on the real (renamed) directory: %v", err)
 	} else {
 		f.Close()
 	}
-	if f, err := openIndexChildDir(parent, "plain"); err != nil {
+	if f, err := openIndexChildDir(parent, "plain", root); err != nil {
 		t.Fatalf("openIndexChildDir failed on a plain directory child: %v", err)
 	} else {
 		f.Close()
@@ -2411,12 +2411,14 @@ func TestWalkIOTruncationKeepsWriteFailedGuard(t *testing.T) {
 	}
 }
 
-// TestWalkCapTruncationReleasesWriteFailedGuard is the other side of the
-// asymmetry: a cap-only truncation (entry cap) walked everything the cap
-// allows, so the table is exactly what the scan wrote and the guard is
-// released — a root that structurally ends truncated must not be pinned
-// in filesystem-fallback mode across restarts.
-func TestWalkCapTruncationReleasesWriteFailedGuard(t *testing.T) {
+// TestWalkCapTruncationKeepsWriteFailedGuard pins the guard's behavior
+// for a cap-only truncation (entry cap): the walk indexed everything the
+// cap allows, but directories the walk never reached read as
+// authoritative empty listings from the index, so the table is NOT a
+// proof of complete listings — the guard stays and the listings fall
+// back to the filesystem. A later clean "done" terminal on the root is
+// the release path.
+func TestWalkCapTruncationKeepsWriteFailedGuard(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "zzz"), 0o755); err != nil {
 		t.Fatal(err)
@@ -2439,7 +2441,7 @@ func TestWalkCapTruncationReleasesWriteFailedGuard(t *testing.T) {
 		t.Fatalf("rows = %d; want exactly the entry cap", len(rows))
 	}
 	svc.setTerminal(1, "truncated", detail, len(rows), rootCanon, false)
-	if svc.writeFailedRootContains(rootCanon) {
-		t.Errorf("the partial-write guard was kept on a cap-only truncation; the walk indexed everything the cap allows, so the guard must be released")
+	if !svc.writeFailedRootContains(rootCanon) {
+		t.Errorf("the partial-write guard was released on a cap-only truncation; the walk did not index every directory, so the listings must keep serving the filesystem")
 	}
 }

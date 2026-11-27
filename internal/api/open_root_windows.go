@@ -37,13 +37,26 @@ func openIndexDir(dir string) (*os.File, error) {
 //     whatever the reparse target points at. The check is against the SAME
 //     joined path the open uses, so it verifies the exact name being opened.
 //
-//  2. The walk's root containment check (openIndexDir's caller-side
-//     validation) still applies to the opened directory: an open that
-//     resolves outside the input root is rejected there.
+//  2. AFTER the open, bind the handle to its resolved final path
+//     (rawPathByHandle, the same technique openInsideRoot uses) and verify
+//     it stays inside the scan's ORIGINAL resolved root (withinResolvedRoot,
+//     against the root string as captured by resolveScanRoot at scan
+//     start): os.Open FOLLOWS reparse points, so the Lstat above (which
+//     does not) is not a binding for the open — a junction swapped into an
+//     ancestor between the entry read and the open would redirect the
+//     handle outside the root, and readDirWith would then enumerate that
+//     outside directory. The comparison base is the original resolved root
+//     STRING, not a fresh EvalSymlinks(root): a re-resolution would follow
+//     the swapped ancestor junction and re-base the comparison onto the
+//     outside tree, letting the redirected child pass. Windows has no
+//     openat, so there is no per-component / root-handle anchor — the
+//     original resolved root string is the strongest binding the platform
+//     allows (a root re-open by pathname would follow the same junction).
+//     A resolution failure is a refusal, not a fallback.
 //
 // The directory verdict is the enumeration's (FindFirstFile reports a
 // reparse point as a file), same as openIndexDir.
-func openIndexChildDir(parent *os.File, name string) (*os.File, error) {
+func openIndexChildDir(parent *os.File, name, root string) (*os.File, error) {
 	joined := filepath.Join(parent.Name(), name)
 	// Fail closed on a reparse-point child: the walk never follows
 	// junctions, so a reparse point here is a swap-in (the entry read saw a
@@ -58,7 +71,29 @@ func openIndexChildDir(parent *os.File, name string) (*os.File, error) {
 		// walk stop for this subtree).
 		return nil, fmt.Errorf("child %q is a reparse point", name)
 	}
-	return os.Open(joined)
+	f, err := os.Open(joined)
+	if err != nil {
+		return nil, err
+	}
+	// Bind the handle to its resolved final path and verify containment
+	// against the scan's ORIGINAL resolved root (check 2 in the doc
+	// above): os.Open follows reparse points, so the Lstat is not a
+	// binding for the open. root is already the symlink-resolved form
+	// captured by resolveScanRoot at scan start — the comparison base is
+	// that original string, NOT a fresh EvalSymlinks(root): re-resolving
+	// would follow a junction a writer swapped into an ancestor between
+	// the scan start and this open, re-basing the comparison onto the
+	// outside tree the child was redirected into.
+	finalRaw, ok := rawPathByHandle(f)
+	if !ok {
+		f.Close()
+		return nil, fmt.Errorf("resolve opened index directory for containment: %s", joined)
+	}
+	if !withinResolvedRoot(root, finalRaw) {
+		f.Close()
+		return nil, fmt.Errorf("opened index directory escapes input root: %s", finalRaw)
+	}
+	return f, nil
 }
 
 // openInsideRoot opens path for probing, binding the probe to the file at

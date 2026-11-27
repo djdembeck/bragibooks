@@ -412,6 +412,12 @@
 	// old, or a book reset/draft change wipes the state) and on unmount,
 	// so a navigation that clears coverPreviewUrl cannot strand the
 	// previous book's blob for the page's lifetime.
+	//
+	// Unmount also bumps the sequence (below) so a pending POST/blob
+	// continuation fails its `seq !== coverPreviewSeq` check and never
+	// creates a blob URL after the last cleanup has run — the cleanup
+	// alone would only revoke a URL that already exists.
+	$effect(() => () => { coverPreviewSeq++; });
 	$effect(() => {
 		const staticUrl = coverPreviewStatic; // non-URL covers: depend on the static path
 		const draftUrl = draft?.cover_source === 'url' ? (draft?.cover_url ?? '') : '';

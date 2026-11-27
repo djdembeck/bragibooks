@@ -113,9 +113,15 @@
 		// without bumping it, so it cannot discard an in-flight user
 		// navigation. It commits only if no user navigation has since
 		// bumped listingSeq (seq === listingSeq) AND it is still the
-		// newest background request (bg === bgListingSeq).
+		// newest background request (bg === bgListingSeq) AND the
+		// DISPLAYED path is still the one captured at refresh start
+		// (reListPath === currentPath): a user navigation to B that
+		// commits in flight changes currentPath WITHOUT bumping
+		// listingSeq, so the sequence checks alone would let a late
+		// background re-list of A send the user back to A.
 		let bg = 0;
 		let seq: number;
+		const reListPath = background ? currentPath : '';
 		if (background) {
 			bg = ++bgListingSeq;
 			seq = listingSeq; // read, do NOT bump: user navigation owns it
@@ -128,7 +134,7 @@
 				`/directories?path=${encodeURIComponent(path)}&index=1`
 			);
 			if (response.index !== undefined) indexState = response.index ?? null;
-			if (seq !== listingSeq || (background && bg !== bgListingSeq)) return;
+			if (seq !== listingSeq || (background && (bg !== bgListingSeq || reListPath !== currentPath))) return;
 			entries = validEntries(response.entries || []);
 			currentPath = response.path || path;
 			return;
@@ -137,7 +143,7 @@
 		// indexed freshness cannot survive a turn of the indexing toggle.
 		const response = await get<DirectoriesResponse>(`/directories?path=${encodeURIComponent(path)}`);
 		indexState = null;
-		if (seq !== listingSeq || (background && bg !== bgListingSeq)) return;
+		if (seq !== listingSeq || (background && (bg !== bgListingSeq || reListPath !== currentPath))) return;
 		entries = validEntries(response.entries || []);
 		currentPath = response.path || path;
 	}

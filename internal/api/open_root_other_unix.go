@@ -27,8 +27,69 @@ func openRootFinalCheck(f *os.File) (string, error) { return "", nil }
 // would otherwise block the single scan worker in the open itself —
 // cancelling the walk's context does not interrupt a blocking open, so
 // the scan (and shutdown with it) would stall.
+//
+// O_NOFOLLOW protects only the FINAL component of the pathname: a
+// filesystem writer that replaces a writable ANCESTOR of the root with a
+// symlink between resolveScanRoot and this open would redirect the walk's
+// base to an outside tree, and every later openat would then faithfully
+// stay under the wrong directory. There is no procfs here to re-read the
+// descriptor's target, so the final check binds the opened descriptor to
+// the directory the ANCHORED per-component open from the filesystem root
+// resolves to (verifyIndexDirRoot, fail-closed) — openat + O_NOFOLLOW per
+// component from "/", so the verification open cannot follow a swapped
+// ancestor.
 func openIndexDir(dir string) (*os.File, error) {
-	return os.OpenFile(dir, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	f, err := os.OpenFile(dir, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyIndexDirRoot(f, dir); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// verifyIndexDirRoot binds an opened walk directory to the resolved root:
+// it re-opens dir ANCHORED PER COMPONENT from the filesystem root
+// (openRootAnchoredAttempt with root = "/", openat + O_NOFOLLOW per
+// component — the binding this platform has instead of procfs) and
+// compares the two descriptors' (dev, inode) pairs. The verification open
+// walks every component of dir against a verified parent descriptor,
+// starting from the kernel's own "/" — it does NOT EvalSymlinks dir (the
+// openRootAnchored wrapper would), so a writer that swaps a writable
+// ANCESTOR of dir to an escaping symlink during the pathname open and
+// restores it for a re-resolution cannot redirect the verification open
+// to the same outside tree the walked descriptor bound to. Equal pairs
+// mean the walk's base is the directory the anchored open proved to be
+// the root; a mismatch means the pathname open followed a swapped
+// ancestor outside the tree and the enumeration is refused. A resolution
+// failure is a refusal, not a fallback.
+func verifyIndexDirRoot(f *os.File, dir string) error {
+	var fi unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &fi); err != nil {
+		return err
+	}
+	// Anchor the verification open to the filesystem root, NOT to dir:
+	// openRootAnchored(dir, dir, true) would EvalSymlinks(dir) first,
+	// re-following a swapped ancestor and re-basing the walk onto the
+	// outside tree. openRootAnchoredAttempt walks dir's components
+	// directly from "/" (openat + O_NOFOLLOW per component), so the
+	// descriptor it opens is the root the pathname dir names, with no
+	// ancestor re-resolution to swap under.
+	af, aerr, _ := openRootAnchoredAttempt("/", dir, true)
+	if aerr != nil {
+		return aerr
+	}
+	defer af.Close()
+	var afi unix.Stat_t
+	if aerr := unix.Fstat(int(af.Fd()), &afi); aerr != nil {
+		return aerr
+	}
+	if fi.Dev != afi.Dev || fi.Ino != afi.Ino {
+		return fmt.Errorf("opened index directory escapes input root: %s", dir)
+	}
+	return nil
 }
 
 // openIndexChildDir opens the child directory name against the ALREADY-
@@ -43,7 +104,7 @@ func openIndexDir(dir string) (*os.File, error) {
 // walk's d.Info() change signals resolve against it — a bare name would
 // stat against the process cwd and yield nil (zero signals) for every
 // entry the child holds.
-func openIndexChildDir(parent *os.File, name string) (*os.File, error) {
+func openIndexChildDir(parent *os.File, name, root string) (*os.File, error) {
 	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
