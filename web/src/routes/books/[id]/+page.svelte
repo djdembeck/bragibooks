@@ -433,33 +433,40 @@
 	let abdRelease = $state<AudiobookDBRelease | null>(null);
 	let abdLoading = $state(false);
 	let abdError = $state<CleanedAdbError | null>(null);
+	// Bumped by every selection change and every load, so a superseded
+	// request cannot publish results, an error, or a loading reset.
+	let abdRequestSeq = 0;
 
 	async function loadAbd() {
 		const id = normStr(book?.audiobookdb_book_id);
 		if (!id) return;
 		const savedReleaseId = normStr(book?.audiobookdb_release_id);
+		const requestId = ++abdRequestSeq;
+		const currentRequest = () =>
+			requestId === abdRequestSeq &&
+			normStr(book?.audiobookdb_book_id) === id &&
+			normStr(book?.audiobookdb_release_id) === savedReleaseId;
 		abdLoading = true;
 		abdError = null;
 		abdBook = null;
 		abdRelease = null;
 		try {
 			const b = await get<AudiobookDBBook>(`/search/books/${id}`);
+			if (!currentRequest()) return;
 			// Runtime, release date and publisher live on the release. Compare
 			// against the saved edition; the first catalog release is only a
 			// fallback for records matched before an edition was stored.
 			const rid = catalogReleaseId(savedReleaseId, b.releases);
-			const r = rid ? await get<AudiobookDBRelease>(`/search/releases/${rid}`) : null;
-			if (
-				normStr(book?.audiobookdb_book_id) === id &&
-				normStr(book?.audiobookdb_release_id) === savedReleaseId
-			) {
-				abdBook = b;
-				abdRelease = r;
-			}
+			const r = rid
+				? await get<AudiobookDBRelease>(`/search/releases/${encodeURIComponent(rid)}`)
+				: null;
+			if (!currentRequest()) return;
+			abdBook = b;
+			abdRelease = r;
 		} catch (e) {
-			abdError = toCleanedError(e);
+			if (currentRequest()) abdError = toCleanedError(e);
 		} finally {
-			abdLoading = false;
+			if (currentRequest()) abdLoading = false;
 		}
 	}
 
@@ -470,8 +477,21 @@
 	}
 
 	$effect(() => {
-		// Fetch once per expansion; retry re-invokes the same loader.
-		if (abdExpanded && normStr(book?.audiobookdb_book_id)) loadAbd();
+		// Fetch once per expansion; retry re-invokes the same loader. Reading
+		// both catalog IDs also ties the comparison to the selection: a change
+		// starts a new request and supersedes any in-flight one.
+		if (abdExpanded && normStr(book?.audiobookdb_book_id)) {
+			loadAbd();
+			return;
+		}
+		if (abdExpanded) {
+			// The book lost its catalog ID: there is no comparison to load.
+			abdRequestSeq += 1;
+			abdLoading = false;
+			abdBook = null;
+			abdRelease = null;
+			abdError = null;
+		}
 	});
 
 	interface DiffRow {
