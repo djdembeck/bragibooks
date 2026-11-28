@@ -1,5 +1,5 @@
 # Stage 0: Build SvelteKit frontend
-FROM oven/bun:1@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS frontend
+FROM oven/bun:1@sha256:3aa040e5445efa09d75bb428a64ba50db13e2b3ac9b6b0c7f145615f62b2ee18 AS frontend
 WORKDIR /app/web
 COPY web/package.json web/bun.lock ./
 RUN bun install --frozen-lockfile
@@ -7,7 +7,7 @@ COPY web/ ./
 RUN bun run build
 
 # Stage 1: Build Go backend with embedded frontend
-FROM golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS builder
+FROM golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS builder
 RUN apk add --no-cache git
 WORKDIR /build
 COPY go.mod go.sum ./
@@ -19,7 +19,7 @@ RUN VERSION="${VERSION#v}" && CGO_ENABLED=0 go build -tags webui -ldflags="-s -w
 
 
 # Stage 2: Runtime
-FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ffmpeg ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
@@ -31,7 +31,7 @@ COPY --from=builder /build/bragibooks /usr/local/bin/
 # tokens (verified at startup via --capabilities, not the version string
 # alone). Pinned to the multi-arch INDEX digest, not an architecture
 # manifest digest.
-COPY --from=ghcr.io/djdembeck/m4b-merge:v2.2.0@sha256:ad08601cf802d93de4285ef0cb9056a0dcefbe063fc41272760a54899b4eeee2 /usr/local/bin/m4b-merge /usr/local/bin/
+COPY --from=ghcr.io/djdembeck/m4b-merge:v2.2.1@sha256:e7f4264914a5e8564325c1dcf3da6a591b6528f2b256960bf3a69c3a695892a3 /usr/local/bin/m4b-merge /usr/local/bin/
 COPY docker/entrypoint.sh /usr/local/bin/bragibooks-entrypoint
 RUN chmod 0755 /usr/local/bin/bragibooks-entrypoint
 # The image runs as root by default (matching the legacy image); the
