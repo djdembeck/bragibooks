@@ -132,7 +132,11 @@ func TestValidateCapabilitiesRejectsMissingScalarFields(t *testing.T) {
 			Values:       []string{WritePolicyValueWrite, WritePolicyValuePreserve, WritePolicyValueClear},
 			ScalarFields: SupportedWriteFields,
 		},
-		CoverPolicies:   PolicyVariantSet{Variants: []string{"write", "preserve", "clear"}},
+		// The real engine vocabulary, verbatim: a written cover is
+		// "write_url" (or the object form in constraint text), never
+		// bare "write". A fixture that invents "write" is why the boot
+		// gate regressed into rejecting the pinned engine.
+		CoverPolicies:   PolicyVariantSet{Variants: []string{"write_url", "preserve", "clear"}},
 		ChapterPolicies: PolicyVariantSet{Variants: []string{"write", "preserve", "clear"}},
 	}
 	if _, err := p.validateCapabilities(good); err != nil {
@@ -147,7 +151,7 @@ func TestValidateCapabilitiesRejectsMissingScalarFields(t *testing.T) {
 	// reject every unselected-field / preserve job at run time: the gate must
 	// name that at startup.
 	noCoverPreserve := *good
-	noCoverPreserve.CoverPolicies.Variants = []string{"write", "clear"}
+	noCoverPreserve.CoverPolicies.Variants = []string{"write_url", "clear"}
 	if _, err := p.validateCapabilities(&noCoverPreserve); err == nil {
 		t.Fatal("engine without cover preserve accepted; a preserved cover would fail at job time")
 	}
