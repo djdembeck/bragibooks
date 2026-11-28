@@ -111,8 +111,15 @@
 		color: var(--text-secondary);
 	}
 
+	/* Must shrink and wrap: the sentence is longer than a phone-width
+	   viewport, and flex-shrink: 0 held it at max-content width, pushing
+	   the status off both edges of the strip. Wrapping (rather than an
+	   ellipsis) keeps the "27 of 28" tail — the part that says how far
+	   along the scan is — readable; the strip grows a line instead. */
 	.index-banner__text {
-		flex-shrink: 0;
+		flex: 1 1 auto;
+		min-width: 0;
+		overflow-wrap: anywhere;
 	}
 
 	/* The quiet name of the operation, so the strip reads as the source
