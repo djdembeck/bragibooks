@@ -128,23 +128,65 @@ func (h *Handler) ListDirectories(w http.ResponseWriter, r *http.Request) {
 	// (a `..` after a resolved component pops the RESOLVED component),
 	// not lexically collapsed against the PWD alias; a lexical Abs of
 	// the EvalSymlinks result would collapse `..` against the
-	// un-resolved $PWD string and can denote a different directory. An
-	// absolute request resolves with a single EvalSymlinks (its result
-	// is already absolute); on Windows a root-relative request (leading
-	// separator, no volume — not absolute by filepath's definition)
-	// takes that same single pass, since the OS resolves it against the
-	// current drive's root. If os.Getwd fails (relative branch) or the
-	// EvalSymlinks pass fails, the original lexical path is used as-is.
+	// un-resolved $PWD string and can denote a different directory.
+	//
+	// The branch per request form:
+	//   - absolute: a single EvalSymlinks (its result is already
+	//     absolute);
+	//   - Windows root-relative (leading separator of EITHER kind — Go
+	//     treats \ and / as separators on Windows — with no volume, so
+	//     not absolute by filepath's definition): the current volume is
+	//     supplied first (only the VolumeName of the working directory,
+	//     e.g. C: + \books = C:\books) so the resolved form carries the
+	//     drive letter the absolute index root has; if os.Getwd fails,
+	//     the path resolves as-is;
+	//   - Windows drive-relative (a volume, no separator, e.g.
+	//     C:books): the drive's CWD is extracted via Abs of the bare
+	//     volume + separator (syscall.FullPathName on Windows) — the
+	//     request suffix is NOT cleaned — and the untouched suffix is
+	//     resolved raw against it through the same single
+	//     EvalSymlinks pass, so `..` keeps OS-traversal semantics;
+	//   - ordinary relative: the raw Getwd+path concatenation above.
+	// Both volume branches are no-ops on Unix, where VolumeName is
+	// always "". On any failure (Getwd, Abs, EvalSymlinks) the original
+	// lexical path is used as-is.
 	var resolved string
 	if fallbackIndex {
 		resolved = path
-		if filepath.IsAbs(path) || strings.HasPrefix(path, string(os.PathSeparator)) {
-			if r, err := filepath.EvalSymlinks(path); err == nil {
+		switch {
+		case filepath.IsAbs(path) || strings.HasPrefix(path, string(os.PathSeparator)) || strings.HasPrefix(path, "/"):
+			p := path
+			if !filepath.IsAbs(path) && filepath.VolumeName(path) == "" {
+				// Root-relative without a volume: supply only the
+				// current volume (a no-op on Unix).
+				if wd, err := os.Getwd(); err == nil {
+					p = filepath.VolumeName(wd) + path
+				}
+			}
+			if r, err := filepath.EvalSymlinks(p); err == nil {
 				resolved = r
 			}
-		} else if wd, err := os.Getwd(); err == nil {
-			if r, err := filepath.EvalSymlinks(wd + string(os.PathSeparator) + path); err == nil {
-				resolved = r
+		case filepath.VolumeName(path) != "":
+			// Windows drive-relative (e.g. C:books): Abs of the bare
+			// volume + separator extracts that drive's OWN working
+			// directory WITHOUT cleaning the request suffix (a no-op
+			// on Unix, where VolumeName is always ""); the untouched
+			// suffix is then resolved raw, the same single-pass way
+			// as the ordinary-relative case, so `..` keeps
+			// OS-traversal semantics. A leading separator on the
+			// suffix is impossible: IsAbs catches C:/books in the
+			// absolute case above.
+			vol := filepath.VolumeName(path)
+			if base, err := filepath.Abs(vol + string(os.PathSeparator)); err == nil {
+				if r, err := filepath.EvalSymlinks(base + string(os.PathSeparator) + strings.TrimPrefix(path, vol)); err == nil {
+					resolved = r
+				}
+			}
+		default:
+			if wd, err := os.Getwd(); err == nil {
+				if r, err := filepath.EvalSymlinks(wd + string(os.PathSeparator) + path); err == nil {
+					resolved = r
+				}
 			}
 		}
 	}
