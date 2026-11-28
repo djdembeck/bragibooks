@@ -155,6 +155,14 @@ func TestValidateCapabilitiesRejectsMissingScalarFields(t *testing.T) {
 	if _, err := p.validateCapabilities(&noCoverPreserve); err == nil {
 		t.Fatal("engine without cover preserve accepted; a preserved cover would fail at job time")
 	}
+	// Bragi emits the bare "write_url" for a URL pin with no staged file,
+	// so an engine advertising only preserve/clear cannot honor that job:
+	// the gate must refuse it instead of passing startup.
+	noCoverWriteURL := *good
+	noCoverWriteURL.CoverPolicies.Variants = []string{WritePolicyValuePreserve, WritePolicyValueClear}
+	if _, err := p.validateCapabilities(&noCoverWriteURL); err == nil {
+		t.Fatal("engine without cover write_url accepted; a write_url job would fail at run time")
+	}
 	noChapterPreserve := *good
 	noChapterPreserve.ChapterPolicies.Variants = []string{"write", "clear"}
 	if _, err := p.validateCapabilities(&noChapterPreserve); err == nil {

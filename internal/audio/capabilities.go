@@ -220,20 +220,21 @@ func (p *Processor) validateCapabilities(caps *Capabilities) (*Capabilities, err
 			return nil, fmt.Errorf("engine capabilities lack scalar field %q; the per-field metadata write selection cannot be honored (engine scalar fields: %s)", f, strings.Join(caps.FieldPolicies.ScalarFields, ", "))
 		}
 	}
-	// A preserved cover and a cleared cover each serialize a distinct
-	// policy string into the job file, so both advertised cover variants
-	// are required: an engine that dropped one would boot cleanly (and
-	// accept a binary swap) only to reject the job at run time.
+	// Every cover policy string Bragi serializes into a job file must be
+	// advertised, or an engine that dropped one would boot cleanly (and
+	// accept a binary swap) only to reject the job at run time:
 	//
-	// A WRITTEN cover is the exception: Bragi never serializes it as the
-	// bare string "write". It emits "write_url" (a write_url pin with no
-	// URL) or the object form {"write": "/absolute/path"} (a staged local
-	// cover file), and the engine advertises only "write_url" in
-	// cover_policies.variants while naming the object form in the
-	// constraint text. Requiring "write" therefore demands a spelling the
-	// engine cannot advertise and fails every boot on the pinned
-	// m4b-merge v2.2.x.
-	for _, v := range []string{WritePolicyValuePreserve, WritePolicyValueClear} {
+	//   - "write_url" for a URL pin with no staged file (snapshot.go emits
+	//     the bare string);
+	//   - "preserve" and "clear" for the preserved and cleared covers.
+	//
+	// A written cover backed by a local file is the exception: Bragi emits
+	// the object form {"write": "/absolute/path"}, which the engine names
+	// only in cover_policies.constraint, not in variants. The variant list
+	// therefore has no bare "write" to assert (requiring one rejected every
+	// boot on the pinned m4b-merge v2.2.x), but "write_url" is advertised
+	// and Bragi can emit it, so the gate requires it.
+	for _, v := range []string{"write_url", WritePolicyValuePreserve, WritePolicyValueClear} {
 		if !policyVariant(caps.CoverPolicies.Variants, v) {
 			return nil, fmt.Errorf("engine cover_policies do not advertise %q; a job with that cover policy cannot be honored (cover variants: %s)", v, strings.Join(caps.CoverPolicies.Variants, ", "))
 		}
