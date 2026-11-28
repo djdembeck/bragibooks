@@ -139,8 +139,9 @@ All notable changes to this project will be documented in this file. See [standa
   to an edition without credits clears the stored publisher, and the book
   page compares the saved edition instead of the first catalog release.
   The comparison rejects a saved edition the catalog book does not list,
-  does not request malformed catalog IDs, and ignores superseded lookups so
-  a stale response cannot replace the current edition.
+  does not request malformed catalog IDs, omits edition rows when no
+  edition loaded, and ignores superseded lookups so a stale response
+  cannot replace the current edition.
 
 ### Features & Improvements
 

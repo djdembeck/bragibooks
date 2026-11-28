@@ -22,7 +22,7 @@
 	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '#lib/types.js';
 	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { publisherName } from '#lib/publisher.js';
-	import { catalogReleaseId } from '#lib/catalogRelease.js';
+	import { catalogReleaseId, isCatalogId } from '#lib/catalogRelease.js';
 	import { formatJobTime, formatElapsed, elapsedLabel } from '#lib/datetime.js';
 	import { liveNow } from '#lib/liveNow.svelte.js';
 	import {
@@ -440,6 +440,20 @@
 	async function loadAbd() {
 		const id = normStr(book?.audiobookdb_book_id);
 		if (!id) return;
+		if (!isCatalogId(id)) {
+			// The stored book ID is interpolated into the request path, so a
+			// malformed value is refused instead of sent to the catalog.
+			abdRequestSeq += 1;
+			abdLoading = false;
+			abdBook = null;
+			abdRelease = null;
+			abdError = {
+				message: 'The stored AudiobookDB book ID is not a valid catalog identifier.',
+				rateLimited: false,
+				raw: `audiobookdb_book_id: ${JSON.stringify(id)}`
+			};
+			return;
+		}
 		const savedReleaseId = normStr(book?.audiobookdb_release_id);
 		const requestId = ++abdRequestSeq;
 		const currentRequest = () =>
@@ -523,15 +537,22 @@
 			adb: a,
 			differs: l !== '' || a !== '' ? !same(l, a) : false
 		});
-		return [
+		const rows = [
 			row('Title', book.title, abdBook.title),
 			row('Authors', localAuthors || 'Unknown', adbAuthors),
 			row('Narrators', localNarrators || 'Unknown', adbNarrators),
-			row('Series', localSeries, adbSeries),
-			row('Publisher', book.publisher, publisherName(abdRelease) || ''),
-			row('Runtime', localRuntime, adbRuntime),
-			row('Release date', localDate, adbDate)
+			row('Series', localSeries, adbSeries)
 		];
+		// Edition fields have no catalog side without a loaded release; an
+		// empty comparison would flag every populated local value as differing.
+		if (abdRelease) {
+			rows.push(
+				row('Publisher', book.publisher, publisherName(abdRelease) || ''),
+				row('Runtime', localRuntime, adbRuntime),
+				row('Release date', localDate, adbDate)
+			);
+		}
+		return rows;
 	});
 
 	/* ── Display hygiene ───────────────────────────────────────
