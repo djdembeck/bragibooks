@@ -36,7 +36,7 @@ export class ApiError extends Error {
 
 // Same-origin UI auth: the UI never stores a key. It relies on the server's
 // double-submit CSRF guard (loopback-LAN path) on the browser state.
-function authHeaders(): Record<string, string> {
+export function authHeaders(): Record<string, string> {
 	try {
 		const headers: Record<string, string> = {};
 		// The server requires a double-submit CSRF token on state-changing

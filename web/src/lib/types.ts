@@ -71,7 +71,9 @@ export interface SourceASINEvidence {
 }
 
 export interface BookWithPeople {
-	/** Optional Match presentation report; not populated by current intake. */
+	/** Optional Match presentation report. The pending list carries the
+	 *  source read state only; GET /api/books/:id/match-evidence fills the
+	 *  identifiers and comparisons for the selected catalog record. */
 	match_evidence?: MatchEvidenceReport;
 	/** Populated only by the pending-books list response. */
 	source_asin?: SourceASINEvidence | null;
@@ -151,13 +153,37 @@ export interface ProcessingJob {
 	created_at: string;
 	/** Durable enqueue order; SQLite created_at is second-precision. */
 	queue_order?: number;
+	/** The queue request that created the job; groups a batch's rows. Absent for pre-batch history. */
+	batch_id?: string;
 	/** Queue-time destination snapshot (profiled batches only). */
 	output_dir?: string;
 	output_scheme?: string;
 }
 
+/** Bounded latest-batch rollup in the /jobs response: the completion
+ *  banner reads only this (counts, wall clock, row ids), so it stays small
+ *  and whole for a batch of any size. The batch's full rows are fetched on
+ *  demand via `/jobs?batch_id=ID&limit=&offset=`. */
+export interface BatchAggregate {
+	batch_id: string;
+	total: number;
+	done: number;
+	failed: number;
+	cancelled: number;
+	in_flight: number;
+	all_terminal: boolean;
+	started_at?: string | null;
+	finished_at?: string | null;
+	/** The batch's newest queue order: the banner's dismissal identity marker. */
+	last_seq: number;
+	/** The batch's row ids in queue order. */
+	job_ids: string[];
+}
+
 export interface JobsListResponse {
 	jobs: ProcessingJob[];
+	/** Absent when no batched job exists or the probe degraded. */
+	batch?: BatchAggregate | null;
 }
 
 export interface StatusCounts {
@@ -182,6 +208,19 @@ export interface Settings {
 	region: string;
 	api_endpoint_enabled?: boolean;
 	api_endpoint_env_managed?: boolean;
+	/** Opt-in input-directory index (pre-extracted ASIN/title evidence). */
+	indexing_enabled?: boolean;
+	/** Per-field embedded-metadata write selection (#518); absent = all supported. */
+	metadata_fields?: string[];
+	/** Chapter write policy for the engine's chapter path (#518): write | preserve. */
+	metadata_chapters?: string;
+	/** True while PROCESSING_METADATA_FIELDS pins the selection deployment-side. */
+	metadata_fields_pinned?: boolean;
+	/** True while PROCESSING_METADATA_CHAPTERS pins the policy deployment-side. */
+	metadata_chapters_pinned?: boolean;
+	/** Stored profiles the current engine rejects (empty when clean). The
+	 *  Settings page renders this as a fixable list. */
+	invalid_output_profiles?: InvalidOutputProfile[];
 	created_at?: string;
 	updated_at?: string;
 	bragibooks_version?: string;
@@ -199,6 +238,50 @@ export interface DirectoryEntry {
 export interface DirectoriesResponse {
 	path: string;
 	entries: DirectoryEntry[];
+}
+
+/** Per-path ASIN + derived-title evidence served by the indexed listing.
+ *  `asin` is `SourceASINEvidence` (present/ambiguous/missing/unknown); a
+ *  null `asin` means the stored snapshot could not be decoded. */
+export interface IndexEvidence {
+	asin?: SourceASINEvidence | null;
+	title?: string;
+}
+
+/** A directory entry augmented with index evidence (index mode only). */
+export interface IndexedDirectoryEntry extends DirectoryEntry {
+	evidence?: IndexEvidence;
+}
+
+/** Last completed (or in-flight) input-directory index scan. */
+export interface IndexState {
+	root: string;
+	entries: number;
+	last_run_at: string; // "" if never
+	/** Transient: paths with no stored row before this scan (0 when the
+	 *  count is not known yet — queued, mid-walk — or nothing is new). */
+	added?: number;
+	status: 'never' | 'queued' | 'running' | 'done' | 'truncated' | 'interrupted' | 'error';
+	detail: string;
+	generation: number;
+	// In-memory progress while a scan is running: total = paths needing
+	// (re-)extraction this scan, extracted = how many are done. Absent (0)
+	// while the fast directory walk is in flight and once the scan ends.
+	total?: number;
+	extracted?: number;
+}
+
+/** GET /api/index response. */
+export interface IndexStatus {
+	enabled: boolean;
+	state: IndexState;
+}
+
+/** Indexed variant of the directory listing (GET /api/directories?index=1). */
+export interface IndexedDirectoriesResponse {
+	path: string;
+	entries: IndexedDirectoryEntry[];
+	index?: IndexState;
 }
 
 export interface SearchHit {
@@ -239,6 +322,9 @@ export interface AudiobookDBBook {
 	 * payloads include. Both fields are optional in practice.
 	 */
 	image?: { url: string; width: number; height: number; blurdata?: string } | null;
+	/** The book's own subtitle; the server capture's fallback after the
+	 *  selected release's own subtitle (subtitleFromCatalog precedence). */
+	subtitle: string | null;
 	disambiguation: string | null;
 	type?: string;
 	originallyPublishedAt?: string;
@@ -259,12 +345,15 @@ export interface AudiobookDBRelease {
 	runtimeLengthSec: number;
 	isbn: string | null;
 	releaseDate: string | null;
+	/** The release's own subtitle; it wins over the book-level value in
+	 *  the server capture (subtitleFromCatalog precedence). */
+	subtitle: string;
 	chapterDetail?: {
 		chapters: { title: string; ordinal: number; startOffsetMs: number; lengthMs: number; lengthString: string }[];
 	};
 	people: AudiobookDBPersonRole[];
 	publisher: { id: string; name: string };
-	language: { id: string; title: string };
+	language: { name: string };
 	images: AudiobookDBImage[];
 }
 
@@ -276,6 +365,8 @@ export interface ProcessingRequest {
 
 export interface ProcessingResponse {
 	jobs: Array<{ id: string; book_id: number }>;
+	/** Identity of the queue request, shared by every job it created; the completion banner groups runs by it. */
+	batch_id: string;
 	/** Queue-time destination snapshot of the started batch (profile-backed batches only); absent for global-settings batches. */
 	output_dir?: string;
 	output_scheme?: string;
@@ -304,6 +395,87 @@ export interface ReprocessRequest {
 	path_format?: string;
 }
 
+/** Wire shape of GET /api/books/{id}/metadata (the manual editor state). */
+export interface SnapshotChapter {
+	title: string;
+	start_millis: number;
+	duration_millis: number;
+}
+
+export interface BookMetadataSnapshot {
+	book_id: number;
+	audiobookdb_book_id: string;
+	audiobookdb_release_id: string;
+	title: string;
+	subtitle: string;
+	authors: string[];
+	narrators: string[];
+	series_name: string;
+	series_position: string;
+	description: string;
+	genres: string[];
+	year: number | null;
+	cover_file: string;
+	chapters: SnapshotChapter[] | null;
+	captured_at: string;
+}
+
+/** The stored manual override layer. Absent (null) = no overrides saved. */
+export interface BookMetadataOverrides {
+	title: string;
+	subtitle: string;
+	authors: string[] | null;
+	narrators: string[] | null;
+	series_name: string;
+	series_position: string;
+	description: string;
+	genres: string[] | null;
+	year: number | null;
+	cleared: string[];
+	cover_source: '' | 'clear' | 'file' | 'url';
+	cover_file: string;
+	cover_url: string;
+	chapters: SnapshotChapter[] | null;
+	updated_at: string;
+}
+
+/** PUT /api/books/{id}/metadata body: the editor's full override draft.
+ *  Field conventions: '' = no scalar override; null array = no array
+ *  override; null year = no year override; cleared = explicit tag removal. */
+export interface BookMetadataDraft {
+	title: string;
+	subtitle: string;
+	authors: string[] | null;
+	narrators: string[] | null;
+	series_name: string;
+	series_position: string;
+	description: string;
+	genres: string[] | null;
+	year: number | null;
+	cleared: string[];
+	cover_source: '' | 'clear' | 'file' | 'url';
+	cover_file: string;
+	cover_url: string;
+	chapters: SnapshotChapter[] | null;
+}
+
+export interface BookMetadataResponse {
+	snapshot: BookMetadataSnapshot | null;
+	overrides: BookMetadataOverrides | null;
+	effective: BookMetadataSnapshot | null;
+	effective_chapters: SnapshotChapter[] | null;
+}
+
+/** Wire shape of POST /api/engine/preview. */
+export interface EnginePreviewResponse {
+	relative_path: string;
+}
+
+/** Wire shape of POST /api/books/{id}/metadata/cover. */
+export interface CoverUploadResponse {
+	cover_file: string;
+}
+
 /** Wire shape of models.OutputProfile. */
 export interface OutputProfile {
 	id: number;
@@ -312,6 +484,16 @@ export interface OutputProfile {
 	output_scheme: string;
 	created_at: string;
 	updated_at: string;
+}
+
+/** A stored output profile whose format the current engine rejects, as
+ *  found at boot (or after a profile mutation). The server starts anyway;
+ *  the Settings UI is the repair path, so the list is surfaced there. */
+export interface InvalidOutputProfile {
+	id: number;
+	name: string;
+	format: string;
+	error: string;
 }
 
 export interface OutputProfilesResponse {

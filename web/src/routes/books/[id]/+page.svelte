@@ -13,6 +13,11 @@
 		ReprocessPreview,
 		ReprocessRequest,
 		Settings,
+		BookMetadataResponse,
+		BookMetadataDraft,
+		EnginePreviewResponse,
+		CoverUploadResponse,
+		SnapshotChapter,
 	} from '#lib/types.js';
 	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '#lib/types.js';
 	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
@@ -36,9 +41,26 @@
 	import { parseParts, trimSegment, validateScheme } from '#lib/scheme.js';
 	import { ExternalLink, ArrowLeft, CheckCircle, ChevronDown, FolderOpen } from '@lucide/svelte';
 
+	import MetadataEditor from './MetadataEditor.svelte';
+
 	let { data }: { data: PageData } = $props();
 
 	let book: BookWithPeople | null = $derived(data.book);
+
+	/* The editor's naming preview needs the GLOBAL path format (the queue
+	 * destination a bare book inherits), loaded once — a missing value just
+	 * states the hint, it never blocks editing. */
+	let globalPathFormat = $state<string | null>(null);
+	let manualMetadataOpen = $state(false);
+	$effect(() => {
+		if (window.location.hash === '#manual-metadata') manualMetadataOpen = true;
+	});
+	$effect(() => {
+		if (!book) return;
+		get<Settings>('/settings')
+			.then((s) => (globalPathFormat = s.output_scheme || null))
+			.catch(() => (globalPathFormat = null));
+	});
 
 	const authorNames = $derived(book ? book.authors.map((a) => a.name).join(', ') : '');
 	const narratorNames = $derived(book ? book.narrators.map((n) => n.name).join(', ') : '');
@@ -739,6 +761,27 @@
 		{/if}
 	</section>
 
+	<!-- ── Manual metadata: the per-book override layer ──────────
+	 * Every supported engine value is editable here; the draft,
+	 * effective state and audit all live on the server, and a save
+	 * records a database row only — a processing job writes the tags. -->
+	<details
+		class="card record-section meditor-shell"
+		id="manual-metadata"
+		bind:open={manualMetadataOpen}
+	>
+		<summary class="meditor-shell__summary">
+			<h2 class="detail__section-title">Manual metadata</h2>
+			<span class="meditor-shell__hint">Open to edit this book's catalog values.</span>
+		</summary>
+		<MetadataEditor
+			bookId={book.id}
+			pathFormat={globalPathFormat}
+			open={manualMetadataOpen}
+			onSaved={() => void refreshAll()}
+		/>
+	</details>
+
 	<!-- ── Re-process dialog — done books, destination settings ── -->
 	<Modal bind:open={reprocessOpen} title="Re-process" beforeClose={mayCloseReprocess}>
 		<div class="reprocess">
@@ -1300,6 +1343,29 @@
 	}
 
 	/* ── Record sections stacked below the identity/record grid ─── */
+	.meditor-shell {
+		scroll-margin-top: calc(var(--nav-height) + 1rem);
+	}
+
+	.meditor-shell > summary {
+		cursor: pointer;
+	}
+
+	.meditor-shell > summary .detail__section-title {
+		display: inline;
+		margin: 0;
+	}
+
+	.meditor-shell__hint {
+		margin-left: 0.75rem;
+		color: var(--text-muted);
+		font-size: 0.875rem;
+	}
+
+	.meditor-shell[open] > summary {
+		margin-bottom: 1rem;
+	}
+
 	.record-section {
 		margin-top: 1rem;
 	}
@@ -1312,15 +1378,17 @@
 		flex-wrap: wrap;
 	}
 
-	/* One header class for every section title
-	 * (Actions / Compare / Recorded activity / File paths / Description). */
+	/* One header class for every record section title
+	 * (Actions / Manual metadata / Compare / Recorded activity / File paths /
+	 * Description). The section tier is 17px/700 per DESIGN.md, above the
+	 * editor's 15.5px group headings and 14px field legends. */
 	.detail__section-title {
 		margin: 0;
-		font-size: 0.8rem;
+		font-size: 1.0625rem;
 		font-weight: 700;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
-		color: var(--text-secondary);
+		line-height: 1.3;
+		letter-spacing: -0.01em;
+		color: var(--text);
 	}
 
 	.record-section__link {

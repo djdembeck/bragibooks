@@ -74,12 +74,19 @@ export function conflictingEvidenceFields(report: MatchEvidenceReport | undefine
 		.map(([field]) => field);
 }
 
-export function evidenceBadge(report: MatchEvidenceReport | undefined, manual: boolean): {
+export function evidenceBadge(
+	report: MatchEvidenceReport | undefined,
+	manual: boolean,
+	asin = false
+): {
 	label: string;
 	kind: 'neutral' | 'verified' | 'conflict';
 	identityScope?: 'book' | 'edition';
 } {
-	const fallback = { label: manual ? 'Chosen manually' : 'Title suggestion', kind: 'neutral' as const };
+	const fallback = {
+		label: manual ? 'Chosen manually' : asin ? 'Selected by source ASIN' : 'Title suggestion',
+		kind: 'neutral' as const
+	};
 	if (!report || report.sourceRead.status === 'not_read' || report.sourceRead.status === 'failed') return fallback;
 	if (report.identifiers.some((id) => id.state === 'conflict') ||
 		Object.entries(report.comparisons).some(([field, comparison]) => comparisonMark(comparison, field as EvidenceField) === 'different')) {
@@ -88,12 +95,16 @@ export function evidenceBadge(report: MatchEvidenceReport | undefined, manual: b
 	const allResolved = report.identifiers.every((id) => id.state === 'verified');
 	const verified = report.identifiers.filter((id) => id.state === 'verified' && id.identifier?.trim() &&
 		id.provenance?.trim() && id.bookId === report.selection.bookId);
+	// An ASIN pick keeps the source-ASIN attribution in the visible badge:
+	// the canonical detail fetch can verify the book identity for exactly
+	// this case, and the identity labels must not replace the attribution.
+	const asinAttribution = asin && !manual ? 'Selected by source ASIN' : undefined;
 	if (report.sourceRead.status === 'read' && allResolved && report.origin === 'edition_id' && report.selection.releaseId &&
 		verified.some((id) => id.scope === 'edition' && id.releaseId === report.selection.releaseId)) {
-		return { label: 'Exact edition ID', kind: 'verified', identityScope: 'edition' };
+		return { label: asinAttribution ?? 'Exact edition ID', kind: 'verified', identityScope: 'edition' };
 	}
 	if (allResolved && report.origin === 'book_id' && verified.some((id) => id.scope === 'book')) {
-		return { label: 'Exact book ID · edition unverified', kind: 'neutral', identityScope: 'book' };
+		return { label: asinAttribution ?? 'Exact book ID · edition unverified', kind: 'neutral', identityScope: 'book' };
 	}
 	return fallback;
 }

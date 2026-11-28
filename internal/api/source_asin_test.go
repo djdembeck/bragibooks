@@ -688,10 +688,10 @@ func TestSourceMetadataSchemaTwoFlagsRoundTrip(t *testing.T) {
 	}
 }
 
-// TestListBooksPendingMetadataQueryFailureLeavesNil pins attachSourceASINs'
-// best-effort contract: a query failure (here: the metadata table is
-// absent) is logged and leaves every book's source_asin nil — it never
-// fails the list.
+// TestListBooksPendingMetadataQueryFailureLeavesNil pins
+// attachSourceProjections' best-effort contract: a query failure (here: the
+// metadata table is absent) is logged and leaves every book's source_asin
+// nil — it never fails the list.
 func TestListBooksPendingMetadataQueryFailureLeavesNil(t *testing.T) {
 	h := newTestHandler(t)
 	if _, err := h.svc.DB.Exec(

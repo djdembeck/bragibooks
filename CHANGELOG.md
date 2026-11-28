@@ -4,8 +4,112 @@ All notable changes to this project will be documented in this file. See [standa
 
 ## [Unreleased]
 
+### Added
+
+- Queue completion banner: when the most recent merge batch finishes, the
+  queue page now states the result up front ("Batch complete — 3 of 3
+  processed", "Batch ended with 1 failure", "Batch failed",
+  "Batch stopped") with the run's wall clock, instead of leaving a
+  finished queue to be judged from Recent activity. A failed run carries
+  a "Review N failures" action that opens Recent activity and scrolls to
+  the first failed row; a single-book run links through to the book
+  record. The banner is dismissible per run (a newer batch re-announces
+  itself), and a fully failed run is announced with `role="alert"`
+  rather than the polite `status` used by other outcomes. Each queue
+  request is stamped with a durable batch id (`batch_id` on the
+  `/api/process` response and job rows), so two requests enqueued back
+  to back are reported as separate batches; pre-batch history rows have
+  no id and keep grouping by queue position. Recent activity renders
+  and hydrates only its newest rows (plus the banner's run, so the
+  Review action always has a row to land on) instead of one book fetch
+  and job card per history row. A single failed book reads "Book
+  failed — nothing processed".
+- Manual metadata editor (per book): a durable override layer on the book
+  record exposing every supported engine value — title, subtitle, ordered
+  author/narrator lists, series name/position, description, genres, year,
+  cover (catalog, uploaded local asset, secure URL, or remove-from-output),
+  and a millisecond-precision chapter editor with ordered-range diagnostics.
+  Each field keeps the three states the engine needs: the catalog value, an
+  explicit edited value, and an explicit clear (tag removed from the output),
+  and the UI states which action it is taking. Saving records a database row
+  only (the audit entry says so); tags are written when a processing job runs.
+  The book's record page now carries an engine-backed live output-name
+  preview of the draft, a "Reset to catalog" action that discards the manual
+  layer without touching the chosen release, and cover uploads stored as
+  immutable per-book assets that a queued job keeps even after later edits.
+  A queued job's frozen metadata, write policy, and asset references are
+  unchanged by later edits (verified by behavior tests).
+
 ### Fixed
 
+- Authoritative processing hardening (post-review):
+  - Every engine run re-verifies the exact binary it launches (version floor and protocol) before starting, so a re-pointed or swapped engine binary can no longer run queued jobs past the fail-closed gate; saving a new engine binary runs the same gate before the save is accepted, and a passing change refreshes the stored capabilities and token registry.
+  - The boot capability gate now also requires the engine to report the pinned resolver_version (`"1"`; an empty value is rejected) and to advertise all three scalar/cover policy values `write`, `preserve`, and `clear`, so an engine that dropped one fails at startup with a nameable diagnosis instead of refusing the matching jobs at run time.
+  - Published-artifact containment is checked component by component: a symlinked directory (or file) that resolves outside the output root is rejected, not just a symlinked final file.
+  - Post-success staging cleanup is scoped to the run's own engine process ID, so a concurrently running job's in-flight staging in the same output root is never deleted; the per-run staged cover carries the job ID, the output root is created before staging, and the staged cover is removed after the run in every case.
+  - An authorless snapshot now sends an empty `authors` array (the engine rejects JSON `null` for it), and a blank title uses the `preserve` write policy instead of an unconditional write.
+  - Path formats containing a brace token the engine does not know are rejected at save time (server and Settings UI) instead of surfacing as an engine failure at run time.
+  - Re-pointing the engine binary in a settings save revalidates the effective global path format and every saved output-profile scheme against the CANDIDATE engine's token set before the save is accepted: a scheme the new engine rejects refuses the save with 400, naming the offending profile, instead of becoming a run-time failure for every job that resolves through it.
+  - Match's proposed output name now feeds the engine the same series normalization a save captures (all named series, re-split by the last ` #`), so the previewed name cannot diverge from the stored snapshot's name.
+  - The Match page now previews every selected row in batch mode (bounded concurrency of 3, a failed fetch requeues its row, and a settled slot advances the queue) with a "Resolving…" pending state, and the preview payload carries the subtitle with the same precedence as server capture (the selected release's own subtitle when present, then the book's, then the book's disambiguation), so a `{subtitle}` scheme previews the path the queued job will publish.
+  - Round 2: the path-format token registry is published atomically, so a binary re-point can no longer be read mid-replacement by a concurrent validation; a re-pointed engine binary's verified capabilities are published together with the binary swap (no stale-registry window, no second probe); the UI's unsupported-token check scans the serialized template so an expression split across parts cannot bypass the server's E0 rule; Match's series re-parse trims with the server's Go whitespace set (U+0085 included); snapshot cover fetches connect only to the public IP addresses that passed validation (DNS-rebinding resistant), with unspecified and CGNAT addresses rejected; and the per-run version probe now runs under the run's context so a cancelled run kills the probe's process tree.
+  - Round 3: a re-pointed engine binary's verified capabilities and token registry are now published BEFORE the binary swap, so a concurrent reader can no longer pair the new binary with the previous binary's capabilities (a job captured under the old identity that runs on the new binary trips the identity check, fails closed, and recovers by re-queue); the cover fetch client no longer follows redirects internally, so every 3xx reaches the per-hop loop that validates and pins each destination; and a single path-format validation no longer spans two registry generations.
+  - Snapshot cover downloads only follow HTTPS URLs: a non-HTTPS cover is refused, the host is resolved and every address must be public (private/loopback/link-local/multicast refused), on the initial URL and on every redirect hop.
+  - Engine preview errors no longer expose the server's temporary job-file path.
+  - Round 4: a job's COMPLETE destination (output root, relative path format, and completed directory) is frozen into the job row at enqueue time for every job — profile, override, and plain global alike — so a settings change after enqueue can no longer redirect or re-format a queued job; a job row with no frozen destination cannot run and fails with a clear re-queue message. The stored global path format is validated against the engine's token vocabulary at boot, and an invalid global format now fails startup with a nameable diagnosis instead of refusing jobs one by one. Every stored output-profile format is validated at boot as well, but an invalid profile does not stop the server: the boot log records the diagnosis, the Settings UI exposes the bad profile for repair, and enqueue refuses work that uses the profile with the same diagnosis. A book's processing snapshot now degrades instead of silently losing data when the catalog is down: the row is refreshed with the new local fields while retaining the previously captured genres, chapters, and cover, and the catalog round trip is skipped entirely for pipeline-only updates (status/paths/format). A hard snapshot-capture failure (a database error) invalidates the row and reports 500 — the book is refused at queue time with an explicit re-preview message, never run on stale data. Snapshot covers are written to capture-specific immutable filenames (`<bookID>-<nano>.jpg`): a later capture can no longer overwrite, or remove on its own failure, the file an active queued job's snapshot references, and superseded legacy cover files are pruned only when the book has no active job.
+  - Round 5: saving a global output path format now applies the same relative-path rules as boot and enqueue (an absolute path or a `..` segment is refused at save time, not made fatal at the next startup); reprocess locates a run's inputs against the FROZEN completed directory recorded on that run (falling back to the live global only for legacy rows), so a setting changed after the run no longer makes reprocess report the inputs missing; cover pruning is now per-file, book-scoped, and race-safe — it removes only THIS book's own snapshot-cover files (the capture-specific images and the legacy shared name) that no live snapshot references, never source covers (`<bookID>.jpg`) or other books' covers; a file some active job's snapshot names is always kept, and the sweep is skipped entirely if the active-reference scan fails; the whole capture critical section (cover download + snapshot write + prune) runs under a per-book lock also held by the enqueue's snapshot read→insert, so the prune can no longer delete a file the paired job names, and a hard snapshot-capture failure now reports 500 and names the state (the book can never run on a stale snapshot), including when the invalidating delete itself fails; and the cover fetch's DNS resolution is bound to the capture deadline so a stuck name lookup dies on the same clock as the download.
+  - Round 6 (PR review threads): the Settings path-format example now sends the engine the same payload shape a real job does — people as arrays selected from the capability vocabulary (plural tokens preferred, singular only when the engine reports no plural token), genres as an array, and no `metadata_id` (which the supplied-metadata struct silently dropped) — so the displayed preview can no longer lie for formats that use those tokens; a degraded (catalog-down) capture now retains previously captured catalog content only when it belongs to the same selection — book-level genres and cover only on an unchanged AudiobookDB book id, release-level chapters only on an unchanged book AND release id — so a re-match to a different book, an unlink, or a changed release starts those fields empty instead of carrying over the previous selection's content; and reprocess's live-global completed-directory fallback is now legacy-row-only (a stored row with no snapshot), so a post-cutover job that deliberately froze completion to empty keeps its frozen empty directory and can never locate an unrelated same-basename file in a directory the run never used.
+- The engine preview request body is capped at 1 MiB: `POST /api/engine/preview` refuses a larger body with 413, so an oversized payload can no longer be decoded into memory before validation.
+- The chapter write contract distinguishes an explicit empty chapter list from an absent one: a job that carries `[]` writes no chapters into the output, while a job with no chapter list at all leaves the embedded chapters of a natively chaptered input untouched. The snapshot stores the distinction, and the job payload carries it through to the engine.
+
+- Source index steady state: directories whose stored snapshot hit the
+  probe caps (box sets with more than 100 files) were treated as
+  incomplete on every refresh and re-extracted (~100 ffprobe calls per
+  directory per pass), which spent the scan budget before the rest of
+  the tree was touched and kept the index from settling — every page
+  visit then triggered a multi-minute rescan. A non-degraded truncated
+  directory snapshot is now accepted as stable for an unchanged subtree
+  (the child-change rule still re-extracts it when its contents
+  gain/lose/modify files, and degraded directories still self-heal on
+  every refresh).
+- Source index partial-write safety: an index write that fails partway
+  can leave the table half-written. Until a scan completes cleanly,
+  indexed listings fall back to the filesystem, and the guard is
+  persisted, so the fallback survives a restart.
+- Source index steady state (non-audio files): a non-audio file stored
+  with a degraded snapshot (as the pre-fix binary did for `.cue`,
+  `.txt`, …) was re-extracted on every refresh and stored back as
+  degraded with a misleading "budget exhausted" marker, so it never
+  settled. Such a row now re-enters the extract set with the complete
+  empty snapshot (nothing to probe), and the budget-failure marker is
+  only applied to rows that would actually have been probed.
+- The app-wide source-index progress strip now shows only when a scan
+  is genuinely adding new sources: the scan counts paths with no stored
+  row from a prior scan, and the strip stays hidden for a refresh that
+  finds nothing new (the no-op rescan a page visit triggers).
+- Test isolation: the API test suite unsets deployment environment
+  variables (e.g. `DIRECTORIES_OUTPUT_DIR`) before running, so a shell
+  that exports container paths can no longer make the queue-time
+  write-access probes fail on machines where those paths do not exist.
+- Source index ASIN extraction: a canonical ASIN carried by a book
+  folder name was dropped whenever the folder name contained a dot
+  before the ASIN (e.g. `M.R. Forbes - … {B0GVPM58JP}`) — the filename
+  scan stripped the "extension" with `filepath.Ext`, which cut the name
+  at the first interior dot and destroyed the ASIN. The strip now matches
+  only the known audio container extensions, so non-audio names (folders)
+  are scanned whole. A folder with no audio files (a book folder holding
+  only a `.cue`/`.txt`) now also surfaces a folder-name ASIN instead of
+  reading "—".
+- The Match page's proposed AudiobookDB card shows the release's language instead of "Language Unavailable". AudiobookDB sends a release language as a name-only reference (`{"name":"English"}`); the client decoded it as `{id,title}`, so the value was always empty. The card, the saved `language` field, and the source-vs-catalog language comparison now read the real release language.
+- The Match page's **Source details** panel now reflects the stored source-metadata snapshot instead of always reporting "Source metadata not read". `GET /api/books?status=pending` carries a source-only `match_evidence` report whose read status comes from snapshot completeness (a complete current-schema pass, a partial pass, a degraded pass, or no row), and `GET /api/books/{id}/match-evidence?book_id=…&release_id=…` resolves the snapshot's ASIN and AudiobookDB IDs against the selected catalog record and builds per-field source-vs-catalog comparisons. A failed catalog lookup degrades the report (`lookup_failed` / `unavailable`) rather than inventing agreement; `books.asin` and the save path are untouched.
+- Release workflow now creates the draft release record in the `reserve`
+  job, up front, and treats a release record that the listing does not
+  return as an empty asset store (every artifact is a fresh upload)
+  instead of failing with "Release vX.Y.Z does not exist". A draft create
+  rejected as "already exists" is likewise tolerated when the listing
+  lags behind the record. The v2.1.0 run hit exactly this: the asset
+  step ran seconds after the draft was created, the listing had not
+  reflected it, and the already-published image was left with no assets.
 - Release assets are uploaded with their plain file names
   (`bragibooks_2.0.0_checksums.txt`, `bragibooks_Darwin_arm64.tar.gz`, …).
   New uploads no longer attach a `bragibooks-publish-v1;…` display label,
@@ -29,8 +133,36 @@ All notable changes to this project will be documented in this file. See [standa
 
 ### Features & Improvements
 
+- **Per-field metadata write selection in Settings** (#518)
+  - Settings gains a "Metadata writes" section: checkboxes for each embedded field the engine supports (title, subtitle, authors, narrators, series, description, genres, year, cover) plus a chapter write policy (write / preserve). The field vocabulary comes from the engine's capability document, so no field the engine cannot write is ever offered.
+  - The selection persists through the existing config precedence (`processing.metadata_fields` / `PROCESSING_METADATA_FIELDS`, `processing.metadata_chapters` / `PROCESSING_METADATA_CHAPTERS`, Settings UI, DB row; migration v16). No saved selection is the documented default: every supported field the job carries is written, matching previous behavior. A deployment pin (the two env vars above) stays authoritative for jobs while present: the Settings UI renders the pinned controls read-only, the server ignores saves of the pinned value (unrelated settings in the same save still land), and the pin never reaches the durable stores, so it stops applying the moment it is removed. If the durable stores themselves are unreadable while a pin is set, the save is refused with a nameable diagnosis instead of writing the pin. Matches the API-endpoint env-managed contract.
+  - The selection is frozen into each job's queue-time snapshot (queue, process, and reprocess paths), so a settings change after enqueue cannot alter a queued job's policy. Unselected fields are left exactly as embedded in the source; title and subtitle are independent selections backed by the engine's component preservation, so a title-only run cannot erase the subtitle and vice versa.
+  - Cover and chapters follow their policies: a preserved cover/chapters skips all mutation (and generates no chapter sidecar) — supported for a single natively-copyable input; the engine reports an explicit diagnosed error otherwise. Output naming always uses the selected/edited metadata, even when nothing is selected for writes.
+- **Authoritative processing jobs: engine-owned naming and previews** (#479, #480)
+  - A processing job is captured as a durable, versioned snapshot of the effective metadata (ordered authors and narrators, canonical AudiobookDB book ID, release year, series, genres, title/subtitle) together with the engine's schema/resolver identity. The worker hands the engine a structured `--job` file and consumes its `--machine` result; Bragi no longer re-matches the catalog at worker time and no longer performs its own path substitution. The engine owns sanitization, tagging, and naming.
+  - People are ordered arrays end to end: the capture order in the UI is the order that names the output (the plural `{authors}` / `{narrators}` tokens join with ", "), and the path format gains the canonical AudiobookDB book ID token `{book_id}`.
+  - The path-token vocabulary now comes from the engine's capability document instead of local registries: the Settings builder, profile validation, and Match's proposed output name all derive from `GET /api/engine/capabilities`.
+  - `POST /api/engine/preview` runs the engine's non-mutating job preview, and Match's proposed output name is that preview over the exact payload a save records, so the name shown is the name the job will publish.
+  - The worker verifies the pinned engine's capabilities (accepted schema/resolver identity, non-empty token list) before executing, and a published machine result that reports a different identity fails the job and preserves its staging for re-queue.
+  - The production and dev Docker images pin the `m4b-merge` v2.2.0 image by its immutable multi-arch index digest; the startup check verifies schema, resolver, and token capabilities (including the supplied-mode `{book_id}` token), not just the version string.
+- A Windows amd64 release archive is now built alongside the existing
+  Linux and macOS amd64/arm64 archives. On Windows, process cancellation
+  kills the spawned m4b-merge tree through a job object (kill-on-close),
+  the platform equivalent of the POSIX process-group kill used elsewhere.
+- Release archives embed the version and use lowercase platform names
+  (`bragibooks_2.1.0_linux-amd64.tar.gz`, `bragibooks_2.1.0_darwin-arm64.tar.gz`,
+  …) instead of `bragibooks_Linux_x86_64.tar.gz` / `bragibooks_Darwin_arm64.tar.gz`.
 - Kept the container's default HTTP port at `8000`, the same port the Python image used, so existing Docker port mappings keep working after upgrading; `SERVER_PORT` still overrides it.
 - Narrowed development Docker media access to configurable input/output directories rather than mounting the developer home directory; pinned Docker build, runtime, and media-tool image digests for reproducible builds, with Renovate digest updates.
+- **Opt-in input-directory source index**
+  - Settings gains a "Source index" toggle (off by default, `directories.indexing_enabled` / `DIRECTORIES_INDEXING_ENABLED`). When on, a background worker walks the input directory and stores one row per path with change-detection signals and the same pre-extracted source metadata intake would compute (embedded/filename ASINs, derived title, ffprobe tags), so Import renders from the index in milliseconds instead of re-walking the filesystem.
+  - The Import page shows the pre-extracted ASIN (monospace badge for one valid value, `N ASINs` for ambiguous, `—` for missing/unknown) and derived title per entry, a status line ("N indexed · <when>"), and a dismissible first-run banner that enables the index and points to Settings for turning it off. New and changed files are appended on visit: a stale index (never run, >60 s old, or pointing at a different root) triggers a non-blocking refresh and re-lists when it lands. Columns are hidden on narrow viewports.
+  - While a scan is in flight, an app-wide banner under the nav names the operation and shows the live progress ("Source index · Reading audio files — N of M") on every page, including Settings, where the Source index section's status line carries the same count; the banner hides at the terminal state. Its observer stays resident (1 s while the index is enabled, 10 s while disabled), so a scan started on any page is visible app-wide without a reload; reduced-motion users see a static activity mark instead of the sweeping rail. The settings row now spans the section's full width. `GET /api/index` reports the in-flight `extracted`/`total` pair (in-memory, absent once the scan ends).
+  - Failed, incomplete, and interrupted index runs are surfaced instead of reading as freshness: the Settings status line and Import status line name the condition (truncated, interrupted, error) and point at Refresh, the Import enable button shows its in-flight and failure states, and a settings draft that turns the index on before saving shows "Enable takes effect after you save settings." instead of the live status controls. `PUT /api/settings` returns `indexing_enabled` so that saved truth comes from the response, matching `GET`.
+  - Indexing is incremental: unchanged complete rows are kept (size + modtime match), changed/new rows are re-extracted, vanished rows are pruned — a truncated walk never prunes, and degraded rows (ffprobe missing, scan budget exhausted) are retried on each refresh (a refresh alone does not guarantee they complete). A non-terminal state left by a hard crash is recovered at boot.
+  - ffprobe runs at most once per audio file: a file under a directory extracted in the same pass is not probed on its own — its row is derived from the folder's single pass (same tags, fields, ASIN, and duration a standalone probe would produce). Files at the input root and files under an incomplete parent probe on their own, and a truncated pass self-heals on the next refresh. Non-audio files keep their pre-built complete empty snapshot instead of a failed ffprobe pass, so they classify stable on every later refresh.
+  - Intake reuses the stored complete snapshot, so importing an indexed folder skips the ffprobe pass entirely; any miss falls back to live probing.
+  - New API surface: `GET /api/index` (status + generation), `POST /api/index/refresh` (202, coalesced; 400 while disabled), and `GET /api/directories?path=…&index=1` (index-backed listing with per-entry evidence). Disabled deployments behave exactly as before.
 - **Per-book selection and bulk book actions on the catalog** (#506)
   - The Books catalog selects books individually: every row carries a checkbox, and the header checkbox is tri-state (all / some / none) that selects or clears every book matching the current filter and search (server-capped at 1,000 via the `GET /books?all_ids=1` ID list). The bulk bar's count follows that selection, and the bulk actions act on that explicit selection only — never on an implicit whole-catalog scope.
   - The bulk bar offers three operations over the selected books: requeue for processing (with the chosen output profile's summary rendered under its picker as a caption, so the bar's actions stay on one line), mark as done, and remove. The bar reflows to a full-width stack on narrow screens.

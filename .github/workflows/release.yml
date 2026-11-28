@@ -63,6 +63,13 @@ jobs:
           if [[ "$RELEASE_EVENT" == push ]]; then args+=(--automatic); fi
           tag=$(python3 scripts/release.py reserve "${args[@]}")
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Create the draft release record up front
+        if: steps.reserve.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.reserve.outputs.tag }}
+          SOURCE: ${{ github.sha }}
+        run: python3 scripts/release.py release --tag "$TAG" --source "$SOURCE"
 
   outputs:
     needs: reserve

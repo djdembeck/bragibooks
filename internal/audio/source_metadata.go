@@ -75,8 +75,10 @@ type SourceFile struct {
 	Error           string  `json:"error,omitempty"`
 }
 
-// SourceFileTags is one probed file's effective (format + first audio
-// stream) tag map, kept verbatim for recoverability.
+// SourceFileTags is one probed file's scope-aware normalized tag map
+// (format tags overlaid by the first audio stream's, case-folded with
+// stream scope winning collisions — the map the field projection runs
+// from), retained for recoverability.
 type SourceFileTags struct {
 	File string            `json:"file"` // basename
 	Tags map[string]string `json:"tags"`
@@ -165,7 +167,33 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 // deadline expiry, empty source — is expressed inside the returned
 // snapshot; the returned error is non-nil only for programming-level
 // faults.
-func ExtractSourceMetadata(ctx context.Context, ffprobe, srcPath string) (*SourceMetadata, error) {
+//
+// srcName is the source's IDENTITY: the original path the operator sees,
+// used for the ASIN filename fallback and file naming. srcKind is the
+// row's KIND, decided by the caller ("file" or "folder"): an indexed
+// source's kind is the walk's row type, NOT a fresh stat of srcName —
+// the name is mutable, and re-statting it would let a source swapped to
+// a directory after the walk enter folder discovery with unpinned child
+// paths. "unknown" (standalone callers with no row) classifies by
+// stat, as before.
+// probePath is what ffprobe actually reads: for an indexed source this is
+// the PINNED descriptor's path (the resolved target inside the input
+// root), so a symlink swap after the open-time check cannot repoint the
+// probe, while srcName keeps the stored metadata naming the real source.
+// The two are equal for the standalone (intake) path. srcFile is the
+// verified open descriptor for probePath (nil on the standalone path,
+// where no descriptor is available): for a file it is handed to the
+// ffprobe child via cmd.ExtraFiles so the child probes /dev/fd/3, the
+// inherited descriptor, instead of reopening the mutable name; for a
+// folder it is the verified directory descriptor that folder discovery
+// enumerates through. pinPart,
+// when set, is called for each discovered audio part of a folder and
+// returns the part's pinned probe path, the part's verified descriptor
+// (nil when the part is probed by name), plus a release func (and false
+// when the part cannot be pinned, in which case the part is recorded as
+// one errored file rather than probing it by name); nil probes every
+// part by name.
+func ExtractSourceMetadata(ctx context.Context, ffprobe, srcName, probePath, srcKind string, pinPart func(part string) (string, *os.File, func(), bool), srcFile *os.File) (*SourceMetadata, error) {
 	passCtx, cancel := context.WithTimeout(ctx, sourceMetadataTimeout)
 	defer cancel()
 
@@ -175,37 +203,67 @@ func ExtractSourceMetadata(ctx context.Context, ffprobe, srcPath string) (*Sourc
 		Fields:     make(map[string]SourceField, len(tagPrecedence)),
 	}
 
-	stat, err := os.Stat(srcPath)
-	if err != nil {
-		snap = degradedSnapshot(snap, err.Error())
-		// Filename extraction needs no successful probe: a stat failure
-		// (renamed source, vanished file) still leaves a scannable name.
-		// Set the field only when a value is found so a clean degradation
-		// stays all-error.
-		if values := findASINs([]string{filepath.Base(srcPath)}); len(values) > 0 {
-			snap.Fields[FieldASIN] = SourceField{Values: values, Source: SourceFilename, Status: StatusPresent}
+	isDir := srcKind == "folder"
+	if srcKind != "folder" && srcKind != "file" {
+		// No row kind (standalone caller): classify by the source's own
+		// stat, the pre-index behavior. A stat failure degrades exactly
+		// as before — a vanished source is a degraded snapshot, not a
+		// probe of a name that resolves to nothing.
+		stat, serr := os.Stat(srcName)
+		if serr != nil {
+			snap = degradedSnapshot(snap, serr.Error())
+			// Filename extraction needs no successful probe: a stat
+			// failure (renamed source, vanished file) still leaves a
+			// scannable name. Set the field only when a value is found
+			// so a clean degradation stays all-error.
+			if values := findASINs([]string{filepath.Base(srcName)}); len(values) > 0 {
+				snap.Fields[FieldASIN] = SourceField{Values: values, Source: SourceFilename, Status: StatusPresent}
+			}
+			return snap, nil
 		}
-		return snap, nil
+		isDir = stat.IsDir()
 	}
 
-	var paths []string
-	if stat.IsDir() {
+	var paths, probePaths []string
+	var probeFds []*os.File
+	var pinClosers []func()
+	defer func() {
+		for i := len(pinClosers) - 1; i >= 0; i-- {
+			pinClosers[i]()
+		}
+	}()
+	if isDir {
 		snap.SourceKind = "folder"
-		paths, err = discoverAudioFiles(passCtx, srcPath, snap)
-		if err != nil {
-			return degradedSnapshot(snap, err.Error()), nil
+		var derr error
+		// Discover through the PINNED directory path (probePath), not
+		// srcName: for an indexed folder, srcName is the row's mutable
+		// pathname, and a symlink swap of that name to an outside
+		// directory after openInsideRoot verified it would otherwise be
+		// ENUMERATED here — the parts' basenames and count would land in
+		// Files/FilesTotal before the part pins refuse the outside files.
+		// srcName stays the source's IDENTITY (the stored naming, the
+		// ASIN fallback). The two are equal on the standalone path.
+		// srcFile is the verified directory descriptor when the caller
+		// pinned one (an indexed folder): discovery enumerates through
+		// it, so a name swap cannot redirect the walk. nil on the
+		// standalone path, which opens the name as before.
+		paths, probePaths, probeFds, pinClosers, derr = discoverAndPinAudioFiles(passCtx, probePath, srcFile, snap, pinPart)
+		if derr != nil {
+			return degradedSnapshot(snap, derr.Error()), nil
 		}
 	} else {
 		snap.SourceKind = "file"
-		paths = []string{srcPath}
+		paths = []string{srcName}
+		probePaths = []string{probePath}
+		probeFds = []*os.File{srcFile}
 	}
 	snap.FilesTotal = len(paths)
 
 	if len(paths) == 0 {
-		return finalizeEmpty(snap), nil
+		return finalizeEmpty(snap, srcName), nil
 	}
 
-	merged, mergedTruncated, probedErrs := probeFiles(passCtx, ffprobe, paths, snap)
+	merged, mergedTruncated, probedErrs := probeFiles(passCtx, ffprobe, paths, probePaths, probeFds, snap)
 	if probedErrs == len(paths) {
 		firstErr := ""
 		if len(snap.Files) > 0 {
@@ -215,12 +273,12 @@ func ExtractSourceMetadata(ctx context.Context, ffprobe, srcPath string) (*Sourc
 		// degraded override so a found value is not written over by the
 		// all-error marking.
 		snap = degradedSnapshot(snap, fmt.Sprintf("all %d probed files failed: %s", len(paths), firstErr))
-		applyASINFallback(snap, srcPath)
+		applyASINFallback(snap, srcName)
 		return snap, nil
 	}
 
 	mergeFields(snap, merged, mergedTruncated)
-	applyASINFallback(snap, srcPath)
+	applyASINFallback(snap, srcName)
 	return finalize(snap), nil
 }
 
@@ -259,7 +317,7 @@ func degradedSnapshot(snap *SourceMetadata, cause string) *SourceMetadata {
 // files. A clean scan marks every field explicitly missing; a truncated
 // scan (bound hit before the directory was exhausted) cannot claim the
 // unscanned entries held nothing, so the fields are errored instead.
-func finalizeEmpty(snap *SourceMetadata) *SourceMetadata {
+func finalizeEmpty(snap *SourceMetadata, srcPath string) *SourceMetadata {
 	snap.Files = []SourceFile{}
 	snap.RawTags = []SourceFileTags{}
 	for _, f := range fieldKeys {
@@ -270,6 +328,10 @@ func finalizeEmpty(snap *SourceMetadata) *SourceMetadata {
 		}
 		snap.Fields[f] = SourceField{Values: []string{}, Source: SourceEmbedded, Status: StatusMissing}
 	}
+	// No audio to probe, but the source name can still carry an ASIN —
+	// an empty book folder named "... [B0...]" is a real source, not a
+	// dead end.
+	applyASINFallback(snap, srcPath)
 	return snap
 }
 
@@ -277,15 +339,29 @@ func finalizeEmpty(snap *SourceMetadata) *SourceMetadata {
 // batches) keeping regular audio files, bounded by maxDiscoveredEntries
 // scanned entries, maxProbedParts matched files, and the pass deadline.
 // The kept paths are sorted so probe and merge order is deterministic.
-func discoverAudioFiles(ctx context.Context, dir string, snap *SourceMetadata) ([]string, error) {
-	d, err := os.Open(dir)
-	if err != nil {
-		return nil, err
+// truncated reports that a bound (or the deadline) cut the walk short:
+// the kept set is then a first-N projection, not the whole folder.
+// dirFile is the verified directory descriptor to enumerate through
+// (nil: open the name, the standalone pre-index behavior).
+func discoverAudioFiles(ctx context.Context, dir string, dirFile *os.File) ([]string, bool, error) {
+	// Enumerate THROUGH the verified directory descriptor when one is
+	// available (an indexed folder): the entries come from the pinned fd,
+	// so a swap of the directory's name cannot redirect the walk. With no
+	// descriptor (the standalone path) we open the name, the documented
+	// pre-index behavior, and own that open for the duration of the walk.
+	d := dirFile
+	if d == nil {
+		opened, err := os.Open(dir)
+		if err != nil {
+			return nil, false, err
+		}
+		defer opened.Close()
+		d = opened
 	}
-	defer d.Close()
 
 	var kept []string
 	scanned := 0
+	truncated := false
 	for {
 		batch, readErr := d.ReadDir(64)
 		for _, e := range batch {
@@ -298,10 +374,10 @@ func discoverAudioFiles(ctx context.Context, dir string, snap *SourceMetadata) (
 			if readErr == io.EOF {
 				break
 			}
-			return nil, readErr
+			return nil, false, readErr
 		}
 		if ctx.Err() != nil || scanned >= maxDiscoveredEntries || len(kept) >= maxProbedParts {
-			snap.Truncated = true
+			truncated = true
 			break
 		}
 	}
@@ -309,29 +385,102 @@ func discoverAudioFiles(ctx context.Context, dir string, snap *SourceMetadata) (
 	if len(kept) > maxProbedParts {
 		kept = kept[:maxProbedParts]
 	}
-	return kept, nil
+	return kept, truncated, nil
+}
+
+// discoverAndPinAudioFiles discovers the folder's audio parts and, when
+// pinPart is set, pins EVERY part (same open-time containment rule the
+// source's own open used) before any probe runs: a part swapped to an
+// escaping (or special) file between discovery and probe would otherwise
+// be probed by its name and persisted. probePaths[i] is what ffprobe
+// reads for paths[i] (the pinned descriptor's path when pinned, the
+// part's own name when pinPart is nil, and the EMPTY sentinel when the
+// part failed to pin — a failed pin is recorded as one errored file and
+// NOT probed, so one bad part degrades one file, not the folder).
+// probeFds[i] is the verified descriptor for probePaths[i] (nil when the
+// part is probed by name, so no descriptor can be handed to the child).
+// The returned closers release the pinned descriptors; the caller owns
+// them for the pass's duration. Truncation (a discovery/probe bound or
+// the deadline) is derived from the kept set, so a pin that adds no
+// discovery of its own cannot masquerade as one. dirFile is the
+// verified directory descriptor to enumerate through (nil: the
+// standalone path opens the name).
+func discoverAndPinAudioFiles(ctx context.Context, dir string, dirFile *os.File, snap *SourceMetadata, pinPart func(part string) (string, *os.File, func(), bool)) ([]string, []string, []*os.File, []func(), error) {
+	kept, truncated, err := discoverAudioFiles(ctx, dir, dirFile)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if truncated {
+		snap.Truncated = true
+	}
+	probePaths := make([]string, len(kept))
+	for i, part := range kept {
+		probePaths[i] = part
+	}
+	if pinPart == nil {
+		return kept, probePaths, nil, nil, nil
+	}
+	probeFds := make([]*os.File, len(kept))
+	var closers []func()
+	for i, part := range kept {
+		p, f, closer, ok := pinPart(part)
+		if !ok {
+			// The pin refused this part: probe it by name would
+			// re-follow the swap, so it is recorded as one errored
+			// file (the empty probePath sentinel) instead.
+			probePaths[i] = ""
+			continue
+		}
+		probePaths[i] = p
+		probeFds[i] = f
+		closers = append(closers, closer)
+	}
+	return kept, probePaths, probeFds, closers, nil
 }
 
 // probeFiles runs ffprobe over every path in order, recording per-file
 // duration and effective tags, and returns the merged per-field value
 // lists plus the set of fields whose list the per-field cap cut short.
-// Returns the number of files whose probe failed.
-func probeFiles(ctx context.Context, ffprobe string, paths []string, snap *SourceMetadata) (map[string][]string, map[string]bool, int) {
+// Returns the number of files whose probe failed. paths are the
+// source-identity names (stored in the snapshot's Files/RawTags);
+// probePaths is what ffprobe actually reads — the pinned descriptor's
+// path for an indexed part, the part's own name otherwise — and is
+// parallel to paths (equal when nothing was pinned). An EMPTY probePath
+// marks a part that could not be pinned (vanished, or swapped to an
+// escaping/special file between discovery and pin): it is recorded as
+// one errored file and NOT probed by name — probing the name would
+// re-follow exactly the swap the pin refused. probeFds, when parallel
+// to paths, carries each part's verified descriptor for the fd hand-off
+// (bindProbe); a nil slot means the part is probed by name.
+func probeFiles(ctx context.Context, ffprobe string, paths, probePaths []string, probeFds []*os.File, snap *SourceMetadata) (map[string][]string, map[string]bool, int) {
 	merged := make(map[string][]string, len(tagPrecedence))
 	seen := make(map[string]map[string]bool, len(tagPrecedence))
 	truncated := make(map[string]bool, len(tagPrecedence))
 	probedErrs := 0
 	rawBytes := 0
 
-	for _, path := range paths {
+	for i, path := range paths {
 		if ctx.Err() != nil || rawBytes > maxRawTagBytes {
 			snap.Truncated = true
 			break
 		}
-		snap.FilesProbed++
+		probePath := probePaths[i]
 		snap.Files = append(snap.Files, SourceFile{File: filepath.Base(path)})
-
-		effective, lowered, duration, probeErr := probeOne(ctx, ffprobe, path)
+		if probePath == "" {
+			// Refused pin: recorded as one errored file and NOT probed —
+			// it must not count as probed, or a folder with one probed +
+			// one refused part would report zero unprobed files,
+			// contradicting the per-file error.
+			snap.Files[len(snap.Files)-1].Error = "part not pinned (vanished or escaped the input root); not probed"
+			probedErrs++
+			continue
+		}
+		snap.FilesProbed++
+		var fd *os.File
+		if len(probeFds) == len(paths) {
+			fd = probeFds[i]
+		}
+		tags, duration, probeErr := probeOne(ctx, ffprobe, probePath, fd)
 		if probeErr != "" {
 			snap.Files[len(snap.Files)-1].Error = probeErr
 			probedErrs++
@@ -342,22 +491,21 @@ func probeFiles(ctx context.Context, ffprobe string, paths []string, snap *Sourc
 
 		// Retention cap: stop adding raw entries, keep merged values.
 		approx := len(filepath.Base(path))
-		for k, v := range effective {
+		for k, v := range tags {
 			approx += len(k) + len(v) + 8
 		}
 		if rawBytes+approx <= maxRawTagBytes {
-			snap.RawTags = append(snap.RawTags, SourceFileTags{File: filepath.Base(path), Tags: effective})
+			snap.RawTags = append(snap.RawTags, SourceFileTags{File: filepath.Base(path), Tags: tags})
 			rawBytes += approx
 		} else {
 			snap.Truncated = true
 		}
 
-		// Tag keys are matched case-insensitively (ID3 and M4B spell
-		// the same tag differently); RawTags above keeps the original
-		// spellings. `lowered` folds the effective overlay
-		// case-insensitively with stream scope winning, so same-key,
-		// different-case format/stream collisions are deterministic.
-		mergeDoc(merged, seen, truncated, lowered)
+		// The per-file projection (FileSnapshotFromFolder) and the
+		// folder merge both run against the same normalized map: the
+		// scope-aware fold with stream scope winning, so a derived
+		// child snapshot equals what a standalone probe would produce.
+		mergeDoc(merged, seen, truncated, tags)
 	}
 	return merged, truncated, probedErrs
 }
@@ -406,24 +554,40 @@ func addValue(merged map[string][]string, seen map[string]map[string]bool, trunc
 	merged[field] = append(merged[field], value)
 }
 
-// probeOne runs a single bounded ffprobe and returns the original-case
-// effective tag map, the same tags lowercased, the parsed duration, and
-// an error message ("" on success).
-func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, map[string]string, float64, string) {
+// probeOne runs a single bounded ffprobe and returns the scope-aware
+// normalized tag map (format tags overlaid by the first audio stream's
+// tags, case-folded with stream scope winning same-lowercase-key
+// collisions — the same map mergeDoc projects from), the parsed
+// duration, and an error message ("" on success). f is the verified
+// open descriptor for path (nil: probe by name); on darwin/BSD it is
+// handed to the child via cmd.ExtraFiles so the child probes
+// /dev/fd/3, the inherited descriptor, instead of reopening the
+// mutable name.
+func probeOne(ctx context.Context, ffprobe, path string, f *os.File) (map[string]string, float64, string) {
+	probePath, extra := bindProbe(path, f)
+	// ffprobe infers the format from file content, so a crafted playlist
+	// or container can reference remote resources; restrict it to local
+	// protocols. `file` is always needed: a pinned probe reads its
+	// descriptor through a file-protocol path (/dev/fd/3 on darwin/BSD,
+	// /proc/<pid>/fd/<n> on Linux, an NT device path on Windows), so
+	// dropping `file` would break the primary open. The whitelist still
+	// blocks remote protocols (http, tcp, udp, …), which is the main
+	// risk a reference-bearing format (playlist) introduces.
+	whitelist := "file,pipe,data"
 	cmd := exec.CommandContext(ctx, ffprobe,
-		// ffprobe infers the format from file content, so a crafted
-		// playlist or container can reference remote resources; restrict
-		// it to local protocols.
-		"-protocol_whitelist", "file,pipe,data",
-		"-v", "error", "-print_format", "json", "-show_format", "-show_streams", path)
+		"-protocol_whitelist", whitelist,
+		"-v", "error", "-print_format", "json", "-show_format", "-show_streams", probePath)
+	if extra != nil {
+		cmd.ExtraFiles = []*os.File{extra}
+	}
 	stderr := &limitedWriter{}
 	cmd.Stderr = stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, nil, 0, fmt.Sprintf("probe pipe: %v", err)
+		return nil, 0, fmt.Sprintf("probe pipe: %v", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, nil, 0, fmt.Sprintf("start probe: %v", err)
+		return nil, 0, fmt.Sprintf("start probe: %v", err)
 	}
 
 	// reap kills the child and reaps it after closing stdout, so an early
@@ -445,19 +609,19 @@ func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, map
 		}
 		if len(out) > maxProbeOutputBytes {
 			reap()
-			return nil, nil, 0, "probe output exceeds 1 MiB"
+			return nil, 0, "probe output exceeds 1 MiB"
 		}
 		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
 			break
 		}
 		if rerr != nil {
 			reap()
-			return nil, nil, 0, fmt.Sprintf("read probe output: %v; stderr: %s", rerr, string(stderr.b))
+			return nil, 0, fmt.Sprintf("read probe output: %v; stderr: %s", rerr, string(stderr.b))
 		}
 	}
 	runErr := cmd.Wait()
 	if runErr != nil {
-		return nil, nil, 0, fmt.Sprintf("ffprobe: %v; stderr: %s", runErr, string(stderr.b))
+		return nil, 0, fmt.Sprintf("ffprobe: %v; stderr: %s", runErr, string(stderr.b))
 	}
 
 	var doc struct {
@@ -471,34 +635,18 @@ func probeOne(ctx context.Context, ffprobe, path string) (map[string]string, map
 		} `json:"streams"`
 	}
 	if err := json.NewDecoder(bytes.NewReader(out)).Decode(&doc); err != nil {
-		return nil, nil, 0, fmt.Sprintf("parse probe output: %v", err)
+		return nil, 0, fmt.Sprintf("parse probe output: %v", err)
 	}
 
-	// Effective tags: format-level tags overlaid by the first audio
-	// stream's tags (stream-level keys win: the narrower scope is the
-	// more specific claim).
-	effective := make(map[string]string, len(doc.Format.Tags))
-	for k, v := range doc.Format.Tags {
-		effective[k] = v
-	}
-	for _, s := range doc.Streams {
-		if s.CodecType == "audio" {
-			for k, v := range s.Tags {
-				effective[k] = v
-			}
-			break
-		}
-	}
-	for k, v := range effective {
-		if len(v) > maxTagValueBytes {
-			effective[k] = v[:maxTagValueBytes] + "…"
-		}
-	}
-
-	lowered := foldProbeTags(doc.Format.Tags, firstAudioStreamTags(doc.Streams))
+	// The normalized tag map is the scope-aware fold of format + first
+	// audio stream: stream scope wins same-lowercase-key collisions, and
+	// it is the exact map the standalone single-file path projects fields
+	// from — so a folder pass's stored per-file tags feed
+	// FileSnapshotFromFolder identically.
+	tags := foldProbeTags(doc.Format.Tags, firstAudioStreamTags(doc.Streams))
 
 	duration, _ := strconv.ParseFloat(doc.Format.Duration, 64)
-	return effective, lowered, duration, ""
+	return tags, duration, ""
 }
 
 // firstAudioStreamTags returns the tags of the first audio stream, or nil.
@@ -520,8 +668,7 @@ func firstAudioStreamTags(streams []struct {
 // scope is decided by lexicographic key order — never map iteration order
 // (finding: nondeterministic extracted values). Collecting the source pairs
 // first and inserting them in sorted (scope, key) order makes the winner of
-// any collision deterministic. Values are capped at maxTagValueBytes,
-// matching the effective-tag pass.
+// any collision deterministic. Values are capped at maxTagValueBytes.
 func foldProbeTags(formatTags, streamTags map[string]string) map[string]string {
 	type tagPair struct {
 		scope int // 0 = format, 1 = stream
@@ -615,16 +762,29 @@ func (s *SourceMetadata) incompleteMsg() string {
 		errored, s.FilesTotal-s.FilesProbed, s.FilesTotal)
 }
 
-// findASINs scans basenames (extension stripped) for ASINs, returning the
-// distinct matches normalized to uppercase in first-seen order.
+// stripAudioExt removes a trailing audio extension (case-insensitive) from
+// name. It matches only the known container list, never filepath.Ext: a
+// name that is not an audio file — a folder such as
+// "M.R. Forbes - Book {B0GVPM58JP}" — must come through untouched, since
+// filepath.Ext would cut at the first dot and destroy the ASIN.
+func stripAudioExt(name string) string {
+	lower := strings.ToLower(name)
+	for _, ext := range audioExtensions {
+		if strings.HasSuffix(lower, ext) {
+			return name[:len(name)-len(ext)]
+		}
+	}
+	return name
+}
+
+// findASINs scans basenames (audio extension stripped) for ASINs,
+// returning the distinct matches normalized to uppercase in first-seen
+// order.
 func findASINs(names []string) []string {
 	seen := map[string]bool{}
 	var values []string
 	for _, name := range names {
-		stripped := name
-		if ext := filepath.Ext(stripped); ext != "" {
-			stripped = stripped[:len(stripped)-len(ext)]
-		}
+		stripped := stripAudioExt(name)
 		for _, m := range asinPattern.FindAllString(stripped, -1) {
 			upper := strings.ToUpper(m)
 			if !seen[upper] {
@@ -681,4 +841,78 @@ func finalize(snap *SourceMetadata) *SourceMetadata {
 		}
 	}
 	return snap
+}
+
+// FileSnapshotFromFolder builds the per-file SourceMetadata for one audio
+// file from a COMPLETE folder snapshot, so the file is never probed a
+// second time when its parent folder was probed in the same pass. The
+// file's tags are the folder pass's RawTags entry for its basename — the
+// same scope-aware normalized map probeOne computed (and the standalone
+// single-file path projects from), so original-case precedence keys and
+// format-vs-stream collisions resolve identically — its duration is the
+// Files entry, and its fields/ASIN run the exact single-file projection a
+// standalone probe would have produced (tag precedence, series_part
+// slash-cut, embedded value with filename fallback).
+//
+// Callers MUST pass a snapshot for which this file's probe succeeded
+// (snapshot Complete() and a RawTags entry for the basename): an absent
+// file returns a degraded snapshot, which the index stores as the
+// honest "extraction not run" marker and re-attempts on the next refresh.
+func FileSnapshotFromFolder(folder *SourceMetadata, filePath string) *SourceMetadata {
+	base := filepath.Base(filePath)
+	snap := &SourceMetadata{
+		Schema:      SourceMetadataSchema,
+		SourceKind:  "file",
+		FilesTotal:  1,
+		FilesProbed: 1,
+		Fields:      make(map[string]SourceField, len(fieldKeys)),
+		Files:       []SourceFile{{File: base}},
+	}
+	var tags map[string]string
+	for _, rt := range folder.RawTags {
+		if rt.File == base {
+			tags = rt.Tags
+			break
+		}
+	}
+	if tags == nil {
+		return degradedSnapshot(snap, "not found in folder snapshot; extraction not run")
+	}
+	for _, f := range folder.Files {
+		if f.File == base {
+			snap.Files[0].DurationSeconds = f.DurationSeconds
+			snap.DurationSeconds = f.DurationSeconds
+			break
+		}
+	}
+	// Per-file projection: one value per field (no cross-file merge, no
+	// per-field cap), mirroring mergeDoc/mergeFields for a single file.
+	for _, field := range fieldKeys {
+		value := ""
+		found := false
+		for _, key := range tagPrecedence[field] {
+			v, ok := tags[key]
+			if !ok {
+				continue
+			}
+			if field == FieldSeriesPart {
+				if slash := strings.IndexByte(v, '/'); slash >= 0 {
+					v = v[:slash]
+				}
+			}
+			if v == "" {
+				continue
+			}
+			value, found = v, true
+			break
+		}
+		if found {
+			snap.Fields[field] = SourceField{Values: []string{value}, Source: SourceEmbedded, Status: StatusPresent}
+		} else {
+			snap.Fields[field] = SourceField{Values: []string{}, Source: SourceEmbedded, Status: StatusMissing}
+		}
+	}
+	snap.RawTags = []SourceFileTags{{File: base, Tags: tags}}
+	applyASINFallback(snap, filePath)
+	return finalize(snap)
 }

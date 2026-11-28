@@ -42,7 +42,47 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
 	completed_at TEXT,
 	created_at TEXT DEFAULT (datetime('now')),
 	queue_seq INTEGER,
-	book_pre_status TEXT
+	book_pre_status TEXT,
+	batch_id TEXT,
+	batch_closed INTEGER NOT NULL DEFAULT 0,
+	snapshot_version INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS book_snapshots (
+    book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    audiobookdb_book_id TEXT NOT NULL DEFAULT '',
+    audiobookdb_release_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    subtitle TEXT NOT NULL DEFAULT '',
+    authors TEXT NOT NULL DEFAULT '[]',
+    narrators TEXT NOT NULL DEFAULT '[]',
+    series_name TEXT NOT NULL DEFAULT '',
+    series_position TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    genres TEXT NOT NULL DEFAULT '[]',
+    year INTEGER,
+    cover_file TEXT NOT NULL DEFAULT '',
+    chapters TEXT NOT NULL DEFAULT '[]',
+    captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS book_metadata_overrides (
+    book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    title TEXT NOT NULL DEFAULT '',
+    subtitle TEXT NOT NULL DEFAULT '',
+    authors TEXT NOT NULL DEFAULT '',
+    narrators TEXT NOT NULL DEFAULT '',
+    series_name TEXT NOT NULL DEFAULT '',
+    series_position TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    genres TEXT NOT NULL DEFAULT '',
+    year INTEGER,
+    cleared TEXT NOT NULL DEFAULT '[]',
+    cover_source TEXT NOT NULL DEFAULT '',
+    cover_file TEXT NOT NULL DEFAULT '',
+    cover_url TEXT NOT NULL DEFAULT '',
+    chapters TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `
 
@@ -73,9 +113,42 @@ func newTestJobsHandler(t *testing.T) (*Handler, *ProcessingService) {
 		t.Fatalf("create jobs schema: %v", err)
 	}
 
-	svc := NewProcessingService(db, &audio.Processor{}, 1)
+	// The processor carries a queueable global destination: the queue path
+	// freezes the effective output root + format into every job, so an
+	// empty global is a refused (not inheritable) configuration. Tests
+	// that exercise specific destinations swap svc.proc below (and re-store
+	// the engine identity via testProcessor, which seeds it).
+	svc := NewProcessingService(db, testProcessor(&audio.Processor{
+		OutputDir:  t.TempDir(),
+		PathFormat: "{title}",
+		LogLevel:   "info",
+	}), 1)
 	h := &Handler{svc: &Services{DB: db, ProcessingSvc: svc}}
 	return h, svc
+}
+
+// seedSnapshot inserts a minimal authoritative capture row for a book so the
+// queue path's hard prerequisite (an operator-captured selection) is met.
+// Pipeline tests are about the job mechanics, not the capture, so the row
+// carries just the book's title; a real capture comes from Match/save.
+func seedSnapshot(t *testing.T, db *sql.DB, bookID int64) {
+	t.Helper()
+	if _, err := db.Exec(
+		`INSERT INTO book_snapshots (book_id, title, authors, narrators)
+		 VALUES (?, (SELECT title FROM books WHERE id = ?), '["Author"]', '["Narrator"]')`,
+		bookID, bookID,
+	); err != nil {
+		t.Fatalf("seed snapshot for book %d: %v", bookID, err)
+	}
+}
+
+// testProcessor builds a fake-engine Processor with the verified engine
+// identity stored, the same pair the real startup path (CheckCapabilities +
+// StoreCapabilities) produces. A job reports back the identity captured at
+// queue time, so a test that swaps the processor must re-store it.
+func testProcessor(p *audio.Processor) *audio.Processor {
+	p.StoreCapabilities(&audio.Capabilities{SchemaVersion: 1, ResolverVersion: "1"})
+	return p
 }
 
 // writeSleepingBinary writes a shell script to dir that sleeps, so a queued
@@ -92,12 +165,17 @@ func writeSleepingBinary(t *testing.T, dir string) string {
 	return p
 }
 
-// writeStreamingSleepBinary prints one line before sleeping, so a running
-// job has live stdout in memory when it is cancelled.
+// writeStreamingSleepBinary prints one progress line to stderr (the engine's
+// log stream in machine mode) before sleeping, so a running job has live
+// output in memory when it is cancelled.
 func writeStreamingSleepBinary(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "stream-sleep-bin")
-	script := "#!/bin/sh\nprintf 'partial live line\\n'\nexec sleep 300 1>&- 2>&-\n"
+	// The --version and --capabilities branches serve the pre-launch engine
+	// gate: the mock must report a version at or above the floor and the
+	// schema/resolver identity the test seeded into the processor, or
+	// RunJob refuses to start it.
+	script := "#!/bin/sh\ncase \"$*\" in *--version*) echo 'm4b-merge 2.2.0'; exit 0;; *--capabilities*) echo '{\"schema_version\":1,\"resolver_version\":\"1\",\"default_path_format\":\"{author}/{title}\",\"path_tokens\":[{\"name\":\"book_id\",\"value\":\"b\",\"example\":\"B\"},{\"name\":\"authors\",\"value\":\"a\",\"example\":\"A\"},{\"name\":\"narrators\",\"value\":\"n\",\"example\":\"N\"},{\"name\":\"title\",\"value\":\"t\",\"example\":\"T\"}],\"field_policies\":{\"values\":[\"write\",\"preserve\",\"clear\"],\"scalar_fields\":[\"title\",\"subtitle\",\"authors\",\"narrators\",\"series\",\"description\",\"genres\",\"year\"]},\"cover_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"preserve\",\"clear\"]},\"chapter_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"preserve\",\"clear\"]}}'; exit 0;; esac\nprintf 'partial live line\\n' 1>&2\nexec sleep 300 1>&- 2>&-\n"
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatalf("write streaming sleeping binary: %v", err)
 	}
@@ -171,12 +249,13 @@ func TestCancelQueuedJob(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, 1)
 
 	// Queue a job without starting workers, so it stays 'queued'.
 	// Queueing intentionally leaves the book in its pre-queue state ('matched'):
 	// the queued -> processing transition happens at worker start, so a queued
 	// cancel needs no status rollback.
-	id, err := h.svc.ProcessingSvc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := h.svc.ProcessingSvc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -230,7 +309,8 @@ func TestCancelQueuedJobRestoresPreQueueBookStatus(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
-	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	seedSnapshot(t, h.svc.DB, 1)
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -252,7 +332,8 @@ func TestWorkerLosingQueuedClaimRestoresPreQueueBookStatus(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
-	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	seedSnapshot(t, h.svc.DB, 1)
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -284,18 +365,19 @@ func TestCancelRunningJob(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
 	bin := writeSleepingBinary(t, t.TempDir())
-	svc.proc = &audio.Processor{Binary: bin}
+	svc.proc = testProcessor(&audio.Processor{Binary: bin, OutputDir: t.TempDir(), PathFormat: "{title}"})
 
 	if _, err := h.svc.DB.Exec(
 		"INSERT INTO books (id, title, status, status_message) VALUES (1, 'Running Book', 'matched', '')",
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, 1)
 
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(ctx, 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -342,12 +424,18 @@ func TestCancelRunningJobPersistsLiveOutput(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
 	bin := writeStreamingSleepBinary(t, t.TempDir())
-	svc.proc = &audio.Processor{Binary: bin}
+	svc.proc = testProcessor(&audio.Processor{Binary: bin, OutputDir: t.TempDir(), PathFormat: "{title}"})
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (1, 'Book', 'matched')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	seedSnapshot(t, h.svc.DB, 1)
 
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(ctx, 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -414,7 +502,11 @@ func TestFinalizeCancelledExecErrorSkipsBookRestoreAndCleansUp(t *testing.T) {
 	if _, err := db.Exec(processingSchemaSQL); err != nil {
 		t.Fatalf("create jobs schema: %v", err)
 	}
-	svc := NewProcessingService(db, &audio.Processor{}, 1)
+	svc := NewProcessingService(db, testProcessor(&audio.Processor{
+		OutputDir:  t.TempDir(),
+		PathFormat: "{title}",
+		LogLevel:   "info",
+	}), 1)
 
 	// Book in its pre-queue status: QueueJob records it as
 	// book_pre_status, so a SUCCESSFUL finalizeCancelled WOULD have
@@ -425,8 +517,9 @@ func TestFinalizeCancelledExecErrorSkipsBookRestoreAndCleansUp(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, db, 1)
 
-	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -512,7 +605,8 @@ func TestQueueJobRecordsMergeAction(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
-	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	seedSnapshot(t, h.svc.DB, 1)
+	id, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -961,6 +1055,18 @@ func jobIDsFromList(t *testing.T, body *httptest.ResponseRecorder) (map[string]s
 	return byID, ids
 }
 
+// decodeList decodes a ListJobsResponse from raw response bytes: the
+// recorder's reader is consumed by the first decode, so the aggregate
+// assertions decode the captured copy, not the recorder.
+func decodeList(t *testing.T, raw []byte) ListJobsResponse {
+	t.Helper()
+	var resp ListJobsResponse
+	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&resp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	return resp
+}
+
 // Regression: the Queue page derives its active set from GET /jobs. When a
 // batch of audit rows (imports/metadata saves) lands while a merge is in
 // flight, the recent-history LIMIT used to push the active job out of the
@@ -1146,24 +1252,13 @@ func TestJobsRoutesResolve(t *testing.T) {
 	}
 }
 
-// fakeM4bBinary writes a shell script that exits 0 immediately and reports a
-// version, standing in for m4b-merge in pipeline tests.
-func fakeM4bBinary(t *testing.T, dir string) string {
-	t.Helper()
-	p := filepath.Join(dir, "fake-m4b")
-	if err := os.WriteFile(p, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.0.0; exit 0; fi\necho ran\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write fake binary: %v", err)
-	}
-	return p
-}
-
 // TestStreamJobProgressCloseEndsStream covers the row-16 fix: finalize closes
 // the progress channel, so the SSE loop terminates on its own (and the
 // trailing "done" line is written) without waiting for a client disconnect.
 func TestStreamJobProgressCloseEndsStream(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1273,7 +1368,7 @@ func newStreamRequest(t *testing.T, id string) *http.Request {
 func TestStreamJobStreamsLiveOutput(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1337,7 +1432,7 @@ func TestStreamJobStreamsLiveOutput(t *testing.T) {
 func TestStreamJobFanOutToConcurrentTimeStreams(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1446,7 +1541,7 @@ func TestStreamJobSlowReaderCannotStallAppend(t *testing.T) {
 func TestStreamJobReconnectCarriesFullSnapshot(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1522,7 +1617,7 @@ func TestStreamJobFinalDrainDeliversTrailingLine(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
 	for i := range 20 {
-		id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+		id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{}, "")
 		if err != nil {
 			t.Fatalf("iteration %d: queue job: %v", i, err)
 		}
@@ -1577,7 +1672,7 @@ func TestStreamJobFinalDrainDeliversTrailingLine(t *testing.T) {
 func TestStreamJobLateSubscriberGetsTerminalResult(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	id, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1764,11 +1859,11 @@ func TestJobStateOutputFrom(t *testing.T) {
 func TestJobsExposeDurableQueueOrder(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 
-	first, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, audio.RunOptions{})
+	first, err := svc.QueueJob(t.Context(), 0, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue first job: %v", err)
 	}
-	second, err := svc.QueueJob(t.Context(), 0, []string{"/x/b.m4b"}, audio.RunOptions{})
+	second, err := svc.QueueJob(t.Context(), 0, []string{"/x/b.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue second job: %v", err)
 	}
@@ -1800,6 +1895,193 @@ func TestJobsExposeDurableQueueOrder(t *testing.T) {
 	}
 }
 
+// TestProcessRequestsCarryDurableBatchIdentity covers the completion
+// banner's grouping contract: one POST /api/process request shares one
+// batch id across every job it enqueues, and back-to-back requests stay
+// contiguous in queue_order (MAX+1 per insert, rows never pruned) — so the
+// batch id, not the adjacency, is what separates two user batches.
+func TestProcessRequestsCarryDurableBatchIdentity(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+
+	for id := int64(1); id <= 4; id++ {
+		if _, err := h.svc.DB.Exec(
+			"INSERT INTO books (id, title, status) VALUES (?, 'Book', 'matched')", id); err != nil {
+			t.Fatalf("seed book %d: %v", id, err)
+		}
+		seedSnapshot(t, h.svc.DB, id)
+	}
+	srcA := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcA, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed audio: %v", err)
+	}
+	srcB := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcB, "b.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed audio: %v", err)
+	}
+
+	post := func(bookIDs []int64, srcDirs []string) string {
+		body, _ := json.Marshal(StartProcessingRequest{BookIDs: bookIDs, SrcDirs: srcDirs})
+		req := httptest.NewRequest("POST", "/api/process", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		h.StartProcessing(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("process status = %d — body: %s", w.Code, w.Body.String())
+		}
+		var resp StartProcessingResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp.BatchID == "" || len(resp.Jobs) != len(bookIDs) {
+			t.Fatalf("response = %+v; want %d jobs and a batch id", resp, len(bookIDs))
+		}
+		return resp.BatchID
+	}
+
+	first := post([]int64{1, 2}, []string{srcA, srcB})
+	second := post([]int64{3, 4}, []string{srcA, srcB})
+	if first == second {
+		t.Fatalf("two requests share batch id %q; want distinct ids", first)
+	}
+
+	var list struct {
+		Jobs []struct {
+			BookID     int64  `json:"book_id"`
+			QueueOrder int64  `json:"queue_order"`
+			BatchID    string `json:"batch_id"`
+		} `json:"jobs"`
+	}
+	req := httptest.NewRequest("GET", "/api/jobs?limit=10", nil)
+	w := httptest.NewRecorder()
+	h.ListJobs(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list jobs status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode jobs: %v", err)
+	}
+	if len(list.Jobs) != 4 {
+		t.Fatalf("jobs = %d; want 4", len(list.Jobs))
+	}
+
+	byOrder := make(map[int64]struct {
+		bookID  int64
+		batchID string
+	}, len(list.Jobs))
+	minOrder, maxOrder := int64(1<<62), int64(-1)
+	for _, job := range list.Jobs {
+		byOrder[job.QueueOrder] = struct {
+			bookID  int64
+			batchID string
+		}{job.BookID, job.BatchID}
+		if job.QueueOrder < minOrder {
+			minOrder = job.QueueOrder
+		}
+		if job.QueueOrder > maxOrder {
+			maxOrder = job.QueueOrder
+		}
+	}
+	// The scenario the banner must survive: four contiguous queue orders
+	// across two separate requests (min..max with no gap).
+	if maxOrder-minOrder+1 != 4 {
+		t.Fatalf("queue orders span %d..%d; want 4 contiguous values", minOrder, maxOrder)
+	}
+	for i := int64(0); i < 4; i++ {
+		entry, ok := byOrder[minOrder+i]
+		if !ok {
+			t.Fatalf("missing queue order %d in %v", minOrder+i, byOrder)
+		}
+		wantBatch := first
+		wantBooks := map[int64]bool{1: true, 2: true}
+		if i >= 2 {
+			wantBatch, wantBooks = second, map[int64]bool{3: true, 4: true}
+		}
+		if !wantBooks[entry.bookID] {
+			t.Errorf("order %d: book %d; want one of %v", minOrder+i, entry.bookID, wantBooks)
+		}
+		if entry.batchID != wantBatch {
+			t.Errorf("order %d: batch id = %q; want %q", minOrder+i, entry.batchID, wantBatch)
+		}
+	}
+
+	// The single-job endpoint carries the id too (pollJob refreshes from it).
+	var one struct {
+		BatchID string `json:"batch_id"`
+	}
+	jobReq := httptest.NewRequest("GET", "/api/jobs?limit=1", nil)
+	jobW := httptest.NewRecorder()
+	h.ListJobs(jobW, jobReq)
+	newest := list.Jobs[0]
+	for _, job := range list.Jobs {
+		if job.QueueOrder > newest.QueueOrder {
+			newest = job
+		}
+	}
+	singleID := newestBookID(h, newest.BookID, t)
+	singleW := httptest.NewRecorder()
+	h.GetJobStatus(singleW, chiJobRequest(t, singleID))
+	if singleW.Code != http.StatusOK {
+		t.Fatalf("get job status = %d — body: %s", singleW.Code, singleW.Body.String())
+	}
+	if err := json.Unmarshal(singleW.Body.Bytes(), &one); err != nil {
+		t.Fatalf("decode job: %v", err)
+	}
+	wantID := first
+	if newest.BatchID == second {
+		wantID = second
+	}
+	if one.BatchID != wantID {
+		t.Errorf("single job batch id = %q; want %q", one.BatchID, wantID)
+	}
+
+	// Pre-batch rows (no batch id) omit the field: the web falls back to
+	// the queue-order adjacency rule for those.
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, status, action, detail, started_at, completed_at, queue_seq) VALUES ('legacy-1', 1, 'done', 'import', '/in/a.m4b', '2026-01-01 00:00:00', '2026-01-01 00:00:01', 0)",
+	); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	var legacy struct {
+		BatchID any `json:"batch_id"`
+	}
+	legacyW := httptest.NewRecorder()
+	h.GetJobStatus(legacyW, chiJobRequest(t, "legacy-1"))
+	if legacyW.Code != http.StatusOK {
+		t.Fatalf("legacy job status = %d — body: %s", legacyW.Code, legacyW.Body.String())
+	}
+	if err := json.Unmarshal(legacyW.Body.Bytes(), &legacy); err != nil {
+		t.Fatalf("decode legacy job: %v", err)
+	}
+	if legacy.BatchID != nil {
+		t.Errorf("legacy row batch id = %v; want the field absent", legacy.BatchID)
+	}
+}
+
+// chiJobRequest builds a GET /api/jobs/{id} request with the chi route
+// context the direct GetJobStatus test calls need (chiURLParam reads it).
+func chiJobRequest(t *testing.T, jobID string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/api/jobs/"+jobID, nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Keys = append(rctx.URLParams.Keys, "id")
+	rctx.URLParams.Values = append(rctx.URLParams.Values, jobID)
+	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+}
+
+// newestBookID looks a book id up for the test; the jobs API exposes only
+// ids, so the single-job probe needs the book's job id resolved from the DB.
+func newestBookID(h *Handler, bookID int64, t *testing.T) string {
+	t.Helper()
+	var id string
+	err := h.svc.DB.QueryRow(
+		"SELECT id FROM processing_jobs WHERE book_id = ? AND batch_id IS NOT NULL ORDER BY queue_seq DESC LIMIT 1",
+		bookID,
+	).Scan(&id)
+	if err != nil {
+		t.Fatalf("find newest job for book %d: %v", bookID, err)
+	}
+	return id
+}
+
 // TestQueueJobDuplicateRejected covers the server-side 409 guard.
 func TestQueueJobDuplicateRejected(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
@@ -1809,25 +2091,28 @@ func TestQueueJobDuplicateRejected(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, 1)
 
-	first, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{})
+	first, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("first queue: %v", err)
 	}
-	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{}); err == nil {
+	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, ""); err == nil {
 		t.Fatal("second queue for a book with a queued job: want error, got nil")
 	}
 
 	// A finished job frees the book for a new run.
 	setJobStatus(t, h.svc.DB, first, "done")
-	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, audio.RunOptions{}); err != nil {
+	if _, err := svc.QueueJob(t.Context(), 1, []string{"/x/a.m4b"}, queueDestination{}, ""); err != nil {
 		t.Fatalf("queue after terminal job: %v", err)
 	}
 }
 
-// TestStartProcessingDuplicateBook409 exercises the same guard through the
-// handler: a repeated book_id in one request body is a 409, not a double run.
-func TestStartProcessingDuplicateBook409(t *testing.T) {
+// TestStartProcessingDuplicateBookRejected exercises the duplicate guard
+// through the handler: a repeated book_id in one request body is refused in
+// the preflight loop (400) BEFORE any insert, so a valid first occurrence is
+// never left with a queued job and an unclosed batch.
+func TestStartProcessingDuplicateBookRejected(t *testing.T) {
 	h, _ := newTestJobsHandler(t)
 
 	if _, err := h.svc.DB.Exec(
@@ -1835,6 +2120,7 @@ func TestStartProcessingDuplicateBook409(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, 1)
 	srcDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(srcDir, "a.m4b"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed audio: %v", err)
@@ -1845,26 +2131,68 @@ func TestStartProcessingDuplicateBook409(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.StartProcessing(w, req)
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("duplicate book status = %d; want 409 — body: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate book status = %d; want 400 (preflight rejects before any insert) — body: %s", w.Code, w.Body.String())
+	}
+	var n int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&n); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("jobs created = %d; want 0 (the duplicate must be refused before any insert)", n)
 	}
 }
 
-// writeMergingBinary writes an executable shell script that mimics a
-// successful m4b-merge run: it honors -o <dir> and creates
-// <dir>/Author/Title.m4b.
+// writeMergingBinary writes an executable that mimics a successful
+// machine-protocol m4b-merge run: it reads the --job file, publishes
+// <root>/Author/Title.m4b directly under the job's output_root (the engine
+// publishes in place, no relocation), and emits the single machine result
+// document on stdout.
 func writeMergingBinary(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "merging-bin")
-	script := `#!/bin/sh
-out=""
-while [ $# -gt 0 ]; do
-  if [ "$1" = "-o" ]; then out="$2"; shift; fi
-  shift
-done
-mkdir -p "$out/Author"
-printf 'book' > "$out/Author/Title.m4b"
-echo merged
+	script := `#!/usr/bin/env python3
+import json, os, sys
+
+if "--version" in sys.argv:
+    print("m4b-merge 2.2.0")
+    sys.exit(0)
+if "--capabilities" in sys.argv:
+    print(json.dumps({"schema_version": 1, "resolver_version": "1",
+        "default_path_format": "{author}/{title}",
+        "path_tokens": [{"name": k, "value": k, "example": k} for k in
+            ("author", "authors", "narrator", "narrators", "title", "subtitle",
+             "series_name", "series_position", "year", "genre",
+             "metadata_id", "book_id")],
+        "field_policies": {"values": ["write", "preserve", "clear"],
+            "scalar_fields": ["title", "subtitle", "authors", "narrators",
+                "series", "description", "genres", "year"]},
+        "cover_policies": {"constraint": "str", "variants": ["write", "preserve", "clear"]},
+        "chapter_policies": {"constraint": "str", "variants": ["write", "preserve", "clear"]}}))
+    sys.exit(0)
+job = None
+for i, a in enumerate(sys.argv):
+    if a == "--job" and i + 1 < len(sys.argv):
+        job = sys.argv[i + 1]
+with open(job) as f:
+    jf = json.load(f)
+root = jf["output_root"]
+rel = "Author/Title.m4b"
+os.makedirs(os.path.join(root, "Author"), exist_ok=True)
+with open(os.path.join(root, rel), "w") as f:
+    f.write("book")
+sys.stderr.write("progress\n")
+print(json.dumps({
+    "schema_version": 1,
+    "resolver_version": "1",
+    "status": "succeeded",
+    "groups": [{
+        "group": "main",
+        "outcome": "succeeded",
+        "artifacts": [{"relative_path": rel, "kind": "audio", "exists": True}],
+        "files_moved": True
+    }]
+}))
 `
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatalf("write merging binary: %v", err)
@@ -1881,40 +2209,66 @@ func writeDerivedTitleBinary(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "derived-bin")
 	script := `#!/usr/bin/env python3
-import os, sys, re
+import json, os, sys
 
-args = sys.argv[1:]
-out = scheme = input_ = asin = None
-i = 0
-while i < len(args):
-    a = args[i]
-    if a == "-o" and i + 1 < len(args):
-        out = args[i + 1]; i += 2
-    elif a in ("-i", "--input") and i + 1 < len(args):
-        if input_ is None:
-            input_ = args[i + 1]
-        i += 2
-    elif a == "-p" and i + 1 < len(args):
-        scheme = args[i + 1]; i += 2
-    elif a == "-a" and i + 1 < len(args):
-        asin = args[i + 1]; i += 2
-    else:
-        i += 1
+if "--version" in sys.argv:
+    print("m4b-merge 2.2.0")
+    sys.exit(0)
+if "--capabilities" in sys.argv:
+    print(json.dumps({"schema_version": 1, "resolver_version": "1",
+        "default_path_format": "{author}/{title}",
+        "path_tokens": [{"name": k, "value": k, "example": k} for k in
+            ("author", "authors", "narrator", "narrators", "title", "subtitle",
+             "series_name", "series_position", "year", "genre",
+             "metadata_id", "book_id")],
+        "field_policies": {"values": ["write", "preserve", "clear"],
+            "scalar_fields": ["title", "subtitle", "authors", "narrators",
+                "series", "description", "genres", "year"]},
+        "cover_policies": {"constraint": "str", "variants": ["write", "preserve", "clear"]},
+        "chapter_policies": {"constraint": "str", "variants": ["write", "preserve", "clear"]}}))
+    sys.exit(0)
+job = None
+for i, a in enumerate(sys.argv):
+    if a == "--job" and i + 1 < len(sys.argv):
+        job = sys.argv[i + 1]
+with open(job) as f:
+    jf = json.load(f)
+root = jf["output_root"]
+scheme = jf.get("path_format") or "{title}"
+input_ = jf["inputs"][0]
 # {title} derives from the source basename so same-batch jobs in one shared
-# destination tree never collide; the remaining tokens fall back to the CLI
-# asin (test books pass none -> empty), mirroring m4b-merge's empty fields.
-title = os.path.basename(input_).rsplit(".", 1)[0]
-tokens = {"title": title, "asin": asin or "", "author": "", "narrator": "",
-          "series_name": "", "series_position": "", "subtitle": "", "year": ""}
-rel = re.sub(r"\{(\w+)\}", lambda m: tokens.get(m.group(1), ""), scheme or "{title}")
-# Empty token fields (author, series, ...) leave leading/duplicate slashes
-# in the relative path; normalize so os.path.join keeps the -o root
-# (an absolute rel would silently discard it) and directories collapse.
+# destination tree never collide; the remaining tokens come from the job's
+# input_supplied metadata (the engine substitutes them).
+meta = jf.get("input_supplied", {})
+def tok(key):
+    v = meta.get(key, "")
+    if isinstance(v, list):
+        return ", ".join(v)
+    return "" if v is None else str(v)
+tokens = {k: (tok(k) if k != "title" else os.path.basename(input_).rsplit(".", 1)[0])
+          for k in ("title", "author", "authors", "narrator", "narrators",
+                    "series_name", "series_position", "subtitle", "year",
+                    "genre", "metadata_id", "book_id")}
+import re
+rel = re.sub(r"\{(\w+)\}", lambda m: tokens.get(m.group(1), ""), scheme)
+# Empty token fields leave leading/duplicate slashes; normalize so the
+# relative path stays under the root.
 rel = re.sub(r"/+", "/", rel).strip("/")
-os.makedirs(os.path.join(out, os.path.dirname(rel) or "."), exist_ok=True)
-with open(os.path.join(out, rel + ".m4b"), "w") as f:
+os.makedirs(os.path.join(root, os.path.dirname(rel) or "."), exist_ok=True)
+with open(os.path.join(root, rel + ".m4b"), "w") as f:
     f.write("book")
-print("merged")
+sys.stderr.write("progress\n")
+print(json.dumps({
+    "schema_version": 1,
+    "resolver_version": "1",
+    "status": "succeeded",
+    "groups": [{
+        "group": "main",
+        "outcome": "succeeded",
+        "artifacts": [{"relative_path": rel + ".m4b", "kind": "audio", "exists": True}],
+        "files_moved": True
+    }]
+}))
 `
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatalf("write derived-title binary: %v", err)
@@ -1942,18 +2296,19 @@ func countM4Bs(t *testing.T, dir string) int {
 func TestProcessJobRecordsOutputFormat(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
 	bin := writeMergingBinary(t, t.TempDir())
-	svc.proc = &audio.Processor{Binary: bin, OutputDir: t.TempDir(), PathFormat: "{title}", LogLevel: "info"}
+	svc.proc = testProcessor(&audio.Processor{Binary: bin, OutputDir: t.TempDir(), PathFormat: "{title}", LogLevel: "info"})
 
 	if _, err := h.svc.DB.Exec(
 		"INSERT INTO books (id, title, status) VALUES (1, 'Book', 'matched')",
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, 1)
 
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")}, audio.RunOptions{})
+	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -1977,19 +2332,20 @@ func TestProcessJobRecordsOutputFormat(t *testing.T) {
 // terminal state its in-memory state is dropped, while the DB retains it.
 func TestFinishedJobLeavesMap(t *testing.T) {
 	h, svc := newTestJobsHandler(t)
-	bin := fakeM4bBinary(t, t.TempDir())
-	svc.proc = &audio.Processor{Binary: bin, OutputDir: t.TempDir(), PathFormat: "{title}", LogLevel: "info"}
+	bin := writeMergingBinary(t, t.TempDir())
+	svc.proc = testProcessor(&audio.Processor{Binary: bin, OutputDir: t.TempDir(), PathFormat: "{title}", LogLevel: "info"})
 
 	if _, err := h.svc.DB.Exec(
 		"INSERT INTO books (id, title, status) VALUES (1, 'Book', 'matched')",
 	); err != nil {
 		t.Fatalf("seed book: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, 1)
 
 	ctx := t.Context()
 	svc.RunWorkers(ctx, 1)
 
-	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")}, audio.RunOptions{})
+	id, err := svc.QueueJob(ctx, 1, []string{filepath.Join(t.TempDir(), "a.m4b")}, queueDestination{}, "")
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
@@ -2036,7 +2392,7 @@ func setupProfileSuite(t *testing.T) profileSuiteFixtures {
 		t.Fatalf("LoadFrom: %v", err)
 	}
 	h.svc.Config = cm
-	svc.proc = &audio.Processor{}
+	svc.proc = testProcessor(&audio.Processor{})
 	svc.proc.ApplyConfig(cm.Config())
 
 	// Book 1 -> source A (becomes "A"), book 2 -> source B (becomes "B").
@@ -2045,6 +2401,8 @@ func setupProfileSuite(t *testing.T) profileSuiteFixtures {
 	); err != nil {
 		t.Fatalf("seed books: %v", err)
 	}
+	seedSnapshot(t, h.svc.DB, 1)
+	seedSnapshot(t, h.svc.DB, 2)
 
 	fx := profileSuiteFixtures{h: h, svc: svc, cm: cm, bin: bin, rootA: rootA}
 	fx.profileB, fx.profileG = 0, 0
@@ -2270,11 +2628,17 @@ func TestQueueProfileFormatOnlySnapshotsGlobalDir(t *testing.T) {
 // queue-time snapshot, no ConfigManager dependency). Queuing with globals
 // (A, {author}/{title}) then reconfiguring to (C, {title}) before the worker
 // runs must move the output to C.
-func TestQueueUnprofiledUsesWorkerTimeGlobals(t *testing.T) {
+// TestQueueUnprofiledFreezesGlobalsAtQueue: a plain (unprofiled, no-
+// override) job must run on the globals FROZEN AT ENQUEUE TIME, not on a
+// later worker-time reconfigure: the queue freezes the effective triple
+// into the job args, and processJob consumes only the queued values.
+func TestQueueUnprofiledFreezesGlobalsAtQueue(t *testing.T) {
 	fx := setupProfileSuite(t)
 
 	fx.svc.workerStartHook = func(string) {
-		fx.reconfigure(t, t.TempDir(), "{title}")
+		// A settings change AFTER the job was queued: it must not redirect
+		// the frozen job.
+		fx.reconfigure(t, t.TempDir(), "{author}/{title}")
 	}
 	fx.svc.RunWorkers(t.Context(), 1)
 
@@ -2299,10 +2663,10 @@ func TestQueueUnprofiledUsesWorkerTimeGlobals(t *testing.T) {
 		t.Fatalf("dest query: %v", err)
 	}
 	if !strings.HasSuffix(dest, "a.m4b") {
-		t.Errorf("dest = %q; want it to end with a.m4b (worker-time {title})", dest)
+		t.Errorf("dest = %q; want it to end with a.m4b (queue-time {title})", dest)
 	}
-	if strings.HasPrefix(dest, fx.rootA) {
-		t.Errorf("dest = %q; must NOT be under queue-time global root (reconfigure must win unprofiled)", dest)
+	if !strings.HasPrefix(dest, fx.rootA) {
+		t.Errorf("dest = %q; MUST be under the queue-time global root %q (a post-queue reconfigure must not redirect it)", dest, fx.rootA)
 	}
 }
 
@@ -2458,8 +2822,9 @@ func TestQueueInvalidProfileID400(t *testing.T) {
 
 // TestQueueSingleBookReprocessUsesGlobals (behavioral anchor for the book
 // detail page's single-book reprocess): a /process request with one book and
-// NO profile ID uses the worker-time global destination — the exact
-// unprofiled contract the detail page relies on.
+// NO profile ID freezes the global destination at QUEUE time (the unprofiled
+// job's globals inherit into its stored args) — the exact unprofiled
+// contract the detail page relies on.
 func TestQueueSingleBookReprocessUsesGlobals(t *testing.T) {
 	fx := setupProfileSuite(t)
 	fx.svc.RunWorkers(t.Context(), 1)
@@ -2483,13 +2848,18 @@ func TestQueueSingleBookReprocessUsesGlobals(t *testing.T) {
 	if got := m4bsForBook(t, fx.h, 1); got != want {
 		t.Errorf("single-book dest = %q; want %q (global root + global format)", got, want)
 	}
-	// Unprofiled jobs carry no destination snapshot in their stored args.
+	// Unprofiled jobs freeze the globals into their stored args at queue
+	// time: the effective root + format must be present and match the live
+	// globals, not omitted.
 	var stored string
 	if err := fx.h.svc.DB.QueryRow("SELECT m4b_merge_args FROM processing_jobs WHERE id = ?", resp.Jobs[0]["id"]).Scan(&stored); err != nil {
 		t.Fatalf("read stored args: %v", err)
 	}
-	if strings.Contains(stored, "output_dir") || strings.Contains(stored, "output_scheme") {
-		t.Errorf("stored args leak a destination snapshot for an unprofiled job: %s", stored)
+	if !strings.Contains(stored, `"output_dir":"`+fx.rootA+`"`) {
+		t.Errorf("stored args missing the frozen global output dir %q: %s", fx.rootA, stored)
+	}
+	if !strings.Contains(stored, `"output_scheme":"{author}/{title}"`) {
+		t.Errorf("stored args missing the frozen global path format: %s", stored)
 	}
 }
 
@@ -2542,5 +2912,683 @@ func TestQueueResponseCarriesEffectiveDestination(t *testing.T) {
 	}
 	if _, ok := raw["output_scheme"]; ok {
 		t.Errorf("global-settings batch response carries output_scheme: %s", w.Body.String())
+	}
+}
+
+// Regression: the completion banner summarizes the LATEST batch, so its
+// rollup must stay whole even when the batch is longer than the limit
+// window (the cap truncates the recent list) or newer audit rows have
+// pushed it out of the recent window entirely. The response carries the
+// batch as a bounded aggregate (counts, wall clock, row ids) — not its
+// full rows — and ?batch_id=ID pages the rows in queue order.
+func TestListJobsServesLatestBatchAggregate(t *testing.T) {
+	t.Run("batch longer than the limit window", func(t *testing.T) {
+		h, _ := newTestJobsHandler(t)
+		// 120 done jobs of one batch, queue_seq 1..120, created 00:00:00..
+		// 01:59:00 so they are the NEWEST rows and also the newest batch.
+		for i := 1; i <= 120; i++ {
+			if _, err := h.svc.DB.Exec(
+				"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id, batch_closed) VALUES (?, 1, 'done', 'merge', ?, ?, 'b1', 1)",
+				fmt.Sprintf("b1-%03d", i), fmt.Sprintf("2026-01-01 %02d:%02d:00", (i-1)/60, (i-1)%60), i,
+			); err != nil {
+				t.Fatalf("seed batch job %d: %v", i, err)
+			}
+		}
+		w := httptest.NewRecorder()
+		h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=100", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+		}
+		var resp ListJobsResponse
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		// The recent window is capped at 100 rows: the batch's full rows
+		// no longer ride along, so the list stays bounded.
+		if n := len(resp.Jobs); n != 100 {
+			t.Fatalf("list len = %d; want the 100-row cap, not the 120-job batch", n)
+		}
+		// The aggregate covers the WHOLE 120-job batch: counts, wall
+		// clock, and every row id, in queue order.
+		if resp.Batch == nil {
+			t.Fatal("batch aggregate missing from response")
+		}
+		if resp.Batch.BatchID != "b1" || resp.Batch.Total != 120 || resp.Batch.Done != 120 {
+			t.Fatalf("aggregate = %+v; want b1, total 120, done 120", resp.Batch)
+		}
+		if !resp.Batch.AllTerminal || resp.Batch.InFlight != 0 {
+			t.Errorf("aggregate terminal = (%v, %d); want all terminal", resp.Batch.AllTerminal, resp.Batch.InFlight)
+		}
+		if resp.Batch.LastSeq != 120 {
+			t.Errorf("aggregate last_seq = %d; want 120 (the batch's newest queue order)", resp.Batch.LastSeq)
+		}
+		if n := len(resp.Batch.JobIDs); n != 120 {
+			t.Fatalf("aggregate job ids = %d; want all 120 row ids", n)
+		}
+		for i := 1; i <= 120; i++ {
+			if want := fmt.Sprintf("b1-%03d", i); resp.Batch.JobIDs[i-1] != want {
+				t.Fatalf("aggregate job id %d = %q; want %q (queue order)", i, resp.Batch.JobIDs[i-1], want)
+			}
+		}
+
+		// The paged fetch serves the same batch in queue order, bounded:
+		// page 1 is the first 16 rows, and the last page the tail.
+		w = httptest.NewRecorder()
+		h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?batch_id=b1&limit=16&offset=0", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("batch page status = %d; want 200 — body: %s", w.Code, w.Body.String())
+		}
+		var page ListJobsResponse
+		if err := json.NewDecoder(w.Body).Decode(&page); err != nil {
+			t.Fatalf("decode page: %v", err)
+		}
+		if page.Batch != nil {
+			t.Errorf("batch page carries an aggregate; want rows only")
+		}
+		if n := len(page.Jobs); n != 16 {
+			t.Fatalf("batch page len = %d; want 16", n)
+		}
+		if page.Jobs[0]["id"] != "b1-001" || page.Jobs[15]["id"] != "b1-016" {
+			t.Errorf("batch page = (%v..%v); want b1-001..b1-016 in queue order", page.Jobs[0]["id"], page.Jobs[15]["id"])
+		}
+		w = httptest.NewRecorder()
+		h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?batch_id=b1&limit=16&offset=112", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("batch tail page status = %d; want 200 — body: %s", w.Code, w.Body.String())
+		}
+		var tail ListJobsResponse
+		if err := json.NewDecoder(w.Body).Decode(&tail); err != nil {
+			t.Fatalf("decode tail: %v", err)
+		}
+		if n := len(tail.Jobs); n != 8 {
+			t.Fatalf("batch tail len = %d; want the final 8 rows", n)
+		}
+		if tail.Jobs[0]["id"] != "b1-113" || tail.Jobs[7]["id"] != "b1-120" {
+			t.Errorf("batch tail = (%v..%v); want b1-113..b1-120", tail.Jobs[0]["id"], tail.Jobs[7]["id"])
+		}
+	})
+
+	t.Run("finished batch pushed out of the recent window by newer audit rows", func(t *testing.T) {
+		h, _ := newTestJobsHandler(t)
+		// A finished 3-job batch created on 01-01.
+		for i := 1; i <= 3; i++ {
+			if _, err := h.svc.DB.Exec(
+				"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id, batch_closed) VALUES (?, 1, 'done', 'merge', '2026-01-01 00:00:00', ?, 'b1', 1)",
+				fmt.Sprintf("b1-%d", i), i,
+			); err != nil {
+				t.Fatalf("seed batch job %d: %v", i, err)
+			}
+		}
+		// 110 newer audit rows: the 100-row recent window no longer
+		// reaches the batch, and nothing in the batch is active.
+		seedAuditRows(t, h.svc.DB, 110)
+		w := httptest.NewRecorder()
+		h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=100", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+		}
+		var resp ListJobsResponse
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		// The recent window is 100 audit rows; the batch's rows are NOT
+		// appended (the aggregate stands in for them).
+		if n := len(resp.Jobs); n != 100 {
+			t.Fatalf("list len = %d; want the 100-row recent window only", n)
+		}
+		for _, j := range resp.Jobs {
+			if id, _ := j["id"].(string); strings.HasPrefix(id, "b1-") {
+				t.Fatalf("batch row %s in the list; the aggregate, not the rows, rides along", id)
+			}
+		}
+		// The aggregate still covers the whole batch: the banner keeps the
+		// run even when no batch row is in the response.
+		if resp.Batch == nil || resp.Batch.BatchID != "b1" || resp.Batch.Total != 3 || resp.Batch.Done != 3 {
+			t.Fatalf("aggregate = %+v; want b1, total 3, done 3", resp.Batch)
+		}
+		if n := len(resp.Batch.JobIDs); n != 3 {
+			t.Fatalf("aggregate job ids = %d; want 3", n)
+		}
+	})
+}
+
+// Regression: a LATER book's validation failure (here: a missing snapshot)
+// must reject the WHOLE request before any insert, so a valid first book is
+// not left with a queued job and an unclosed batch. The preflight loop
+// validates every book before the enqueue loop runs (StartProcessing), so a
+// mid-batch failure cannot hide an already-accepted job.
+func TestStartProcessingPreflightRejectsWholeBatch(t *testing.T) {
+	fx := setupProfileSuite(t)
+	// Book 3 exists but has no captured snapshot: loadSnapshotForQueue
+	// returns a nil capture, the cheapest deterministic per-book rejection.
+	if _, err := fx.h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (3, 'Gamma', 'matched')",
+	); err != nil {
+		t.Fatalf("seed book 3: %v", err)
+	}
+	srcA := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcA, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source A: %v", err)
+	}
+	srcB := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcB, "b.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source B: %v", err)
+	}
+	// Book 1 is valid (snapshot seeded by the suite); book 3 is not.
+	w := fx.postProcess(t, []string{srcA, srcB}, nil, 1, 3)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("process status = %d; want 500 (book 3 has no snapshot) — body: %s", w.Code, w.Body.String())
+	}
+	// The valid first book must NOT have been enqueued: the whole batch is
+	// rejected, so the queue is empty and no batch was created.
+	var n int
+	if err := fx.h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&n); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("jobs created = %d; want 0 (the preflight rejection must leave no accepted job)", n)
+	}
+}
+
+// Regression: the aggregate's count/rollup and its id list must come from
+// one snapshot. StartProcessing enqueues a batch's jobs individually, so a
+// read that straddles an in-flight enqueue (two separate queries) can count
+// N rows and return N+1 (or N-1) ids, and the client pages the wrong number
+// of rows. One read transaction makes total and job_ids agree.
+func TestLatestBatchAggregateReadsOneSnapshot(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	// 24 rows on disk; a writer adds 16 more, like an in-flight enqueue.
+	for i := 1; i <= 24; i++ {
+		if _, err := h.svc.DB.Exec(
+			"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 1, 'done', 'merge', ?, ?, 'b1')",
+			fmt.Sprintf("b1-%03d", i), fmt.Sprintf("2026-01-01 %02d:%02d:00", (i-1)/60, (i-1)%60), i,
+		); err != nil {
+			t.Fatalf("seed batch job %d: %v", i, err)
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 25; i <= 40; i++ {
+			if _, err := h.svc.DB.Exec(
+				"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 1, 'done', 'merge', ?, ?, 'b1')",
+				fmt.Sprintf("b1-%03d", i), fmt.Sprintf("2026-01-01 %02d:%02d:00", (i-1)/60, (i-1)%60), i,
+			); err != nil {
+				t.Errorf("writer insert %d: %v", i, err)
+				return
+			}
+		}
+	}()
+	for i := range 25 {
+		agg, err := h.latestBatchAggregate("b1", 0)
+		if err != nil {
+			t.Fatalf("aggregate read %d: %v", i, err)
+		}
+		if len(agg.JobIDs) != agg.Total {
+			t.Fatalf("aggregate read %d: total = %d but job_ids has %d entries; the count and the id list must come from one snapshot", i, agg.Total, len(agg.JobIDs))
+		}
+	}
+	<-done
+	// After the writer stops, the aggregate covers the whole batch.
+	agg, err := h.latestBatchAggregate("b1", 0)
+	if err != nil {
+		t.Fatalf("final aggregate: %v", err)
+	}
+	if agg.Total != 40 || len(agg.JobIDs) != 40 {
+		t.Errorf("final aggregate = (total %d, ids %d); want 40 of each", agg.Total, len(agg.JobIDs))
+	}
+}
+
+// Regression: with the pool closed, ListJobs 500s — the recent query
+// fails before the handler ever reaches the aggregate. The aggregate's
+// own contract (a read failure comes back as an error, not a silently
+// overstated total) is asserted directly below.
+func TestListJobsFailsWhenDBClosed(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES ('b1-1', 1, 'done', 'merge', '2026-01-01 00:00:00', 1, 'b1')",
+	); err != nil {
+		t.Fatalf("seed batch job: %v", err)
+	}
+	h.svc.DB.Close()
+
+	w := httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=10", nil))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("list over a closed db = %d; want 500 — body: %s", w.Code, w.Body.String())
+	}
+
+	// The aggregate's read failure must surface as an error (the id
+	// scan must not be swallowed), so ListJobs' degrade branch can act
+	// on it when the recent/active queries survive.
+	agg, err := h.latestBatchAggregate("b1", 0)
+	if err == nil {
+		t.Fatalf("aggregate over a closed db = %+v, nil; want a non-nil error (the id read must not be swallowed)", agg)
+	}
+}
+
+// Regression: latestBatchID's own contract — sql.ErrNoRows (no batched row)
+// is the only non-error outcome; any other probe failure must surface as a
+// real error so ListJobs can take its degrade branch (200, recent+active
+// only) instead of 500ing.
+func TestLatestBatchIDProbeFailureContract(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES ('b1-1', 1, 'done', 'merge', '2026-01-01 00:00:00', 1, 'b1')",
+	); err != nil {
+		t.Fatalf("seed batch job: %v", err)
+	}
+
+	// Healthy probe: newest batched row wins, book scope filters it.
+	got, err := h.latestBatchID(0)
+	if err != nil {
+		t.Fatalf("healthy probe: %v", err)
+	}
+	if got != "b1" {
+		t.Errorf("unscoped probe = %q; want b1", got)
+	}
+	if got, err = h.latestBatchID(1); err != nil || got != "b1" {
+		t.Errorf("book-1 probe = (%q, %v); want (b1, nil)", got, err)
+	}
+	if got, err = h.latestBatchID(2); err != nil || got != "" {
+		t.Errorf("book-2 probe = (%q, %v); want (\"\", nil) — no batched row for book 2", got, err)
+	}
+
+	// Closed DB: a non-ErrNoRows probe failure must come back as an error
+	// (the degrade branch's precondition).
+	h.svc.DB.Close()
+	t.Cleanup(func() { t.Log("db closed by test") })
+	if got, err := h.latestBatchID(0); err == nil {
+		t.Errorf("closed-db probe = (%q, nil); want a non-nil error the handler can log and degrade on", got)
+	} else if errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("closed-db probe error = %v; want a real fault, not ErrNoRows (which means 'no batch', not 'probe failed')", err)
+	}
+}
+
+// Regression: when the probe finds no batch (or fails), ListJobs degrades
+// to the pre-batch behavior — 200 with recent + active only and NO batch
+// aggregate — and the client falls back to queue-order adjacency. A
+// batched row the probe cannot see (queue_seq NULL) is the faithful
+// fixture: the probe's filter excludes it, so the handler takes the
+// no-aggregate branch while the row still rides along in the list.
+func TestListJobsDegradesWithoutBatchOnProbeMiss(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	// A batched row the probe cannot see: batch_id set, queue_seq NULL.
+	// The probe (batch_id IS NOT NULL AND queue_seq IS NOT NULL) misses it,
+	// so the response must carry no aggregate — the old behavior.
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, status, action, created_at, batch_id) VALUES ('b1-1', 1, 'done', 'merge', '2026-01-01 00:00:00', 'b1')",
+	); err != nil {
+		t.Fatalf("seed batch job: %v", err)
+	}
+	// Pre-batch history: no batch id at all.
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq) VALUES ('l1', 1, 'done', 'merge', '2025-12-31 00:00:00', 1)",
+	); err != nil {
+		t.Fatalf("seed legacy job: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=10", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("degraded list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	raw := w.Body.Bytes()
+	resp := decodeList(t, raw)
+	// No aggregate: the probe saw no batch, so the banner falls back to
+	// the adjacency walk over the rows the list carries.
+	if resp.Batch != nil {
+		t.Fatalf("degraded response carries aggregate %+v; want none", resp.Batch)
+	}
+	// The rows are still there (old behavior: the list is the source of
+	// truth for the banner).
+	if n := len(resp.Jobs); n != 2 {
+		t.Fatalf("degraded list len = %d; want both rows", n)
+	}
+
+	// Control: the same row WITH a queue_seq is visible to the probe and
+	// the aggregate appears.
+	h2, _ := newTestJobsHandler(t)
+	if _, err := h2.svc.DB.Exec(
+		"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES ('b1-1', 1, 'done', 'merge', '2026-01-01 00:00:00', 1, 'b1')",
+	); err != nil {
+		t.Fatalf("seed visible batch job: %v", err)
+	}
+	w = httptest.NewRecorder()
+	h2.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=10", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("control list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	control := decodeList(t, w.Body.Bytes())
+	if control.Batch == nil || control.Batch.BatchID != "b1" || control.Batch.Total != 1 {
+		t.Fatalf("control aggregate = %+v; want b1 total 1", control.Batch)
+	}
+}
+
+// Regression: the book_id scope must apply to the batch aggregate and the
+// paged batch fetch as well as the recent and active queries — a scoped
+// list must never surface another book's batch (its rollup or its rows).
+func TestListJobsBookScopeAppliesToBatchAggregate(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (1, 'Book One', 'processing'), (2, 'Book Two', 'processing')",
+	); err != nil {
+		t.Fatalf("seed books: %v", err)
+	}
+	// Two finished 3-job batches created at the SAME second: created_at
+	// cannot separate them, so the newest-batch probe resolves by
+	// queue_seq. The book-2 batch has the HIGHER queue orders, so the
+	// probe picks it even for the unscoped list — the book-1 scope must
+	// then fall back to book 1's OWN batch id, not inherit the global one.
+	for i := 1; i <= 3; i++ {
+		if _, err := h.svc.DB.Exec(
+			"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 1, 'done', 'merge', '2026-01-01 00:00:00', ?, 'b1')",
+			fmt.Sprintf("b1-%d", i), i,
+		); err != nil {
+			t.Fatalf("seed book-1 batch %d: %v", i, err)
+		}
+		if _, err := h.svc.DB.Exec(
+			"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 2, 'done', 'merge', '2026-01-01 00:00:00', ?, 'b2')",
+			fmt.Sprintf("b2-%d", i), 3+i,
+		); err != nil {
+			t.Fatalf("seed book-2 batch %d: %v", i, err)
+		}
+	}
+	// 110 newer book-1 audit rows push book 1's batch out of the 100-row
+	// recent window: the aggregate (and the paged fetch) are the ONLY
+	// paths that re-include it.
+	seedAuditRows(t, h.svc.DB, 110)
+
+	// Unscoped: the probe's newest batch is b2 (queue_seq 4..6); the
+	// aggregate carries b2, not b1. The list is the 100-row window only.
+	w := httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=100", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("unscoped list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	byID, ids := jobIDsFromList(t, w)
+	if n := len(ids); n != 100 {
+		t.Fatalf("unscoped list len = %d; want the 100-row recent window", n)
+	}
+	for i := 1; i <= 3; i++ {
+		if _, ok := byID[fmt.Sprintf("b1-%d", i)]; ok {
+			t.Errorf("unscoped list carries b1-%d; the batch's rows are not appended", i)
+		}
+	}
+
+	// Book 1's scope: the probe must resolve book 1's OWN batch (b1) even
+	// though b2 is the global newest, and the aggregate's AND book_id = ?
+	// must keep book 2's rollup out.
+	w = httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=100&book_id=1", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("book-1 list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	raw1 := w.Body.Bytes()
+	byID, ids = jobIDsFromList(t, w)
+	// 100-row recent window PLUS book 1's own latest-batch rows re-included
+	// (b1's 3 rows sort out of the window behind the 110 audit rows; the
+	// book page needs its book's full history in the list).
+	if n := len(ids); n != 103 {
+		t.Fatalf("book-1 list len = %d; want the 100-row recent window + 3 re-included b1 rows", n)
+	}
+	for id := range byID {
+		if strings.HasPrefix(id, "b2-") {
+			t.Errorf("book-2 batch row %s present in book-1 list", id)
+		}
+	}
+	for i := 1; i <= 3; i++ {
+		if _, ok := byID[fmt.Sprintf("b1-%d", i)]; !ok {
+			t.Errorf("book-1 list missing re-included batch row b1-%d", i)
+		}
+	}
+	// Book 1's aggregate: b1, not the global-newest b2.
+	book1Resp := decodeList(t, raw1)
+	if book1Resp.Batch == nil || book1Resp.Batch.BatchID != "b1" || book1Resp.Batch.Total != 3 {
+		t.Fatalf("book-1 aggregate = %+v; want b1 with total 3", book1Resp.Batch)
+	}
+	for i := 1; i <= 3; i++ {
+		if want := fmt.Sprintf("b1-%d", i); book1Resp.Batch.JobIDs[i-1] != want {
+			t.Errorf("book-1 aggregate job id %d = %q; want %q", i, book1Resp.Batch.JobIDs[i-1], want)
+		}
+	}
+
+	// Mirror image: book 2's scope carries its own aggregate, and its 3
+	// rows sit inside its (uncontested) recent window, so the list holds
+	// them without an append.
+	w = httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=100&book_id=2", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("book-2 list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	raw2 := w.Body.Bytes()
+	byID, ids = jobIDsFromList(t, w)
+	if n := len(ids); n != 3 {
+		t.Fatalf("book-2 list len = %d; want its 3 batch rows only", n)
+	}
+	for i := 1; i <= 3; i++ {
+		if _, ok := byID[fmt.Sprintf("b2-%d", i)]; !ok {
+			t.Errorf("book-2 list missing b2-%d", i)
+		}
+	}
+	for id := range byID {
+		if strings.HasPrefix(id, "b1-") {
+			t.Errorf("book-1 batch row %s present in book-2 list", id)
+		}
+	}
+	book2Resp := decodeList(t, raw2)
+	if book2Resp.Batch == nil || book2Resp.Batch.BatchID != "b2" || book2Resp.Batch.Total != 3 {
+		t.Fatalf("book-2 aggregate = %+v; want b2 with total 3", book2Resp.Batch)
+	}
+
+	// The paged batch fetch honors the book scope too: book 1's page of
+	// b2 is empty, book 2's page carries its rows.
+	w = httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?batch_id=b2&limit=100&book_id=1", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("scoped batch page status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	scopedPage := decodeList(t, w.Body.Bytes())
+	if n := len(scopedPage.Jobs); n != 0 {
+		t.Errorf("book-1 scoped page of b2 = %d rows; want 0", n)
+	}
+	w = httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?batch_id=b2&limit=100&book_id=2", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("book-2 batch page status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	ownPage := decodeList(t, w.Body.Bytes())
+	if n := len(ownPage.Jobs); n != 3 {
+		t.Fatalf("book-2 page of b2 = %d rows; want 3", n)
+	}
+	if ownPage.Jobs[0]["id"] != "b2-1" || ownPage.Jobs[2]["id"] != "b2-3" {
+		t.Errorf("book-2 page = (%v..%v); want b2-1..b2-3 in queue order", ownPage.Jobs[0]["id"], ownPage.Jobs[2]["id"])
+	}
+}
+
+// Regression: the book page renders /jobs?book_id=ID&limit=20 AS the book's
+// full activity history (it has no on-demand batch fetch). Before the
+// bounded aggregate, ListJobs appended the whole latest batch to the list;
+// the aggregate replaced that for the queue page, so a book whose latest
+// merge job is followed by >= limit of its own audit rows loses the
+// terminal merge row from the recent window. The book-scoped list must
+// re-include the latest batch's rows (bounded: only that batch, via the
+// batch_id index), so the history stays whole.
+func TestListJobsBookScopeReincludesLatestBatchRows(t *testing.T) {
+	h, _ := newTestJobsHandler(t)
+	if _, err := h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (1, 'Book', 'done')",
+	); err != nil {
+		t.Fatalf("seed book: %v", err)
+	}
+	// The book's finished 2-job batch, created first (queue_seq 1..2).
+	for i := 1; i <= 2; i++ {
+		if _, err := h.svc.DB.Exec(
+			"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 1, 'done', 'merge', '2026-01-01 00:00:00', ?, 'b1')",
+			fmt.Sprintf("b1-%d", i), i,
+		); err != nil {
+			t.Fatalf("seed batch job %d: %v", i, err)
+		}
+	}
+	// 25 newer audit rows of the SAME book: with limit=20 (the book page's
+	// bound) the recent window holds only audit rows — the batch's rows
+	// sort out of it entirely.
+	for i := 1; i <= 25; i++ {
+		mins := 10 * (i - 1)
+		if _, err := h.svc.DB.Exec(
+			"INSERT INTO processing_jobs (id, book_id, status, action, detail, created_at) VALUES (?, 1, 'done', 'import', ?, ?)",
+			fmt.Sprintf("audit-%02d", i), fmt.Sprintf("/in/%02d.m4b", i), fmt.Sprintf("2026-01-02 %02d:%02d:00", 9+mins/60, mins%60),
+		); err != nil {
+			t.Fatalf("seed audit %d: %v", i, err)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?book_id=1&limit=20", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	byID, ids := jobIDsFromList(t, w)
+	// 20 recent audit rows + 2 re-included batch rows; nothing else.
+	if n := len(ids); n != 22 {
+		t.Fatalf("list len = %d; want 20 recent + 2 re-included batch rows", n)
+	}
+	for i := 1; i <= 2; i++ {
+		if status, ok := byID[fmt.Sprintf("b1-%d", i)]; !ok || status != "done" {
+			t.Errorf("terminal batch row b1-%d missing from book history (or wrong status %q)", i, status)
+		}
+	}
+	// The re-included rows come after the window, deduped (no row appears
+	// twice — the raw list, not the id map, exposes a duplicate).
+	seen := make(map[string]int, len(ids))
+	for _, id := range ids {
+		seen[id]++
+		if seen[id] > 1 {
+			t.Errorf("duplicate row %s in list", id)
+		}
+	}
+	for _, id := range ids {
+		if strings.HasPrefix(id, "b1-") {
+			if id != ids[len(ids)-2] && id != ids[len(ids)-1] {
+				t.Errorf("batch row %s not at the tail of the list: %v", id, ids)
+			}
+		}
+	}
+
+	// The unscoped list must NOT re-include: it pages batch rows on
+	// demand via ?batch_id=, so its body stays the plain recent window.
+	w = httptest.NewRecorder()
+	h.ListJobs(w, httptest.NewRequest("GET", "/api/jobs?limit=20", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("unscoped list status = %d; want 200", w.Code)
+	}
+	byID, ids = jobIDsFromList(t, w)
+	if n := len(ids); n != 20 {
+		t.Fatalf("unscoped list len = %d; want the 20-row recent window", n)
+	}
+	for id := range byID {
+		if strings.HasPrefix(id, "b1-") {
+			t.Errorf("unscoped list carries re-included batch row %s", id)
+		}
+	}
+}
+
+// seedBatchBooks creates n books, each with a capture row and an on-disk
+// source file, so QueueBatch's prepare pass (snapshot load + destination
+// freeze) succeeds for every item.
+func seedBatchBooks(t *testing.T, h *Handler, n int) []queueBatchItem {
+	t.Helper()
+	items := make([]queueBatchItem, 0, n)
+	for i := range n {
+		id := int64(i + 1)
+		if _, err := h.svc.DB.Exec(
+			`INSERT INTO books (id, title, status) VALUES (?, ?, 'pending')`, id, fmt.Sprintf("Book %d", id)); err != nil {
+			t.Fatalf("seed book %d: %v", id, err)
+		}
+		seedSnapshot(t, h.svc.DB, id)
+		src := filepath.Join(t.TempDir(), fmt.Sprintf("src-%d.m4b", i))
+		if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		items = append(items, queueBatchItem{BookID: id, SrcPaths: []string{src}})
+	}
+	return items
+}
+
+func jobsMapSize(s *ProcessingService) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.jobs)
+}
+
+// TestQueueBatchMidInsertFailureRollsBackRowsAndStates pins the batch
+// rollback contract: a mid-batch insert failure rejects the whole request,
+// leaves NO committed rows (the transaction rolls back), and removes the
+// in-memory job states that were registered before the commit (a worker
+// never runs a job whose row was not committed, so the registrations would
+// otherwise stay in the map for the process's lifetime).
+func TestQueueBatchMidInsertFailureRollsBackRowsAndStates(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	items := seedBatchBooks(t, h, 3)
+	if _, err := h.svc.DB.Exec(
+		`CREATE TRIGGER fail_batch_insert AFTER INSERT ON processing_jobs
+		 FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := svc.QueueBatch(t.Context(), "batch-rb", queueDestination{}, svc.proc.QueueSnapshot(), items)
+	if err == nil {
+		t.Fatalf("QueueBatch succeeded; want the injected insert failure")
+	}
+	if ids != nil {
+		t.Errorf("ids = %v; want nil on failure", ids)
+	}
+	var n int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("processing_jobs rows = %d; want 0 (the batch transaction must roll back)", n)
+	}
+	if got := jobsMapSize(svc); got != 0 {
+		t.Errorf("service.jobs size = %d; want 0 (unregisterStates must remove the pre-committed registrations)", got)
+	}
+}
+
+// TestQueueBatchRegistersStatesBeforeRowsClaimable pins the publication
+// ordering: after QueueBatch returns, every queued job ID has a state in
+// s.jobs (a row is claimable the instant the transaction commits, so the
+// registration must already have landed under the service mutex), and a
+// failing insert leaves NO registrations for that batch behind.
+func TestQueueBatchRegistersStatesBeforeRowsClaimable(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	items := seedBatchBooks(t, h, 4)
+	ids, err := svc.QueueBatch(t.Context(), "batch-order-1", queueDestination{}, svc.proc.QueueSnapshot(), items[:2])
+	if err != nil {
+		t.Fatalf("QueueBatch: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("ids = %v; want 2", ids)
+	}
+	svc.mu.RLock()
+	for _, id := range ids {
+		if st := svc.jobs[id]; st == nil {
+			svc.mu.RUnlock()
+			t.Fatalf("queued job %s has no state in service.jobs; the registration must land before the commit makes the row claimable", id)
+		}
+	}
+	svc.mu.RUnlock()
+
+	// A second batch whose insert fails must not leave ITS registrations
+	// in the map: the first batch's states remain, and nothing more.
+	if _, err := h.svc.DB.Exec(
+		`CREATE TRIGGER fail_batch_insert2 AFTER INSERT ON processing_jobs
+		 FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.QueueBatch(t.Context(), "batch-order-2", queueDestination{}, svc.proc.QueueSnapshot(), items[2:4]); err == nil {
+		t.Fatalf("second QueueBatch succeeded; want the injected insert failure")
+	}
+	if got := jobsMapSize(svc); got != 2 {
+		t.Errorf("service.jobs size = %d; want 2 (the first batch's states only — the failed batch's registrations must be rolled back)", got)
 	}
 }

@@ -26,6 +26,12 @@
 	let filter = $state('all');
 	let currentPage = $state(0);
 	let q = $state('');
+	// Monotonic criteria generation: bumped on EVERY selection-invalidating
+	// filter/search change, even one that later returns to the original
+	// value. A value comparison (criteriaChanged) cannot see the round trip
+	// — the selection was already cleared mid-flight — so an in-flight bulk
+	// write must be invalidated by generation, not by the criteria values.
+	let criteriaGen = $state(0);
 	let response = $state<BooksListResponse | null>(null);
 	const dl: DelayedLoadState = delayedLoad({ delay: 200 });
 
@@ -132,7 +138,8 @@
 	function setFilter(value: string) {
 		filter = normalizedFilter(value);
 		currentPage = 0;
-		clearSelection(); // A new filter redefines "all matching" — the old selection is stale.
+		criteriaGen++; // A new filter redefines "all matching" — the old selection is stale.
+		clearSelection();
 		updateUrl(filter, 0);
 	}
 
@@ -152,7 +159,8 @@
 			if (next === q) return;
 			q = next;
 			currentPage = 0;
-			clearSelection(); // A new query redefines "all matching" — the old selection is stale.
+			criteriaGen++; // A new query redefines "all matching" — the old selection is stale.
+			clearSelection();
 			updateUrl(filter, 0, next);
 		}, 300);
 	}
@@ -169,20 +177,25 @@
 		// response afterwards would resurrect IDs that no longer match.
 		const requestedFilter = filter;
 		const requestedQ = q;
+		// The generation, not the values: a round trip (change then restore
+		// to the original) clears the selection mid-flight but reads as
+		// "unchanged" to a value comparison, so the generation is the only
+		// signal that the baseline is stale.
+		const requestedGen = criteriaGen;
 		try {
 			const params = new URLSearchParams();
 			if (requestedFilter !== 'all') params.set('status', requestedFilter);
 			if (requestedQ) params.set('q', requestedQ);
 			params.set('all_ids', '1');
 			const res = await get<{ ids: number[]; total: number; truncated: boolean }>(`/books?${params.toString()}`);
-			if (criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) return;
+			if (criteriaGen !== requestedGen) return;
 			if (!res || !Array.isArray(res.ids)) throw new Error('Could not load matching book IDs.');
 			// The server caps the all_ids payload: total/truncated make the
 			// cut explicit so the UI never treats a capped list as the whole
 			// matching set (finding: F21).
 			selection.applyBaseline(new Set(res.ids), res.total ?? res.ids.length, Boolean(res.truncated));
 		} catch (e) {
-			if (criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) return;
+			if (criteriaGen !== requestedGen) return;
 			bulkError = toCleanedError(e);
 			// Retry re-runs the select-all that just failed, not the previous
 			// bulk operation (e.g. a failed requeue) whose action it would
@@ -287,6 +300,13 @@
 		bulkActing = 'requeue';
 		bulkError = null;
 		bulkSuccess = null;
+		// Criteria generation: the captured ids belong to the filter/search
+		// state at dispatch time. If a request outlives that state (a
+		// filter/search change cleared the selection mid-flight), the
+		// dispatch must be discarded, not applied to stale ids. The
+		// generation (not the values) is the signal: a round trip that
+		// restores the original criteria still bumped it.
+		const requestedGen = criteriaGen;
 		try {
 			const ids = effectiveSelectedIds();
 			// Snapshot with the ids: clearSelection() (filter/search change)
@@ -297,6 +317,10 @@
 			// Capped at 16 in flight (fetchInChunks preserves input order,
 			// which the parallel src_dirs require).
 			const books = await fetchInChunks(ids.map((id) => () => get<BookWithPeople>(`/books/${id}`)), 16);
+			// A criteria change mid-fetch cleared the visible selection: the
+			// captured ids no longer represent what the user sees, so the
+			// batch must not be dispatched.
+			if (criteriaGen !== requestedGen) return;
 			const payload: { book_ids: number[]; src_dirs: string[]; output_profile_id?: number } = {
 				book_ids: ids,
 				src_dirs: books.map((b) => b.src_path),
@@ -323,12 +347,21 @@
 		bulkSuccess = null;
 		bulkProgress = 0;
 		bulkTotal = ids.length;
-		const requestedFilter = filter;
-		const requestedQ = q;
+		// The generation, not the values: a round trip that restores the
+		// original criteria still bumped it and cleared the selection.
+		const requestedGen = criteriaGen;
 		let failed: CleanedAdbError | null = null;
 		let done = 0;
+		// True once a filter/search change lands between PUTs: the captured
+		// ids belong to the previous criteria, so no further book may be
+		// marked done.
+		let stale = false;
 		try {
 			for (const id of ids) {
+				if (criteriaGen !== requestedGen) {
+					stale = true;
+					break;
+				}
 				try {
 					await put(`/books/${id}`, { status: 'done' });
 					done++;
@@ -341,7 +374,7 @@
 				// counts and washes move one row at a time.
 				selection.pruneSelectionId(id);
 			}
-			if (!criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) {
+			if (!stale && criteriaGen === requestedGen) {
 				// Per-book PUTs do not refresh the list response: pull the
 				// catalog again so status badges, totals, and pagination match
 				// (partial success included — the re-fetch sees what landed).
@@ -387,9 +420,11 @@
 			// list, not from books.status: the status only becomes 'processing'
 			// when a worker claims the job, so a book whose job is still queued
 			// keeps its pre-queue status and would slip through a status test.
-			// limit trims only the recent-history query; ListJobs appends the
-			// complete queued/running set regardless, so limit=1 keeps the
-			// payload small while still returning every in-flight job.
+			// limit bounds the recent-history query; the active (queued/
+			// running) set is appended in full regardless, and the
+			// latest-batch aggregate is small and bounded, so limit=1 keeps
+			// the payload small while still returning every in-flight job.
+			// Full batch rows are fetched on demand, not here.
 			const activeJobs = await get<JobsListResponse>('/jobs?limit=1');
 			const { resolved, skipped } = partitionForRemoval(ids.map((id) => known.get(id)!), activeJobs.jobs);
 			removeSkipped = skipped;
@@ -425,13 +460,22 @@
 		bulkSuccess = null;
 		bulkProgress = 0;
 		bulkTotal = removeList.length;
-		const requestedFilter = filter;
-		const requestedQ = q;
+		// The generation, not the values: a round trip that restores the
+		// original criteria still bumped it and cleared the selection.
+		const requestedGen = criteriaGen;
 		let failed: CleanedAdbError | null = null;
 		let done = 0;
 		let survivors: BookWithPeople[] = [];
+		// True once a filter/search change lands between deletes: the
+		// captured list belongs to the previous criteria, so no further
+		// book may be removed.
+		let stale = false;
 		try {
 			for (const book of removeList) {
+				if (criteriaGen !== requestedGen) {
+					stale = true;
+					break;
+				}
 				try {
 					await del(`/books/${book.id}`);
 					done++;
@@ -448,7 +492,7 @@
 			confirmRemoveOpen = false;
 			removeList = failed ? survivors : [];
 			removeSkipped = [];
-			if (!criteriaChanged({ filter, q }, { filter: requestedFilter, q: requestedQ })) {
+			if (!stale && criteriaGen === requestedGen) {
 				// The list response still shows the deleted rows: pull the
 				// catalog again so rows, totals, and pagination match
 				// (partial success included — the re-fetch sees what landed).
@@ -525,6 +569,7 @@
 			// A criteria change from the URL (back/forward, deep link)
 			// redefines "all matching" — drop the selection so the bar
 			// cannot offer done/remove against the stale baseline.
+			criteriaGen++;
 			clearSelection();
 		}
 		if (filter !== nextFilter) filter = nextFilter;

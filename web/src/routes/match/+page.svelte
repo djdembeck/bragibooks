@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick, untrack } from 'svelte';
-	import { get, put, del } from '#lib/api.js';
+	import { get, post, put, del } from '#lib/api.js';
 	import { goto } from '$app/navigation';
 	import type {
 		BookWithPeople,
@@ -11,7 +11,9 @@
 		AudiobookDBRelease,
 		Settings,
 		SourceASINEvidence,
-		UpdateBookRequest
+		UpdateBookRequest,
+		BookMetadataOverrides,
+		BookMetadataResponse
 	} from '#lib/types.js';
 	import {
 		extractAsin,
@@ -23,7 +25,6 @@
 	} from '#lib/types.js';
 	import { Button, Alert, ErrorDetail, Skeleton, EmptyState, Modal } from '#lib/components/index.js';
 	import { toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
-	import { resolveScheme } from '#lib/scheme.js';
 	import { showBlockNudge, showEditorNudge, showPanelNudge } from '#lib/missingRelease.js';
 	import SourceEvidence from './SourceEvidence.svelte';
 	import RuntimeComparison from './RuntimeComparison.svelte';
@@ -34,6 +35,8 @@
 		type EvidenceField, type MatchEvidenceReport
 	} from '#lib/matchEvidence.js';
 	import { delayedLoad, type DelayedLoadState } from '#lib/delayedLoad.svelte.js';
+	import { trimSegment } from '#lib/scheme.js';
+	import { newPreviewBatchState, plan, settle } from '#lib/previewBatch.js';
 
 	type ReviewMode = 'batch' | 'focused';
 
@@ -65,6 +68,8 @@
 		/** Every book/release request increments this; only the newest may apply. */
 		seq: number;
 		manualPick: boolean;
+		/** Auto-selection via the source ASIN fast path (not title search). */
+		asinPick: boolean;
 		removing: boolean;
 		removingConfirming: boolean;
 		descriptionOpen: boolean;
@@ -284,6 +289,7 @@
 					included: true,
 					seq: 0,
 					manualPick: false,
+					asinPick: false,
 					removing: false,
 					removingConfirming: false,
 					descriptionOpen: false,
@@ -305,6 +311,44 @@
 	async function autoMatch(candidate: MatchCandidate) {
 		const seq = ++candidate.seq;
 		try {
+			// ASIN fast path: resolve directly when the source carries a
+			// present, unambiguous ASIN. An empty/missing value (status
+			// 'present' is never paired with one, but 'ambiguous'/'missing'/
+			// 'unknown' carry no value) falls through to title search.
+			const asin = candidate.sourceAsin?.status === 'present'
+				? candidate.sourceAsin.value
+				: undefined;
+			if (asin) {
+				const hit = await searchByASIN(asin);
+				if (seq !== candidate.seq) return;
+				if (hit) {
+					candidate.selectedBookId = hit.id;
+					candidate.details = { book: null, release: null };
+					// The by-asin payload lacks `external` and `series`, which
+					// the save derives the asin and series from. Fetch the
+					// canonical detail (the title path's include set) so the
+					// save carries both; a detail-fetch failure keeps the
+					// already-resolved by-asin book.
+					let book = hit;
+					try {
+						book = await getBookDetail(hit.id);
+					} catch {
+						book = hit;
+					}
+					if (seq !== candidate.seq) return;
+					candidate.searchResults = [book];
+					const releaseId = book.releases?.[0]?.id;
+					const release = releaseId ? await getReleaseDetail(releaseId) : null;
+					if (seq !== candidate.seq) return;
+					candidate.details = { book, release };
+					candidate.selectedReleaseId = release?.id ?? null;
+					candidate.manualPick = false;
+					candidate.asinPick = true;
+					void loadEvidence(candidate);
+					return;
+				}
+			}
+			// Title search fallback (existing path, unchanged below).
 			const hits = await searchBooks(stripExtension(candidate.title));
 			if (seq !== candidate.seq) return;
 			candidate.searchResults = hits;
@@ -324,6 +368,7 @@
 				candidate.details = { book, release };
 				candidate.selectedReleaseId = release?.id ?? null;
 				candidate.manualPick = false;
+				void loadEvidence(candidate);
 			}
 		} catch (e) {
 			if (seq === candidate.seq) candidate.error = toCleanedError(e);
@@ -372,6 +417,16 @@
 		return n;
 	}
 
+	async function searchByASIN(asin: string): Promise<AudiobookDBBook | null> {
+		try {
+			return await get<AudiobookDBBook>(`/search/by-asin/${encodeURIComponent(asin)}`);
+		} catch {
+			// 404 = ASIN not in catalog; any other error = network/upstream
+			// failure. Both fall back to title search.
+			return null;
+		}
+	}
+
 	async function searchBooks(query: string): Promise<AudiobookDBBook[]> {
 		if (!query.trim()) return [];
 		const response = await get<SearchResponse>(
@@ -388,7 +443,7 @@
 		const cached = bookRequests.get(bookId);
 		if (cached) return cached;
 		const request = get<AudiobookDBBook>(
-			`/search/books/${bookId}?include=releases,people,series,images,external`
+			`/search/books/${bookId}?include=releases,people,series,images,external,genres`
 		);
 		bookRequests.set(bookId, request);
 		void request.catch(() => {
@@ -543,6 +598,7 @@
 			// Publish the record actually selected so picker metadata and the
 			// inspector cannot disagree after a recovered or alternate choice.
 			hydration[bookId] = { book, release, loading: false, error: null };
+			void loadEvidence(candidate);
 		} catch (e) {
 			if (seq === candidate.seq) {
 				candidate.error = toCleanedError(e);
@@ -576,6 +632,7 @@
 			if (book) {
 				hydration[book.id] = { book, release, loading: false, error: null };
 			}
+			void loadEvidence(candidate);
 		} catch (e) {
 			if (seq === candidate.seq) candidate.releaseError = toCleanedError(e);
 		} finally {
@@ -978,6 +1035,24 @@
 		return typeof value === 'string' ? value.trim() : '';
 	}
 
+	/** Mirror of the server's splitSeries (internal/api/snapshot.go): the
+	 *  stored books.series string is "Name #N" (or several, comma-joined);
+	 *  the last " #" separates name from position, a leading "#N" with no
+	 *  name is an empty name. Keeping the preview's re-parse identical to
+	 *  capture is what guarantees the previewed name matches the saved
+	 *  snapshot's name. Trimming uses Go's unicode.IsSpace set (trimSegment)
+	 *  rather than String.prototype.trim — the server trims with
+	 *  strings.TrimSpace, and the two disagree on U+0085, which would let a
+	 *  series name carry into the saved snapshot while vanishing from the
+	 *  previewed one (or vice versa). */
+	function splitSeries(series: string): [string, string] {
+		series = trimSegment(series);
+		if (!series) return ['', ''];
+		const i = series.lastIndexOf(' #');
+		if (i >= 0) return [trimSegment(series.slice(0, i)), trimSegment(series.slice(i + 2))];
+		return [series, ''];
+	}
+
 	/** Upstream sends series positions as a number, a string, or an object
 	 *  carrying `value`/`label`. Accept those forms, never invent one. */
 	function seriesPositionValue(series: unknown): string {
@@ -1089,34 +1164,240 @@
 		return parent ? `${sourceBase(candidate)} in ${parent}` : sourceBase(candidate);
 	}
 
-	// ── Proposed output naming ─────────────────────────────────
-	// Preview only: the processor writes ASIN + scheme and reports the actual
-	// final path. Resolved through the shared scheme resolver, so this
-	// preview agrees with the Settings example (Go segment rules, no
-	// double `.m4b`). As with that resolver, unknown placeholders stay
-	// visible (unrecognized spellings are literal), and `{asin}` stays
-	// literal — m4b-merge does not substitute it (engine parity).
-
-	function schemeValues(candidate: MatchCandidate): Record<string, string> {
-		const book = candidate.details.book;
-		const release = candidate.details.release;
-		const series = book?.series?.[0];
-		const releaseDate = release?.releaseDate || book?.originallyPublishedAt || '';
-		return {
-			author: roleNames(book, release, 'author'),
-			narrator: roleNames(book, release, 'narrator'),
-			series_name: seriesRecordName(series),
-			series_position: seriesPositionValue(series),
-			subtitle: valueFor(release, 'subtitle') || valueFor(book, 'subtitle'),
-			title: release?.title || book?.title || '',
-			year: yearOf(releaseDate)
-		};
+	// ── Output naming preview (engine-backed) ──────────────────
+	// The engine's non-mutating job preview over the EXACT capture payload a
+	// save records (ordered people, canonical ADB book id, release year,
+	// series, genres) — so the name shown here is the name the job will
+	// publish. No local token substitution: the engine owns the resolver.
+	let outputPreviews = $state<Record<number, string>>({});
+	// Bounded concurrency for batch mode: every row previews its own capture
+	// payload (batch mode shows one row per source, so a focused-only
+	// request left every other row without a name). The bookkeeping (what
+	// stands, what is requeued, what a response may change) lives in the
+	// pure #lib/previewBatch module.
+	const PREVIEW_CONCURRENCY = 3;
+	const batch = newPreviewBatchState();
+	// Version counter that wakes the effect below. A $state Set is NOT a
+	// working wake: Svelte 5 proxies plain objects and arrays, not native
+	// Sets, so an in-place clear()/add() creates no dependency and a
+	// settling request would never re-run the effect (batches past the
+	// cap stalled at "Resolving…"). Reassigning this counter on every
+	// settle is an explicit reactive write: the effect re-runs, plan()
+	// skips the slots that still stand (unchanged payload), and dispatches
+	// the next queued rows.
+	let previewBatchVersion = $state(0);
+	// The server-computed effective metadata (snapshot + overrides) per
+	// local book id, fetched once per book. The preview payload must use
+	// the SAME effective metadata the queue path uses (processing.go
+	// overlays the saved manual overrides before freezing the job); a
+	// catalog-only preview would show the catalog title even though the
+	// job names the file from the override.
+	// The saved OVERRIDE LAYER (pure manual overrides, not the server's
+	// effective snapshot) per local book id, fetched once per book. The
+	// preview applies this layer to the PENDING candidate's base capture
+	// (the currently selected book+release), so a release change re-bases
+	// the preview on the new release's metadata with the same overrides
+	// on top — the old effective snapshot carried the OLD release's base
+	// values, which leaked into a re-matched candidate.
+	const effectiveMetaCache = $state<Record<number, BookMetadataOverrides | null>>({});
+	// In-flight metadata fetches, recorded SYNCHRONOUSLY: the cache only
+	// fills after the GET settles, so every $effect re-run in that window
+	// would otherwise start a second GET for the same book. Reuse the
+	// pending promise until it settles (dedup).
+	const pendingEffectiveMeta = new Map<number, Promise<void>>();
+	let effectiveMetaVersion = $state(0);
+	async function ensureEffectiveMeta(bookId: number) {
+		if (bookId in effectiveMetaCache) return;
+		const inFlight = pendingEffectiveMeta.get(bookId);
+		if (inFlight) {
+			void inFlight;
+			return;
+		}
+		const p = (async () => {
+			try {
+				const resp = await get<BookMetadataResponse>(`/books/${bookId}/metadata`);
+				effectiveMetaCache[bookId] = resp.overrides;
+			} catch {
+				effectiveMetaCache[bookId] = null;
+			} finally {
+				pendingEffectiveMeta.delete(bookId);
+			}
+		})();
+		pendingEffectiveMeta.set(bookId, p);
+		await p;
+		effectiveMetaVersion++;
 	}
 
-	// ── Output naming preview (global Settings) ───────────────
+	$effect(() => {
+		void previewBatchVersion;
+		void effectiveMetaVersion;
+		const wanted = new Map<number, string>();
+		for (const c of candidates) {
+			if (c.details.book && outputScheme) {
+				const eff = effectiveMetaCache[c.bookId] ?? null;
+				const meta = eff
+					? effectivePreviewMeta(eff, c.details.book, c.details.release)
+					: captureMetadata(c.details.book, c.details.release);
+				wanted.set(c.bookId, JSON.stringify({ metadata: meta, path_format: outputScheme }));
+				if (!(c.bookId in effectiveMetaCache)) {
+					void ensureEffectiveMeta(c.bookId);
+				}
+			}
+		}
+		const dispatched = plan(batch, wanted, PREVIEW_CONCURRENCY);
+		// Pick up the stale-value clears plan made for queued (undispatched)
+		// rows: a settled path for a PREVIOUS edition must not render while
+		// its replacement waits for a free slot (the render cache is cleared
+		// only for dispatched rows, so a payload change under a saturated cap
+		// would leave the old path visible until a slot frees).
+		outputPreviews = { ...batch.previews };
+		for (const d of dispatched) {
+			// Back off repeated failures: a persistently failing preview
+			// (the engine is down, the format is invalid for this engine)
+			// must not re-dispatch every 250 ms forever. The delay doubles
+			// with each consecutive failure, capped at 5 s, and resets on a
+			// success (settle clears the failCount).
+			const fails = batch.failCount.get(d.id) ?? 0;
+			const delay = Math.min(250 * 2 ** fails, 5000);
+			setTimeout(async () => {
+				let ok = false;
+				let value = '';
+				try {
+					const body = JSON.parse(d.payload);
+					const resp = await post<{ relative_path: string }>('/engine/preview', body);
+					ok = true;
+					value = resp.relative_path;
+				} catch {
+					// ok stays false: the slot is dropped and the id
+					// requeues (a failed fetch retries, never pins a
+					// permanent pending row).
+				} finally {
+					settle(batch, d.id, d.payload, d.gen, { ok, value });
+					// Sync the render state: settled values and pending
+					// slots both live in the module's bookkeeping now.
+					outputPreviews = { ...batch.previews };
+				// Wake the effect so the freed slot advances the
+				// queue (plan() skips the slots that stand).
+					previewBatchVersion++;
+				}
+			}, delay);
+		}
+	});
+
+	/** The preview payload's metadata: the PENDING candidate's base capture
+	 *  (the currently selected book+release) with the saved OVERRIDE LAYER
+	 *  applied on top — the same view the queue path freezes (Go's
+	 *  applyMetadataOverride overlays the manual overrides on the capture
+	 *  before the job is built). Overlaying the layer on the base (not
+	 *  serving the server's effective snapshot verbatim) is what lets a
+	 *  release change re-base the preview: the base is the NEW release's
+	 *  metadata, and only the user's manual overrides ride on top. A null
+	 *  layer (no overrides, or the fetch not yet settled) returns the bare
+	 *  base capture.
+	 *
+	 * Conventions mirror applyMetadataOverride: a non-empty scalar /
+	 * non-null array overrides, and series_name / series_position apply
+	 * INDEPENDENTLY (a position-only override is not gated on the name,
+	 * and a name-only override does not drag the catalog position along).
+	 * A cleared field is NOT removed from the preview: the server keeps
+	 * the captured value in the effective metadata (the output is named
+	 * from it) and pins only the write policy to clear the tag from the
+	 * file, so the preview's path must resolve from the same value.
+	 * Cover and chapters are not preview inputs (the engine resolves name
+	 * tokens only) and are left as the base capture has them. */
+	function effectivePreviewMeta(
+		ov: BookMetadataOverrides | null,
+		book: AudiobookDBBook,
+		release: AudiobookDBRelease | null
+	): Record<string, unknown> {
+		const base = captureMetadata(book, release);
+		if (!ov) return base;
+		// The override values win for the name-bearing fields the engine
+		// resolves: title, subtitle, people, series, year, genres.
+		if (ov.title) base.title = ov.title;
+		if (ov.subtitle) base.subtitle = ov.subtitle;
+		if (ov.authors !== null) base.authors = ov.authors;
+		if (ov.narrators !== null) base.narrators = ov.narrators;
+		// Independent of each other, exactly as the server's override
+		// layer composes them: each field applies on its own.
+		if (ov.series_name) base.series_name = ov.series_name;
+		if (ov.series_position) base.series_position = ov.series_position;
+		if (ov.year !== null) base.year = ov.year;
+		if (ov.genres !== null) base.genres = ov.genres;
+		// Cleared fields keep their captured values: the server's
+		// effective metadata does too (the naming source), and only the
+		// write policy pins the tag's removal. Deleting them here would
+		// make the preview resolve a path the queued output does not.
+		return base;
+	}
+
+	// Trims the rune set Go's unicode.IsSpace covers (what
+	// strings.TrimSpace in genreTitles, internal/api/snapshot.go,
+	// trims); the class mirrors IsSpace, which excludes U+FEFF.
+	// JS String.prototype.trim's whitespace set differs — e.g. U+0085 —
+	// and a title JS would leave would diverge the preview from the
+	// saved snapshot.
+	function goTrim(s: string): string {
+		const ws = '[\t\n\u000B\f\r \u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]';
+		return s.replace(new RegExp('^' + ws + '+'), '').replace(new RegExp(ws + '+$'), '');
+	}
+
+	/** The snapshot shape a save captures for this selection — ordered
+	 *  people arrays, canonical ADB book id (#480), release year. */
+	function captureMetadata(book: AudiobookDBBook, release: AudiobookDBRelease | null): Record<string, unknown> {
+		const releaseDate = release?.releaseDate || book.originallyPublishedAt || '';
+		const meta: Record<string, unknown> = {
+			title: release?.title || book.title || '',
+			authors: rolePeople(book, release, 'author').map((p) => p.name),
+			narrators: rolePeople(book, release, 'narrator').map((p) => p.name)
+		};
+		// Subtitle with the SAME precedence the server capture uses
+		// (subtitleFromCatalog): the selected release's own subtitle when
+		// present, then the book's, then the book's disambiguation. Without
+		// it, a {subtitle} scheme resolves a different path in the preview
+		// than in the queued job (the snapshot carries the value, the
+		// preview payload did not).
+		// trimSegment (not .trim): the server's TrimSpace capture strips
+		// the Go unicode.IsSpace set (U+0085, U+00A0, ...), which JS
+		// .trim leaves in — the preview payload must match the snapshot.
+		const subtitle = [release?.subtitle, book.subtitle, book.disambiguation]
+			.map((v) => trimSegment(v ?? ''))
+			.find((v) => v !== '');
+		if (subtitle) meta.subtitle = subtitle;
+		if (book.id) meta.book_id = book.id;
+		const year = Number(yearOf(releaseDate));
+		if (Number.isFinite(year) && year > 0) meta.year = year;
+		// Same series normalization the save captures: the stored books.series
+		// field is ALL named series entries comma-joined as "Name #N", and
+		// capture re-parses that string. A preview on only the first entry
+		// would diverge from the saved snapshot whenever a book has more
+		// than one named series.
+		const seriesName = (book.series ?? [])
+			.map((entry) => {
+				const name = seriesRecordName(entry);
+				if (!name) return '';
+				const position = seriesPositionValue(entry);
+				return [name, position ? `#${position}` : ''].filter(Boolean).join(' ');
+			})
+			.filter(Boolean)
+			.join(', ');
+		const [firstSeriesName, firstSeriesPosition] = splitSeries(seriesName);
+		if (firstSeriesName) meta.series_name = firstSeriesName;
+		if (firstSeriesPosition) meta.series_position = firstSeriesPosition;
+		// Same genre normalization the saved snapshot uses (genreTitles in
+		// internal/api/snapshot.go): the FULL ordered list, each title
+		// trimmed by goTrim (Go's unicode.IsSpace set), blanks dropped.
+		// A first-genre-only preview diverged from the queued job whenever
+		// the first title was blank.
+		const genres = (book.genres ?? [])
+			.map((g) => goTrim(g.title))
+			.filter((t) => t !== '');
+		if (genres.length) meta.genres = genres;
+		return meta;
+	}
+
 	function proposedRelativeName(candidate: MatchCandidate): string {
-		if (!outputScheme || !candidate.details.book) return '';
-		return resolveScheme(outputScheme, schemeValues(candidate));
+		return outputPreviews[candidate.bookId] ?? '';
 	}
 
 	function fullOutputPath(candidate: MatchCandidate): string {
@@ -1258,6 +1539,35 @@
 		});
 	}
 
+	/** Load the selection-scoped evidence report after the catalog record
+	 *  settles. The pending list only states the source read state; the
+	 *  identifiers and source-vs-catalog comparisons are derived against the
+	 *  selected record. A failed request leaves that source-only report in
+	 *  place, so the read banner never regresses to "not read". */
+	async function loadEvidence(candidate: MatchCandidate) {
+		const bookId = candidate.selectedBookId;
+		if (!bookId || candidate.details.book?.id !== bookId) return;
+		const releaseId = candidate.selectedReleaseId;
+		const seq = candidate.seq;
+		const params = new URLSearchParams({ book_id: bookId });
+		if (releaseId) params.set('release_id', releaseId);
+		try {
+			const report = await get<MatchEvidenceReport>(
+				`/books/${candidate.bookId}/match-evidence?${params.toString()}`
+			);
+			if (
+				seq !== candidate.seq ||
+				candidate.selectedBookId !== bookId ||
+				candidate.selectedReleaseId !== releaseId
+			) {
+				return;
+			}
+			candidate.evidence = report;
+		} catch {
+			// Keep the source-only list report.
+		}
+	}
+
 	type MatchStateKind = 'auto' | 'manual' | 'none' | 'low' | 'loading' | 'error';
 
 	/** The catalog match state — the existing manualPick, details.book,
@@ -1283,8 +1593,9 @@
 				: { kind: 'low', text: 'No close title match' };
 		}
 		if (!isReady(candidate)) return { kind: 'loading', text: 'Loading edition…' };
-		return candidate.manualPick
-			? { kind: 'manual', text: 'Selected manually' }
+		if (candidate.manualPick) return { kind: 'manual', text: 'Selected manually' };
+		return candidate.asinPick
+			? { kind: 'auto', text: 'Selected by source ASIN' }
 			: { kind: 'auto', text: 'Selected by title' };
 	}
 
@@ -1507,7 +1818,7 @@
 			release_date: releaseDate,
 			series: series || undefined,
 			publisher: release?.publisher?.name || undefined,
-			language: release?.language?.title || undefined,
+			language: release?.language?.name || undefined,
 			runtime_length_minutes: runtimeMs ? Math.round(runtimeMs / 60000) : undefined,
 			cover_image_url: selectedCover(candidate),
 			status: 'matched',
@@ -1544,7 +1855,7 @@
 	{@const kind = statusKind(c)}
 	{#if kind === 'auto' || kind === 'manual'}
 		{@const report = selectedEvidence(c)}
-		{@const badge = evidenceBadge(report, c.manualPick)}
+		{@const badge = evidenceBadge(report, c.manualPick, c.asinPick)}
 		{@const fields = badge.kind === 'conflict' ? conflictingEvidenceFields(report) : []}
 		{@const identifiers = report && (report.sourceRead.status === 'read' || report.sourceRead.status === 'partial') ? report.identifiers : []}
 		<span class="match__explanation" data-evidence-origin={badge.kind}>
@@ -1560,7 +1871,7 @@
 					{#if fields.length}<span class="match__explanation-line">Fields differ: {fields.map((field) => evidenceFieldLabels[field]).join(', ')}.</span>{/if}
 					{#if identifiers.some((identifier) => identifier.state === 'conflict')}<span class="match__explanation-line">The source identifier points to a different record.</span>{/if}
 				{:else}
-					<span class="match__explanation-line">{#if badge.identityScope === 'edition'}Source identifier matches this edition.{:else if badge.identityScope === 'book'}Identifies the book, not the edition.{:else if c.manualPick}You chose this record; check its narrator and edition.{:else}Title-based suggestion; check narrator and edition.{/if}</span>
+					<span class="match__explanation-line">{#if badge.identityScope === 'edition'}Source identifier matches this edition.{:else if badge.identityScope === 'book'}{#if c.asinPick && !c.manualPick}Matched by the source file's ASIN. Identifies the book, not the edition.{:else}Identifies the book, not the edition.{/if}{:else if c.manualPick}You chose this record; check its narrator and edition.{:else if c.asinPick}Matched by the source file's ASIN; check narrator and edition.{:else}Title-based suggestion; check narrator and edition.{/if}</span>
 				{/if}
 			</span>
 		</span>
@@ -1645,7 +1956,10 @@
 		{:else if proposedRelativeName(c)}
 			<code>{proposedRelativeName(c)}</code>
 		{:else}
-			<span>Output scheme is empty</span>
+			<!-- Scheme set, record selected, name not settled: the preview
+			     is queued, in flight, or retrying — all pending, never an
+			     empty scheme. -->
+			<span>Resolving…</span>
 		{/if}
 		</div>
 		<details class="match__fullpath"><summary>Output path and naming details</summary><p>Preview only; the processor reports the final output path.</p><code>{fullOutputPath(c)}</code></details>
@@ -1892,7 +2206,7 @@
 										<p class="batch__author">{@render fieldEvidence(c, 'author', selectedAuthors(c))}</p>
 										<p class="batch__evidence batch__evidence--primary"><span class="batch__evidence-label">Narrator</span> <strong>{@render fieldEvidence(c, 'narrator', selectedNarrators(c) || 'Unavailable')}</strong> · <span class="batch__evidence-label">Runtime</span> <strong class="batch__runtime-value">{@render fieldEvidence(c, 'runtime', runtimeLabel(releaseRuntimeMs(c.details.release)) || 'Unavailable')}</strong></p>
 										<p class="batch__evidence batch__evidence--release"><span class="batch__evidence-label">Released</span> {@render fieldEvidence(c, 'date', dateLabel(c.details.release?.releaseDate) || 'Unavailable')}</p>
-										<p class="batch__evidence"><span class="batch__evidence-label">Publisher</span> {@render fieldEvidence(c, 'publisher', c.details.release?.publisher?.name || 'Unavailable')} · <span class="batch__evidence-label">Language</span> {@render fieldEvidence(c, 'language', c.details.release?.language?.title || 'Unavailable')}</p>
+										<p class="batch__evidence"><span class="batch__evidence-label">Publisher</span> {@render fieldEvidence(c, 'publisher', c.details.release?.publisher?.name || 'Unavailable')} · <span class="batch__evidence-label">Language</span> {@render fieldEvidence(c, 'language', c.details.release?.language?.name || 'Unavailable')}</p>
 										{#if edition}<p class="batch__edition">{edition}</p>{/if}
 										<div class="batch__state">{@render provenance(selected.id)}</div>
 									</div>
@@ -2057,6 +2371,14 @@
 							<div class="match__source-copy">
 								<h2 class="match__comparison-label">Source</h2>
 								<p class="match__source-name">{sourceBase(c)}</p>
+								<a
+									class="match__source-edit"
+									href={`/books/${c.bookId}#manual-metadata`}
+									target="_blank"
+									rel="noopener"
+								>
+									Edit metadata<span class="sr-only"> (opens in a new tab)</span>
+								</a>
 								{@render sourceDetails(c)}
 							</div>
 						</div>
@@ -2138,7 +2460,7 @@
 										<div class="match__meta-primary"><dt>Runtime</dt><dd>{@render fieldEvidence(c, 'runtime', runtimeLabel(releaseRuntimeMs(release)) || 'Unavailable')}</dd></div>
 										<div class="match__meta-release"><dt>Released</dt><dd>{@render fieldEvidence(c, 'date', dateLabel(release?.releaseDate) || 'Unavailable')}</dd></div>
 										<div><dt>Publisher</dt><dd>{@render fieldEvidence(c, 'publisher', release?.publisher?.name || 'Unavailable')}</dd></div>
-										<div><dt>Language</dt><dd>{@render fieldEvidence(c, 'language', release?.language?.title || 'Unavailable')}</dd></div>
+										<div><dt>Language</dt><dd>{@render fieldEvidence(c, 'language', release?.language?.name || 'Unavailable')}</dd></div>
 									</dl>
 									{#if description}
 										<div class="match__description">
@@ -2227,7 +2549,7 @@
 					{/if}
 						{#key c.bookId}
 						<details class="match__change" open={!c.details.book || !!c.error || !!c.releaseError} ontoggle={(e) => { if (!e.currentTarget.open) closePicker(); }}>
-							<summary>Change book or edition</summary>
+							<summary>Change catalog match or edition</summary>
 							{#if c.releaseError}
 								<div class="match__edition-error" role="alert">
 									<span>Edition failed to load: {c.releaseError.message}</span>
@@ -3649,6 +3971,19 @@
 	.match-picker__field {
 		display: flex;
 		flex-direction: column;
+	}
+
+	.match__source-edit {
+		display: inline-block;
+		margin-top: 0.25rem;
+		color: var(--text-muted);
+		font-size: 0.8125rem;
+		text-decoration: underline;
+		text-underline-offset: 2px;
+	}
+
+	.match__source-edit:hover {
+		color: var(--text);
 	}
 
 	.match-picker__trigger {

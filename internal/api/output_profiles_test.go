@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -168,6 +169,24 @@ func TestCreateOutputProfileValidationErrors(t *testing.T) {
 	}
 }
 
+// TestValidateProfileAbsoluteDirIsPlatformAppropriate guards the
+// Windows target: the destination-root check is filepath.IsAbs, so a
+// Windows-style absolute path (volume letter + backslash) is accepted
+// there, while a bare relative name is refused everywhere.
+func TestValidateProfileAbsoluteDirIsPlatformAppropriate(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows absolute-path shape only exists on Windows")
+	}
+	_, _, _, msg := validateProfile("N", "C:\\output", "{author}/{title}")
+	if msg != "" {
+		t.Fatalf("Windows absolute destination refused: %s", msg)
+	}
+	_, _, _, msg = validateProfile("N", "output", "{author}/{title}")
+	if msg == "" {
+		t.Fatal("relative destination accepted")
+	}
+}
+
 func TestUpdateOutputProfilePersistsAndRefreshes(t *testing.T) {
 	h := newTestHandler(t)
 	first := filepath.Join(t.TempDir(), "one")
@@ -258,6 +277,50 @@ func TestDeleteOutputProfileUnknownAndInvalidID(t *testing.T) {
 	h.DeleteOutputProfile(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("re-delete status = %d; want 404 — body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestSettingsInvalidOutputProfilesEmptyNotNull pins the settings JSON
+// contract: after a clean boot (no invalid profiles, i.e. a nil slice is
+// recorded) the settings response must carry invalid_output_profiles as an
+// EMPTY ARRAY, not null — the Settings UI counts on a list shape. The
+// assertion is on the RAW body: decoding null into a map yields nil, so
+// only the text distinguishes [] from null.
+func TestSettingsInvalidOutputProfilesEmptyNotNull(t *testing.T) {
+	h := newSettingsTestService(t, newSettingsTestDB(t))
+	SetBootInvalidProfiles(nil)
+	t.Cleanup(func() { SetBootInvalidProfiles(nil) })
+
+	req := httptest.NewRequest("GET", "/api/settings", nil)
+	w := httptest.NewRecorder()
+	h.GetSettings(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET settings = %d — body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"invalid_output_profiles":[]`) {
+		t.Fatalf("settings body = %q; want the invalid_output_profiles field as an empty array, not null", w.Body.String())
+	}
+
+	// The non-empty case must survive too: a recorded profile reaches the
+	// UI verbatim (the repair list is the point of the field).
+	SetBootInvalidProfiles([]InvalidOutputProfile{{ID: 7, Name: "bad", Format: "../x", Error: "escapes"}})
+	req = httptest.NewRequest("GET", "/api/settings", nil)
+	w = httptest.NewRecorder()
+	h.GetSettings(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET settings = %d — body: %s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	list, ok := got["invalid_output_profiles"].([]any)
+	if !ok || len(list) != 1 {
+		t.Fatalf("invalid_output_profiles = %#v; want the one recorded profile", got["invalid_output_profiles"])
+	}
+	prof, _ := list[0].(map[string]any)
+	if prof["id"] != float64(7) || prof["name"] != "bad" {
+		t.Fatalf("recorded profile not surfaced: %#v", list[0])
 	}
 }
 

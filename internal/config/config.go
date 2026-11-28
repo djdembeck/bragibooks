@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
@@ -64,14 +65,34 @@ type DirectoriesConfig struct {
 	InputDir     string `mapstructure:"input_dir" yaml:"input_dir" json:"input_dir"`
 	OutputDir    string `mapstructure:"output_dir" yaml:"output_dir" json:"output_dir"`
 	CompletedDir string `mapstructure:"completed_dir" yaml:"completed_dir" json:"completed_dir"`
+	// IndexingEnabled turns on the input-directory index (pre-extracted
+	// source evidence served by the Import page). Default off; the DB
+	// settings row is the runtime preference, env/YAML pin the deployment.
+	IndexingEnabled bool `mapstructure:"indexing_enabled" yaml:"indexing_enabled" json:"indexing_enabled"`
 }
 
 // ProcessingConfig holds audiobook processing configuration.
 type ProcessingConfig struct {
-	NumCPUs    int    `mapstructure:"num_cpus" yaml:"num_cpus" json:"num_cpus"`
+	NumCPUs int `mapstructure:"num_cpus" yaml:"num_cpus" json:"num_cpus"`
+	// PathFormat is the global output path template.
 	PathFormat string `mapstructure:"path_format" yaml:"path_format" json:"path_format"`
 	Region     string `mapstructure:"region" yaml:"region" json:"region"`
 	LogLevel   string `mapstructure:"log_level" yaml:"log_level" json:"log_level"`
+	// MetadataFields is the per-field embedded-metadata write selection
+	// (#518): which supported logical fields processing may write into the
+	// output file. Nil means the DEFAULT behavior — write every supported
+	// field that has an available value (all-supported-available). An
+	// explicit list (possibly EMPTY, meaning write nothing) writes exactly
+	// the selected fields and preserves the rest. The selection is a WRITE
+	// permission, not a value source: output naming always uses the full
+	// effective metadata, and an unselected field is preserved, never
+	// cleared.
+	MetadataFields *[]string `mapstructure:"metadata_fields" yaml:"metadata_fields" json:"metadata_fields"`
+	// MetadataChapters is the chapter write policy (#518): "write" (the
+	// default; embed the release's chapters + the chapter sidecar) or
+	// "preserve" (no chapter mutation; the engine enforces the single
+	// natively-copyable input requirement with a diagnosed error).
+	MetadataChapters string `mapstructure:"metadata_chapters" yaml:"metadata_chapters" json:"metadata_chapters"`
 }
 
 // ConfigManager manages thread-safe config updates and persistence.
@@ -172,27 +193,100 @@ func loadWith(explicitPath string) (Config, string, error) {
 		}
 	}
 
+	// A present-but-MALFORMED processing.metadata_fields (null, a scalar,
+	// a list with a non-string member) would fail the typed decode for
+	// the WHOLE file, collapsing every other pin into defaults and
+	// aborting startup. Sanitize the file bytes ONCE, before ANY decode
+	// (Viper's Unmarshal, the yamlOnly override decode, and the key-set
+	// pass all read the same bytes), so the malformed value reads as
+	// "the file did not set the selection": the DB row (the durable
+	// selection) is honored, and the pin-freeze keeps the durable row's
+	// value instead of silently converting it. An explicit empty list is
+	// a valid value and stays.
+	var rawFileBytes []byte
+	if !configFileNotFound {
+		// A failed read must not leave a possibly-truncated buffer in
+		// rawFileBytes: the yamlOnly override decode below reuses it, and
+		// a nil buffer there triggers the loud re-read error path that
+		// this one would bypass.
+		var readErr error
+		rawFileBytes, readErr = os.ReadFile(v.ConfigFileUsed())
+		if readErr != nil {
+			rawFileBytes = nil
+		}
+		var rawMap map[string]any
+		if rawFileBytes != nil && yaml.Unmarshal(rawFileBytes, &rawMap) == nil {
+			if proc, ok := rawMap["processing"].(map[string]any); ok {
+				if val, present := proc["metadata_fields"]; present {
+					if _, listOK := yamlStringListValue(val); !listOK {
+						delete(proc, "metadata_fields")
+						if cleaned, cleanErr := yaml.Marshal(rawMap); cleanErr == nil {
+							rawFileBytes = cleaned
+							_ = v.ReadConfig(bytes.NewReader(cleaned))
+							log.Printf("Warning: config processing.metadata_fields is not a string list (%v); treating the key as unset so the saved write selection is honored", val)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// DIRECTORIES_INDEXING_ENABLED is on-only and exact: a non-exact
+	// value ("false", "TRUE", "1", "on", ...) must never override the
+	// YAML/default preference, and an unparseable value ("on", "yes")
+	// would also fail the whole decode. Unset it for Unmarshal so
+	// Viper's env layering cannot layer it over file/default; the exact
+	// "true" pin is re-asserted by applyEnvPriority after the load.
+	var indexingEnvRestore func()
+	if env := os.Getenv("DIRECTORIES_INDEXING_ENABLED"); env != "" && env != "true" {
+		_ = os.Unsetenv("DIRECTORIES_INDEXING_ENABLED")
+		indexingEnvRestore = func() { _ = os.Setenv("DIRECTORIES_INDEXING_ENABLED", env) }
+	}
+
 	var cfg Config
-	if err := v.Unmarshal(&cfg); err != nil {
-		setLoadError(fmt.Errorf("failed to unmarshal config: %w", err))
-		return Config{}, "", fmt.Errorf("failed to unmarshal config: %w", err)
+	unmarshalErr := v.Unmarshal(&cfg)
+	if indexingEnvRestore != nil {
+		indexingEnvRestore()
+	}
+	if unmarshalErr != nil {
+		setLoadError(fmt.Errorf("failed to unmarshal config: %w", unmarshalErr))
+		return Config{}, "", fmt.Errorf("failed to unmarshal config: %w", unmarshalErr)
 	}
 
 	var configPath string
 	if !configFileNotFound {
 		configPath = v.ConfigFileUsed()
 
-		raw, err := os.ReadFile(configPath)
-		if err != nil {
-			setLoadError(fmt.Errorf("failed to re-read config file for overrides: %w", err))
-			return Config{}, "", fmt.Errorf("failed to re-read config file for overrides: %w", err)
+		// The SAME bytes the sanitize pass saw (or the file itself when
+		// no sanitization was needed): decoding the original here would
+		// let a malformed metadata_fields abort the typed decode that the
+		// Viper pass just survived.
+		raw := rawFileBytes
+		if raw == nil {
+			var readErr error
+			raw, readErr = os.ReadFile(configPath)
+			if readErr != nil {
+				setLoadError(fmt.Errorf("failed to re-read config file for overrides: %w", readErr))
+				return Config{}, "", fmt.Errorf("failed to re-read config file for overrides: %w", readErr)
+			}
 		}
 		var yamlOnly Config
 		if err := yaml.Unmarshal(raw, &yamlOnly); err != nil {
 			setLoadError(fmt.Errorf("failed to parse config file for overrides: %w", err))
 			return Config{}, "", fmt.Errorf("failed to parse config file for overrides: %w", err)
 		}
-		for _, key := range flattenYAMLKeys(parseYAMLMap(raw), "") {
+		rawMap := parseYAMLMap(raw)
+		// yaml.Unmarshal decodes an empty list to a nil slice, so it cannot
+		// distinguish "explicit empty" from "absent". metadata_fields makes
+		// that distinction load-bearing (nil = default all-supported, [] =
+		// the explicit "write nothing" selection, #518), so an empty list
+		// PRESENT in the file is restored to a non-nil empty slice here.
+		if proc, ok := rawMap["processing"].(map[string]any); ok {
+			if v, present := proc["metadata_fields"]; present && isEmptyListValue(v) {
+				yamlOnly.Processing.MetadataFields = &[]string{}
+			}
+		}
+		for _, key := range flattenYAMLKeys(rawMap, "") {
 			overrideKey(&cfg, &yamlOnly, key)
 		}
 	}
@@ -218,6 +312,14 @@ func Load() (Config, string, error) {
 
 // yamlKeysFromFile returns the set of dotted keys present in the YAML file
 // at path (empty map for a missing/unreadable file).
+//
+// `processing.metadata_fields` is special: it is dropped from the set when
+// its value is present but NOT a valid string list (null, a scalar, or a
+// list with a non-string member). A present-but-malformed value must read as
+// "the file did not authoritatively set the selection" so the DB row (the
+// durable stored selection) is honored at startup and by the pin-freeze —
+// never silently collapsed to the default. An explicit empty list IS valid
+// (the "write nothing" selection) and stays present.
 func yamlKeysFromFile(configPath string) map[string]bool {
 	yamlKeys := make(map[string]bool)
 	if configPath == "" {
@@ -228,6 +330,13 @@ func yamlKeysFromFile(configPath string) map[string]bool {
 		if yaml.Unmarshal(raw, &rawMap) == nil {
 			for _, k := range flattenYAMLKeys(rawMap, "") {
 				yamlKeys[k] = true
+			}
+			if proc, ok := rawMap["processing"].(map[string]any); ok {
+				if v, present := proc["metadata_fields"]; present {
+					if _, listOK := yamlStringListValue(v); !listOK {
+						delete(yamlKeys, "processing.metadata_fields")
+					}
+				}
 			}
 		}
 	}
@@ -255,6 +364,153 @@ func (cm *ConfigManager) Store(cfg *Config) {
 // UI renders the state read-only. This is the single source for that rule.
 func (cm *ConfigManager) APIEndpointEnvManaged() bool {
 	return os.Getenv("SERVER_API_ENDPOINT_ENABLED") != ""
+}
+
+// MetadataEnvManaged reports whether PROCESSING_METADATA_FIELDS and/or
+// PROCESSING_METADATA_CHAPTERS pin the per-field write selection
+// deployment-side. Env beats the settings stores in the documented
+// precedence: the UI renders the pinned controls read-only, the settings
+// save ignores the pinned keys, and ReassertMetadataPins keeps the pinned
+// values authoritative in the live config until the operator removes the
+// pin. Mirrors APIEndpointEnvManaged.
+func (cm *ConfigManager) MetadataEnvManaged() (fields, chapters bool) {
+	fields = os.Getenv("PROCESSING_METADATA_FIELDS") != ""
+	chapters = os.Getenv("PROCESSING_METADATA_CHAPTERS") != ""
+	return
+}
+
+// ReassertMetadataPins re-applies the PROCESSING_METADATA_* pins to a live
+// config. The full env priority runs at load time (applyEnvPriority), but
+// the settings save path stores a freshly merged config that would silently
+// drop an active pin from the live state for the rest of the process's
+// lifetime; callers that replace the live config must re-assert the pins so
+// the deployment value stays authoritative (and visible to readers) until
+// the operator removes it.
+func ReassertMetadataPins(cfg *Config) {
+	if v := os.Getenv("PROCESSING_METADATA_FIELDS"); v != "" {
+		list := normalizeMetadataPin(v)
+		cfg.Processing.MetadataFields = &list
+	}
+	if v := os.Getenv("PROCESSING_METADATA_CHAPTERS"); v != "" {
+		cfg.Processing.MetadataChapters = strings.TrimSpace(v)
+	}
+}
+
+// StoredMetadataSelection reads the durable config file (the store the
+// Settings save persists through) and returns the written metadata
+// selection: a nil pointer means "not set" (default all-supported-
+// available), a present empty list means the explicit none-selected save,
+// and a non-empty list is the saved selection. A missing file returns the
+// defaults, matching the empty-row baseline. fieldsOK and chaptersOK
+// report that the file's value for each key is a valid list / a valid
+// string (ABSENT counts as OK for both keys: an absent key is the
+// documented default, not an unreadable value); a present malformed
+// value leaves the key's value at its default AND its OK flag false, so
+// a caller that freezes a pinned key can preserve the durable row's
+// current value instead of writing a silently converted one.
+func (cm *ConfigManager) StoredMetadataSelection() (fields *[]string, chapters string, fieldsOK, chaptersOK bool) {
+	fields = nil
+	chapters = "write"
+	fieldsOK = true
+	chaptersOK = true
+	path := cm.configPath
+	if path == "" {
+		return
+	}
+	m := parseYAMLMap(mustReadFile(path))
+	if m == nil {
+		return
+	}
+	if proc, ok := m["processing"].(map[string]any); ok {
+		if v, present := proc["metadata_fields"]; present {
+			if list, ok := yamlStringListValue(v); ok {
+				fields = &list
+			} else {
+				fieldsOK = false
+			}
+		}
+		if v, present := proc["metadata_chapters"]; present {
+			if s, ok := v.(string); ok {
+				chapters = s
+			} else {
+				chaptersOK = false
+			}
+		}
+	}
+	return
+}
+
+// StoredMetadataKeyPresent reports whether the durable config file
+// carries a value for each metadata key at all (a present MALFORMED
+// value is "present": the typed loader discarded it, so the file has
+// said something it will not honor). StoredMetadataSelection's OK flags
+// alone cannot distinguish "the file says nothing about the selection"
+// (no fields key: the settings row is the durable selection) from "the
+// file actively manages the selection" (fields key present: its value,
+// default included, is authoritative over a stale row).
+func (cm *ConfigManager) StoredMetadataKeyPresent() (fields, chapters bool) {
+	path := cm.configPath
+	if path == "" {
+		return false, false
+	}
+	m := parseYAMLMap(mustReadFile(path))
+	if m == nil {
+		return false, false
+	}
+	proc, _ := m["processing"].(map[string]any)
+	_, f := proc["metadata_fields"]
+	_, c := proc["metadata_chapters"]
+	return f, c
+}
+
+// mustReadFile reads a file's raw bytes; missing files return nil. It is
+// for readers of optional stores (a not-found is a valid empty state), not
+// for callers that must distinguish other I/O errors.
+func mustReadFile(path string) []byte {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// yamlStringListValue converts a parsed-YAML list value to a string slice.
+// The second return reports that the value was a fully valid list (a
+// present empty list is valid and yields an empty slice); a non-list value
+// and a list with ANY non-string member are not valid and yield ok=false.
+// A silently dropped member would make a mixed list like [title, 7] read
+// as the authoritative [title], and the pin-freeze would freeze exactly
+// that truncated selection.
+func yamlStringListValue(v any) ([]string, bool) {
+	l, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(l))
+	for _, item := range l {
+		s, ok := item.(string)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, s)
+	}
+	return out, true
+}
+
+// normalizeMetadataPin splits a PROCESSING_METADATA_FIELDS pin into its
+// field list (an all-whitespace pin is the explicit "write nothing"). The
+// values are NOT validated: the boot validation in main.go is the single
+// nameable gate (same as the path-format boot check), so a bad pin fails
+// startup with a clear diagnosis, not a silently dropped deployment value.
+func normalizeMetadataPin(v string) []string {
+	parts := strings.Split(v, ",")
+	list := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			list = append(list, p)
+		}
+	}
+	return list
 }
 
 // AddYAMLKeys records that the given dotted keys are now explicitly present
@@ -480,6 +736,15 @@ func applyEnvPriority(cfg *Config) {
 	if isEnvTrue("SERVER_API_ENDPOINT_ENABLED") {
 		cfg.Server.APIEndpoint.Enabled = true
 	}
+	// On-only and exact: the documented contract is that ONLY the value
+	// "true" force-enables indexing (deployment pin). Any other value —
+	// including "false", "1", "yes", "on", "TRUE" — is NOT a pin:
+	// loadWith strips it from the Viper env layer and overrideKey keeps
+	// the YAML preference, so no non-exact value reaches this branch.
+	// Matching the DB-gate form in cmd/bragibooks/main.go.
+	if os.Getenv("DIRECTORIES_INDEXING_ENABLED") == "true" {
+		cfg.Directories.IndexingEnabled = true
+	}
 	if v := envVal("m4b_merge.binary"); v != "" {
 		cfg.M4bMerge.Binary = v
 	}
@@ -491,6 +756,15 @@ func applyEnvPriority(cfg *Config) {
 	}
 	if v := envVal("processing.region"); v != "" {
 		cfg.Processing.Region = v
+	}
+	// PROCESSING_METADATA_FIELDS pins the per-field write selection as a
+	// comma-separated list (an empty list is the explicit "write nothing").
+	if v := envVal("processing.metadata_fields"); v != "" {
+		list := normalizeMetadataPin(v)
+		cfg.Processing.MetadataFields = &list
+	}
+	if v := envVal("processing.metadata_chapters"); v != "" {
+		cfg.Processing.MetadataChapters = strings.TrimSpace(v)
 	}
 }
 
@@ -521,10 +795,30 @@ func flattenYAMLKeys(m map[string]any, prefix string) []string {
 	return keys
 }
 
+// isEmptyListValue reports whether a parsed-YAML value is a present empty
+// list (a `key: []` in the file), as opposed to nil (absent) or a non-empty
+// list. A `key: []` decodes to an empty []interface{}; a `key:` with no
+// value decodes to nil.
+func isEmptyListValue(v any) bool {
+	if l, ok := v.([]any); ok {
+		return len(l) == 0
+	}
+	return false
+}
+
 // overrideKey copies a single dotted key from yamlOnly into target — but
 // only when the env var for that key is unset (env wins, so deployment
 // config is never silently frozen by a settings save).
 func overrideKey(target, yamlOnly *Config, key string) {
+	if key == "directories.indexing_enabled" {
+		// On-only contract: the YAML value always stands — a non-exact
+		// env value must not pin the flag (loadWith reset the env layer
+		// over the default, so restoring the YAML preference here keeps
+		// it). The exact "true" pin is re-asserted by applyEnvPriority
+		// after this pass.
+		target.Directories.IndexingEnabled = yamlOnly.Directories.IndexingEnabled
+		return
+	}
 	if hasEnv(key) {
 		return
 	}
@@ -566,6 +860,12 @@ func overrideKey(target, yamlOnly *Config, key string) {
 		target.Processing.Region = yamlOnly.Processing.Region
 	case "processing.log_level":
 		target.Processing.LogLevel = yamlOnly.Processing.LogLevel
+	case "processing.metadata_fields":
+		// The nil (default all) vs explicit-list distinction must survive the
+		// YAML pass: an empty YAML list is an explicit "write nothing".
+		target.Processing.MetadataFields = yamlOnly.Processing.MetadataFields
+	case "processing.metadata_chapters":
+		target.Processing.MetadataChapters = yamlOnly.Processing.MetadataChapters
 	}
 }
 
@@ -594,10 +894,21 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("directories.input_dir", "")
 	v.SetDefault("directories.output_dir", "")
 	v.SetDefault("directories.completed_dir", "")
+	v.SetDefault("directories.indexing_enabled", false)
 	v.SetDefault("processing.num_cpus", 1)
 	v.SetDefault("processing.path_format", "{author}/{title}")
 	v.SetDefault("processing.region", "us")
 	v.SetDefault("processing.log_level", "info")
+	// processing.metadata_fields is intentionally NOT defaulted: nil (absent)
+	// is the documented all-supported-available behavior for existing installs,
+	// distinct from an explicit empty list (write nothing). Setting a default
+	// here would collapse that distinction. processing.metadata_chapters is
+	// not defaulted here either: viper folds SetDefault values into EVERY
+	// unmarshal, so a default would make the YAML pass (overrideKey) see a
+	// "write" that the YAML never set and clobber a DB-saved "preserve".
+	// The blank value is the documented default (write) at every consumer:
+	// the DB column carries DEFAULT 'write', the load COALESCEs a missing
+	// column to 'write', and buildEngineJob treats a blank policy as write.
 }
 
 // setDefaultsOnConfig sets default values directly on a Config struct.
@@ -612,6 +923,7 @@ func setDefaultsOnConfig(cfg *Config) {
 	cfg.Directories.InputDir = ""
 	cfg.Directories.OutputDir = ""
 	cfg.Directories.CompletedDir = ""
+	cfg.Directories.IndexingEnabled = false
 	cfg.Processing.NumCPUs = 1
 	cfg.Processing.PathFormat = "{author}/{title}"
 	cfg.Processing.Region = "us"

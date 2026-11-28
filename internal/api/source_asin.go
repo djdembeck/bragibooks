@@ -1,9 +1,6 @@
 package api
 
 import (
-	"encoding/json"
-	"fmt"
-	"log"
 	"regexp"
 	"strings"
 
@@ -122,63 +119,4 @@ func derivePresentSourceASIN(complete bool, field *audio.SourceField) *models.So
 		}
 	}
 	return &models.SourceASIN{Status: models.SourceASINAmbiguous, Count: len(normalized)}
-}
-
-// attachSourceASINs batch-loads book_source_metadata for the given books
-// and sets SourceASIN on each. Best-effort: a missing or malformed row
-// leaves SourceASIN nil, and a query failure logs and leaves everything
-// nil — it never fails the list.
-//
-// Element addresses are stable for the caller's slice: `&books[i]` points
-// into the caller's backing array, so the writes below are visible to the
-// caller without a second pass. Do NOT pass a copy of the slice here.
-//
-// Follow-up (deliberately not done): the payload is decoded in Go because
-// the whole snapshot is the contract. If the row count ever makes that
-// decode hot, project the field in SQL instead —
-// json_extract(payload,'$.fields.asin') — at the cost of a second place
-// that knows the payload shape.
-func (h *Handler) attachSourceASINs(books []models.BookWithPeople) {
-	if len(books) == 0 {
-		return
-	}
-
-	placeholders := make([]string, len(books))
-	args := make([]any, len(books))
-	byID := make(map[int64]*models.BookWithPeople, len(books))
-	for i := range books {
-		placeholders[i] = "?"
-		args[i] = books[i].ID
-		byID[books[i].ID] = &books[i]
-	}
-
-	rows, err := h.svc.DB.Query(
-		fmt.Sprintf("SELECT book_id, payload FROM book_source_metadata WHERE book_id IN (%s)", strings.Join(placeholders, ",")),
-		args...,
-	)
-	if err != nil {
-		log.Printf("attach source ASINs: query book_source_metadata: %v", err)
-		return
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var bookID int64
-		var payload []byte
-		if err := rows.Scan(&bookID, &payload); err != nil {
-			log.Printf("attach source ASINs: scan row: %v", err)
-			continue
-		}
-		var snap audio.SourceMetadata
-		if err := json.Unmarshal(payload, &snap); err != nil {
-			// Malformed payload: leave the book's SourceASIN nil.
-			continue
-		}
-		if book, ok := byID[bookID]; ok {
-			book.SourceASIN = deriveSourceASIN(&snap)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		log.Printf("attach source ASINs: read rows: %v", err)
-	}
 }

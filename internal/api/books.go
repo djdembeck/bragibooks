@@ -187,7 +187,7 @@ func (h *Handler) ListBooks(w http.ResponseWriter, r *http.Request) {
 	// The source-ASIN projection is a pending-queue aid only; other
 	// statuses and all_ids mode omit it entirely.
 	if status == "pending" {
-		h.attachSourceASINs(booksWithPeople)
+		h.attachSourceProjections(booksWithPeople)
 	}
 
 	writeJSON(w, http.StatusOK, ListBooksResponse{
@@ -334,6 +334,19 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A missing book is a 400/404, not a later 500: the UPDATE below would
+	// match zero rows silently, and the snapshot capture would then fail
+	// with a not-found that the caller cannot distinguish from a real DB
+	// error.
+	var exists int64
+	if err := h.svc.DB.QueryRow("SELECT 1 FROM books WHERE id = ?", bookID).Scan(&exists); err == sql.ErrNoRows {
+		writeError(w, http.StatusNotFound, "book not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "book lookup: "+err.Error())
+		return
+	}
+
 	setters := []string{}
 	args := []interface{}{}
 
@@ -411,6 +424,27 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The per-book lock spans the book+people writes AND the capture
+	// below: without it, an enqueue landing between the committed write
+	// and the capture freezes the PRE-update snapshot, and a capture
+	// failure does not revoke the already-queued copy (invalidation is
+	// not revoking). The lock is released explicitly BEFORE the
+	// response build (getBook, getPeopleByBookID, RecordBookAction,
+	// writeJSON) — reads that do not touch the snapshot must not hold
+	// the enqueue lock; the early-return paths release it via the defer.
+	var bookUnlock func()
+	if h.svc.ProcessingSvc != nil {
+		u := h.svc.ProcessingSvc.lockBookCover(bookID)
+		bookUnlock = func() {
+			if bookUnlock == nil {
+				return
+			}
+			bookUnlock = nil
+			u()
+		}
+		defer bookUnlock()
+	}
+
 	if len(setters) > 0 {
 		args = append(args, bookID)
 		settersStr := strings.Join(setters, ", ")
@@ -425,9 +459,70 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 
 	if req.Authors != nil || req.Narrators != nil {
 		if err := replacePeople(h.svc.DB, bookID, req.Authors, req.Narrators); err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("replace people: %v", err))
+			// The scalar UPDATE above has ALREADY committed: a failed
+			// people replace leaves the book's row and its people
+			// disagreeing with the saved selection, and the existing
+			// snapshot is stale with respect to both. Fail closed on the
+			// early return path the same way a hard capture failure does:
+			// invalidate the snapshot under the per-book lock (held since
+			// the writes) so the book can never run on the stale row.
+			if derr := h.invalidateBookSnapshotLocked(bookID); derr != nil {
+				log.Printf("update book %d: replace people failed (%v) AND invalidation failed: %v", bookID, err, derr)
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+					"people update failed (%v) and the old snapshot could not be invalidated (%v): the book's metadata is in an unknown state — do not process it until a fresh save/re-preview succeeds", err, derr))
+				return
+			}
+			log.Printf("update book %d: replace people failed (%v) — invalidated snapshot row", bookID, err)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+				"people update failed: %v — the old snapshot was invalidated; re-preview the book to restore it", err))
 			return
 		}
+	}
+
+	// Re-capture the authoritative snapshot now that the book row and its
+	// people are the operator's current selection. A catalog-linked book is
+	// what a processing job will run on, so its capture must track this
+	// save; for a non-catalog book the capture still records the local
+	// fields (title, people, series, year) that the job will name from.
+	// The catalog round trip is skipped for pipeline-only updates.
+	//
+	// On a hard capture failure (a DB error, not a catalog one) the book
+	// update above has ALREADY committed, so the save cannot be undone:
+	// the row is invalidated (deleted) and the save reports 500, leaving
+	// the book with no authoritative snapshot. A book with no snapshot row
+	// is refused at queue time with an explicit re-match and re-preview
+	// message — it can never run on stale data.
+	//
+	// On catalog unavailability the capture degrades: the row is refreshed
+	// with the new local fields while retaining the previously captured
+	// catalog content (genres/chapters/cover), and the save succeeds.
+	if _, cerr := h.captureSnapshotUnlocked(r.Context(), bookID, snapshotRelevantChanged(&req)); cerr != nil {
+		// Fail closed: the stale row MUST be invalidated so the book can never
+		// later run on it. If the invalidation itself fails, do NOT report a
+		// clean 503 — the book's state is now unknown (a row that may be
+		// stale and loadable), so report 500 and say the snapshot is in an
+		// unknown state, never "re-preview to restore it" (finding: ignored
+		// invalidation DELETE). The per-book lock is held, so the delete
+		// and the capture above ran under it: an enqueue that wanted the
+		// snapshot waited for the whole section, so the queued copy is
+		// either the new snapshot (capture succeeded) or none at all
+		// (invalidated below) — never the pre-update one.
+		if derr := h.invalidateBookSnapshotLocked(bookID); derr != nil {
+			log.Printf("capture snapshot for book %d: %v — AND invalidation failed: %v", bookID, cerr, derr)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+				"book saved, but its processing snapshot capture failed (%v) and the old snapshot could not be invalidated (%v): the book's metadata is in an unknown state — do not process it until a fresh save/re-preview succeeds", cerr, derr))
+			return
+		}
+		log.Printf("capture snapshot for book %d: %v — invalidated snapshot row", bookID, cerr)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+			"book saved, but its processing snapshot capture failed: %v — re-preview the book to restore it", cerr))
+		return
+	}
+	// Critical section over: the book row, people, and snapshot are all
+	// settled. Release the per-book lock before the response build so a
+	// concurrent enqueue does not wait on these reads.
+	if bookUnlock != nil {
+		bookUnlock()
 	}
 
 	book, err := h.getBook(bookID)
@@ -468,6 +563,20 @@ func (h *Handler) UpdateBook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, bookWithPeople)
+}
+
+// invalidateBookSnapshotLocked deletes the book's snapshot row. The
+// caller MUST already hold the per-book cover lock — the same lock
+// QueueJob holds across its snapshot read→insert and captureSnapshot
+// holds across the whole capture (UpdateBook holds it across the writes
+// and the capture). Deleting without it could remove the very file a
+// concurrent enqueue already read and is about to name in the job's
+// frozen args; and because the per-book lock is a non-reentrant
+// sync.Mutex, calling this from inside the critical section is the only
+// safe form — an auto-locking variant there would deadlock.
+func (h *Handler) invalidateBookSnapshotLocked(bookID int64) error {
+	_, err := h.svc.DB.Exec("DELETE FROM book_snapshots WHERE book_id = ?", bookID)
+	return err
 }
 
 // CreateBooks handles POST /api/books, creating a batch of pending books from source paths.
@@ -584,18 +693,202 @@ func (h *Handler) attachSourceCover(ctx context.Context, bookID int64, srcPath s
 // (including ffprobe-missing hosts, which persist a degraded row with
 // explicit error states); an INSERT failure never fails intake.
 func (h *Handler) attachSourceMetadata(ctx context.Context, bookID int64, srcPath string) {
+	// Fast path: an indexed folder's snapshot is already stored in the
+	// source index — reuse it and skip the ffprobe pass entirely. Gated on
+	// the LIVE flag: after a toggle-off the rows survive, so the live
+	// probe runs until the index is re-enabled. Best effort: any
+	// lookup/decode/staleness failure falls through to the live probe.
+	if h.svc.IndexSvc != nil && h.svc.IndexSvc.Enabled() {
+		if snap := h.storedIndexMetadata(srcPath); snap != nil {
+			log.Printf("attach source metadata for book %d: reusing indexed snapshot for %s", bookID, srcPath)
+			h.persistSourceMetadata(bookID, snap)
+			return
+		}
+	}
 	var snap *audio.SourceMetadata
 	var err error
 	if h.svc.FFprobe == "" {
 		snap = audio.DegradedSourceMetadata("ffprobe binary unavailable; extraction not run")
 	} else {
-		snap, err = audio.ExtractSourceMetadata(ctx, h.svc.FFprobe, srcPath)
+		snap, err = audio.ExtractSourceMetadata(ctx, h.svc.FFprobe, srcPath, srcPath, "unknown", nil, nil)
 		if err != nil || snap == nil {
 			log.Printf("extract source metadata for book %d: %v", bookID, err)
 			snap = audio.DegradedSourceMetadata(fmt.Sprintf("extraction failed: %v", err))
 		}
 	}
 	h.persistSourceMetadata(bookID, snap)
+}
+
+// storedIndexMetadata returns the index's stored snapshot for srcPath when
+// one exists, is a complete extraction (the only kind intake may claim
+// fields from), and is FRESH: the row's size/modtime change signals match
+// a current os.Stat of the source. For a directory the gate ALSO requires
+// every stored child row below it to still match a live stat: a dir's own
+// mtime moves only on entry add/remove directly under it, so a child
+// rewritten in place (same name, same entry set) is invisible to the dir's
+// own signals and the unchanged-folder fast path would otherwise claim
+// pre-rewrite title/author/ASIN/duration. It ALSO requires every file named
+// in the stored folder snapshot's Files list to have a stored row under the
+// directory: a walk truncated by the depth or entry cap records no rows for
+// the omitted entries, so a complete-looking payload written by an earlier
+// untruncated scan can name files the index never stored, and a rewrite of
+// such a file advances neither the dir's own signals nor any stored child
+// row. Nil — and thus a live probe — on any miss, decode failure,
+// incomplete (degraded) snapshot, a payload-named file lacking a stored
+// row, or a source that changed (in-place rewrite, mtime bump, child
+// rewrite, child deletion) since the last scan. The lookup key is
+// canonicalized the same way the index stores paths so non-canonical
+// caller paths (trailing separators, ./ segments, relative forms) still
+// hit the row.
+func (h *Handler) storedIndexMetadata(srcPath string) *audio.SourceMetadata {
+	// Index rows are stored under the SYMLINK-RESOLVED root (the scan
+	// resolves the configured input dir, and every walked path hangs off
+	// the resolved form). An intake path under a symlinked root is LEXICAL,
+	// so a direct lookup by canonicalRoot misses every row for such a root
+	// and every intake falls through to a live ffprobe. Rebase the lookup
+	// (and the descendant freshness queries below) onto the resolved root
+	// the same way listIndexedChildren does; when the root is not a symlink
+	// the two forms are equal and the rebase is a no-op.
+	stored := canonicalRoot(srcPath)
+	// The resolved root comes from the index service (it owns the scan-root
+	// resolution); the lexical root from the config. Without either there is
+	// no resolved root to rebase onto and the canonical form is the lookup.
+	if h.svc.IndexSvc != nil && h.svc.Config != nil {
+		if root := h.svc.IndexSvc.CurrentRoot(); root != "" {
+			if lexicalRoot := canonicalRoot(h.svc.Config.Config().Directories.InputDir); lexicalRoot != "" && lexicalRoot != root {
+				switch {
+				case stored == lexicalRoot:
+					stored = root
+				case strings.HasPrefix(stored, indexChildPrefix(lexicalRoot)):
+					stored = rebaseUnder(stored, lexicalRoot, root)
+				}
+			}
+		}
+	}
+	var payload, modtime, rowType string
+	var size int64
+	if err := h.svc.DB.QueryRow(`SELECT payload, size, modtime, type FROM source_index WHERE path = ?`,
+		stored).Scan(&payload, &size, &modtime, &rowType); err != nil {
+		return nil
+	}
+	info, err := os.Stat(srcPath)
+	if err != nil || info.Size() != size ||
+		info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z") != modtime {
+		return nil // source missing, or changed since the last scan
+	}
+	// Type is part of freshness: a directory replaced in place by a file of
+	// the SAME size and mtime (or the reverse) matches the two signals
+	// above, and the current info.IsDir() checks would then classify the
+	// STORED folder snapshot as a file snapshot (or keep a folder snapshot
+	// for a file). Compare the stored entry's type with the current one and
+	// force a re-probe on a mismatch.
+	storedDir := rowType == "dir"
+	if storedDir != info.IsDir() {
+		return nil // the source's kind changed since the last scan
+	}
+	if info.IsDir() && !h.indexedChildrenFresh(stored) {
+		return nil // a stored descendant changed in place; the dir's own signals can't see it
+	}
+	var snap audio.SourceMetadata
+	if err := json.Unmarshal([]byte(payload), &snap); err != nil {
+		log.Printf("stored index metadata for %s: decode: %v", srcPath, err)
+		return nil
+	}
+	if info.IsDir() && !h.folderPayloadFilesStored(stored, snap.Files) {
+		return nil // a payload-named file has no stored row: its scan was cap-truncated
+	}
+	if !sourceMetadataComplete(&snap) {
+		return nil
+	}
+	return &snap
+}
+
+// indexedChildrenFresh mirrors classify's dirDirty pass for the intake
+// gate: it reports whether every stored index row BELOW dirPath (the
+// directory's full descendant set, since a dir's own mtime moves only on
+// entry add/remove directly under it) still matches a current os.Stat.
+// Any missing child, size/modtime mismatch, or lookup failure returns
+// false — the caller then falls through to the live probe. The file path
+// never consults this gate: a file row's own signals are the source of
+// truth for a file source.
+func (h *Handler) indexedChildrenFresh(dirPath string) bool {
+	rows, err := h.svc.DB.Query(`SELECT path, size, modtime, type FROM source_index WHERE path LIKE ? ESCAPE '\'`,
+		likeEscape(indexChildPrefix(dirPath))+"%")
+	if err != nil {
+		log.Printf("stored index metadata children for %s: query: %v", dirPath, err)
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var childPath, childModtime, childType string
+		var childSize int64
+		if err := rows.Scan(&childPath, &childSize, &childModtime, &childType); err != nil {
+			log.Printf("stored index metadata children for %s: scan: %v", childPath, err)
+			return false
+		}
+		info, err := os.Stat(childPath)
+		if err != nil {
+			return false // child missing
+		}
+		// The type is part of the freshness signal: a same-size/mtime
+		// file-to-dir (or dir-to-file) replacement would otherwise reuse
+		// the stale metadata.
+		if (childType == "dir") != info.IsDir() || info.Size() != childSize ||
+			info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z") != childModtime {
+			return false // child re-typed, rewritten in place, or mtime-bumped
+		}
+	}
+	return rows.Err() == nil
+}
+
+// folderPayloadFilesStored reports whether every file named in a stored
+// folder snapshot's Files list has a stored source_index row under dirPath.
+// A depth-cap or entry-cap walk truncation stores no rows for the entries
+// it skipped, so a complete-looking payload can outlive its own scan's
+// coverage: a rewrite of a payload-named file without a stored row advances
+// neither the directory's own signals nor any stored child row (the
+// child check above has nothing to compare), and the unchanged-folder fast
+// path would claim stale title/author/ASIN/duration. The check is bounded
+// to the payload's file list — it never walks the filesystem: a file that
+// EXISTS without a row (depth-cap omission) is the hazard, a file that is
+// gone is caught by the directory's own mtime signal. The match is against
+// the EXACT indexed child paths (dirPath + basename), not basenames: the
+// payload's discovery is immediate (one directory level), and a nested file
+// with the same basename as a direct child the walk omitted at its entry
+// cap must not satisfy the omitted child (a basename match made the omitted
+// file look stored). A folder snapshot from a truncated pass is incomplete
+// (Truncated/Degraded) and is rejected by sourceMetadataComplete, so this
+// check only ever sees a complete payload: there is no completeness marker
+// to gate on separately — if a truncated payload reached here, the
+// completeness check would also reject it. Any query/scan failure returns
+// false: the live probe.
+func (h *Handler) folderPayloadFilesStored(dirPath string, files []audio.SourceFile) bool {
+	paths := make([]string, 0, len(files))
+	for _, f := range files {
+		if f.File != "" {
+			paths = append(paths, indexChildPrefix(dirPath)+f.File)
+		}
+	}
+	if len(paths) == 0 {
+		return true
+	}
+	rows, err := h.svc.DB.Query(`SELECT path FROM source_index WHERE path IN (`+placeholders(len(paths))+`)`,
+		toArgs(paths)...)
+	if err != nil {
+		log.Printf("stored index metadata payload files for %s: query: %v", dirPath, err)
+		return false
+	}
+	defer rows.Close()
+	found := 0
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			log.Printf("stored index metadata payload files for %s: scan: %v", dirPath, err)
+			return false
+		}
+		found++
+	}
+	return found == len(paths) && rows.Err() == nil
 }
 
 // persistSourceMetadata writes one book's snapshot row; failures are
@@ -779,6 +1072,18 @@ func (h *Handler) DeleteBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The delete and the cover sweep run under the SAME per-book lock a
+	// capture's write+prune and the enqueue's snapshot read hold
+	// (lockBookCover). Without it, an in-flight capture can be waiting on
+	// its catalog request while the row is deleted and the sweep runs; when
+	// the capture resumes it writes a NEW cover for the now-deleted book
+	// and then fails to store its snapshot, leaving exactly the orphan this
+	// sweep is meant to prevent. Holding the lock across delete+sweep makes
+	// a capture either finish (its cover is swept) or start after (it finds
+	// no row and stores nothing).
+	unlock := h.svc.ProcessingSvc.lockBookCover(bookID)
+	defer unlock()
+
 	// The delete repeats the job check inside the statement: a job queued
 	// between the count above and this Exec must not be orphaned either.
 	res, err := h.svc.DB.Exec(
@@ -822,13 +1127,54 @@ func (h *Handler) DeleteBook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// The extracted cover is keyed by book ID; leaving it behind would leak
-	// an orphan and let a later book reuse the slot's art.
+	// Every cover class the book owns is keyed by book ID; leaving any
+	// behind would leak an orphan (the per-book sweeps — override prune,
+	// snapshot prune — are unreachable once the book row is gone, so the
+	// deletion is the only thing that reclaims them).
 	if h.svc.CoversDir != "" {
-		os.Remove(filepath.Join(h.svc.CoversDir, strconv.FormatInt(bookID, 10)+".jpg"))
+		h.removeBookOwnedCovers(bookID)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// removeBookOwnedCovers best-effort removes every cover file this book's id
+// owns: the legacy extracted cover (<id>.jpg), the override assets
+// (ovr-<id>-*.jpg), and the snapshot captures (<id>-<unixnano>.jpg plus the
+// legacy <id>-snapshot.jpg). Runs only after the active-job guard, so no
+// queued/running job can still reference a file being removed.
+func (h *Handler) removeBookOwnedCovers(bookID int64) {
+	id := strconv.FormatInt(bookID, 10)
+	legacy := id + ".jpg"
+	legacySnapshot := id + "-snapshot.jpg"
+	overridePrefix := "ovr-" + id + "-"
+	entries, err := os.ReadDir(h.svc.CoversDir)
+	if err != nil {
+		log.Printf("delete book %d: read covers dir: %v (skipping cover cleanup)", bookID, err)
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		// The snapshot class is <id>-<digits>.jpg; require the dot and all
+		// digits after it so a sibling book's <idX>-... files never match.
+		isSnapshot := name == legacySnapshot ||
+			(strings.HasPrefix(name, id+"-") && strings.HasSuffix(name, ".jpg") && name != legacy)
+		if !isSnapshot && name != legacy && !strings.HasPrefix(name, overridePrefix) {
+			continue
+		}
+		if isSnapshot && name != legacySnapshot {
+			suffix := name[len(id)+1 : len(name)-len(".jpg")]
+			if !allDigitsLen(suffix) {
+				continue
+			}
+		}
+		if err := os.Remove(filepath.Join(h.svc.CoversDir, name)); err != nil && !os.IsNotExist(err) {
+			log.Printf("delete book %d: remove cover %s: %v", bookID, name, err)
+		}
+	}
 }
 
 // activeJobCount returns the number of queued or running processing jobs

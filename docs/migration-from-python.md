@@ -92,6 +92,8 @@ Not copied:
 - **Django internals.** Admin sessions, Django users, and the `secret_key.txt` in `/config` are not used by the Go app (they can stay in the volume, go unused).
 - **Audio files.** Nothing moves. Source files, processed output, and completed files stay exactly where the old app left them; what changes is only where the app keeps its data (from `db.sqlite3` to `bragibooks.db` in the same volume).
 
+The Python-data copy above is distinct from the Go app's **schema migrations**, which run automatically at every startup and need no operator action. An existing `bragibooks.db` (one you already run) is upgraded in place — for example the `processing_jobs.batch_closed` column (v21) is added and its backfill marks pre-existing batches closed — so upgrading the app is not a manual schema change.
+
 ## Configuration changes
 
 The Python app's environment variables no longer apply. Mapping of what changed:
@@ -109,6 +111,8 @@ The Python app's environment variables no longer apply. Mapping of what changed:
 Python environment variables are not reused, except for the legacy `REGION` alias. In particular, `ALLOWED_HOSTS` is ignored: set `SERVER_ALLOWED_HOSTS` to exact hostnames and replace any wildcard. Access through `localhost`, loopback, or a literal private IP needs no change. If the old deployment used a reverse proxy, see [Reverse proxy](reverse-proxy.md) for the exact external `Host` and for `BRAGIBOOKS_TRUSTED_PROXIES` when the proxy forwards `X-Forwarded-For`.
 
 Go settings precedence is **environment variable > YAML file > default**, with the database settings row (where the migration writes the legacy settings) loaded below YAML and env.
+
+**Path format token change (action needed if you used `{asin}`).** The Python app let you build the output path from the book's ASIN (`{asin}`). The new app resolves the output name through the `m4b-merge` engine, which does not accept `{asin}` — it resolves `{book_id}` (the canonical AudiobookDB book id) and the people tokens (`{author}`, `{authors}`, `{narrator}`, `{narrators}`, …) instead. A stored global path format (`processing.path_format`) that still contains `{asin}` is **refused at startup** with a clear diagnosis naming the offending value, so the app will not boot until it is fixed. A stored output profile's scheme with the same problem does not prevent startup: the server starts, logs the diagnosis, and exposes the bad profile in Settings, where you repair it. Enqueue then refuses work that uses the profile, with the same diagnosis. Replace `{asin}` in the format with `{book_id}` (or a people/title token) in Settings before starting. The check runs on every stored value at boot, so a pre-existing legacy scheme surfaces once, at upgrade time, not on the first job.
 
 One binding detail to be aware of: `SERVER_HOST` defaults to *empty*, and an empty host makes the Go server listen on **all interfaces** (`:8000`), not loopback. In Docker the published port is what controls exposure — use `--publish 127.0.0.1:8888:8000` to keep it reachable from the host only. If you run the binary directly on a host and want loopback-only, set `SERVER_HOST=127.0.0.1` explicitly.
 

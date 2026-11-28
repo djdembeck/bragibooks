@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+// TestMain installs the engine's verified path-token vocabulary (the real
+// startup path does this from --capabilities): validation is
+// capability-driven, so the suite needs the engine's token set, which no
+// longer includes the legacy {asin} token.
+func TestMain(m *testing.M) {
+	SetPathFormatTokens([]string{
+		"author", "authors", "narrator", "narrators", "title", "subtitle",
+		"series_name", "series_position", "year", "genre", "metadata_id", "book_id",
+	})
+	m.Run()
+}
+
 func TestValidatePathFormat(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -28,9 +40,20 @@ func TestValidatePathFormat(t *testing.T) {
 		{name: "empty template", template: "", wantErrFr: "produces no path elements"},
 		{name: "separators only", template: "///", wantErrFr: "produces no path elements"},
 		{name: "whitespace only", template: "  / ", wantErrFr: "produces no path elements"},
-		{name: "asin alone has no substitutable placeholder", template: "{asin}", wantErrFr: "must include at least one placeholder"},
 		{name: "year scheme is valid (warnings are UI-only)", template: "{author}/{year}"},
-		{name: "unicode text allowed", template: "{author}/{.Grüße} mídia"},
+		{name: "unicode text allowed", template: "{author}/.Grüße mídia"},
+		// A closed brace is a token expression, so even a unicode "name" the
+		// engine does not know is an unsupported token, not literal text.
+		{name: "closed unicode brace is an unsupported token", template: "{author}/{.Grüße}", wantErrFr: `unsupported token {.Grüße}`},
+		// E0: a closed brace expression the engine does not know is rejected
+		// by the engine's parser, so it must be rejected here too.
+		{name: "unsupported token rejected", template: "{asin}", wantErrFr: `unsupported token {asin}`},
+		{name: "unsupported token mid-scheme", template: "{author}/{isbn}/{title}", wantErrFr: `unsupported token {isbn}`},
+		// A token the engine knows stays valid.
+		{name: "known token accepted", template: "{author}/{title}/{book_id}"},
+		// An UNCLOSED brace is literal text (the legacy pass-through), not a
+		// token: no E0, only the placeholder/element rules apply.
+		{name: "unclosed brace is literal text", template: "vol {x", wantErrFr: "must include at least one placeholder"},
 		{name: "control char forbidden", template: "{title}/a\x07b", wantErrFr: `path text cannot contain U+0007`},
 		// E1/E2 boundary on control-only segments: "\t" is a unicode.IsSpace
 		// rune, so trimming empties the segment and no element survives;
@@ -98,5 +121,110 @@ func TestValidateRelativePathFormat(t *testing.T) {
 				t.Fatalf("ValidateRelativePathFormat(%q) = %q, want error containing %q", tt.template, err, tt.wantErrFr)
 			}
 		})
+	}
+}
+
+// TestSetPathFormatTokensConcurrentExercises reads and republishes the token
+// registry simultaneously: a partially built map read mid-replacement would
+// race a concurrent map write (fatal), which -race surfaces as a data race.
+func TestSetPathFormatTokensConcurrentExercises(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			SetPathFormatTokens([]string{"author", "title", "book_id"})
+		}
+	}()
+	for i := 0; i < 2000; i++ {
+		if err := ValidatePathFormat("{author}/{title}"); err != nil {
+			t.Fatalf("concurrent validation: %v", err)
+		}
+	}
+	<-done
+	// The stress republished a reduced vocabulary; restore the full set so
+	// later tests in the package see the same registry TestMain installed.
+	SetPathFormatTokens([]string{
+		"author", "authors", "narrator", "narrators", "title", "subtitle",
+		"series_name", "series_position", "year", "genre", "metadata_id", "book_id",
+	})
+}
+
+// TestAdvancedPathSchemesValid asserts that the advanced multi-token
+// structures from #71 (series name + position + title + subtitle + year in
+// the same segment, repeated across segments) are accepted at save time.
+// The #71 series-drop was in the resolver, which is engine-owned: no test in
+// this repo exercises path resolution, so these assertions cover the
+// Go-side save contract only.
+func TestAdvancedPathSchemesValid(t *testing.T) {
+	schemes := []string{
+		// #71 structure with the colon replaced by a space: colons are
+		// rejected in literal path text on the Linux+Windows union.
+		"{author}/{series_name} {series_position} - {title} {subtitle} ({year})/{author} - {series_name} {series_position} - {title} {subtitle} ({year})",
+		// Series segment first, bare author/title second.
+		"{series_name} {series_position}/{author}/{title}",
+		// Subtitle as the distinguishing token.
+		"{author}/{title} - {subtitle} ({year})",
+		// Genre and metadata id in the structure.
+		"{genre}/{series_name} {series_position}/{title} {metadata_id}",
+		// Deep nesting with a literal archive segment.
+		"archive/{year}/{author}/{title}",
+	}
+	for _, s := range schemes {
+		if err := ValidateRelativePathFormat(s); err != nil {
+			t.Errorf("ValidateRelativePathFormat(%q) = %v, want nil", s, err)
+		}
+	}
+	// The ORIGINAL #71 template carries a colon in "title: subtitle"; on the
+	// Linux+Windows character union it must be refused at save time, with the
+	// colon named as the offender.
+	original := "{author}/{series_name} {series_position} - {title}: {subtitle} ({year})/{author} - {series_name} {series_position} - {title}: {subtitle} ({year})"
+	if err := ValidateRelativePathFormat(original); err == nil {
+		t.Fatalf("ValidateRelativePathFormat(%q) = nil, want the colon refused", original)
+	} else if !strings.Contains(err.Error(), `path text cannot contain ":"`) {
+		t.Fatalf("ValidateRelativePathFormat(%q) = %q, want the colon named", original, err.Error())
+	}
+}
+
+// TestNormalizeEnginePathFormatAdvanced pins the trailing-.m4b strip on
+// advanced structures: only the last segment's suffix is removed, and a
+// stored format that already ends in .m4b must not gain a second one when
+// the engine appends its own (a live --job-preview probe showed a double
+// .m4b when the stored format is passed un-normalized).
+func TestNormalizeEnginePathFormatAdvanced(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{
+			in:   "{author}/{series_name} {series_position} - {title} {subtitle} ({year})/{author} - {series_name} {series_position} - {title} {subtitle} ({year}).m4b",
+			want: "{author}/{series_name} {series_position} - {title} {subtitle} ({year})/{author} - {series_name} {series_position} - {title} {subtitle} ({year})",
+		},
+		{
+			in:   "{author}/{title}.m4b",
+			want: "{author}/{title}",
+		},
+		// A literal .m4b in a MIDDLE segment is untouched.
+		{
+			in:   "archive.m4b/{title}",
+			want: "archive.m4b/{title}",
+		},
+		// No suffix: unchanged.
+		{
+			in:   "{author}/{title}",
+			want: "{author}/{title}",
+		},
+		// Mixed-case suffix: the strip is case-insensitive, so ".M4B" is
+		// removed exactly like lowercase ".m4b".
+		{
+			in:   "{author}/{title}.M4B",
+			want: "{author}/{title}",
+		},
+		// A mixed-case suffix in a MIDDLE segment is untouched.
+		{
+			in:   "archive.M4B/{title}",
+			want: "archive.M4B/{title}",
+		},
+	}
+	for _, tt := range tests {
+		if got := NormalizeEnginePathFormat(tt.in); got != tt.want {
+			t.Errorf("NormalizeEnginePathFormat(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }

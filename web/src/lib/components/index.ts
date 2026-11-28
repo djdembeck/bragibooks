@@ -15,3 +15,4 @@ export { default as AbdTag } from './AbdTag.svelte';
 export { default as Spinner } from './Spinner.svelte';
 export { default as CoverArt } from './CoverArt.svelte';
 export { default as OutputProfileSelector } from './OutputProfileSelector.svelte';
+export { default as IndexStatusBanner } from './IndexStatusBanner.svelte';

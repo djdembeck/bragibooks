@@ -53,6 +53,9 @@ func newSettingsTestDB(t *testing.T) *sql.DB {
 			api_enabled BOOLEAN NOT NULL DEFAULT 0,
 			api_key_digest TEXT NOT NULL DEFAULT '',
 			legacy_token_migrated BOOLEAN NOT NULL DEFAULT 0,
+			indexing_enabled BOOLEAN NOT NULL DEFAULT 0,
+			metadata_fields TEXT NOT NULL DEFAULT '',
+			metadata_chapters TEXT NOT NULL DEFAULT 'write',
 			created_at TEXT DEFAULT (datetime('now')),
 			updated_at TEXT DEFAULT (datetime('now'))
 		)`); err != nil {
@@ -251,6 +254,64 @@ func TestSettingsAPIEndpointRegenerateInvalidatesPreviousKey(t *testing.T) {
 	}
 	if !matchAPIKeyDigest(newKey, digest) {
 		t.Error("the new key does not match the stored digest")
+	}
+}
+
+// TestSettingsAPIEndpointStateKeepsPinnedSelection guards the full-row
+// write paths (enable/disable/regenerate and their DB rollbacks): they
+// replace the WHOLE settings row, so a pinned PROCESSING_METADATA_FIELDS
+// value must be frozen to the stored row's selection before the write,
+// exactly like UpdateSettings. Without the freeze, the live config's nil
+// selection would ride into the durable row and a later save would
+// overwrite the operator's pinned choice with the default.
+func TestSettingsAPIEndpointStateKeepsPinnedSelection(t *testing.T) {
+	t.Setenv("PROCESSING_METADATA_FIELDS", "title")
+	db := newSettingsTestDB(t)
+	h := newSettingsTestService(t, db)
+
+	const stored = `["title","cover"]`
+	if _, err := db.Exec("INSERT INTO settings (id, api_enabled, api_key_digest, metadata_fields, metadata_chapters) VALUES (1, 1, ?, ?, 'write')", keyDigestOf("bk_"+strings.Repeat("ab", 32)), stored); err != nil {
+		t.Fatal(err)
+	}
+	h.svc.Config.SetAPIEndpointState(true, keyDigestOf("bk_"+strings.Repeat("ab", 32)))
+
+	code, got := settingsRoundTrip(t, h, http.MethodPost, "/api/settings/api-endpoint/regenerate")
+	if code != http.StatusOK {
+		t.Fatalf("regenerate = %d, want 200 (%v)", code, got)
+	}
+	var fields, chapters string
+	if err := db.QueryRow("SELECT metadata_fields, metadata_chapters FROM settings WHERE id = 1").Scan(&fields, &chapters); err != nil {
+		t.Fatal(err)
+	}
+	if fields != stored {
+		t.Errorf("metadata_fields after endpoint-state write = %q, want the stored %q (the pin must not ride into the row)", fields, stored)
+	}
+	if chapters != "write" {
+		t.Errorf("metadata_chapters after endpoint-state write = %q, want write", chapters)
+	}
+}
+
+// TestSettingsAPIEndpointStateAbortsOnUnreadableRow guards the sibling
+// rule: with a metadata pin active, the stored row is the fallback for the
+// frozen value. A row that CANNOT be read (a real query failure, distinct
+// from a missing row) must abort the endpoint-state write rather than
+// replace the durable selection with the default.
+func TestSettingsAPIEndpointStateAbortsOnUnreadableRow(t *testing.T) {
+	t.Setenv("PROCESSING_METADATA_FIELDS", "title")
+	db := newSettingsTestDB(t)
+	h := newSettingsTestService(t, db)
+	if _, err := db.Exec("INSERT INTO settings (id, api_enabled, api_key_digest, metadata_fields) VALUES (1, 1, ?, ?)", keyDigestOf("bk_"+strings.Repeat("ab", 32)), `["title"]`); err != nil {
+		t.Fatal(err)
+	}
+	h.svc.Config.SetAPIEndpointState(true, keyDigestOf("bk_"+strings.Repeat("ab", 32)))
+	// A real query failure, not a missing row: the table is gone.
+	if _, err := db.Exec("DROP TABLE settings"); err != nil {
+		t.Fatal(err)
+	}
+
+	code, got := settingsRoundTrip(t, h, http.MethodPost, "/api/settings/api-endpoint/regenerate")
+	if code != http.StatusInternalServerError {
+		t.Fatalf("regenerate with an unreadable row = %d, want 500 (%v)", code, got)
 	}
 }
 
@@ -677,6 +738,11 @@ func TestUpdateSettingsOutputSchemeValidation(t *testing.T) {
 		{name: "reserved device name rejected", scheme: `{con}`, want: http.StatusBadRequest, wantBody: "output scheme:"},
 		{name: "year scheme accepted (warnings do not gate)", scheme: `{author}/{year}`, want: http.StatusOK, wantBody: `"output_scheme":"{author}/{year}"`},
 		{name: "asin alone rejected", scheme: `{asin}`, want: http.StatusBadRequest, wantBody: "output scheme:"},
+		// Relative-path rules (matching the boot check): an absolute scheme or
+		// a ".." traversal must be refused at save time, not make the next
+		// startup fatal.
+		{name: "absolute scheme rejected", scheme: `/abs/{title}`, want: http.StatusBadRequest, wantBody: "output scheme:"},
+		{name: "dotdot traversal rejected", scheme: `../{title}`, want: http.StatusBadRequest, wantBody: "output scheme:"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -837,5 +903,168 @@ func TestUpdateSettingsDirectoryWriteAccess(t *testing.T) {
 	}
 	if rec := doPutSettings(t, h, `{"completed_dir":""}`); rec.Code != http.StatusOK {
 		t.Fatalf("clearing completed_dir: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestUpdateSettingsReplacePreservesIndexingEnabled pins the whole-row
+// carry-through: a settings save that does not mention indexing_enabled
+// must not reset the stored opt-in flag to DEFAULT 0 (finding: settings
+// writers reset indexing_enabled).
+func TestUpdateSettingsReplacePreservesIndexingEnabled(t *testing.T) {
+	h := newTestSettingsHandler(t)
+	// The live config reflects the stored row (boot loads it); set both so
+	// the save's in-memory snapshot carries the flag.
+	if _, err := h.svc.DB.Exec(`UPDATE settings SET indexing_enabled = 1 WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	cfg := h.svc.Config.Config()
+	cfg.Directories.IndexingEnabled = true
+	h.svc.Config.Store(cfg)
+	// A partial save that does not touch the flag.
+	if rec := doPutSettings(t, h, `{"input_dir":"/i"}`); rec.Code != http.StatusOK {
+		t.Fatalf("PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var got int
+	if err := h.svc.DB.QueryRow(`SELECT indexing_enabled FROM settings WHERE id = 1`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 1 {
+		t.Fatalf("indexing_enabled = %d after unrelated save, want 1 (reset to DEFAULT 0)", got)
+	}
+}
+
+// TestUpdateSettingsIndexingEnabledTriggersScan pins the settings-save
+// scan trigger: turning the index ON persists the flag AND schedules a
+// (re)scan, and re-pointing the input root while it is on schedules a
+// rescan. A save that touches neither transition schedules nothing.
+func TestUpdateSettingsIndexingEnabledTriggersScan(t *testing.T) {
+	newHandlerWithIndexSvc := func(t *testing.T, inputDir string, enabled bool) (*Handler, *IndexService) {
+		t.Helper()
+		h := newTestSettingsHandler(t)
+		cm := h.svc.Config
+		cm.Config().Directories.InputDir = inputDir
+		cm.Config().Directories.IndexingEnabled = enabled
+		cm.Store(cm.Config())
+		svc := NewIndexService(h.svc.DB, cm, "")
+		h.svc.IndexSvc = svc
+		return h, svc
+	}
+
+	t.Run("enable-persists-and-queues-scan", func(t *testing.T) {
+		h, svc := newHandlerWithIndexSvc(t, t.TempDir(), false)
+		genBefore := svc.Status().State.Generation
+		if rec := doPutSettings(t, h, fmt.Sprintf(`{"input_dir":%q,"indexing_enabled":true}`, t.TempDir())); rec.Code != http.StatusOK {
+			t.Fatalf("PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+		}
+		var got int
+		if err := h.svc.DB.QueryRow(`SELECT indexing_enabled FROM settings WHERE id = 1`).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != 1 {
+			t.Fatalf("indexing_enabled = %d after enable PUT, want 1 (flag not persisted)", got)
+		}
+		st := svc.Status().State
+		if st.Generation <= genBefore {
+			t.Fatalf("generation = %d, want > %d (enable must queue a scan)", st.Generation, genBefore)
+		}
+		if st.Status != "queued" {
+			t.Fatalf("status = %s, want queued (scan scheduled by the enable)", st.Status)
+		}
+	})
+
+	t.Run("root-move-while-enabled-rescans", func(t *testing.T) {
+		h, svc := newHandlerWithIndexSvc(t, t.TempDir(), true)
+		genBefore := svc.Status().State.Generation
+		if rec := doPutSettings(t, h, fmt.Sprintf(`{"input_dir":%q}`, t.TempDir())); rec.Code != http.StatusOK {
+			t.Fatalf("PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+		}
+		st := svc.Status().State
+		if st.Generation <= genBefore {
+			t.Fatalf("generation = %d, want > %d (root move while enabled must rescan)", st.Generation, genBefore)
+		}
+		if st.Status != "queued" {
+			t.Fatalf("status = %s, want queued", st.Status)
+		}
+	})
+
+	t.Run("disable-and-same-root-queue-nothing", func(t *testing.T) {
+		h, svc := newHandlerWithIndexSvc(t, t.TempDir(), false)
+		genBefore := svc.Status().State.Generation
+		// Re-send the SAME input dir while disabled: neither the
+		// enable transition nor a root move fires.
+		if rec := doPutSettings(t, h, fmt.Sprintf(`{"input_dir":%q}`, h.svc.Config.Config().Directories.InputDir)); rec.Code != http.StatusOK {
+			t.Fatalf("PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+		}
+		st := svc.Status().State
+		if st.Generation != genBefore {
+			t.Fatalf("generation = %d, want %d (no scan must be queued)", st.Generation, genBefore)
+		}
+	})
+}
+
+// TestSettingsBinarySwapRevalidatesSchemesAgainstCandidate guards the swap
+// gate: after accepting a candidate engine binary, EVERY effective scheme
+// (the global output scheme and each saved output-profile scheme) must be
+// revalidated against the CANDIDATE's token vocabulary — a scheme the old
+// engine accepted that the new one rejects must refuse the save, not
+// become a run-time failure for every job that resolves through it.
+func TestSettingsBinarySwapRevalidatesSchemesAgainstCandidate(t *testing.T) {
+	db := newSettingsTestDB(t)
+	h := newSettingsTestService(t, db)
+	if _, err := db.Exec(`CREATE TABLE output_profiles (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+		output_dir TEXT NOT NULL DEFAULT '',
+		output_scheme TEXT NOT NULL DEFAULT '',
+		created_at TEXT DEFAULT (datetime('now')),
+		updated_at TEXT DEFAULT (datetime('now'))
+	)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// A candidate engine: version floor passes, and its capability
+	// vocabulary covers the global {author}/{title} scheme — but NOT
+	// {series_position}, which the stored profile scheme uses.
+	candidate := filepath.Join(t.TempDir(), "candidate-engine")
+	script := `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "m4b-merge 2.2.0"; exit 0; fi
+if [ "$1" = "--capabilities" ]; then
+  echo '{"schema_version":1,"resolver_version":"1","default_path_format":"{title}","path_tokens":[{"name":"book_id","value":"b","example":"B"},{"name":"authors","value":"a","example":"A"},{"name":"narrators","value":"n","example":"N"},{"name":"author","value":"a","example":"A"},{"name":"title","value":"t","example":"T"}],"field_policies":{"values":["write","preserve","clear"],"scalar_fields":["title","subtitle","authors","narrators","series","description","genres","year"]},"cover_policies":{"constraint":"str","variants":["write","preserve","clear"]},"chapter_policies":{"constraint":"str","variants":["write","preserve","clear"]}}'
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(candidate, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO output_profiles (name, output_dir, output_scheme) VALUES ('Wide', '', '{series_position}/{title}')"); err != nil {
+		t.Fatal(err)
+	}
+
+	putBinary := func() (int, string) {
+		req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"m4b_merge_binary":"`+candidate+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		buildSettingsRouter(h).ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+
+	// The profile scheme uses a token the candidate does not advertise:
+	// the swap must be refused, naming the profile.
+	code, body := putBinary()
+	if code != http.StatusBadRequest {
+		t.Fatalf("swap with an unsupported profile scheme = %d, want 400 — %s", code, body)
+	}
+	if !strings.Contains(body, "Wide") || !strings.Contains(body, "series_position") {
+		t.Fatalf("rejection must name the profile and the token: %s", body)
+	}
+
+	// With no profile schemes to revalidate, the same swap succeeds.
+	if _, err := db.Exec("DELETE FROM output_profiles"); err != nil {
+		t.Fatal(err)
+	}
+	code, body = putBinary()
+	if code != http.StatusOK {
+		t.Fatalf("swap with only supported schemes = %d, want 200 — %s", code, body)
 	}
 }
