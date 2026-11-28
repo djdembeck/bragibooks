@@ -1029,7 +1029,7 @@ func TestSettingsBinarySwapRevalidatesSchemesAgainstCandidate(t *testing.T) {
 	script := `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "m4b-merge 2.2.0"; exit 0; fi
 if [ "$1" = "--capabilities" ]; then
-  echo '{"schema_version":1,"resolver_version":"1","default_path_format":"{title}","path_tokens":[{"name":"book_id","value":"b","example":"B"},{"name":"authors","value":"a","example":"A"},{"name":"narrators","value":"n","example":"N"},{"name":"author","value":"a","example":"A"},{"name":"title","value":"t","example":"T"}],"field_policies":{"values":["write","preserve","clear"],"scalar_fields":["title","subtitle","authors","narrators","series","description","genres","year"]},"cover_policies":{"constraint":"str","variants":["write","preserve","clear"]},"chapter_policies":{"constraint":"str","variants":["write","preserve","clear"]}}'
+  echo '{"schema_version":1,"resolver_version":"1","default_path_format":"{title}","path_tokens":[{"name":"book_id","value":"b","example":"B"},{"name":"authors","value":"a","example":"A"},{"name":"narrators","value":"n","example":"N"},{"name":"author","value":"a","example":"A"},{"name":"title","value":"t","example":"T"}],"field_policies":{"values":["write","preserve","clear"],"scalar_fields":["title","subtitle","authors","narrators","series","description","genres","year"]},"cover_policies":{"constraint":"str","variants":["write_url","preserve","clear"]},"chapter_policies":{"constraint":"str","variants":["write","preserve","clear"]}}'
   exit 0
 fi
 exit 0

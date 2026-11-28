@@ -40,7 +40,7 @@ if "--capabilities" in sys.argv:
         "field_policies": {"values": ["write", "preserve", "clear"],
             "scalar_fields": ["title", "subtitle", "authors", "narrators",
                 "series", "description", "genres", "year"]},
-        "cover_policies": {"constraint": "str", "variants": ["write", "preserve", "clear"]},
+        "cover_policies": {"constraint": "str", "variants": ["write_url", "preserve", "clear"]},
         "chapter_policies": {"constraint": "str", "variants": ["write", "preserve", "clear"]}}))
     sys.exit(0)
 job = None
