@@ -21,6 +21,7 @@
 	} from '#lib/types.js';
 	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '#lib/types.js';
 	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
+	import { publisherName } from '#lib/publisher.js';
 	import { formatJobTime, formatElapsed, elapsedLabel } from '#lib/datetime.js';
 	import { liveNow } from '#lib/liveNow.svelte.js';
 	import {
@@ -500,7 +501,7 @@
 			row('Authors', localAuthors || 'Unknown', adbAuthors),
 			row('Narrators', localNarrators || 'Unknown', adbNarrators),
 			row('Series', localSeries, adbSeries),
-			row('Publisher', book.publisher, abdRelease?.publisher?.name || ''),
+			row('Publisher', book.publisher, publisherName(abdRelease) || ''),
 			row('Runtime', localRuntime, adbRuntime),
 			row('Release date', localDate, adbDate)
 		];

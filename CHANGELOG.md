@@ -130,6 +130,12 @@ All notable changes to this project will be documented in this file. See [standa
   path only, now applies to every plain-named asset, so the stale asset
   must be resolved out of band. Labeled historical assets keep the
   provenance-bound reuse that tolerates a byte-differing rebuild.
+- The Match page's proposed AudiobookDB card shows the release's publisher
+  instead of "Publisher Unavailable". AudiobookDB sends publisher credits
+  as a `publishers` array, and the singular `publisher` key is null. The
+  client decoded the singular key, so the value was always empty. The card,
+  the saved `publisher` field, and the source-vs-catalog publisher
+  comparison now read the credited publishers in upstream order.
 
 ### Features & Improvements
 

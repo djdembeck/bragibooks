@@ -5,17 +5,21 @@ import (
 	"testing"
 )
 
-// TestReleaseDecodesLanguageName is the repro+regression for issue #519:
-// upstream sends a release language as a name-only reference, so a
-// {id,title} struct decoded every release language as empty and the Match
-// page rendered "Language Unavailable" for releases that carry one.
-func TestReleaseDecodesLanguageName(t *testing.T) {
+// TestReleaseDecodesLanguageAndPublishers is the repro+regression for
+// issues #519 and #552: upstream sends a release language as a name-only
+// reference and publisher credits as a `publishers` array with the
+// singular `publisher` key null. Binding the language to a {id,title}
+// struct or the publisher to the singular key decoded both as empty, so
+// the Match page rendered "Language Unavailable"/"Publisher Unavailable"
+// for releases that carry them.
+func TestReleaseDecodesLanguageAndPublishers(t *testing.T) {
 	// Trimmed from GET https://audiobookdb.org/api/releases/Bq93nTyJUUbd
-	// with include=...,language,people,publisher.
+	// with include=...,language,people,publishers.
 	payload := []byte(`{
 		"id": "Bq93nTyJUUbd",
 		"title": "Accidental Astronaut 2",
-		"publisher": {"id": "jwN6LnzQi4kQ", "name": "Podium Audio"},
+		"publisher": null,
+		"publishers": [{"id": "jwN6LnzQi4kQ", "name": "Podium Audio", "position": 0, "creditedName": "Podium Audio"}],
 		"language": {"name": "English"}
 	}`)
 
@@ -26,8 +30,36 @@ func TestReleaseDecodesLanguageName(t *testing.T) {
 	if release.Language.Name != "English" {
 		t.Errorf("language = %q; want English", release.Language.Name)
 	}
-	if release.Publisher.Name != "Podium Audio" {
-		t.Errorf("publisher = %q; want Podium Audio", release.Publisher.Name)
+	if got := release.PublisherName(); got != "Podium Audio" {
+		t.Errorf("publisher = %q; want Podium Audio", got)
+	}
+}
+
+// TestReleasePublisherName covers the display string built from the
+// publishers array: upstream order is kept, blank entries are skipped, and
+// multiple credited publishers are joined.
+func TestReleasePublisherName(t *testing.T) {
+	tests := []struct {
+		name       string
+		publishers []IdName
+		want       string
+	}{
+		{name: "none", publishers: nil, want: ""},
+		{name: "single", publishers: []IdName{{Name: "Podium Audio"}}, want: "Podium Audio"},
+		{name: "blank entries skipped", publishers: []IdName{{Name: "  "}, {Name: "Podium Audio"}}, want: "Podium Audio"},
+		{name: "multiple keep order", publishers: []IdName{{Name: "Podium Audio"}, {Name: "Second Press"}}, want: "Podium Audio, Second Press"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			release := &Release{Publishers: tc.publishers}
+			if got := release.PublisherName(); got != tc.want {
+				t.Errorf("PublisherName() = %q; want %q", got, tc.want)
+			}
+		})
+	}
+	var nilRelease *Release
+	if got := nilRelease.PublisherName(); got != "" {
+		t.Errorf("nil release PublisherName() = %q; want empty", got)
 	}
 }
 

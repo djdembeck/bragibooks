@@ -91,7 +91,7 @@ const RELEASE = {
 	releaseDate: '2021-05-01',
 	subtitle: 'Rel Sub',
 	people: [],
-	publisher: { id: 'p1', name: 'Pub' },
+	publishers: [{ id: 'p1', name: 'Pub' }],
 	language: { name: 'English' },
 	images: []
 };
