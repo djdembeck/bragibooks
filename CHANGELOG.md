@@ -135,7 +135,9 @@ All notable changes to this project will be documented in this file. See [standa
   as a `publishers` array, and the singular `publisher` key is null. The
   client decoded the singular key, so the value was always empty. The card,
   the saved `publisher` field, and the source-vs-catalog publisher
-  comparison now read the credited publishers in upstream order.
+  comparison now read the credited publishers in upstream order. A rematch
+  to an edition without credits clears the stored publisher, and the book
+  page compares the saved edition instead of the first catalog release.
 
 ### Features & Improvements
 

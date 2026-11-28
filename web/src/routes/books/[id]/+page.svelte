@@ -22,6 +22,7 @@
 	import { formatRuntime, peopleByRole, normStr, decodeHtmlEntities, AUDIO_FILE_EXTS } from '#lib/types.js';
 	import { cleanAdbError, toCleanedError, type CleanedAdbError } from '#lib/adbError.js';
 	import { publisherName } from '#lib/publisher.js';
+	import { catalogReleaseId } from '#lib/catalogRelease.js';
 	import { formatJobTime, formatElapsed, elapsedLabel } from '#lib/datetime.js';
 	import { liveNow } from '#lib/liveNow.svelte.js';
 	import {
@@ -436,16 +437,22 @@
 	async function loadAbd() {
 		const id = normStr(book?.audiobookdb_book_id);
 		if (!id) return;
+		const savedReleaseId = normStr(book?.audiobookdb_release_id);
 		abdLoading = true;
 		abdError = null;
 		abdBook = null;
 		abdRelease = null;
 		try {
 			const b = await get<AudiobookDBBook>(`/search/books/${id}`);
-			// Runtime, release date and publisher live on the release.
-			const rid = b.releases?.[0]?.id;
+			// Runtime, release date and publisher live on the release. Compare
+			// against the saved edition; the first catalog release is only a
+			// fallback for records matched before an edition was stored.
+			const rid = catalogReleaseId(savedReleaseId, b.releases);
 			const r = rid ? await get<AudiobookDBRelease>(`/search/releases/${rid}`) : null;
-			if (normStr(book?.audiobookdb_book_id) === id) {
+			if (
+				normStr(book?.audiobookdb_book_id) === id &&
+				normStr(book?.audiobookdb_release_id) === savedReleaseId
+			) {
 				abdBook = b;
 				abdRelease = r;
 			}

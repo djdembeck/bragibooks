@@ -380,6 +380,28 @@ describe('match ASIN fast path', () => {
 		expect(body.series).toBe('Grim Hollow #2');
 	});
 
+	it('clears the saved publisher when the selected release has no credits', async () => {
+		// Rematching from a credited release to an uncredited one must send an
+		// explicit empty value: UpdateBook writes publisher only when the
+		// field is present, so an omitted field would keep the old edition's
+		// publisher even though the Match card reads "Unavailable".
+		wireApi(
+			{},
+			{ publishers: [] },
+			{ source_asin: { status: 'present', value: 'B00B5HZGUG' }, publisher: 'Old Press' }
+		);
+		await mountAndSettle();
+		const save = mountTarget?.querySelector<HTMLButtonElement>('button.match__save');
+		expect(save).not.toBeNull();
+		save!.click();
+		await vi.waitUntil(
+			() => putMock.mock.calls.length > 0,
+			{ timeout: 4000, interval: 5 }
+		);
+		const body = putMock.mock.calls[0][1] as Record<string, unknown>;
+		expect(body.publisher).toBe('');
+	});
+
 	it('keeps the by-ASIN book selected when the canonical detail fetch fails', async () => {
 		// The detail fetch (include set) repairs the by-asin payload with
 		// `external`/`series` for the save. A 500 there must NOT demote the

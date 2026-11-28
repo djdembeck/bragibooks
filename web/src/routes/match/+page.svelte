@@ -1819,7 +1819,7 @@
 			description: book?.description || undefined,
 			release_date: releaseDate,
 			series: series || undefined,
-			publisher: publisherName(release) || undefined,
+			publisher: release ? (publisherName(release) ?? '') : undefined,
 			language: release?.language?.name || undefined,
 			runtime_length_minutes: runtimeMs ? Math.round(runtimeMs / 60000) : undefined,
 			cover_image_url: selectedCover(candidate),
