@@ -577,7 +577,7 @@ func catalogTextValue(key string, catalog *matchCatalog) string {
 		return ""
 	case audio.FieldPublisher:
 		if release != nil {
-			return strings.TrimSpace(release.Publisher.Name)
+			return release.PublisherName()
 		}
 		return ""
 	case audio.FieldLanguage:
@@ -1037,7 +1037,9 @@ func (h *Handler) fetchMatchCatalog(ctx context.Context, catalogBookID, releaseI
 	if releaseID == "" {
 		return catalog
 	}
-	release, err := client.GetRelease(ctx, releaseID, "people,publisher,language")
+	// The plural relation carries publisher credits; upstream leaves the
+	// singular `publisher` key null, so requesting it yields no value.
+	release, err := client.GetRelease(ctx, releaseID, "people,publishers,language")
 	if err != nil {
 		log.Printf("match evidence: audiobookdb release %q: %v", releaseID, err)
 		catalog.LookupErr = "AudiobookDB release lookup failed."

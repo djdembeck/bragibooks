@@ -3,6 +3,7 @@ package audiobookdb
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 )
 
 // Book represents an audiobookdb book entity.
@@ -41,12 +42,30 @@ type Release struct {
 	ReleaseDate      *string              `json:"releaseDate"`
 	ChapterDetail    *ChapterDetail       `json:"chapterDetail"`
 	People           []PersonRoleRelation `json:"people"`
-	Publisher        IdName               `json:"publisher"`
+	// Upstream sends publisher credits as a `publishers` array ordered by
+	// position; the singular `publisher` key is always null.
+	Publishers []IdName `json:"publishers"`
 	// Upstream sends the release language as a name-only reference
 	// ({"name":"English"}), not the {id,title} shape used by genres,
 	// tags, and series.
 	Language NameRef `json:"language"`
 	Images   []Image `json:"images"`
+}
+
+// PublisherName renders the release's publisher credits as the single
+// string the catalog stores and the Match UI displays. Multiple credited
+// publishers keep their upstream (position) order, joined with ", ".
+func (r *Release) PublisherName() string {
+	if r == nil {
+		return ""
+	}
+	names := make([]string, 0, len(r.Publishers))
+	for _, p := range r.Publishers {
+		if name := strings.TrimSpace(p.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return strings.Join(names, ", ")
 }
 
 // ChapterDetail wraps the chapters array on a release.

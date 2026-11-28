@@ -352,7 +352,7 @@ export interface AudiobookDBRelease {
 		chapters: { title: string; ordinal: number; startOffsetMs: number; lengthMs: number; lengthString: string }[];
 	};
 	people: AudiobookDBPersonRole[];
-	publisher: { id: string; name: string };
+	publishers: { id: string; name: string }[];
 	language: { name: string };
 	images: AudiobookDBImage[];
 }

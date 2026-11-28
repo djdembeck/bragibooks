@@ -30,6 +30,7 @@
 	import RuntimeComparison from './RuntimeComparison.svelte';
 	import MissingReleaseNudge from './MissingReleaseNudge.svelte';
 	import { compareRuntimeDurations } from '#lib/runtimeComparison.js';
+	import { publisherName } from '#lib/publisher.js';
 	import {
 		currentEvidence, evidenceBadge, evidenceComparison, comparisonMark, conflictingEvidenceFields, comparisonLabels, evidenceFieldLabels,
 		type EvidenceField, type MatchEvidenceReport
@@ -456,7 +457,7 @@
 		const cached = releaseRequests.get(releaseId);
 		if (cached) return cached;
 		const request = get<AudiobookDBRelease>(
-			`/search/releases/${releaseId}?include=book,chapterDetail,external,images,language,people,publisher`
+			`/search/releases/${releaseId}?include=book,chapterDetail,external,images,language,people,publishers`
 		);
 		releaseRequests.set(releaseId, request);
 		void request.catch(() => {
@@ -1653,8 +1654,9 @@
 			if (runtime) parts.push(runtime);
 			if (released) parts.push(released);
 			// Publisher only helps when no stronger differentiator exists.
-			if (!narrators && !runtime && !released && release.publisher?.name) {
-				parts.push(release.publisher.name);
+			const publisher = publisherName(release);
+			if (!narrators && !runtime && !released && publisher) {
+				parts.push(publisher);
 			}
 		}
 		const state: 'loading' | 'error' | 'ready' = !entry
@@ -1817,7 +1819,7 @@
 			description: book?.description || undefined,
 			release_date: releaseDate,
 			series: series || undefined,
-			publisher: release?.publisher?.name || undefined,
+			publisher: release ? (publisherName(release) ?? '') : undefined,
 			language: release?.language?.name || undefined,
 			runtime_length_minutes: runtimeMs ? Math.round(runtimeMs / 60000) : undefined,
 			cover_image_url: selectedCover(candidate),
@@ -2206,7 +2208,7 @@
 										<p class="batch__author">{@render fieldEvidence(c, 'author', selectedAuthors(c))}</p>
 										<p class="batch__evidence batch__evidence--primary"><span class="batch__evidence-label">Narrator</span> <strong>{@render fieldEvidence(c, 'narrator', selectedNarrators(c) || 'Unavailable')}</strong> · <span class="batch__evidence-label">Runtime</span> <strong class="batch__runtime-value">{@render fieldEvidence(c, 'runtime', runtimeLabel(releaseRuntimeMs(c.details.release)) || 'Unavailable')}</strong></p>
 										<p class="batch__evidence batch__evidence--release"><span class="batch__evidence-label">Released</span> {@render fieldEvidence(c, 'date', dateLabel(c.details.release?.releaseDate) || 'Unavailable')}</p>
-										<p class="batch__evidence"><span class="batch__evidence-label">Publisher</span> {@render fieldEvidence(c, 'publisher', c.details.release?.publisher?.name || 'Unavailable')} · <span class="batch__evidence-label">Language</span> {@render fieldEvidence(c, 'language', c.details.release?.language?.name || 'Unavailable')}</p>
+										<p class="batch__evidence"><span class="batch__evidence-label">Publisher</span> {@render fieldEvidence(c, 'publisher', publisherName(c.details.release) || 'Unavailable')} · <span class="batch__evidence-label">Language</span> {@render fieldEvidence(c, 'language', c.details.release?.language?.name || 'Unavailable')}</p>
 										{#if edition}<p class="batch__edition">{edition}</p>{/if}
 										<div class="batch__state">{@render provenance(selected.id)}</div>
 									</div>
@@ -2459,7 +2461,7 @@
 										<div class="match__meta-primary"><dt>Narrator</dt><dd>{@render fieldEvidence(c, 'narrator', selectedNarrators(c) || 'Unavailable')}</dd></div>
 										<div class="match__meta-primary"><dt>Runtime</dt><dd>{@render fieldEvidence(c, 'runtime', runtimeLabel(releaseRuntimeMs(release)) || 'Unavailable')}</dd></div>
 										<div class="match__meta-release"><dt>Released</dt><dd>{@render fieldEvidence(c, 'date', dateLabel(release?.releaseDate) || 'Unavailable')}</dd></div>
-										<div><dt>Publisher</dt><dd>{@render fieldEvidence(c, 'publisher', release?.publisher?.name || 'Unavailable')}</dd></div>
+										<div><dt>Publisher</dt><dd>{@render fieldEvidence(c, 'publisher', publisherName(release) || 'Unavailable')}</dd></div>
 										<div><dt>Language</dt><dd>{@render fieldEvidence(c, 'language', release?.language?.name || 'Unavailable')}</dd></div>
 									</dl>
 									{#if description}

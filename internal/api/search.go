@@ -74,7 +74,7 @@ func (h *Handler) GetReleaseFromDB(w http.ResponseWriter, r *http.Request) {
 
 	include := r.URL.Query().Get("include")
 	if include == "" {
-		include = "book,chapterDetail,external,images,language,people,publisher"
+		include = "book,chapterDetail,external,images,language,people,publishers"
 	}
 
 	release, err := h.getAudiobookDB().GetRelease(r.Context(), id, include)

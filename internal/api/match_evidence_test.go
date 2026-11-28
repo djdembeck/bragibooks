@@ -120,8 +120,8 @@ func evidenceTestCatalog() *matchCatalog {
 			People: []audiobookdb.PersonRoleRelation{
 				{Role: audiobookdb.RoleRef{Name: "Narrator"}, Person: audiobookdb.PersonRef{ID: "p2", Name: "Nia Narrator"}},
 			},
-			Publisher: audiobookdb.IdName{ID: "pub", Name: "Test Press"},
-			Language:  audiobookdb.NameRef{Name: "English"},
+			Publishers: []audiobookdb.IdName{{ID: "pub", Name: "Test Press"}},
+			Language:   audiobookdb.NameRef{Name: "English"},
 		},
 	}
 }
@@ -563,6 +563,33 @@ func TestGetMatchEvidenceResolvesAgainstCatalog(t *testing.T) {
 	}
 }
 
+func TestGetMatchEvidenceRequestsPublisherRelation(t *testing.T) {
+	// The catalog stub expands publisher credits only when the request names
+	// the `publishers` relation. A singular `publisher` include therefore
+	// leaves the comparison without a catalog value even though the Match
+	// card would display the release's publisher.
+	h := newTestHandler(t)
+	seedBookWithASINMetadata(t, h, 1, "pending", "", completeSourceSnap(map[string]audio.SourceField{
+		audio.FieldAudiobookdbReleaseID: {Values: []string{"release-a"}, Source: audio.SourceEmbedded, Status: audio.StatusPresent},
+		audio.FieldPublisher:            {Values: []string{"Test Press"}, Source: audio.SourceEmbedded, Status: audio.StatusPresent},
+	}))
+	installCatalogStub(t, h, evidenceTestCatalog())
+
+	req := newMatchEvidenceRequest(t, "1", "?book_id=book-a&release_id=release-a")
+	w := httptest.NewRecorder()
+	h.GetMatchEvidence(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200 — body: %s", w.Code, w.Body.String())
+	}
+	var report models.MatchEvidence
+	if err := json.NewDecoder(w.Body).Decode(&report); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := report.Comparisons["publisher"].State; got != models.ComparisonMatch {
+		t.Errorf("publisher = %q; want match (release include must request publishers)", got)
+	}
+}
+
 // newMatchEvidenceRequest builds a handler request with the chi route
 // parameter and query string the endpoint reads.
 func newMatchEvidenceRequest(t *testing.T, id, query string) *http.Request {
@@ -575,7 +602,9 @@ func newMatchEvidenceRequest(t *testing.T, id, query string) *http.Request {
 }
 
 // installCatalogStub points the handler at a local AudiobookDB stub serving
-// the given selected book and release.
+// the given selected book and release. Release relations are gated on the
+// request's include list, as upstream does: publisher credits are returned
+// only when `publishers` is requested.
 func installCatalogStub(t *testing.T, h *Handler, catalog *matchCatalog) {
 	t.Helper()
 	t.Setenv("BRAGIBOOKS_ALLOW_LOCAL_ADB", "1")
@@ -584,7 +613,13 @@ func installCatalogStub(t *testing.T, h *Handler, catalog *matchCatalog) {
 		case strings.HasSuffix(r.URL.Path, "/books/book-a"):
 			_ = json.NewEncoder(w).Encode(catalog.Book)
 		case strings.HasSuffix(r.URL.Path, "/releases/release-a"):
-			_ = json.NewEncoder(w).Encode(catalog.Release)
+			release := catalog.Release
+			if release != nil && !includeHasRelation(r.URL.Query().Get("include"), "publishers") {
+				trimmed := *release
+				trimmed.Publishers = nil
+				release = &trimmed
+			}
+			_ = json.NewEncoder(w).Encode(release)
 		default:
 			http.NotFound(w, r)
 		}
@@ -594,4 +629,15 @@ func installCatalogStub(t *testing.T, h *Handler, catalog *matchCatalog) {
 	client := new(atomic.Value)
 	client.Store(audiobookdb.NewClient("", server.URL))
 	h.svc.AudiobookDB = client
+}
+
+// includeHasRelation reports whether a comma-separated include list names
+// the given relation.
+func includeHasRelation(include, relation string) bool {
+	for _, part := range strings.Split(include, ",") {
+		if strings.TrimSpace(part) == relation {
+			return true
+		}
+	}
+	return false
 }
