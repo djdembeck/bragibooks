@@ -31,7 +31,7 @@ COPY --from=builder /build/bragibooks /usr/local/bin/
 # tokens (verified at startup via --capabilities, not the version string
 # alone). Pinned to the multi-arch INDEX digest, not an architecture
 # manifest digest.
-COPY --from=ghcr.io/djdembeck/m4b-merge:v2.2.0@sha256:ad08601cf802d93de4285ef0cb9056a0dcefbe063fc41272760a54899b4eeee2 /usr/local/bin/m4b-merge /usr/local/bin/
+COPY --from=ghcr.io/djdembeck/m4b-merge:v2.2.1@sha256:e7f4264914a5e8564325c1dcf3da6a591b6528f2b256960bf3a69c3a695892a3 /usr/local/bin/m4b-merge /usr/local/bin/
 COPY docker/entrypoint.sh /usr/local/bin/bragibooks-entrypoint
 RUN chmod 0755 /usr/local/bin/bragibooks-entrypoint
 # The image runs as root by default (matching the legacy image); the
