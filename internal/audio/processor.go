@@ -202,6 +202,32 @@ func (p *Processor) ApplyConfigAndSelection(cfg *config.Config) {
 	p.metadataChapters = cfg.Processing.MetadataChapters
 }
 
+// ApplyConfigAndSelectionWithCapabilities is ApplyConfigAndSelection plus
+// the verified capabilities, all under ONE lock. A binary swap changes the
+// engine identity (the capabilities' schema/resolver, which loadSnapshotForQueue
+// freezes into the job) AND the binary (which RunJob reads at run time);
+// publishing those in two separate locked writes leaves an interval where a
+// queue freezes the NEW identity with the OLD binary, and a worker that runs
+// before the binary half lands trips the pre-launch identity gate. Setting
+// both together makes every reader observe a matching (identity, binary)
+// pair. caps is nil when no binary was swapped (the capabilities are left
+// untouched, so a non-swap save cannot disturb a verified identity).
+func (p *Processor) ApplyConfigAndSelectionWithCapabilities(cfg *config.Config, caps *Capabilities) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Binary = cfg.M4bMerge.Binary
+	p.OutputDir = cfg.Directories.OutputDir
+	p.CompletedDir = cfg.Directories.CompletedDir
+	p.NumCPUs = cfg.Processing.NumCPUs
+	p.PathFormat = cfg.Processing.PathFormat
+	p.LogLevel = cfg.Processing.LogLevel
+	p.metadataFields = cfg.Processing.MetadataFields
+	p.metadataChapters = cfg.Processing.MetadataChapters
+	if caps != nil {
+		p.capabilities = caps
+	}
+}
+
 // stripEscapeSequences removes ANSI/VT100 escape sequences from s so the
 // captured m4b-merge output persists and renders as plain text. Only escape
 // sequences are removed: newlines, tabs, and all ordinary text — including a

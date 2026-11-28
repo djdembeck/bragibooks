@@ -221,24 +221,23 @@ func (p *Processor) validateCapabilities(caps *Capabilities) (*Capabilities, err
 		}
 	}
 	// The derived job policies are not just the scalar write/preserve pair:
-	// a deselected field, a preserved cover, and a preserved chapter list all
-	// serialize the "preserve" policy strings into the job file. The engine
-	// advertises each policy path's accepted variants in cover_policies /
-	// chapter_policies, so the gate must require "preserve" there: an engine
-	// that dropped it would pass the field checks above, boot cleanly, and
-	// only reject every preserve job at run time.
-	if !policyVariant(caps.CoverPolicies.Variants, WritePolicyValuePreserve) {
-		return nil, fmt.Errorf("engine cover_policies do not advertise %q; an unselected field or preserved cover cannot be honored (cover variants: %s)", WritePolicyValuePreserve, strings.Join(caps.CoverPolicies.Variants, ", "))
+	// a written cover, a preserved cover, and a cleared cover each serialize
+	// a DISTINCT policy string into the job file (the chapter list carries
+	// its own "write" policy, "" normalized to the documented "write"
+	// default). The engine advertises each policy path's accepted variants
+	// in cover_policies / chapter_policies, so the gate must require EVERY
+	// value Bragi can emit on that path: an engine that dropped one would
+	// pass the field checks above, boot cleanly (and a binary swap), and
+	// only reject the job at run time.
+	for _, v := range []string{WritePolicyValueWrite, WritePolicyValuePreserve, WritePolicyValueClear} {
+		if !policyVariant(caps.CoverPolicies.Variants, v) {
+			return nil, fmt.Errorf("engine cover_policies do not advertise %q; a job with that cover policy cannot be honored (cover variants: %s)", v, strings.Join(caps.CoverPolicies.Variants, ", "))
+		}
 	}
-	// "clear" is the bare policy Bragi emits for an explicit cover clear
-	// (the per-book editor's pin) with no staged file: an engine that
-	// dropped it would pass boot and reject every cleared-cover job at
-	// run time.
-	if !policyVariant(caps.CoverPolicies.Variants, WritePolicyValueClear) {
-		return nil, fmt.Errorf("engine cover_policies do not advertise %q; a cleared cover cannot be honored (cover variants: %s)", WritePolicyValueClear, strings.Join(caps.CoverPolicies.Variants, ", "))
-	}
-	if !policyVariant(caps.ChapterPolicies.Variants, WritePolicyValuePreserve) {
-		return nil, fmt.Errorf("engine chapter_policies do not advertise %q; a preserved chapter list cannot be honored (chapter variants: %s)", WritePolicyValuePreserve, strings.Join(caps.ChapterPolicies.Variants, ", "))
+	for _, v := range []string{WritePolicyValueWrite, WritePolicyValuePreserve} {
+		if !policyVariant(caps.ChapterPolicies.Variants, v) {
+			return nil, fmt.Errorf("engine chapter_policies do not advertise %q; a job with that chapter policy cannot be honored (chapter variants: %s)", v, strings.Join(caps.ChapterPolicies.Variants, ", "))
+		}
 	}
 	// A missing probe must never be silently swallowed into a start: log so
 	// an operator sees a capability that regressed at boot.

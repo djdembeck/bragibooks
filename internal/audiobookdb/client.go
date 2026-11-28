@@ -289,7 +289,13 @@ func (c *Client) Search(ctx context.Context, query string, types []string, skip,
 // GetBook calls GET /books/{id} and returns the book. The include parameter
 // controls which relations are expanded (comma-separated).
 func (c *Client) GetBook(ctx context.Context, id string, include string) (*Book, error) {
-	url := fmt.Sprintf("%s/books/%s", c.baseURL, id)
+	// Path-escape the id: it is caller-controlled (a query parameter on the
+	// match-evidence route) and is sent to the catalog with the client's
+	// configured credentials. Raw interpolation let a caller inject a slash,
+	// query, or fragment and move the credentialed request off the intended
+	// /books/{id} endpoint.
+	escapedID := url.PathEscape(id)
+	url := fmt.Sprintf("%s/books/%s", c.baseURL, escapedID)
 	if include != "" {
 		url += "?include=" + include
 	}
@@ -309,7 +315,9 @@ func (c *Client) GetBook(ctx context.Context, id string, include string) (*Book,
 // GetRelease calls GET /releases/{id} and returns the release. The include
 // parameter controls which relations are expanded (comma-separated).
 func (c *Client) GetRelease(ctx context.Context, id string, include string) (*Release, error) {
-	url := fmt.Sprintf("%s/releases/%s", c.baseURL, id)
+	// Path-escape the id, as in GetBook: caller-controlled, credentialed.
+	escapedID := url.PathEscape(id)
+	url := fmt.Sprintf("%s/releases/%s", c.baseURL, escapedID)
 	if include != "" {
 		url += "?include=" + include
 	}

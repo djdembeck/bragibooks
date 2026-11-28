@@ -565,11 +565,17 @@ func addValue(merged map[string][]string, seen map[string]map[string]bool, trunc
 // mutable name.
 func probeOne(ctx context.Context, ffprobe, path string, f *os.File) (map[string]string, float64, string) {
 	probePath, extra := bindProbe(path, f)
+	// ffprobe infers the format from file content, so a crafted playlist
+	// or container can reference remote resources; restrict it to local
+	// protocols. `file` is always needed: a pinned probe reads its
+	// descriptor through a file-protocol path (/dev/fd/3 on darwin/BSD,
+	// /proc/<pid>/fd/<n> on Linux, an NT device path on Windows), so
+	// dropping `file` would break the primary open. The whitelist still
+	// blocks remote protocols (http, tcp, udp, …), which is the main
+	// risk a reference-bearing format (playlist) introduces.
+	whitelist := "file,pipe,data"
 	cmd := exec.CommandContext(ctx, ffprobe,
-		// ffprobe infers the format from file content, so a crafted
-		// playlist or container can reference remote resources; restrict
-		// it to local protocols.
-		"-protocol_whitelist", "file,pipe,data",
+		"-protocol_whitelist", whitelist,
 		"-v", "error", "-print_format", "json", "-show_format", "-show_streams", probePath)
 	if extra != nil {
 		cmd.ExtraFiles = []*os.File{extra}

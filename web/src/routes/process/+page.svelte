@@ -84,6 +84,17 @@
 	// disabled while one runs, so two clicks can never start two paged
 	// loops that both append the same fetched rows.
 	let batchLoading = $state(false);
+	// Plain (not $state) reentrancy guard: loadBatchRows reads `jobs` (for
+	// its known-ids set) before its first await, so the "Show all" effect
+	// tracks `jobs` and would re-fire on every page append, spawning a
+	// cascading fetch loop. The guard is plain so toggling it does not
+	// re-run the effect; the in-flight loop runs to completion on its own.
+	let batchLoadInFlight = false;
+	// The token whose batch load last completed (plain: not a dependency,
+	// so setting it does not re-fire the effect). The effect starts a load
+	// only for a token not yet loaded, so a success that clears
+	// batchLoadError does not re-fire the effect into a redundant loop.
+	let batchLoadedToken = -1;
 	let queueSequence = 0;
 	let cancelling = $state<Set<string>>(new Set());
 	const cleanupMap = $state(new Map<string, () => void>());
@@ -133,10 +144,21 @@
 			showAllHistory = false;
 			restoreJobs(jobsResp.jobs);
 			batchAggregate = jobsResp.batch ?? null;
-			// The banner's run's rows are always reachable (the Review-
-			// failures action scrolls to one of them); the rest of the
-			// batch is paged in when "Show all" lifts the render bound.
-			void loadBatchRows(batchAggregate, batchLoadToken);
+			// The batch's full rows (output logs) are paged in only when
+			// "Show all" lifts the render bound (the effect below) — the
+			// initial load keeps the aggregate for counts and defers the
+			// per-row log fetches. The Review-failures action fetches its
+			// single target row separately (fetchJobRow). Run the fetch
+			// NOW only when there are no past jobs at all (the disclosure
+			// and its "Show all" are absent, so nothing else can page the
+			// tail in) AND the aggregate counts rows the recent window
+			// does not carry (the API caps the row list, so a big batch's
+			// tail rows are unreachable otherwise) — a failure still
+			// surfaces its retry control. With past jobs, "Show all"
+			// reaches the tail, so the fetch stays deferred (F-30).
+			if (pastJobs.length === 0 && batchAggregate && loadedBatchRows < batchAggregate.total) {
+				void loadBatchRows(batchAggregate, batchLoadToken);
+			}
 		});
 		loading = false;
 		// Independent of the queue load: a profile-list failure must not
@@ -276,35 +298,43 @@
 	async function loadBatchRows(agg: BatchAggregate | null, token: number) {
 		if (!agg || agg.job_ids.length === 0) return;
 		batchLoading = true;
-		const knownIds = new Set(jobs.map((job) => job.id));
-		for (let offset = 0; offset < agg.total; offset += BATCH_PAGE_SIZE) {
-			const count = Math.min(BATCH_PAGE_SIZE, agg.total - offset);
-			let resp: JobsListResponse;
-			try {
-				resp = await get<JobsListResponse>(
-					`/jobs?batch_id=${encodeURIComponent(agg.batch_id)}&limit=${count}&offset=${offset}`
-				);
-			} catch {
-				// A reload outlived this fetch: the fresh load owns the
-				// batch rows, so no stale error flag.
-				if (token !== batchLoadToken) return;
-				batchLoadError = true;
-				batchLoading = false;
-				return;
+		batchLoadInFlight = true;
+		try {
+			const knownIds = new Set(jobs.map((job) => job.id));
+			for (let offset = 0; offset < agg.total; offset += BATCH_PAGE_SIZE) {
+				const count = Math.min(BATCH_PAGE_SIZE, agg.total - offset);
+				let resp: JobsListResponse;
+				try {
+					resp = await get<JobsListResponse>(
+						`/jobs?batch_id=${encodeURIComponent(agg.batch_id)}&limit=${count}&offset=${offset}`
+					);
+				} catch {
+					// A reload outlived this fetch: the fresh load owns the
+					// batch rows, so no stale error flag.
+					if (token !== batchLoadToken) return;
+					batchLoadError = true;
+					batchLoading = false;
+					return;
+				}
+				if (token !== batchLoadToken) return; // A reload outlived this fetch.
+				const fresh = resp.jobs.filter((job) => !knownIds.has(job.id));
+				if (fresh.length === 0) continue;
+				// Newest first: the appended rows are older than the recent
+				// window, and "Show all" must reveal them in queue order.
+				jobs = [...jobs, ...fresh.map(jobToItem)].sort((a, b) => b.queueOrder - a.queueOrder);
+				for (const job of fresh) knownIds.add(job.id);
 			}
-			if (token !== batchLoadToken) return; // A reload outlived this fetch.
-			const fresh = resp.jobs.filter((job) => !knownIds.has(job.id));
-			if (fresh.length === 0) continue;
-			// Newest first: the appended rows are older than the recent
-			// window, and "Show all" must reveal them in queue order.
-			jobs = [...jobs, ...fresh.map(jobToItem)].sort((a, b) => b.queueOrder - a.queueOrder);
-			for (const job of fresh) knownIds.add(job.id);
-		}
-		// A stale loop outlived by a reload must not clear the flags a
-		// newer load already set.
-		if (token === batchLoadToken) {
-			batchLoadError = false;
-			batchLoading = false;
+			// A stale loop outlived by a reload must not clear the flags a
+			// newer load already set. Marking the token loaded stops the
+			// effect from re-firing into a redundant loop once the success
+			// clears batchLoadError.
+			if (token === batchLoadToken) {
+				batchLoadError = false;
+				batchLoading = false;
+				batchLoadedToken = token;
+			}
+		} finally {
+			batchLoadInFlight = false;
 		}
 	}
 
@@ -553,6 +583,22 @@
 		if (batchAggregate?.batch_id === batchId && batchAggregate.all_terminal) return;
 		try {
 			const resp = await get<JobsListResponse>('/jobs?limit=1');
+			// An older refresh can outlive a newer run: started when batch
+			// A finished, it stays in flight while start() queues batch B
+			// and clears batchAggregate. Applying A's aggregate then would
+			// reinstate A's completion banner while B runs (and a second
+			// stale response can overwrite B's terminal aggregate). Apply
+			// the response only if the page's newest batch is still the
+			// one this refresh was for.
+			let currentBatchId: string | null = null;
+			let newestSeq = -1;
+			for (const job of jobs) {
+				if (job.batchId && job.queueOrder > newestSeq) {
+					currentBatchId = job.batchId;
+					newestSeq = job.queueOrder;
+				}
+			}
+			if (currentBatchId !== batchId) return;
 			batchAggregate = resp.batch ?? null;
 		} catch {
 			// The next terminal event (or a manual reload) re-fetches.
@@ -656,30 +702,6 @@
 	});
 	const pendingBooks = $derived(books.filter((b) => b.status === 'pending'));
 	const pastJobs = $derived(jobs.filter((job) => !isActiveJob(job)));
-	/** The history rows Recent activity renders: the newest
-	 *  HISTORY_RENDER_LIMIT, plus the banner's run's rows so the
-	 *  Review-failures action always has a row to land on. "Show all"
-	 *  lifts the bound: the batch's rows are paged in by loadBatchRows,
-	 *  so every row the banner counts is reachable from the view. */
-	const renderedHistory = $derived.by(() => {
-		const past = pastJobs;
-		if (showAllHistory || past.length <= HISTORY_RENDER_LIMIT) return past;
-		const ids = new Set(past.slice(0, HISTORY_RENDER_LIMIT).map((job) => job.id));
-		if (batchSummary) for (const id of batchSummary.jobIds) ids.add(id);
-		return past.filter((job) => ids.has(job.id));
-	});
-	const hiddenHistoryCount = $derived(pastJobs.length - renderedHistory.length);
-	// Hydrate the rows the bounded view renders: the render cap for
-	// non-batch history, the batch's rows as they page in (loadBatchRows
-	// re-runs this via the derived), and "Show all" lifting the bound.
-	$effect(() => {
-		hydrateRenderedHistory();
-	});
-	const clock = liveNow(() => activeJobs.length > 0);
-	const failedJobs = $derived(pastJobs.filter((job) => job.status === 'error' || job.status === 'failed').length);
-	const runningJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'running').length);
-	const queuedJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'queued').length);
-
 	// The banner tracks the latest merge run (batch) so a finished queue has
 	// a result to look at, not just Recent activity. It states a result only
 	// — while a batch runs, the live job cards own that state. Dismissal is
@@ -704,12 +726,76 @@
 			}))
 		)
 	);
+	/** The LOADED ROWS THAT BELONG TO THE BATCH: the banner's rollup minus
+	 *  what the list does not carry. A count of the whole list
+	 *  (renderedHistory.length) would include unrelated non-batch jobs, so
+	 *  it is not a count of the batch's rows — the hidden-batch term below
+	 *  must measure the batch's own rows against the aggregate's total, or
+	 *  a failed batch can show no hidden history while its rows were never
+	 *  paged in (and the Review action has no row to land on). */
+	const loadedBatchRows = $derived.by(() => {
+		if (!batchSummary) return 0;
+		if (!batchAggregate) return jobs.filter((job) => batchSummary.jobIds.includes(job.id)).length;
+		const owned = new Set(batchAggregate.job_ids);
+		return jobs.filter((job) => owned.has(job.id)).length;
+	});
+	/** The history rows Recent activity renders: the newest
+	 *  HISTORY_RENDER_LIMIT, plus the banner's run's rows so the
+	 *  Review-failures action always has a row to land on. "Show all"
+	 *  lifts the bound: the batch's rows are paged in by loadBatchRows,
+	 *  so every row the banner counts is reachable from the view. */
+	const renderedHistory = $derived.by(() => {
+		const past = pastJobs;
+		if (showAllHistory || past.length <= HISTORY_RENDER_LIMIT) return past;
+		const ids = new Set(past.slice(0, HISTORY_RENDER_LIMIT).map((job) => job.id));
+		if (batchSummary) for (const id of batchSummary.jobIds) ids.add(id);
+		return past.filter((job) => ids.has(job.id));
+	});
+	// The hidden count is the SUM of the unrendered history rows and the
+	// batch's rows the page has not loaded: the two sets are DISJOINT
+	// (older non-batch rows vs. the batch's unloaded tail — a batch's
+	// loaded rows are always inside the render window, so they never count
+	// in the history term), and Math.max undercounts when both are hidden.
+	// The batch term matters because the API caps the job list: a batch
+	// larger than the window has a tail the page never loaded — without it
+	// hiddenHistoryCount is 0 and "Show all" (which pages in the batch's
+	// remaining rows) has no trigger. It compares the batch's OWN loaded
+	// rows against the aggregate's total (never the whole list, which mixes
+	// in unrelated jobs).
+	const hiddenHistoryCount = $derived.by(() => {
+		const history = pastJobs.length - renderedHistory.length;
+		const batch = batchSummary ? Math.max(0, batchSummary.total - loadedBatchRows) : 0;
+		return history + batch;
+	});
+	// Hydrate the rows the bounded view renders: the render cap for
+	// non-batch history, the batch's rows as they page in (loadBatchRows
+	// re-runs this via the derived), and "Show all" lifting the bound.
+	$effect(() => {
+		hydrateRenderedHistory();
+	});
+	const clock = liveNow(() => activeJobs.length > 0);
+	const failedJobs = $derived(pastJobs.filter((job) => job.status === 'error' || job.status === 'failed').length);
+	const runningJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'running').length);
+	const queuedJobs = $derived(jobs.filter((j) => j.status.toLowerCase() === 'queued').length);
+
 	let dismissedBatchId = $state<string | null>(null);
 	const batchVisible = $derived(
 		batchSummary !== null && batchSummary.allTerminal && dismissedBatchId !== batchSummary.id
 	);
 	let historyDetails = $state<HTMLDetailsElement>();
 	let showAllHistory = $state(false);
+	// Defer the batch's full rows (output logs) until "Show all" lifts the
+	// render bound: the initial load keeps the aggregate for counts and the
+	// rows the recent window already returned; the per-row log fetches only
+	// start when the user asks for the full history. The Review-failures
+	// action fetches its single target row separately (fetchJobRow). With
+	// no past jobs there is no "Show all" to defer for: load() runs the
+	// fetch itself in that case (a failure still surfaces its retry).
+	$effect(() => {
+		if (showAllHistory && batchAggregate && !batchLoadError && !batchLoadInFlight && batchLoadedToken !== batchLoadToken) {
+			void loadBatchRows(batchAggregate, batchLoadToken);
+		}
+	});
 	// The first failed row of the latest run: the banner's "Review" action
 	// expands Recent activity and lands there.
 	const firstFailedJobId = $derived.by(() => {
@@ -741,10 +827,28 @@
 		};
 	});
 
+	/** Fetch one job row by id (the Review-failures action's target), so
+	 *  the row renders even while the batch's full rows are deferred. The
+	 *  row is appended newest-first; the known-ids guard in loadBatchRows
+	 *  drops it later when the full batch pages in. */
+	async function fetchJobRow(id: string) {
+		try {
+			const job = await get<ProcessingJob>(`/jobs/${id}`);
+			if (!jobs.some((j) => j.id === id)) {
+				jobs = [jobToItem(job), ...jobs].sort((a, b) => b.queueOrder - a.queueOrder);
+			}
+		} catch {
+			// The row stays out; the banner's count is still correct.
+		}
+	}
+
 	function reviewFailures() {
 		if (historyDetails) historyDetails.open = true;
 		const id = firstFailedJobId;
 		if (!id) return;
+		// The row may not be in the deferred batch rows: fetch its single
+		// row so the disclosure has a target to land on.
+		void fetchJobRow(id);
 		// The row renders once the disclosure opens; land on it a frame later.
 		// 'smooth' is an animated page move — reduced-motion users get the
 		// jump, not the glide.

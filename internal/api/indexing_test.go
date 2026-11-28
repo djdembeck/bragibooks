@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -472,7 +473,7 @@ func runToTerminal(t *testing.T, svc *IndexService) IndexState {
 // mustWalk runs one walk and fails on truncation/cancellation.
 func mustWalk(t *testing.T, svc *IndexService, root string) []indexRow {
 	t.Helper()
-	rows, truncated, detail, cancelled := svc.walk(context.Background(), root)
+	rows, truncated, _, detail, cancelled := svc.walk(context.Background(), root)
 	if truncated || cancelled {
 		t.Fatalf("walk truncated=%v cancelled=%v detail=%q", truncated, cancelled, detail)
 	}
@@ -2179,4 +2180,268 @@ func TestListDirectoriesIndexModeSymlinkedRoot(t *testing.T) {
 			t.Fatalf("child listing fell back to the filesystem (lexical child path rejected): %s", rec.Body.String())
 		}
 	})
+}
+
+// TestWalkDoesNotFollowChildDirSymlinks pins the descriptor-anchored
+// descent: a child that is a SYMLINK to outside the root is not descended
+// (the walk never follows directory symlinks), and an in-root dir-symlink
+// is recorded as a file row, not walked as a directory. Children are
+// opened with openat against the parent's already-open descriptor
+// (openIndexChildDir), so a full-path re-open by name cannot redirect the
+// descent outside the root.
+func TestWalkDoesNotFollowChildDirSymlinks(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "escape.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "real", "in.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A child that is a symlink to outside the root (never descended).
+	if err := os.Symlink(outside, filepath.Join(root, "out-link")); err != nil {
+		t.Fatal(err)
+	}
+	// A child that is a symlink to a directory INSIDE the root: recorded
+	// as a file row (the lstat type), never descended either.
+	if err := os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "in-link")); err != nil {
+		t.Fatal(err)
+	}
+
+	svc, _ := newIndexTestService(t, root)
+	rows := mustWalk(t, svc, root)
+	byPath := map[string]indexRow{}
+	for _, r := range rows {
+		byPath[r.Path] = r
+	}
+	if _, ok := byPath[filepath.Join(root, "real", "in.txt")]; !ok {
+		t.Errorf("real child not walked: %v", rows)
+	}
+	for p := range byPath {
+		for _, link := range []string{"out-link", "in-link"} {
+			if strings.HasPrefix(p, filepath.Join(root, link)+string(os.PathSeparator)) {
+				t.Errorf("walk descended into the symlinked child %s (dir symlinks must not be followed)", p)
+			}
+		}
+	}
+	if r, ok := byPath[filepath.Join(root, "in-link")]; !ok || r.Type != "file" {
+		t.Errorf("in-root dir-symlink row = %+v (present = %v); want a file-type row (lstat, no descent)", r, ok)
+	}
+	if _, ok := byPath[filepath.Join(root, "out-link")]; ok {
+		t.Errorf("out-of-root dir-symlink has a row; it must be skipped entirely")
+	}
+}
+
+// TestWalkSwappedChildSymlinkFailsClosed pins the fail-closed open: the
+// child is read as a directory from the parent's already-open descriptor,
+// then replaced by a symlink before the openat — the open must FAIL
+// (O_NOFOLLOW) instead of following the link, so the walk never descends
+// into a name a writer swapped. This is the walk's exact open sequence
+// (readDirWith reads the entries from the parent fd; readDirChild openats
+// the child against that same fd), with the swap placed in the
+// read→open window deterministically.
+func TestWalkSwappedChildSymlinkFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "escape.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The child starts as a REAL directory; the parent is opened while it
+	// is still there, and the entries are read from the parent's own
+	// descriptor — the walk's sequence.
+	if err := os.MkdirAll(filepath.Join(root, "swapped"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "plain"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := openIndexDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	entries, rerr := parent.ReadDir(4096)
+	if rerr != nil && rerr != io.EOF {
+		t.Fatal(err)
+	}
+	sawDir := false
+	for _, d := range entries {
+		if d.Name() == "swapped" && d.IsDir() {
+			sawDir = true
+		}
+	}
+	if !sawDir {
+		t.Fatalf("the parent's descriptor did not read \"swapped\" as a directory: %v", entries)
+	}
+	// The swap: the directory is gone, a symlink stands in its place —
+	// before the child open, as in the walk's read→open window.
+	if err := os.Rename(filepath.Join(root, "swapped"), filepath.Join(root, "swapped-real")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "swapped")); err != nil {
+		t.Fatal(err)
+	}
+	// The openat against the parent fd must fail closed (O_NOFOLLOW): the
+	// name is a symlink now, and the walk never follows directory symlinks.
+	if _, err := openIndexChildDir(parent, "swapped", root); err == nil {
+		t.Fatal("openIndexChildDir opened the swapped-in symlink; want a failure (O_NOFOLLOW)")
+	}
+	// The controls: the real directory (under its new name) and the other
+	// plain child open fine against the same parent fd.
+	if f, err := openIndexChildDir(parent, "swapped-real", root); err != nil {
+		t.Fatalf("openIndexChildDir failed on the real (renamed) directory: %v", err)
+	} else {
+		f.Close()
+	}
+	if f, err := openIndexChildDir(parent, "plain", root); err != nil {
+		t.Fatalf("openIndexChildDir failed on a plain directory child: %v", err)
+	} else {
+		f.Close()
+	}
+}
+
+func rowsHavePath(rows []indexRow, p string) (indexRow, bool) {
+	for _, r := range rows {
+		if r.Path == p {
+			return r, true
+		}
+	}
+	return indexRow{}, false
+}
+
+// TestWalkDepthBoundStopsDrain pins the depth-bound recovery: a tree at
+// the max depth with MANY over-bound entries must terminate (the drain
+// stops at the first over-bound entry — every remaining one would be
+// unindexable) and record the truncation, without enumerating the rest.
+func TestWalkDepthBoundStopsDrain(t *testing.T) {
+	root := t.TempDir()
+	// A chain of indexMaxDepth directories (the max recordable depth); the
+	// next level is over the bound.
+	dir := root
+	for i := range indexMaxDepth {
+		dir = filepath.Join(dir, fmt.Sprintf("d%02d", i))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	over := filepath.Join(dir, "x")
+	if err := os.MkdirAll(over, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 5000 {
+		if err := os.WriteFile(filepath.Join(over, fmt.Sprintf("f%04d", i)), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	svc, _ := newIndexTestService(t, root)
+	rows, truncated, ioFailed, detail, cancelled := svc.walk(context.Background(), root)
+	if !truncated || cancelled {
+		t.Fatalf("truncated=%v cancelled=%v detail=%q; want the depth bound recorded", truncated, cancelled, detail)
+	}
+	if ioFailed {
+		t.Fatalf("ioFailed = true; the depth bound is a cap, not an I/O failure (%q)", detail)
+	}
+	if !strings.Contains(detail, "depth cap") {
+		t.Errorf("detail = %q; want the depth cap named", detail)
+	}
+	maxDepth := 0
+	for _, r := range rows {
+		d := strings.Count(strings.TrimPrefix(r.Path, root), string(os.PathSeparator))
+		if d > maxDepth {
+			maxDepth = d
+		}
+		if d > indexMaxDepth {
+			t.Errorf("row %s is %d deep; the cap is %d", r.Path, d, indexMaxDepth)
+		}
+	}
+	if maxDepth != indexMaxDepth {
+		t.Errorf("max row depth = %d; want the walk to reach exactly %d", maxDepth, indexMaxDepth)
+	}
+}
+
+// TestWalkIOTruncationKeepsWriteFailedGuard pins the guard asymmetry: an
+// I/O-failed truncation (an unreadable subdirectory) leaves the walked set
+// INCOMPLETE, so the partial-write guard must be RETAINED at the terminal
+// (the listing keeps serving the filesystem until a clean scan).
+func TestWalkIOTruncationKeepsWriteFailedGuard(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 000 does not hide a directory from root")
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "ok"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "ok", "in.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(root, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "hidden.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	svc, _ := newIndexTestService(t, root)
+	rootCanon := svc.CurrentRoot()
+	if !svc.armWriteFailedRoots(1, rootCanon) {
+		t.Fatal("armWriteFailedRoots failed")
+	}
+	rows, truncated, ioFailed, _, cancelled := svc.walk(context.Background(), rootCanon)
+	if !truncated || !ioFailed || cancelled {
+		t.Fatalf("walk = truncated %v ioFailed %v cancelled %v; want the unreadable directory recorded as an I/O-failed truncation", truncated, ioFailed, cancelled)
+	}
+	if _, ok := rowsHavePath(rows, filepath.Join(rootCanon, "locked", "hidden.txt")); ok {
+		t.Errorf("the unreadable directory's contents were walked: %v", rows)
+	}
+	svc.setTerminal(1, "truncated", "io", len(rows), rootCanon, true)
+	if !svc.writeFailedRootContains(rootCanon) {
+		t.Errorf("the partial-write guard was released on an I/O-failed truncation; the table is incomplete and the listing must keep serving the filesystem")
+	}
+}
+
+// TestWalkCapTruncationKeepsWriteFailedGuard pins the guard's behavior
+// for a cap-only truncation (entry cap): the walk indexed everything the
+// cap allows, but directories the walk never reached read as
+// authoritative empty listings from the index, so the table is NOT a
+// proof of complete listings — the guard stays and the listings fall
+// back to the filesystem. A later clean "done" terminal on the root is
+// the release path.
+func TestWalkCapTruncationKeepsWriteFailedGuard(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "zzz"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := range indexMaxEntries {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%05d", i)), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc, _ := newIndexTestService(t, root)
+	rootCanon := svc.CurrentRoot()
+	if !svc.armWriteFailedRoots(1, rootCanon) {
+		t.Fatal("armWriteFailedRoots failed")
+	}
+	rows, truncated, ioFailed, detail, cancelled := svc.walk(context.Background(), rootCanon)
+	if !truncated || ioFailed || cancelled {
+		t.Fatalf("walk = truncated %v ioFailed %v cancelled %v (%q); want a cap-only truncation", truncated, ioFailed, cancelled, detail)
+	}
+	if len(rows) != indexMaxEntries {
+		t.Fatalf("rows = %d; want exactly the entry cap", len(rows))
+	}
+	svc.setTerminal(1, "truncated", detail, len(rows), rootCanon, false)
+	if !svc.writeFailedRootContains(rootCanon) {
+		t.Errorf("the partial-write guard was released on a cap-only truncation; the walk did not index every directory, so the listings must keep serving the filesystem")
+	}
 }

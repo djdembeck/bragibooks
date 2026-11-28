@@ -143,9 +143,13 @@ export function summarizeLegacyRun(jobs: LegacyJob[]): BatchSummary | null {
 
 	// Audit rows (imports, metadata saves) enqueue between runs; they are
 	// excluded from the walk. Same convention as jobActionLabel: a missing
-	// action means merge.
+	// action means merge. Batched rows are excluded too: their run is owned
+	// by the aggregate, and when the aggregate is absent (the window right
+	// after start() clears it) a batched row must not be summarized alone
+	// as a legacy run — that would show a terminal banner for one row while
+	// its sibling jobs are still in flight.
 	const mergeJobs = [...jobs]
-		.filter((job) => job.action === 'merge' || job.action == null)
+		.filter((job) => (job.action === 'merge' || job.action == null) && job.batchId == null)
 		.sort((a, b) => a.queueOrder - b.queueOrder);
 	if (mergeJobs.length === 0) return null;
 

@@ -281,9 +281,21 @@ func (h *Handler) captureSnapshotUnlocked(ctx context.Context, bookID int64, cha
 		}
 		if sameBook && existing.ADBReleaseID != "" && existing.ADBReleaseID == snap.ADBReleaseID {
 			snap.Chapters = existing.Chapters
-			// The subtitle is RELEASE-level content (the release's own value
-			// wins in the precedence below): retain it under the same
-			// unchanged-selection rule as chapters.
+		}
+		// The subtitle is RELEASE-level content: retain it only when it
+		// belongs to the SAME release this capture names (both release
+		// ids empty = a book-only selection, which is "the same"). A
+		// re-match to a DIFFERENT release does NOT pre-fill from the old
+		// row: the enrichment precedence below resolves the subtitle for
+		// the selection this capture names — the selected release's own
+		// subtitle, then the book-level fallback — and a pre-filled value
+		// from the previous release would shadow the book fallback and
+		// survive a new release that carries none of its own. For an
+		// UNCHANGED release the retained value is kept across a degraded
+		// capture: a release-detail failure, or a successful release that
+		// carries no subtitle of its own, must not replace the retained
+		// release-specific subtitle with the book fallback.
+		if sameBook && existing.ADBReleaseID == snap.ADBReleaseID {
 			snap.Subtitle = existing.Subtitle
 		}
 	}
@@ -1158,6 +1170,16 @@ func isNonPublicCoverAddress(ip net.IP) bool {
 		// 255.255.255.255/32 limited broadcast.
 		case v4[0] == 255 && v4[1] == 255 && v4[2] == 255 && v4[3] == 255:
 			return true
+		// 0.0.0.0/8 "this network" (RFC 1122): beyond the unspecified
+		// address (IsUnspecified) these are locally routed, not a public
+		// destination.
+		case v4[0] == 0:
+			return true
+		// 240.0.0.0/4 reserved (RFC 9196) and beyond, 241.0.0.0/8: not
+		// assigned to any public destination; 255.255.255.255/32 already
+		// returned above, so the whole remaining 240/4 is local.
+		case v4[0] >= 240:
+			return true
 		}
 		return false
 	}
@@ -1201,6 +1223,13 @@ func isNonPublicCoverAddress(ip net.IP) bool {
 				return true
 			}
 			return isNonPublicCoverAddress(net.IP{ip6[12], ip6[13], ip6[14], ip6[15]})
+		}
+		// fec0::/10 site-local (RFC 3879): a local prefix, not an
+		// assigned public destination. The first hextet is 0xfec0, so
+		// byte 0 is 0xfe and byte 1's top two bits are 11 (the /10).
+		// fc00::/7 unique-local is already rejected by IsPrivate above.
+		if ip6[0] == 0xfe && ip6[1]&0xc0 == 0xc0 {
+			return true
 		}
 		if ip6[0] == 0 && ip6[1] == 0 && ip6[2] == 0 && ip6[3] == 0 &&
 			ip6[4] == 0 && ip6[5] == 0 && ip6[6] == 0 && ip6[7] == 0 &&
@@ -1374,6 +1403,11 @@ func writeCoverBody(ctx context.Context, resp *http.Response, dest string) error
 		os.Remove(tmpPath)
 		return fmt.Errorf("cover exceeds %d bytes", coverMaxBytes)
 	}
+	// A failed final rename must not leave the fully written temp file
+	// behind: the caller knows only the destination name, so without this
+	// the random temp path is unreachable. After a successful rename the
+	// path no longer exists and the remove is a no-op.
+	defer os.Remove(tmpPath)
 	return os.Rename(tmpPath, dest)
 }
 

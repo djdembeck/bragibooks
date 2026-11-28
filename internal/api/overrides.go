@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bragibooks/bragibooks/internal/audio"
 )
@@ -285,7 +286,14 @@ func jsonChapters(raw string) ([]SnapshotChapter, error) {
 // indistinguishable from "no overrides" on the next load, and the
 // reset-to-catalog action is exactly that deletion.
 func (h *Handler) saveMetadataOverride(o *MetadataOverride) error {
-	if o == nil || overrideIsEmpty(o) {
+	// A nil override is a programming error, not a "delete this book's
+	// overrides" signal: the deletion branch below reads o.BookID, so the
+	// nil guard must be its own rejection, never folded into the empty
+	// check (which would enter the delete branch and dereference nil).
+	if o == nil {
+		return errors.New("save metadata override: nil override")
+	}
+	if overrideIsEmpty(o) {
 		if _, err := h.svc.DB.Exec("DELETE FROM book_metadata_overrides WHERE book_id = ?", o.BookID); err != nil {
 			return fmt.Errorf("delete metadata overrides: %w", err)
 		}
@@ -929,7 +937,7 @@ func (h *Handler) UploadBookMetadataCover(w http.ResponseWriter, r *http.Request
 	// after the snapshot and a rename before the read would be an unkept,
 	// visible file, deleted out from under a not-yet-saved draft.
 	unlock := h.svc.ProcessingSvc.lockBookCover(bookID)
-	h.svc.recordPendingCover(name)
+	h.svc.recordPendingCover(name, bookID)
 	renameErr := func() error {
 		err := os.Rename(tmpName, filepath.Join(h.svc.CoversDir, name))
 		unlock()
@@ -943,17 +951,59 @@ func (h *Handler) UploadBookMetadataCover(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]string{"cover_file": name})
 }
 
-// isValidJPEG reports whether the file at path is a decodable JPEG image:
-// the asset is served by <img> and staged into the engine as cover art,
-// so a text file named .jpg must not enter the asset store.
+// maxCoverPixels bounds the TOTAL decoded pixel count a cover upload may
+// declare: the byte cap limits the COMPRESSED upload, not the memory a full
+// decode allocates, so a 5 MB JPEG can decode to far more than 5 MB of
+// pixels. A 10000×10000 header (100 MP, ≈ 400 MB as RGBA) passes any
+// per-axis cap; 20 MP (≈ 80 MB as RGBA) is far past any cover a browser
+// will show. Checked via DecodeConfig (header only) BEFORE the full decode,
+// so a misdeclared or pathological dimension is rejected without
+// allocating the pixel buffer.
+const maxCoverPixels = 20_000_000
+
+// maxCoverImageDimension is the per-axis sanity limit: the integer square
+// root of maxCoverPixels, so a single axis past it makes the pixel product
+// overflow the total bound on its own. The product check is authoritative;
+// this only rejects a grossly oversized axis before the multiply.
+const maxCoverImageDimension = 4472
+
+// isValidJPEG reports whether the file at path is a fully decodable JPEG
+// image: the asset is served by <img> and staged into the engine as cover
+// art, so a text file named .jpg must not enter the asset store. A full
+// decode (not DecodeConfig, which reads only the header) is required: a
+// a truncated or corrupt JPEG with a valid header would pass a header-only
+// check, be stored as the cover, and fail later in preview/staging,
+// degrading a processing job. The header's declared dimensions are checked
+// against maxCoverImageDimension and the maxCoverPixels total first, so
+// the full decode (and its pixel allocation) runs only for a size a
+// browser will ever show.
 func isValidJPEG(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
 		return false
 	}
 	defer f.Close()
-	_, _, err = image.DecodeConfig(f)
-	return err == nil
+	cfg, _, err := image.DecodeConfig(f)
+	if err != nil {
+		return false
+	}
+	if cfg.Width > maxCoverImageDimension || cfg.Height > maxCoverImageDimension {
+		return false
+	}
+	// The product is the bound that matters: int64 so the multiply
+	// cannot overflow before the compare.
+	if int64(cfg.Width)*int64(cfg.Height) > maxCoverPixels {
+		return false
+	}
+	// DecodeConfig consumed the header: rewind to the start so the full
+	// decode re-reads the whole image, not the tail past the header.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return false
+	}
+	if _, _, err := image.Decode(f); err != nil {
+		return false
+	}
+	return true
 }
 
 // overrideChangeSummary names the editor sections the saved draft
@@ -1038,39 +1088,179 @@ func (h *Handler) persistedOverrideCoverFile(bookID int64) (coverFile string, ok
 // reaps expired entries).
 const pendingCoverTTL = 24 * time.Hour
 
-// recordPendingCover registers an uploaded override cover asset as
-// in-use-by-an-unsaved-draft so prune sweeps keep it until the draft save
-// persists the reference (or the entry expires).
-// reapPendingCovers removes expired entries. The caller must hold
+// reapPendingCoversLocked removes expired entries. The caller must hold
 // pendingCoversMu; calling it from every registry access bounds growth even
-// when uploads never reach a draft save.
-func (s *Services) reapPendingCovers(now time.Time) {
+// when uploads never reach a draft save. Expiration deletes the FILE as
+// well as the registry entry: the registry entry alone does not reclaim the
+// disk an admitted caller can reserve by uploading fresh assets and never
+// saving a draft (each is below the per-upload limit, but unbounded in
+// number).
+//
+// bookID names a book whose per-book cover lock the caller ALREADY holds;
+// that book's expired entries are reaped under the held lock and the book
+// lock is NOT reacquired (the mutex is non-reentrant, and the lock-holding
+// callers — the upload's register and the prune's keep-set read — are
+// exactly the books they touch). Every other expired book's lock is TRIED
+// here, in sorted id order, and released before this returns; a book whose
+// lock is held elsewhere (a concurrent reaper cross-reaping) is left
+// alone — its entry stays registered for a later sweep — so the reap
+// never blocks on a book lock and no lock cycle can form.
+//
+// The registry entry, the reference check, and the file removal happen in
+// the SAME critical section under the book lock: a draft save holds that
+// lock across its existence check → row write → pending-entry drop, so a
+// reaper running under the same lock cannot delete the file a save is
+// about to reference (and an entry is never dropped while the row may
+// still be pointing at its file). Best-effort remove: a prune sweep
+// (save/reset of the same book) may already have deleted the file, and a
+// missing file is the goal.
+func (s *Services) reapPendingCoversLocked(now time.Time, bookID int64) {
+	if s.CoversDir == "" {
+		for name, exp := range s.pendingCovers {
+			if !now.Before(exp) {
+				delete(s.pendingCovers, name)
+			}
+		}
+		return
+	}
+	type expiring struct {
+		name string
+		book int64
+	}
+	var rest []expiring
 	for name, exp := range s.pendingCovers {
-		if !now.Before(exp) {
-			delete(s.pendingCovers, name)
+		if now.Before(exp) {
+			continue
+		}
+		e := expiring{name: name, book: bookIDFromCoverName(name)}
+		if e.book == bookID {
+			// The caller's book lock is already held (or bookID is 0 and
+			// there is no book lock at all): delete the entry and the
+			// file NOW, in this critical section. A save that references
+			// the asset holds the same lock for its whole persist, so it
+			// cannot land in the gap between the two.
+			delete(s.pendingCovers, e.name)
+			_ = os.Remove(filepath.Join(s.CoversDir, e.name))
+		} else {
+			rest = append(rest, e)
 		}
 	}
+	if len(rest) == 0 {
+		return
+	}
+	// The other books' locks are taken WITHOUT pendingCoversMu held: the
+	// save and upload paths take the book lock first and
+	// pendingCoversMu second, so the book lock must be the outer one on
+	// this side too (taking it here while pendingCoversMu is held would
+	// be the inverse order and can deadlock against a save). They are
+	// tried, not blocked on: a book whose lock a CONCURRENT reaper is
+	// holding (two reapers cross-reap each other's books) is deferred to
+	// a later sweep — the entry stays registered until then — so the
+	// reap never waits on a book lock and no lock cycle can form.
+	s.pendingCoversMu.Unlock()
+	sort.Slice(rest, func(i, j int) bool { return rest[i].book < rest[j].book })
+	books := make([]int64, 0, len(rest))
+	for _, e := range rest {
+		if e.book > 0 && s.ProcessingSvc != nil && (len(books) == 0 || books[len(books)-1] != e.book) {
+			books = append(books, e.book)
+		}
+	}
+	// Sorted id order: a deterministic acquisition order, so two
+	// concurrent reaps take (and defer) the same locks in the same
+	// order.
+	unlocks := make([]func(), 0, len(books))
+	locked := make(map[int64]bool, len(books))
+	for _, b := range books {
+		if u, ok := s.ProcessingSvc.tryLockBookCover(b); ok {
+			unlocks = append(unlocks, u)
+			locked[b] = true
+		}
+	}
+	s.pendingCoversMu.Lock()
+	for _, e := range rest {
+		if e.book > 0 && !locked[e.book] {
+			// The book's lock was busy: leave the entry (and the file)
+			// for a later sweep's reap.
+			continue
+		}
+		// Re-validate under BOTH held locks: `rest` was built before
+		// pendingCoversMu was released, and in that gap a same-book save
+		// can persist the cover, drop the pending entry (the saved row is
+		// now the reference), and release its book lock — this sweep then
+		// acquires the lock and, without this check, would remove a file
+		// the row points at. `!ok` (entry dropped) skips the file;
+		// `now.Before(exp)` is the defensive half (a re-registered entry
+		// carries a fresh TTL, so it is not yet expired).
+		if exp, ok := s.pendingCovers[e.name]; !ok || now.Before(exp) {
+			continue
+		}
+		// The entry is deleted under the book lock, and the file follows
+		// in the same critical section: a same-book save (entry drop +
+		// row write) is serialized on this lock, so the entry and the
+		// file never outlive each other. A concurrent drop of the entry
+		// is caught by the re-validation above (its file is the row's
+		// reference, not a candidate); the file removal is best-effort
+		// and a missing file is the goal.
+		delete(s.pendingCovers, e.name)
+		if e.book > 0 {
+			_ = os.Remove(filepath.Join(s.CoversDir, e.name))
+		}
+	}
+	s.pendingCoversMu.Unlock()
+	for i := len(unlocks) - 1; i >= 0; i-- {
+		unlocks[i]()
+	}
+	s.pendingCoversMu.Lock()
 }
 
-func (s *Services) recordPendingCover(name string) {
+// bookIDFromCoverName recovers the book id from an override cover asset
+// name ("ovr-<bookID>-<hex>.jpg"). Returns 0 for a name that does not carry
+// the prefix (the reap then takes no book lock — nothing serializes with it
+// for an unparseable asset).
+func bookIDFromCoverName(name string) int64 {
+	const prefix = "ovr-"
+	if !strings.HasPrefix(name, prefix) {
+		return 0
+	}
+	rest := name[len(prefix):]
+	dash := strings.IndexByte(rest, '-')
+	if dash <= 0 {
+		return 0
+	}
+	var id int64
+	for _, c := range rest[:dash] {
+		if c < '0' || c > '9' {
+			return 0
+		}
+		id = id*10 + int64(c-'0')
+	}
+	return id
+}
+
+// recordPendingCover registers an uploaded override cover asset as
+// in-use-by-an-unsaved-draft. bookID is the owning book: its cover lock is
+// held by the caller (the upload path), so the reap runs in the locked
+// variant and never reacquires it.
+func (s *Services) recordPendingCover(name string, bookID int64) {
 	s.pendingCoversMu.Lock()
 	if s.pendingCovers == nil {
 		s.pendingCovers = make(map[string]time.Time)
 	}
 	now := time.Now()
-	s.reapPendingCovers(now)
+	s.reapPendingCoversLocked(now, bookID)
 	s.pendingCovers[name] = now.Add(pendingCoverTTL)
 	s.pendingCoversMu.Unlock()
 }
 
 // pendingOverrideCoversFor returns this book's non-expired pending override
-// cover assets (the prune keep-set contribution).
+// cover assets (the prune keep-set contribution). bookID's cover lock is
+// held by the caller (the prune sweep), so the reap runs in the locked
+// variant and never reacquires it.
 func (s *Services) pendingOverrideCoversFor(bookID int64) map[string]struct{} {
 	s.pendingCoversMu.Lock()
 	defer s.pendingCoversMu.Unlock()
 	prefix := fmt.Sprintf("ovr-%d-", bookID)
-	now := time.Now()
-	s.reapPendingCovers(now)
+	s.reapPendingCoversLocked(time.Now(), bookID)
 	var out map[string]struct{}
 	for name := range s.pendingCovers {
 		if strings.HasPrefix(name, prefix) {
@@ -1194,16 +1384,19 @@ const (
 // ctx bounds the cover-URL host resolution (a stuck DNS lookup dies on the
 // request clock, not the resolver's).
 func validateMetadataOverride(ctx context.Context, coversDir string, o *MetadataOverride) error {
-	if len(o.Title) > maxOverrideTitleChars {
+	// The limits are CHARACTER limits (the messages say so); len() counts
+	// UTF-8 bytes, so a multi-byte title (e.g. 200 three-byte characters)
+	// would be rejected below the advertised cap. Count runes.
+	if utf8.RuneCountInString(o.Title) > maxOverrideTitleChars {
 		return fmt.Errorf("title is too long (max %d characters)", maxOverrideTitleChars)
 	}
-	if len(o.Subtitle) > maxOverrideSubtitleChars {
+	if utf8.RuneCountInString(o.Subtitle) > maxOverrideSubtitleChars {
 		return fmt.Errorf("subtitle is too long (max %d characters)", maxOverrideSubtitleChars)
 	}
-	if len(o.SeriesName) > maxOverrideSeriesChars || len(o.SeriesPos) > maxOverrideSeriesChars {
+	if utf8.RuneCountInString(o.SeriesName) > maxOverrideSeriesChars || utf8.RuneCountInString(o.SeriesPos) > maxOverrideSeriesChars {
 		return fmt.Errorf("series name/position is too long (max %d characters)", maxOverrideSeriesChars)
 	}
-	if len(o.Description) > maxOverrideDescription {
+	if utf8.RuneCountInString(o.Description) > maxOverrideDescription {
 		return fmt.Errorf("description is too long (max %d characters)", maxOverrideDescription)
 	}
 	if o.Year != nil && (*o.Year < maxOverrideYearLow || *o.Year > maxOverrideYearHigh) {

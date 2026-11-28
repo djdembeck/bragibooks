@@ -36,14 +36,38 @@ func proberPath(f *os.File, original string, isDir bool) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	// A symlink, device, FIFO, or socket is refused: O_NOFOLLOW at open
-	// time rejects only the final-component symlink; a same-inode symlink
-	// target would pass a stat-based identity check.
 	if isDir {
+		// A directory row: a symlink to a directory is not followed by the
+		// walk (it is a file-symlink row), so a final-component symlink here
+		// is refused; only a real directory is accepted.
 		if !oinfo.IsDir() {
 			return "", false
 		}
+	} else if oinfo.Mode()&os.ModeSymlink != 0 {
+		// A file row that is a SYMLINK: the open followed it (O_NOFOLLOW
+		// pins only the final component at open, and openInsideRoot
+		// resolves the link to its regular-file target), so f is bound to
+		// the TARGET. Lstat sees the link itself (not a regular file) and
+		// would refuse the row before ffprobe sees the verified descriptor —
+		// degrading an ordinary in-root audiobook link that indexes fine on
+		// Linux. Accept it, and bind by the TARGET's identity (os.Stat
+		// follows the link), which is what the descriptor and the probe
+		// both see.
+		tinfo, terr := os.Stat(original)
+		if terr != nil {
+			return "", false
+		}
+		if !tinfo.Mode().IsRegular() {
+			return "", false
+		}
+		if !os.SameFile(finfo, tinfo) {
+			return "", false
+		}
+		return original, true
 	} else if !oinfo.Mode().IsRegular() {
+		// A device, FIFO, or socket is refused: O_NOFOLLOW at open time
+		// rejects only the final-component symlink; a same-inode symlink
+		// target would pass a stat-based identity check.
 		return "", false
 	}
 	if !os.SameFile(finfo, oinfo) {

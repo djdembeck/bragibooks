@@ -11,7 +11,9 @@
 		AudiobookDBRelease,
 		Settings,
 		SourceASINEvidence,
-		UpdateBookRequest
+		UpdateBookRequest,
+		BookMetadataOverrides,
+		BookMetadataResponse
 	} from '#lib/types.js';
 	import {
 		extractAsin,
@@ -1184,24 +1186,79 @@
 	// skips the slots that still stand (unchanged payload), and dispatches
 	// the next queued rows.
 	let previewBatchVersion = $state(0);
+	// The server-computed effective metadata (snapshot + overrides) per
+	// local book id, fetched once per book. The preview payload must use
+	// the SAME effective metadata the queue path uses (processing.go
+	// overlays the saved manual overrides before freezing the job); a
+	// catalog-only preview would show the catalog title even though the
+	// job names the file from the override.
+	// The saved OVERRIDE LAYER (pure manual overrides, not the server's
+	// effective snapshot) per local book id, fetched once per book. The
+	// preview applies this layer to the PENDING candidate's base capture
+	// (the currently selected book+release), so a release change re-bases
+	// the preview on the new release's metadata with the same overrides
+	// on top — the old effective snapshot carried the OLD release's base
+	// values, which leaked into a re-matched candidate.
+	const effectiveMetaCache = $state<Record<number, BookMetadataOverrides | null>>({});
+	// In-flight metadata fetches, recorded SYNCHRONOUSLY: the cache only
+	// fills after the GET settles, so every $effect re-run in that window
+	// would otherwise start a second GET for the same book. Reuse the
+	// pending promise until it settles (dedup).
+	const pendingEffectiveMeta = new Map<number, Promise<void>>();
+	let effectiveMetaVersion = $state(0);
+	async function ensureEffectiveMeta(bookId: number) {
+		if (bookId in effectiveMetaCache) return;
+		const inFlight = pendingEffectiveMeta.get(bookId);
+		if (inFlight) {
+			void inFlight;
+			return;
+		}
+		const p = (async () => {
+			try {
+				const resp = await get<BookMetadataResponse>(`/books/${bookId}/metadata`);
+				effectiveMetaCache[bookId] = resp.overrides;
+			} catch {
+				effectiveMetaCache[bookId] = null;
+			} finally {
+				pendingEffectiveMeta.delete(bookId);
+			}
+		})();
+		pendingEffectiveMeta.set(bookId, p);
+		await p;
+		effectiveMetaVersion++;
+	}
 
 	$effect(() => {
 		void previewBatchVersion;
+		void effectiveMetaVersion;
 		const wanted = new Map<number, string>();
 		for (const c of candidates) {
 			if (c.details.book && outputScheme) {
-				wanted.set(
-					c.bookId,
-					JSON.stringify({
-						metadata: captureMetadata(c.details.book, c.details.release),
-						path_format: outputScheme
-					})
-				);
+				const eff = effectiveMetaCache[c.bookId] ?? null;
+				const meta = eff
+					? effectivePreviewMeta(eff, c.details.book, c.details.release)
+					: captureMetadata(c.details.book, c.details.release);
+				wanted.set(c.bookId, JSON.stringify({ metadata: meta, path_format: outputScheme }));
+				if (!(c.bookId in effectiveMetaCache)) {
+					void ensureEffectiveMeta(c.bookId);
+				}
 			}
 		}
 		const dispatched = plan(batch, wanted, PREVIEW_CONCURRENCY);
+		// Pick up the stale-value clears plan made for queued (undispatched)
+		// rows: a settled path for a PREVIOUS edition must not render while
+		// its replacement waits for a free slot (the render cache is cleared
+		// only for dispatched rows, so a payload change under a saturated cap
+		// would leave the old path visible until a slot frees).
+		outputPreviews = { ...batch.previews };
 		for (const d of dispatched) {
-			outputPreviews[d.id] = '';
+			// Back off repeated failures: a persistently failing preview
+			// (the engine is down, the format is invalid for this engine)
+			// must not re-dispatch every 250 ms forever. The delay doubles
+			// with each consecutive failure, capped at 5 s, and resets on a
+			// success (settle clears the failCount).
+			const fails = batch.failCount.get(d.id) ?? 0;
+			const delay = Math.min(250 * 2 ** fails, 5000);
 			setTimeout(async () => {
 				let ok = false;
 				let value = '';
@@ -1219,13 +1276,60 @@
 					// Sync the render state: settled values and pending
 					// slots both live in the module's bookkeeping now.
 					outputPreviews = { ...batch.previews };
-					// Wake the effect so the freed slot advances the
-					// queue (plan() skips the slots that stand).
+				// Wake the effect so the freed slot advances the
+				// queue (plan() skips the slots that stand).
 					previewBatchVersion++;
 				}
-			}, 250);
+			}, delay);
 		}
 	});
+
+	/** The preview payload's metadata: the PENDING candidate's base capture
+	 *  (the currently selected book+release) with the saved OVERRIDE LAYER
+	 *  applied on top — the same view the queue path freezes (Go's
+	 *  applyMetadataOverride overlays the manual overrides on the capture
+	 *  before the job is built). Overlaying the layer on the base (not
+	 *  serving the server's effective snapshot verbatim) is what lets a
+	 *  release change re-base the preview: the base is the NEW release's
+	 *  metadata, and only the user's manual overrides ride on top. A null
+	 *  layer (no overrides, or the fetch not yet settled) returns the bare
+	 *  base capture.
+	 *
+	 * Conventions mirror applyMetadataOverride: a non-empty scalar /
+	 * non-null array overrides, and series_name / series_position apply
+	 * INDEPENDENTLY (a position-only override is not gated on the name,
+	 * and a name-only override does not drag the catalog position along).
+	 * A cleared field is NOT removed from the preview: the server keeps
+	 * the captured value in the effective metadata (the output is named
+	 * from it) and pins only the write policy to clear the tag from the
+	 * file, so the preview's path must resolve from the same value.
+	 * Cover and chapters are not preview inputs (the engine resolves name
+	 * tokens only) and are left as the base capture has them. */
+	function effectivePreviewMeta(
+		ov: BookMetadataOverrides | null,
+		book: AudiobookDBBook,
+		release: AudiobookDBRelease | null
+	): Record<string, unknown> {
+		const base = captureMetadata(book, release);
+		if (!ov) return base;
+		// The override values win for the name-bearing fields the engine
+		// resolves: title, subtitle, people, series, year, genres.
+		if (ov.title) base.title = ov.title;
+		if (ov.subtitle) base.subtitle = ov.subtitle;
+		if (ov.authors !== null) base.authors = ov.authors;
+		if (ov.narrators !== null) base.narrators = ov.narrators;
+		// Independent of each other, exactly as the server's override
+		// layer composes them: each field applies on its own.
+		if (ov.series_name) base.series_name = ov.series_name;
+		if (ov.series_position) base.series_position = ov.series_position;
+		if (ov.year !== null) base.year = ov.year;
+		if (ov.genres !== null) base.genres = ov.genres;
+		// Cleared fields keep their captured values: the server's
+		// effective metadata does too (the naming source), and only the
+		// write policy pins the tag's removal. Deleting them here would
+		// make the preview resolve a path the queued output does not.
+		return base;
+	}
 
 	// Trims the rune set Go's unicode.IsSpace covers (what
 	// strings.TrimSpace in genreTitles, internal/api/snapshot.go,

@@ -375,7 +375,11 @@ func TestCreateBooksWithoutSourceArtKeepsPlaceholder(t *testing.T) {
 
 func TestDeleteBookRemovesExtractedCover(t *testing.T) {
 	coversDir := t.TempDir()
-	h := &Handler{svc: &Services{DB: newTestDB(t), CoversDir: coversDir}}
+	db := newTestDB(t)
+	// DeleteBook sweeps the cover under the per-book lock (lockBookCover),
+	// so the handler needs a ProcessingSvc sharing the same DB, like
+	// newTestHandlerWithJobs.
+	h := &Handler{svc: &Services{DB: db, CoversDir: coversDir, ProcessingSvc: NewProcessingService(db, &audio.Processor{}, 1)}}
 
 	res, err := h.svc.DB.Exec("INSERT INTO books (title, status) VALUES ('Delete Me', 'pending')")
 	if err != nil {
@@ -897,7 +901,11 @@ func TestDeleteBookCascadesSourceMetadata(t *testing.T) {
 	writeProbeSidecar(t, respDir, "1.mp3",
 		`{"format": {"duration": "300.0", "tags": {"title": "Stub Title"}}, "streams": []}`)
 
-	h := &Handler{svc: &Services{DB: newTestDB(t), FFprobe: ffprobe}}
+	db := newTestDB(t)
+	// DeleteBook sweeps under the per-book lock, so the handler needs a
+	// ProcessingSvc sharing the DB (the delete reaches the lock, not an
+	// early 409/500).
+	h := &Handler{svc: &Services{DB: db, FFprobe: ffprobe, ProcessingSvc: NewProcessingService(db, &audio.Processor{}, 1)}}
 	book := postBook(t, h, srcDir)
 	if _, err := h.svc.DB.Exec("SELECT 1 FROM book_source_metadata WHERE book_id = ?", book.ID); err != nil {
 		t.Fatalf("row missing before delete: %v", err)
@@ -1054,7 +1062,10 @@ func TestDeleteBookFailsClosedWhenJobStateUnreadable(t *testing.T) {
 func TestDeleteBookNeverSeededIDIsNoOp(t *testing.T) {
 	coversDir := t.TempDir()
 	coverID := int64(99)
-	h := &Handler{svc: &Services{DB: newTestDB(t), CoversDir: coversDir}}
+	db := newTestDB(t)
+	// The no-op delete still runs the cover sweep under the per-book lock,
+	// so the handler needs a ProcessingSvc sharing the DB.
+	h := &Handler{svc: &Services{DB: db, CoversDir: coversDir, ProcessingSvc: NewProcessingService(db, &audio.Processor{}, 1)}}
 	coverPath := filepath.Join(coversDir, fmt.Sprintf("%d.jpg", coverID))
 	if err := os.WriteFile(coverPath, []byte("art"), 0o644); err != nil {
 		t.Fatalf("seed cover: %v", err)

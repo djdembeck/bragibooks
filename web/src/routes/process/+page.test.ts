@@ -98,6 +98,15 @@ function batchJobList(n: number, batchId: string): ProcessingJob[] {
 	return Array.from({ length: n }, (_, i) => jobFixture(`job-${String(i + 1).padStart(2, '0')}`, i + 1, i + 1, batchId));
 }
 
+// n UNBATCHED legacy rows that sit NEWER than a batch (queue orders
+// startSeq..startSeq+n-1, books after the batch's books). They make the
+// render bound hide some rows (hiddenHistoryCount > 0), so the "Show all"
+// toggle renders and its click is what triggers the deferred paged batch
+// fetch (F-30: the batch's rows are no longer fetched on initial load).
+function legacyJobList(n: number, startSeq: number): ProcessingJob[] {
+	return Array.from({ length: n }, (_, i) => jobFixture(`leg-${String(i + 1).padStart(2, '0')}`, 1000 + i + 1, startSeq + i));
+}
+
 function batchAggregate(batchId: string, n: number, lastSeq: number): BatchAggregate {
 	return {
 		batch_id: batchId,
@@ -257,16 +266,30 @@ describe('queue page history hydration and render bound', () => {
 
 	it('a large batch pages in bounded and the banner reads the aggregate', async () => {
 		// A 120-job batch: bigger than the 100-row recent window, so the
-		// /jobs response carries the newest 100 batch rows PLUS the
+		// /jobs response carries the newest 100 rows (75 batch rows plus
+		// 25 newer unbatched legacy, queue orders 121-145) PLUS the
 		// aggregate (counts + all 120 row ids), not all 120 full rows.
-		// The page pages the batch in BATCH_PAGE_SIZE-at-a-time and reads
-		// the banner from the aggregate, not the rows it holds.
-		const jobs = batchJobList(120, 'req-1'); // books 1..120, queue orders 1..120
+		// The batch's 45 tail rows are past the API's row cap, but past
+		// jobs render "Show all", so the tail is deferred until the user
+		// asks for the full history (F-30): the initial load keeps the
+		// aggregate for counts and defers the per-row log fetches.
+		const jobs = [...batchJobList(120, 'req-1'), ...legacyJobList(25, 121)];
 		const batch = batchAggregate('req-1', 120, 120);
 		await mountWith(jobs, batch);
 
-		// The paged fetch runs, bounded to BATCH_PAGE_SIZE per page:
-		// ceil(120/16) = 8 pages, the last a partial of 8.
+		// No paged fetch on initial load: the tail is reachable through
+		// "Show all", so the fetch stays deferred.
+		expect(getMock.mock.calls.some((call) => String(call[0]).includes('batch_id=req-1'))).toBe(false);
+
+		// "Show all" lifts the bound: the deferred paged fetch runs,
+		// bounded to BATCH_PAGE_SIZE per page (ceil(120/16) = 8 pages, the
+		// last a partial of 8).
+		const more = Array.from(
+			(target.querySelector('.job-history') as HTMLElement).querySelectorAll<HTMLButtonElement>('button.history-more')
+		).find((b) => String(b.textContent).includes('older'));
+		expect(more).not.toBeNull();
+		more!.click();
+		flushSync();
 		await vi.waitFor(
 			() => {
 				const pages = getMock.mock.calls.filter((call) => String(call[0]).includes('batch_id=req-1'));
@@ -504,8 +527,11 @@ describe('queue page history hydration and render bound', () => {
 	it('a failed batch page load surfaces a retry, and the retry fetches the missing pages', async () => {
 		// The banner counts the batch from the aggregate; the rows past
 		// the failed page are only reachable through the retry (the bare
-		// return used to abandon the rest of the batch for the load).
-		const jobs = batchJobList(32, 'req-1'); // books 1..32, queue orders 1..32
+		// return used to abandon the rest of the batch for the load). F-30:
+		// the paged fetch is deferred until "Show all", so 25 newer
+		// unbatched legacy rows (queue orders 33-57) make the toggle
+		// render; its click starts the (failing) fetch.
+		const jobs = [...batchJobList(32, 'req-1'), ...legacyJobList(25, 33)];
 		const batch = batchAggregate('req-1', 32, 32);
 		let batchPageFails = 1; // the first paged fetch fails, the retry succeeds
 		getMock.mockImplementation(async (path: string) => {
@@ -534,6 +560,14 @@ describe('queue page history hydration and render bound', () => {
 		await vi.waitFor(() => {
 			expect(target.querySelector('.job-history')).not.toBeNull();
 		}, { timeout: 4000 });
+
+		// "Show all" lifts the bound and starts the deferred paged fetch.
+		const more = Array.from(
+			(target.querySelector('.job-history') as HTMLElement).querySelectorAll<HTMLButtonElement>('button.history-more')
+		).find((b) => String(b.textContent).includes('older'));
+		expect(more).not.toBeNull();
+		more!.click();
+		flushSync();
 
 		// The failed page flags the load: a visible error with a retry.
 		await vi.waitFor(() => {
@@ -564,7 +598,13 @@ describe('queue page history hydration and render bound', () => {
 		const all = batchJobList(120, 'req-1');
 		all[0] = { ...all[0], status: 'error' };
 		all[1] = { ...all[1], status: 'error' };
-		const recent = all.slice(100); // the newest 100 rows, all done
+		// F-30: the paged fetch is deferred until "Show all", so 25 newer
+		// unbatched legacy rows make the toggle render. The recent window
+		// (newest 100) is 25 legacy + 75 batch rows, all done: no failed
+		// row, so the Review action stays withheld until the paged fetch
+		// brings in the oldest (failed) rows.
+		const legacy = legacyJobList(25, 121);
+		const recent = [...all, ...legacy].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 100);
 		const batch = { ...batchAggregate('req-1', 120, 120), done: 118, failed: 2 };
 		let batchPageFailing = true;
 		getMock.mockImplementation(async (path: string) => {
@@ -589,6 +629,20 @@ describe('queue page history hydration and render bound', () => {
 		flushSync();
 		await vi.waitFor(() => {
 			expect(target.querySelector('.queue-banner-wrap')).not.toBeNull();
+		}, { timeout: 4000 });
+
+		// "Show all" lifts the bound and starts the (failing) deferred
+		// paged fetch: the oldest (failed) rows stay out of the list.
+		const more = Array.from(
+			(target.querySelector('.job-history') as HTMLElement).querySelectorAll<HTMLButtonElement>('button.history-more')
+		).find((b) => String(b.textContent).includes('older'));
+		expect(more).not.toBeNull();
+		more!.click();
+		flushSync();
+		// The failing fetch surfaces the retry control before the test
+		// can recover it.
+		await vi.waitFor(() => {
+			expect(target.querySelector('.history-retry')).not.toBeNull();
 		}, { timeout: 4000 });
 
 		const reviewActions = () =>
@@ -618,8 +672,10 @@ describe('queue page history hydration and render bound', () => {
 		// runs with every batch page gated in flight: while the load
 		// runs the button is disabled, a second click starts nothing,
 		// and when the retry fails the button is enabled again for the
-		// next attempt.
-		const jobs = batchJobList(32, 'req-1');
+		// next attempt. F-30: the paged fetch is deferred until "Show
+		// all", so 25 newer unbatched legacy rows make the toggle render;
+		// its click starts the (failing) initial fetch.
+		const jobs = [...batchJobList(32, 'req-1'), ...legacyJobList(25, 33)];
 		const batch = batchAggregate('req-1', 32, 32);
 		let batchPageFails = true;
 		const batchPageCalls = () =>
@@ -643,6 +699,16 @@ describe('queue page history hydration and render bound', () => {
 			return {};
 		});
 		component = mount(ProcessPage, { target });
+		flushSync();
+		await vi.waitFor(() => {
+			expect(target.querySelector('.job-history')).not.toBeNull();
+		}, { timeout: 4000 });
+		// "Show all" starts the (failing) deferred paged fetch.
+		const more = Array.from(
+			(target.querySelector('.job-history') as HTMLElement).querySelectorAll<HTMLButtonElement>('button.history-more')
+		).find((b) => String(b.textContent).includes('older'));
+		expect(more).not.toBeNull();
+		more!.click();
 		flushSync();
 		await vi.waitFor(
 			() => {
@@ -694,7 +760,10 @@ describe('queue page history hydration and render bound', () => {
 		// (gated) — while it runs the button is disabled, so a second
 		// click is a no-op that starts no second paged loop; and once
 		// the retry lands, every batch row is appended exactly once.
-		const jobs = batchJobList(32, 'req-1');
+		// F-30: the paged fetch is deferred until "Show all", so 25 newer
+		// unbatched legacy rows make the toggle render; its click starts
+		// the (failing) initial fetch.
+		const jobs = [...batchJobList(32, 'req-1'), ...legacyJobList(25, 33)];
 		const batch = batchAggregate('req-1', 32, 32);
 		let batchPageFails = true;
 		const batchPageCalls = () =>
@@ -718,6 +787,16 @@ describe('queue page history hydration and render bound', () => {
 			return {};
 		});
 		component = mount(ProcessPage, { target });
+		flushSync();
+		await vi.waitFor(() => {
+			expect(target.querySelector('.job-history')).not.toBeNull();
+		}, { timeout: 4000 });
+		// "Show all" starts the (failing) deferred paged fetch.
+		const more = Array.from(
+			(target.querySelector('.job-history') as HTMLElement).querySelectorAll<HTMLButtonElement>('button.history-more')
+		).find((b) => String(b.textContent).includes('older'));
+		expect(more).not.toBeNull();
+		more!.click();
 		flushSync();
 		await vi.waitFor(
 			() => {
@@ -769,28 +848,33 @@ describe('queue page history hydration and render bound', () => {
 			Array.from(target.querySelectorAll<HTMLElement>('.job-record[data-job-id]')).map(
 				(el) => el.dataset.jobId
 			);
-		// Every batch row renders exactly once: the retry re-fetched from
-		// offset 0, and the known-ids filter plus the token bump kept
-		// the two attempts from appending the same rows twice.
+		// All 57 rows (25 legacy + 32 batch) fit in the initial 100-row
+		// window, so they are in the list from the start; "Show all"
+		// reveals them all, and the paged fetch appends nothing new (the
+		// known-ids filter drops what the list already holds). The count
+		// and the no-duplicates check confirm the two paged attempts
+		// never double-append a row.
 		await vi.waitFor(
 			() => {
 				const rendered = recordIds();
-				expect(rendered).toHaveLength(32);
-				expect(new Set(rendered).size).toBe(32); // no duplicate ids
+				expect(rendered).toHaveLength(57);
+				expect(new Set(rendered).size).toBe(57); // no duplicate ids
 			},
 			{ timeout: 4000 }
 		);
 	});
 
 	it('renders the batch retry when the batch is all active and no past jobs exist', async () => {
-		// A 32-job batch that is entirely queued: /jobs?limit=100 holds
-		// only active rows, so pastJobs is empty and the Recent activity
-		// disclosure never renders. If the paged batch fetch fails, the
+		// A 120-job batch that is entirely queued: /jobs?limit=100 holds
+		// the newest 100 active rows, so pastJobs is empty and the Recent
+		// activity disclosure never renders, while the batch's 20 tail rows
+		// are past the window — the initial load must page them in (there
+		// is no "Show all" to defer to). If that paged fetch fails, the
 		// missing rows must still be retriable: the error control renders
 		// in the activity region, independent of the disclosure.
-		const jobs = batchJobList(32, 'req-1').map((job) => ({ ...job, status: 'queued' as const }));
+		const jobs = batchJobList(120, 'req-1').map((job) => ({ ...job, status: 'queued' as const }));
 		const batch = {
-			...batchAggregate('req-1', 32, 32),
+			...batchAggregate('req-1', 120, 120),
 			done: 0,
 			in_flight: 0,
 			all_terminal: false,

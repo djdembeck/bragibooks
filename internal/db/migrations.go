@@ -385,6 +385,26 @@ ALTER TABLE processing_jobs ADD COLUMN batch_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_processing_jobs_batch_id ON processing_jobs(batch_id, queue_seq);
 `,
 	},
+	{
+		// v21: a batch is CLOSED once the request that created it has
+		// finished enqueuing every job (StartProcessing sets this after its
+		// final insert). The latest-batch aggregate's all_terminal is what
+		// the completion banner reads, and it is computed over WHATEVER rows
+		// currently share the batch_id — so a read that lands mid-enqueue
+		// (a batch's early jobs already terminal, the rest not yet inserted)
+		// would report all_terminal=true with a PARTIAL total and announce
+		// completion for a batch that is not yet whole. all_terminal now
+		// also requires the closure marker, so a mid-enqueue aggregate is
+		// in-flight (the banner stays put) until the enqueue has finished.
+		// Legacy/audit rows and any batch created before this column carry
+		// 0; they never surface as a "newest batch" (batch_id is NULL), so
+		// the marker's absence is inert for them.
+		version: 21,
+		sql: `
+ALTER TABLE processing_jobs ADD COLUMN batch_closed INTEGER NOT NULL DEFAULT 0;
+UPDATE processing_jobs SET batch_closed = 1 WHERE batch_id IS NOT NULL;
+`,
+	},
 }
 
 // RunMigrations applies all pending schema migrations in order.

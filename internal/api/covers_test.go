@@ -1,7 +1,10 @@
 package api
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -190,5 +193,78 @@ func TestRegisterRoutesCoversRequireAdmin(t *testing.T) {
 	}
 	if w := req("203.0.113.9:5555", token); w.Code != http.StatusOK {
 		t.Errorf("token-cookie cover = %d; want 200 — an <img> in the SPA sends it", w.Code)
+	}
+}
+
+// TestCoverPreviewHandlerContract pins the POST /covers/preview body
+// contract: a valid JSON body with a URL that passes the public-HTTPS guard
+// REACHES the validated fetch path (the body is decoded, exactly-one-value
+// checked, and the URL validated — the request then goes out to fetch),
+// while a body over the 8 KiB cap is 413 BEFORE any fetch, and trailing
+// data after the JSON value / a non-JSON body are 400 (the URL is one
+// value; anything extra is refused, not silently dropped).
+//
+// The fetch is driven with the package's stub seams (lookupCoverHost +
+// coverDialContext, the same pair the other cover tests use): the host
+// resolves to a public address and the pinned dial is made to refuse, so
+// the success case lands at 502 "cover preview unavailable" — the marker
+// that the body passed every gate and the fetch was actually attempted.
+// The 413/400 cases never reach the dial. No public network is contacted.
+func TestCoverPreviewHandlerContract(t *testing.T) {
+	oldLookup := lookupCoverHost
+	lookupCoverHost = func(_ context.Context, host string) ([]string, error) {
+		if host == "covers.example" {
+			return []string{"93.184.216.34"}, nil
+		}
+		return nil, fmt.Errorf("no address for %s", host)
+	}
+	t.Cleanup(func() { lookupCoverHost = oldLookup })
+	oldDial := coverDialContext
+	coverDialContext = func(_ context.Context, _ string, _ string) (net.Conn, error) {
+		return nil, fmt.Errorf("connection refused")
+	}
+	t.Cleanup(func() { coverDialContext = oldDial })
+
+	h := &Handler{svc: &Services{DB: newTestDB(t)}}
+	pv := CoverPreviewHandler(h)
+	validURL := "https://covers.example/1.jpg"
+
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		// Valid body: decodes, exactly-one-value, passes the guard, and
+		// reaches the fetch — the stubbed dial refuses, so 502. This is
+		// the "fetchable URL" path: a 413/400 would mean the body was
+		// refused before the fetch, not that the fetch ran.
+		{"valid fetchable url", `{"url":"` + validURL + `"}`, http.StatusBadGateway},
+		{"body over 8 KiB cap", `{"url":"` + validURL + `","pad":"` + strings.Repeat("x", maxCoverPreviewBodyBytes) + `"}`, http.StatusRequestEntityTooLarge},
+		{"trailing data after json value", `{"url":"` + validURL + `"}` + `{"extra":1}`, http.StatusBadRequest},
+		{"non-json body", "not json", http.StatusBadRequest},
+		{"missing url field", `{}`, http.StatusBadRequest},
+		{"blank url", `{"url":"  "}`, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/covers/preview", strings.NewReader(tc.body))
+			w := httptest.NewRecorder()
+			pv.ServeHTTP(w, req)
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, want %d — body: %s", w.Code, tc.want, w.Body.String())
+			}
+			if tc.want == http.StatusBadGateway {
+				if !strings.Contains(w.Body.String(), "cover preview unavailable") {
+					t.Errorf("502 does not name the fetch failure: %s", w.Body.String())
+				}
+			}
+		})
+	}
+	// A non-POST method is refused before the body is read.
+	req := httptest.NewRequest(http.MethodGet, "/covers/preview", nil)
+	w := httptest.NewRecorder()
+	pv.ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET status = %d; want 405", w.Code)
 	}
 }

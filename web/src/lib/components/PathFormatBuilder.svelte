@@ -39,9 +39,23 @@
 		exampleRel ? (outputDir ? `${outputDir.replace(/\/+$/, '')}/${exampleRel}` : exampleRel) : ''
 	);
 
+	// A signature of the token examples the preview resolves with: an engine
+	// swap refreshes the token registry, and an unchanged format must still
+	// re-run this effect (the preview would otherwise show the old engine's
+	// example until the format is edited). It is computed INSIDE the effect
+	// body — reading $engineTokens there registers the store as a tracked
+	// dependency (a plain const at component init would be read once and the
+	// effect would never re-run on a registry refresh).
 	$effect(() => {
 		const format = serializeParts(parts);
+		// Tracked dependency: re-run on capability change (F-41).
+		void $engineTokens.map((t) => `${t.name}:${t.value}`).join('|');
 		if (!format) {
+			// Invalidate any in-flight preview: the cleanup only clears the
+			// debounce timer, so a POST that already started would still pass
+			// the sequence check and restore a path or error for the cleared
+			// format. Advancing previewSeq here drops it.
+			previewSeq++;
 			exampleRel = '';
 			exampleError = null;
 			exampleLoading = false;

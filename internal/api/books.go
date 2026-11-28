@@ -1072,6 +1072,18 @@ func (h *Handler) DeleteBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The delete and the cover sweep run under the SAME per-book lock a
+	// capture's write+prune and the enqueue's snapshot read hold
+	// (lockBookCover). Without it, an in-flight capture can be waiting on
+	// its catalog request while the row is deleted and the sweep runs; when
+	// the capture resumes it writes a NEW cover for the now-deleted book
+	// and then fails to store its snapshot, leaving exactly the orphan this
+	// sweep is meant to prevent. Holding the lock across delete+sweep makes
+	// a capture either finish (its cover is swept) or start after (it finds
+	// no row and stores nothing).
+	unlock := h.svc.ProcessingSvc.lockBookCover(bookID)
+	defer unlock()
+
 	// The delete repeats the job check inside the statement: a job queued
 	// between the count above and this Exec must not be orphaned either.
 	res, err := h.svc.DB.Exec(

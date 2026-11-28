@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
 	queue_seq INTEGER,
 	book_pre_status TEXT,
 	batch_id TEXT,
+	batch_closed INTEGER NOT NULL DEFAULT 0,
 	snapshot_version INTEGER NOT NULL DEFAULT 0
 );
 
@@ -174,7 +175,7 @@ func writeStreamingSleepBinary(t *testing.T, dir string) string {
 	// gate: the mock must report a version at or above the floor and the
 	// schema/resolver identity the test seeded into the processor, or
 	// RunJob refuses to start it.
-	script := "#!/bin/sh\ncase \"$*\" in *--version*) echo 'm4b-merge 2.2.0'; exit 0;; *--capabilities*) echo '{\"schema_version\":1,\"resolver_version\":\"1\",\"default_path_format\":\"{author}/{title}\",\"path_tokens\":[{\"name\":\"title\",\"value\":\"t\",\"example\":\"T\"}],\"field_policies\":{\"values\":[\"write\",\"preserve\"],\"scalar_fields\":[\"title\"]},\"cover_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"preserve\",\"clear\"]},\"chapter_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"preserve\",\"clear\"]}}'; exit 0;; esac\nprintf 'partial live line\\n' 1>&2\nexec sleep 300 1>&- 2>&-\n"
+	script := "#!/bin/sh\ncase \"$*\" in *--version*) echo 'm4b-merge 2.2.0'; exit 0;; *--capabilities*) echo '{\"schema_version\":1,\"resolver_version\":\"1\",\"default_path_format\":\"{author}/{title}\",\"path_tokens\":[{\"name\":\"book_id\",\"value\":\"b\",\"example\":\"B\"},{\"name\":\"authors\",\"value\":\"a\",\"example\":\"A\"},{\"name\":\"narrators\",\"value\":\"n\",\"example\":\"N\"},{\"name\":\"title\",\"value\":\"t\",\"example\":\"T\"}],\"field_policies\":{\"values\":[\"write\",\"preserve\",\"clear\"],\"scalar_fields\":[\"title\",\"subtitle\",\"authors\",\"narrators\",\"series\",\"description\",\"genres\",\"year\"]},\"cover_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"preserve\",\"clear\"]},\"chapter_policies\":{\"constraint\":\"str\",\"variants\":[\"write\",\"preserve\",\"clear\"]}}'; exit 0;; esac\nprintf 'partial live line\\n' 1>&2\nexec sleep 300 1>&- 2>&-\n"
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatalf("write streaming sleeping binary: %v", err)
 	}
@@ -2107,9 +2108,11 @@ func TestQueueJobDuplicateRejected(t *testing.T) {
 	}
 }
 
-// TestStartProcessingDuplicateBook409 exercises the same guard through the
-// handler: a repeated book_id in one request body is a 409, not a double run.
-func TestStartProcessingDuplicateBook409(t *testing.T) {
+// TestStartProcessingDuplicateBookRejected exercises the duplicate guard
+// through the handler: a repeated book_id in one request body is refused in
+// the preflight loop (400) BEFORE any insert, so a valid first occurrence is
+// never left with a queued job and an unclosed batch.
+func TestStartProcessingDuplicateBookRejected(t *testing.T) {
 	h, _ := newTestJobsHandler(t)
 
 	if _, err := h.svc.DB.Exec(
@@ -2128,8 +2131,15 @@ func TestStartProcessingDuplicateBook409(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.StartProcessing(w, req)
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("duplicate book status = %d; want 409 — body: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate book status = %d; want 400 (preflight rejects before any insert) — body: %s", w.Code, w.Body.String())
+	}
+	var n int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&n); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("jobs created = %d; want 0 (the duplicate must be refused before any insert)", n)
 	}
 }
 
@@ -2918,7 +2928,7 @@ func TestListJobsServesLatestBatchAggregate(t *testing.T) {
 		// 01:59:00 so they are the NEWEST rows and also the newest batch.
 		for i := 1; i <= 120; i++ {
 			if _, err := h.svc.DB.Exec(
-				"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 1, 'done', 'merge', ?, ?, 'b1')",
+				"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id, batch_closed) VALUES (?, 1, 'done', 'merge', ?, ?, 'b1', 1)",
 				fmt.Sprintf("b1-%03d", i), fmt.Sprintf("2026-01-01 %02d:%02d:00", (i-1)/60, (i-1)%60), i,
 			); err != nil {
 				t.Fatalf("seed batch job %d: %v", i, err)
@@ -3003,7 +3013,7 @@ func TestListJobsServesLatestBatchAggregate(t *testing.T) {
 		// A finished 3-job batch created on 01-01.
 		for i := 1; i <= 3; i++ {
 			if _, err := h.svc.DB.Exec(
-				"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id) VALUES (?, 1, 'done', 'merge', '2026-01-01 00:00:00', ?, 'b1')",
+				"INSERT INTO processing_jobs (id, book_id, status, action, created_at, queue_seq, batch_id, batch_closed) VALUES (?, 1, 'done', 'merge', '2026-01-01 00:00:00', ?, 'b1', 1)",
 				fmt.Sprintf("b1-%d", i), i,
 			); err != nil {
 				t.Fatalf("seed batch job %d: %v", i, err)
@@ -3040,6 +3050,44 @@ func TestListJobsServesLatestBatchAggregate(t *testing.T) {
 			t.Fatalf("aggregate job ids = %d; want 3", n)
 		}
 	})
+}
+
+// Regression: a LATER book's validation failure (here: a missing snapshot)
+// must reject the WHOLE request before any insert, so a valid first book is
+// not left with a queued job and an unclosed batch. The preflight loop
+// validates every book before the enqueue loop runs (StartProcessing), so a
+// mid-batch failure cannot hide an already-accepted job.
+func TestStartProcessingPreflightRejectsWholeBatch(t *testing.T) {
+	fx := setupProfileSuite(t)
+	// Book 3 exists but has no captured snapshot: loadSnapshotForQueue
+	// returns a nil capture, the cheapest deterministic per-book rejection.
+	if _, err := fx.h.svc.DB.Exec(
+		"INSERT INTO books (id, title, status) VALUES (3, 'Gamma', 'matched')",
+	); err != nil {
+		t.Fatalf("seed book 3: %v", err)
+	}
+	srcA := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcA, "a.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source A: %v", err)
+	}
+	srcB := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcB, "b.m4b"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed source B: %v", err)
+	}
+	// Book 1 is valid (snapshot seeded by the suite); book 3 is not.
+	w := fx.postProcess(t, []string{srcA, srcB}, nil, 1, 3)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("process status = %d; want 500 (book 3 has no snapshot) — body: %s", w.Code, w.Body.String())
+	}
+	// The valid first book must NOT have been enqueued: the whole batch is
+	// rejected, so the queue is empty and no batch was created.
+	var n int
+	if err := fx.h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&n); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("jobs created = %d; want 0 (the preflight rejection must leave no accepted job)", n)
+	}
 }
 
 // Regression: the aggregate's count/rollup and its id list must come from
@@ -3442,5 +3490,105 @@ func TestListJobsBookScopeReincludesLatestBatchRows(t *testing.T) {
 		if strings.HasPrefix(id, "b1-") {
 			t.Errorf("unscoped list carries re-included batch row %s", id)
 		}
+	}
+}
+
+// seedBatchBooks creates n books, each with a capture row and an on-disk
+// source file, so QueueBatch's prepare pass (snapshot load + destination
+// freeze) succeeds for every item.
+func seedBatchBooks(t *testing.T, h *Handler, n int) []queueBatchItem {
+	t.Helper()
+	items := make([]queueBatchItem, 0, n)
+	for i := range n {
+		id := int64(i + 1)
+		if _, err := h.svc.DB.Exec(
+			`INSERT INTO books (id, title, status) VALUES (?, ?, 'pending')`, id, fmt.Sprintf("Book %d", id)); err != nil {
+			t.Fatalf("seed book %d: %v", id, err)
+		}
+		seedSnapshot(t, h.svc.DB, id)
+		src := filepath.Join(t.TempDir(), fmt.Sprintf("src-%d.m4b", i))
+		if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		items = append(items, queueBatchItem{BookID: id, SrcPaths: []string{src}})
+	}
+	return items
+}
+
+func jobsMapSize(s *ProcessingService) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.jobs)
+}
+
+// TestQueueBatchMidInsertFailureRollsBackRowsAndStates pins the batch
+// rollback contract: a mid-batch insert failure rejects the whole request,
+// leaves NO committed rows (the transaction rolls back), and removes the
+// in-memory job states that were registered before the commit (a worker
+// never runs a job whose row was not committed, so the registrations would
+// otherwise stay in the map for the process's lifetime).
+func TestQueueBatchMidInsertFailureRollsBackRowsAndStates(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	items := seedBatchBooks(t, h, 3)
+	if _, err := h.svc.DB.Exec(
+		`CREATE TRIGGER fail_batch_insert AFTER INSERT ON processing_jobs
+		 FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := svc.QueueBatch(t.Context(), "batch-rb", queueDestination{}, svc.proc.QueueSnapshot(), items)
+	if err == nil {
+		t.Fatalf("QueueBatch succeeded; want the injected insert failure")
+	}
+	if ids != nil {
+		t.Errorf("ids = %v; want nil on failure", ids)
+	}
+	var n int
+	if err := h.svc.DB.QueryRow("SELECT COUNT(*) FROM processing_jobs").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("processing_jobs rows = %d; want 0 (the batch transaction must roll back)", n)
+	}
+	if got := jobsMapSize(svc); got != 0 {
+		t.Errorf("service.jobs size = %d; want 0 (unregisterStates must remove the pre-committed registrations)", got)
+	}
+}
+
+// TestQueueBatchRegistersStatesBeforeRowsClaimable pins the publication
+// ordering: after QueueBatch returns, every queued job ID has a state in
+// s.jobs (a row is claimable the instant the transaction commits, so the
+// registration must already have landed under the service mutex), and a
+// failing insert leaves NO registrations for that batch behind.
+func TestQueueBatchRegistersStatesBeforeRowsClaimable(t *testing.T) {
+	h, svc := newTestJobsHandler(t)
+	items := seedBatchBooks(t, h, 4)
+	ids, err := svc.QueueBatch(t.Context(), "batch-order-1", queueDestination{}, svc.proc.QueueSnapshot(), items[:2])
+	if err != nil {
+		t.Fatalf("QueueBatch: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("ids = %v; want 2", ids)
+	}
+	svc.mu.RLock()
+	for _, id := range ids {
+		if st := svc.jobs[id]; st == nil {
+			svc.mu.RUnlock()
+			t.Fatalf("queued job %s has no state in service.jobs; the registration must land before the commit makes the row claimable", id)
+		}
+	}
+	svc.mu.RUnlock()
+
+	// A second batch whose insert fails must not leave ITS registrations
+	// in the map: the first batch's states remain, and nothing more.
+	if _, err := h.svc.DB.Exec(
+		`CREATE TRIGGER fail_batch_insert2 AFTER INSERT ON processing_jobs
+		 FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.QueueBatch(t.Context(), "batch-order-2", queueDestination{}, svc.proc.QueueSnapshot(), items[2:4]); err == nil {
+		t.Fatalf("second QueueBatch succeeded; want the injected insert failure")
+	}
+	if got := jobsMapSize(svc); got != 2 {
+		t.Errorf("service.jobs size = %d; want 2 (the first batch's states only — the failed batch's registrations must be rolled back)", got)
 	}
 }

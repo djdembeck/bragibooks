@@ -74,11 +74,32 @@ type Services struct {
 // Handler wraps services and registers routes.
 type Handler struct {
 	svc *Services
+	// previewSlots bounds concurrent engine PREVIEW subprocesses. The preview
+	// endpoint is outside the processing worker limit, and each request can
+	// launch an engine process immediately: without a cap a caller with API
+	// access (including the LAN path) can exhaust process/memory resources
+	// with concurrent previews, especially while the engine is slow or stuck.
+	previewSlots chan struct{}
 }
+
+// enginePreviewConcurrency bounds the in-flight engine preview subprocesses.
+const enginePreviewConcurrency = 4
+
+// enginePreviewDeadline bounds a single preview's server-side execution
+// independent of the client's connection: r.Context() only fires when the
+// client gives up, so a client that keeps its connection open would pin a
+// slow/stuck engine process for as long as it wished. A var (not a const)
+// so a test can shorten it to exercise the deadline path in milliseconds
+// (EnginePreview's WithTimeout takes the MINIMUM of this and the request
+// context, so a request-side timeout would mask the server-side one).
+var enginePreviewDeadline = 30 * time.Second
 
 // NewHandler creates a new Handler with the given services.
 func NewHandler(svc *Services) *Handler {
-	return &Handler{svc: svc}
+	return &Handler{
+		svc:          svc,
+		previewSlots: make(chan struct{}, enginePreviewConcurrency),
+	}
 }
 
 // getAudiobookDB returns the current audiobookdb.Client from the atomic value.
@@ -172,6 +193,10 @@ func (h *Handler) RegisterRoutes(r chi.Router, auth func(http.Handler) http.Hand
 	// header.
 	r.Group(func(r chi.Router) {
 		r.Use(auth)
+		// The preview endpoint is registered BEFORE the /covers/* wildcard:
+		// a wildcard matches /covers/preview too, and chi routes the
+		// specific pattern first only when it is declared first.
+		r.Handle("/covers/preview", CoverPreviewHandler(h))
 		r.Handle("/covers/*", CoverHandler(h.svc.CoversDir))
 	})
 }

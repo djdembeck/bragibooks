@@ -92,6 +92,8 @@ Not copied:
 - **Django internals.** Admin sessions, Django users, and the `secret_key.txt` in `/config` are not used by the Go app (they can stay in the volume, go unused).
 - **Audio files.** Nothing moves. Source files, processed output, and completed files stay exactly where the old app left them; what changes is only where the app keeps its data (from `db.sqlite3` to `bragibooks.db` in the same volume).
 
+The Python-data copy above is distinct from the Go app's **schema migrations**, which run automatically at every startup and need no operator action. An existing `bragibooks.db` (one you already run) is upgraded in place — for example the `processing_jobs.batch_closed` column (v21) is added and its backfill marks pre-existing batches closed — so upgrading the app is not a manual schema change.
+
 ## Configuration changes
 
 The Python app's environment variables no longer apply. Mapping of what changed:

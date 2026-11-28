@@ -150,6 +150,15 @@ func (p *Processor) RunJob(ctx context.Context, jobID string, jf JobFile, opts J
 	} else if caps.SchemaVersion != opts.Identity.SchemaVersion || caps.ResolverVersion != opts.Identity.ResolverVersion {
 		return nil, fmt.Errorf("pre-launch engine gate: engine reports schema %d / resolver %s, job was captured under schema %d / resolver %s; re-preview and requeue the book under the current engine",
 			caps.SchemaVersion, caps.ResolverVersion, opts.Identity.SchemaVersion, opts.Identity.ResolverVersion)
+	} else if _, err := p.validateCapabilities(caps); err != nil {
+		// The identity check above is only the schema/resolver pair; the
+		// FULL capability contract (every path token, scalar field, and
+		// cover/chapter policy variant Bragi emits) is re-asserted against
+		// THIS binary before it runs. A binary swapped in after startup
+		// that keeps its identity but drops a required token or policy
+		// variant would otherwise pass the gate and only fail at run time,
+		// with the job already mutating media.
+		return nil, fmt.Errorf("pre-launch engine gate: %w", err)
 	}
 
 	absRoot, err := filepath.Abs(opts.OutputRoot)

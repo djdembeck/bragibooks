@@ -14,6 +14,16 @@
 	import { ChevronUp, ChevronDown, Folder, FileAudio, File } from '@lucide/svelte';
 
 	let currentPath = $state('');
+	// Monotonic identity for in-flight directory listings: a response
+	// commits only if it is still the newest request (see fetchListing).
+	let listingSeq = 0;
+	// SEPARATE, lower-priority identity for the background refresh's
+	// re-list: it must not bump listingSeq, or a background re-list that
+	// lands after the user navigated would discard the user's pending
+	// response. A background response commits only if it is still the
+	// newest background request AND no user navigation has since bumped
+	// listingSeq (fetchListing, background = true).
+	let bgListingSeq = 0;
 	let entries: IndexedDirectoryEntry[] = $state([]);
 	let filtered: IndexedDirectoryEntry[] = $state([]);
 	let settings: Settings | null = $state(null);
@@ -81,21 +91,61 @@
 	// With indexing on, the server answers from the index (fast, with
 	// evidence); the plain filesystem shape is the fallback. Both normalize
 	// into the same entry state, so selection/sort/columns work unchanged.
-	async function fetchListing(path: string): Promise<void> {
+	//
+	// Navigation ownership: the live path at FETCH START is the token. A
+	// late response must not commit entries/currentPath when a newer
+	// navigation has since moved the live path (a background re-list of
+	// /in landing after the user opened /in/book would send them back to
+	// the root), so the commit is refused when the token no longer
+	// matches. The INDEX state is a server-global, not a per-navigation
+	// value: it is committed even when the navigation is refused, so a
+	// superseded re-list still refreshes the freshness the banner reads.
+	async function fetchListing(path: string, background = false): Promise<void> {
+		// Monotonic request identity: a commit is valid only for the LATEST
+		// request, not merely one whose captured path still matches. Two
+		// navigations started before currentPath changes capture the same
+		// path; if the earlier response lands first it moves currentPath,
+		// and a path-token check would then refuse the LATER (newer)
+		// response too, leaving the user at the older destination.
+		//
+		// A BACKGROUND re-list (the refresh poll) takes a separate,
+		// lower-priority identity: it captures the CURRENT listingSeq
+		// without bumping it, so it cannot discard an in-flight user
+		// navigation. It commits only if no user navigation has since
+		// bumped listingSeq (seq === listingSeq) AND it is still the
+		// newest background request (bg === bgListingSeq) AND the
+		// DISPLAYED path is still the one captured at refresh start
+		// (reListPath === currentPath): a user navigation to B that
+		// commits in flight changes currentPath WITHOUT bumping
+		// listingSeq, so the sequence checks alone would let a late
+		// background re-list of A send the user back to A.
+		let bg = 0;
+		let seq: number;
+		const reListPath = background ? currentPath : '';
+		if (background) {
+			bg = ++bgListingSeq;
+			seq = listingSeq; // read, do NOT bump: user navigation owns it
+		} else {
+			seq = ++listingSeq;
+		}
 		const useIndex = settings?.indexing_enabled === true;
 		if (useIndex) {
 			const response = await get<IndexedDirectoriesResponse>(
 				`/directories?path=${encodeURIComponent(path)}&index=1`
 			);
+			if (response.index !== undefined) indexState = response.index ?? null;
+			if (seq !== listingSeq || (background && (bg !== bgListingSeq || reListPath !== currentPath))) return;
 			entries = validEntries(response.entries || []);
 			currentPath = response.path || path;
-			indexState = response.index ?? null;
 			return;
 		}
+		// The filesystem shape has no index state: clear it so a stale
+		// indexed freshness cannot survive a turn of the indexing toggle.
 		const response = await get<DirectoriesResponse>(`/directories?path=${encodeURIComponent(path)}`);
+		indexState = null;
+		if (seq !== listingSeq || (background && (bg !== bgListingSeq || reListPath !== currentPath))) return;
 		entries = validEntries(response.entries || []);
 		currentPath = response.path || path;
-		indexState = null;
 	}
 
 	async function initPath() {
@@ -160,15 +210,28 @@
 				if (refreshCancelled) return; // page unmounted
 				const cur = await get<{ state: IndexState }>('/index');
 				const s = cur?.state;
-				// A terminal at a NEWER generation supersedes ours: a root
-				// change queuing a rescan while our scan runs lets its
-				// terminal land under the rescan's generation, after which
-				// our exact generation is never visible again (an exact
-				// equality here would then poll to the 30-minute timeout).
+				// ANY terminal generation >= the one we asked for ends the
+				// wait. The server exposes only the CURRENT status mirror:
+				// a superseding scan replaces generation N's terminal with
+				// N+1's, so requiring strict equality (the prior === gen)
+				// meant a root change that queued N+1 while N ran left us
+				// polling for a terminal the mirror no longer reports — N
+				// finished, but the page never learned it. A NEWER terminal
+				// proves the older scan is no longer running (its evidence
+				// is at least as fresh), so >= is the correct bound.
 				if (s && s.generation >= gen &&
 					['done', 'truncated', 'interrupted', 'error'].includes(s.status)) {
 					indexState = s;
-					await fetchListing(currentPath);
+					// Re-list the directory the user is on NOW: the path
+					// is captured immediately before the fetch (navigation
+					// ownership), and fetchListing re-verifies the
+					// background token before committing — a user
+					// navigation that lands in the meantime owns the
+					// current listing, so the late background response is
+					// refused (and it does not bump listingSeq, so the
+					// user's pending response is not discarded either).
+					const reListPath = currentPath;
+					await fetchListing(reListPath, true);
 					return;
 				}
 			}

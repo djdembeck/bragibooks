@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick } from 'svelte';
-	import { get, put, post } from '#lib/api.js';
+	import { get, put, post, authHeaders } from '#lib/api.js';
 	import {
 		type BookMetadataResponse,
 		type BookMetadataDraft,
@@ -62,6 +62,13 @@
 	let previewError = $state(false);
 	let previewSeq = 0;
 
+	// Cover preview: the static `/covers/...` URL for file/snapshot covers,
+	// or a blob URL for URL covers (fetched server-side below — an <img>
+	// cannot POST the CSRF token, and the URL must stay out of the request
+	// target). null = placeholder.
+	let coverPreviewUrl = $state<string | null>(null);
+	let coverPreviewSeq = 0;
+
 	// Fetch generation (finding: SvelteKit reuses this component when
 	// navigating /books/1 -> /books/2, and a draft loaded for book A must
 	// never be submitted for book B — every save/upload URL is built from
@@ -89,6 +96,7 @@
 		meta = null;
 		draft = null;
 		baseline = null;
+		coverPreviewUrl = null;
 		coverOpen = false;
 		confirmingReset = false;
 		confirmingDiscard = false;
@@ -376,12 +384,74 @@
 	});
 
 	// ── Cover handling ───────────────────────────────────────────
-	const coverPreviewUrl = $derived.by(() => {
+	// Static cover sources (uploaded file, snapshot art) render straight
+	// from the covers directory.
+	const coverPreviewStatic = $derived.by<string | null>(() => {
 		if (!draft) return null;
 		if (draft.cover_source === 'file' && draft.cover_file) return `/covers/${draft.cover_file}`;
-		if (draft.cover_source === 'url' && draft.cover_url) return draft.cover_url;
+		if (draft.cover_source === 'url') return null; // fetched below
 		if (draft.cover_source === 'clear' || isCleared('cover')) return null;
 		return snapshot?.cover_file ? `/covers/${snapshot.cover_file}` : null;
+	});
+
+	// A URL cover is previewed through the server's validated fetch path,
+	// not loaded directly by the browser: a raw external URL as an <img>
+	// src is resolved and followed by the browser independently of the
+	// server's public-destination and redirect checks, so a saved URL
+	// could make this operator's browser contact a destination reachable
+	// from their network. The endpoint re-asserts the same guard on every
+	// hop and serves the fetched bytes. The URL travels in the POST body
+	// (never the query string — a draft URL can carry credentials in its
+	// path or a signed query, and query strings end up in proxy
+	// request-target logs), and the POST puts the fetch under the CSRF
+	// guard (an <img> load is a GET and would be exempt). The response
+	// becomes a blob URL the <img> can load same-origin.
+	//
+	// Blob URLs are tracked per effect run and revoked in the cleanup:
+	// the cleanup runs when the effect re-runs (a new preview replaces the
+	// old, or a book reset/draft change wipes the state) and on unmount,
+	// so a navigation that clears coverPreviewUrl cannot strand the
+	// previous book's blob for the page's lifetime.
+	//
+	// Unmount also bumps the sequence (below) so a pending POST/blob
+	// continuation fails its `seq !== coverPreviewSeq` check and never
+	// creates a blob URL after the last cleanup has run — the cleanup
+	// alone would only revoke a URL that already exists.
+	$effect(() => () => { coverPreviewSeq++; });
+	$effect(() => {
+		const staticUrl = coverPreviewStatic; // non-URL covers: depend on the static path
+		const draftUrl = draft?.cover_source === 'url' ? (draft?.cover_url ?? '') : '';
+		const seq = ++coverPreviewSeq;
+		let activeBlob: string | null = null;
+		const revoke = () => {
+			if (activeBlob) {
+				URL.revokeObjectURL(activeBlob);
+				activeBlob = null;
+			}
+		};
+		if (!draftUrl) {
+			coverPreviewUrl = staticUrl;
+			return revoke;
+		}
+		fetch('/covers/preview', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', ...authHeaders() },
+			body: JSON.stringify({ url: draftUrl })
+		})
+			.then(async (res) => {
+				if (seq !== coverPreviewSeq) return;
+				if (!res.ok) throw new Error(await res.text());
+				const blob = await res.blob();
+				if (seq !== coverPreviewSeq) return;
+				activeBlob = URL.createObjectURL(blob);
+				coverPreviewUrl = activeBlob;
+			})
+			.catch(() => {
+				if (seq === coverPreviewSeq) {
+					coverPreviewUrl = null;
+				}
+			});
+		return revoke;
 	});
 
 	const coverSource = $derived(draft?.cover_source || (isCleared('cover') ? 'clear' : ''));
@@ -604,6 +674,13 @@
 				draft[key] = list;
 			}
 		}
+		// The year input commits on change/blur like the person inputs, so a
+		// Ctrl/Cmd+S mid-typing would save a stale draft (or the response
+		// rebuild would overwrite the typed value). Flush it here too.
+		const yearEl = document.querySelector<HTMLInputElement>('.meditor__input--year');
+		if (yearEl && yearEl.value !== String(draft.year ?? '')) {
+			draft.year = yearEl.value === '' ? null : Number(yearEl.value);
+		}
 		for (const el of document.querySelectorAll<HTMLInputElement>('.meditor__chapter-title, .meditor__chapter-start, .meditor__chapter-duration')) {
 			const row = el.closest('.meditor__chapter');
 			if (!row) continue;
@@ -754,7 +831,13 @@
 		const seconds = Number(secondsText);
 		if (minutes > 59 || seconds > 59) return null;
 		const fraction = fractionText ? Number(fractionText.padEnd(3, '0')) : 0;
-		return (hours * 3600 + minutes * 60 + seconds) * 1000 + fraction;
+		// The same safe-integer check the raw-millisecond branch applies: an
+		// oversized hours component (the regex allows any digit count) would
+		// otherwise produce an unsafe integer — or Infinity — that JSON
+		// serialization converts to null instead of rejecting the value
+		// locally. The offset result inherits the check (sign * parsed).
+		const millis = (hours * 3600 + minutes * 60 + seconds) * 1000 + fraction;
+		return Number.isSafeInteger(millis) ? millis : null;
 	}
 
 	function parseChapterOffset(value: string): number | null {
@@ -813,9 +896,24 @@
 		confirmingDiscard = false;
 		try {
 			// The inputs stay enabled while the PUT is in flight, so the
-			// live draft can change mid-flight: snapshot exactly what is
-			// about to be sent (savePayload serializes the same
-			// snapshotOf(draft) view) and diff against it after the save.
+			// live draft can change mid-flight. The change-only inputs
+			// (person, year, chapter title/time) commit to the draft only on
+			// blur, so a value still being typed lives only in its input:
+			// flush them into the draft NOW so the submitted snapshot carries
+			// them and the post-submission overlay (which diffs live draft
+			// against submitted) keeps them through the response rebuild —
+			// without this, a response that changes the author/chapter row
+			// the key or replaces the year value overwrites the typed edit.
+			flushChangeOnlyInputs();
+			// The flush validates chapter-time inputs: an invalid value that
+			// was still unblurred is detected HERE (the pre-save check above
+			// ran before the flush). Bail with the error visible — the
+			// Ctrl/Cmd+S path already does this — so the old draft is not
+			// submitted and the invalid value stays shown in its input.
+			if (chapterTimeError) return;
+			// Snapshot exactly what is about to be sent (savePayload
+			// serializes the same snapshotOf(draft) view) and diff against
+			// it after the save.
 			const submitted = snapshotOf(draft);
 			const resp = await put<BookMetadataResponse>(`/books/${startBook}/metadata`, savePayload());
 			if (bookId !== startBook || bookFetchSeq !== startGen) return;
